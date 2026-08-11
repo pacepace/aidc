@@ -1,0 +1,47 @@
+[project]
+name = "aidc-mcp"
+version = "1.0.0"
+description = "aidc control plane: MCP server exposing aidc CLI as tools + resources"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.2,<2",
+    "httpx>=0.27",
+    # Imported directly (auth.py / server.py / tools.py), not just transitively via mcp.
+    # uvicorn[standard] keeps the uvloop/httptools speedups the shipped image runs.
+    "starlette>=0.37",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use long inline fixtures/assertions and the compact `a = x; b = y`
+# setup idiom on purpose; enforcing line-length / no-semicolons there is noise.
+"tests/**" = ["E501", "E702"]
+
+[tool.mypy]
+ignore_missing_imports = true

@@ -1,0 +1,2 @@
+# aidc malware blocklist — populated by the refresher sidecar (proxy/refresher/).
+# This file exists empty in the image so Squid can start before first refresh.

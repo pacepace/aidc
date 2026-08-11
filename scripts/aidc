@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# aidc - AI Dev Container CLI dispatcher
+#
+# Convention-over-config: any executable script in scripts/cmd-*.sh
+# is automatically a subcommand. See docs/design-05-cli.md.
+
+set -euo pipefail
+
+# Resolve the repo root from the script's own location, following symlinks
+# (so `~/.local/bin/aidc -> .../scripts/aidc` works after `make install`).
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *)  SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+AIDC_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+export AIDC_ROOT
+AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+export AIDC_SCRIPTS
+
+# Source common library (provides err/die/info, validation, etc.).
+# shellcheck source=lib/common.sh
+. "$AIDC_SCRIPTS/lib/common.sh"
+
+# ---- VERSION read + validation ----------------------------------------------
+#
+# Single source of truth for the aidc version: ${AIDC_ROOT}/VERSION (one line,
+# semver with v prefix, optional pre-release and/or build metadata).
+#
+# We export TWO forms:
+#   AIDC_VERSION      -- canonical human-facing form (e.g. v0.1.0+sha.abc1234)
+#   AIDC_VERSION_TAG  -- Docker-tag-safe form, with `+` mangled to `_` because
+#                        Docker tag charset is [a-zA-Z0-9_.-]{1,128} (no `+`).
+#
+# Missing or malformed VERSION is a project-state error -- die loudly rather
+# than silently propagating garbage into image tags or envsubst-rendered yaml.
+AIDC_VERSION=$(head -n1 "${AIDC_ROOT}/VERSION" 2>/dev/null | tr -d '\r' || true)
+if [ -z "$AIDC_VERSION" ]; then
+    err "VERSION file is missing or empty at ${AIDC_ROOT}/VERSION"
+    exit 2
+fi
+# Reject any whitespace inside the first line (defends against v0.1.0\tevil
+# getting silently concatenated into v0.1.0evil which then passes the regex).
+case "$AIDC_VERSION" in
+    *[[:space:]]*)
+        err "VERSION first line contains whitespace: '${AIDC_VERSION}'"
+        exit 2
+        ;;
+esac
+# Canonical version format. Permits semver pre-release (-dev, -rc1, -alpha.2)
+# and build metadata (+sha.abc1234). Each suffix segment requires leading AND
+# trailing alphanumeric.
+if ! printf '%s' "$AIDC_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]([a-zA-Z0-9.]*[a-zA-Z0-9])?)?(\+[a-zA-Z0-9]([a-zA-Z0-9.]*[a-zA-Z0-9])?)?$'; then
+    err "VERSION file content '${AIDC_VERSION}' does not match v[MAJOR].[MINOR].[PATCH][(-|.)pre][+build]"
+    exit 2
+fi
+# Mangle `+` -> `_` for Docker tag charset compatibility.
+AIDC_VERSION_TAG="${AIDC_VERSION//+/_}"
+export AIDC_VERSION AIDC_VERSION_TAG
+
+# No args -> help.
+if [ $# -eq 0 ]; then
+    exec bash "$AIDC_SCRIPTS/cmd-help.sh"
+fi
+
+SUBCOMMAND="$1"
+shift
+
+# `aidc help` is an alias for the bare-dispatch help.
+if [ "$SUBCOMMAND" = "help" ] || [ "$SUBCOMMAND" = "-h" ] || [ "$SUBCOMMAND" = "--help" ]; then
+    exec bash "$AIDC_SCRIPTS/cmd-help.sh" "$@"
+fi
+
+SUBCOMMAND_SCRIPT="$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh"
+if [ ! -f "$SUBCOMMAND_SCRIPT" ]; then
+    err "Unknown subcommand: $SUBCOMMAND"
+    bash "$AIDC_SCRIPTS/cmd-help.sh" >&2
+    exit 2
+fi
+
+# Invoke via `bash` rather than relying on the exec bit. This makes the CLI
+# portable to checkouts where the exec bit was stripped (e.g. core.fileMode
+# false, or a fresh tarball extract).
+exec bash "$SUBCOMMAND_SCRIPT" "$@"

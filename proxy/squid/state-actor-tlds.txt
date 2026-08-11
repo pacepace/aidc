@@ -1,0 +1,8 @@
+# aidc default state-actor TLD policy
+# One pattern per line. Squid's dstdomain matches by suffix.
+# Lines starting with # are comments.
+.ru
+.cn
+.by
+.ir
+.kp

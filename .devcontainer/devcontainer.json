@@ -1,0 +1,39 @@
+{
+  "name": "aidc-dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--privileged"
+  ],
+  "remoteUser": "vscode",
+  "overrideCommand": true,
+  "postStartCommand": "sudo /usr/local/bin/aidc-dockerd-start.sh",
+  "comment": [
+    "This devcontainer.json supports VS Code's Dev Containers extension as a SECONDARY entry point.",
+    "Primary entry point is `aidc create <name>` which uses compose + the full proxy/policy/audit stack.",
+    "",
+    "What VS Code path gives you:",
+    "  - The same image as aidc create (Python 3.12/3.13/3.14 + pyenv + uv + poetry + pipenv,",
+    "    Go, Rust, Node, Claude Code, docker-in-docker, native wheel build deps, psql)",
+    "  - VS Code's IDE features (extensions, terminals, language servers)",
+    "",
+    "What VS Code path does NOT give you:",
+    "  - The Squid blocklist proxy",
+    "  - The policy sidecar / taint detection",
+    "  - The audit aggregator",
+    "  - Bridged Claude Code auth, settings, memory, and ~/.claude.json",
+    "  - The git-identity bridge from your host config",
+    "  - `aidc-claude --continue` auto-resume",
+    "",
+    "Features (DinD, common-utils, git) are deliberately omitted. They are already baked into",
+    "the Dockerfile, and the upstream DinD feature has historically lagged new Ubuntu LTS",
+    "releases (it did not support 24.04 at the time; unverified against 26.04) — so leaving",
+    "it in would risk breaking the VS Code build for no benefit.",
+    "",
+    "DinD nuance: VS Code overrides our ENTRYPOINT with its own keep-alive loop, so the",
+    "entrypoint script (which normally starts dockerd) never runs. postStartCommand below",
+    "calls the standalone aidc-dockerd-start.sh as root to spin up dockerd every time the",
+    "container starts. It is idempotent — re-running while dockerd is already up is a no-op."
+  ]
+}

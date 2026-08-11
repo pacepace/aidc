@@ -1,0 +1,9 @@
+# The image only needs pyproject.toml, uv.lock, and src/. Keep build context
+# small and the image free of dev cruft.
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+tests/
+.mypy_cache/
+.ruff_cache/

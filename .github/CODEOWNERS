@@ -1,0 +1,29 @@
+# Owners for security-critical paths. Any PR touching these requires the
+# maintainer's review (branch protection: "Require review from Code Owners" +
+# "Dismiss stale approvals when new commits are pushed").
+#
+# The repo lives under the personal @pacepace account (no org), so the owner is
+# the user directly. If the project ever moves to an org, switch these to a
+# maintainers team alias so adding maintainers becomes a team-membership change.
+
+# Version source of truth -- gates the release tag/VERSION sync.
+VERSION                                   @pacepace
+
+# Homebrew formula templates + the concrete/bootstrap formula. These are Ruby
+# that runs on every user's machine; a malicious edit ships to all users.
+Formula/                                  @pacepace
+release/Formula/                          @pacepace
+release/lint-formula-template.sh          @pacepace
+release/tarball-audit.sh                  @pacepace
+release/tarball-audit-extracted.sh        @pacepace
+
+# Release + CI workflows (highest blast radius: contents: write + TAP_REPO_TOKEN).
+.github/workflows/release.yml             @pacepace
+.github/workflows/smoke.yml               @pacepace
+.github/workflows/ci.yml                  @pacepace
+.github/CODEOWNERS                        @pacepace
+
+# Release/security surface docs.
+docs/done/task-12*                        @pacepace
+docs/done/task-14*                        @pacepace
+docs/requirements.md                      @pacepace

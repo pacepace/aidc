@@ -1,0 +1,111 @@
+# CI: fast lint + MCP test gate + shell unit tests.
+#
+# Runs on every push and PR to develop/main. This is the cheap, always-on
+# quality gate (shellcheck + Python tests + no-Docker shell unit tests). The
+# heavier Docker smoke lives in smoke.yml and is scoped to main-targeting
+# changes only (see that file).
+#
+# Security posture (mirrors docs/done/task-12-ci-smoke.md):
+#   - Top-level permissions are empty; each job grants only `contents: read`.
+#   - No `pull_request_target` trigger (fork-secret exposure vector).
+#   - All third-party actions are pinned by 40-char commit SHA with a version
+#     comment. Tags are mutable; SHAs are not.
+#   - No `set -x`, `env`, `printenv`, or unredacted secret-file dumps anywhere.
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck + formula-template lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      # Advisory per task-12 CI-04: shellcheck findings surface in the log but do
+      # NOT block merge. The mask that `make lint` used (`|| true`) is intentionally
+      # NOT reproduced here -- continue-on-error is how CI tolerates advice while
+      # still showing the developer exactly what shellcheck flagged.
+      - name: Shellcheck
+        continue-on-error: true
+        run: |
+          shopt -s globstar nullglob
+          shellcheck scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh proxy/**/*.sh .devcontainer/*.sh tests/unit/*.sh
+      # BLOCKING: the Homebrew formula templates are Ruby that runs unprivileged
+      # on every user's machine via `brew install`. This lint rejects any
+      # execution construct outside the documented allowlist (task-14 threat
+      # model). It is a security gate, so it is NOT continue-on-error.
+      - name: Lint Homebrew formula templates
+        run: bash release/lint-formula-template.sh
+
+  unit:
+    name: shell unit tests (no Docker)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # BLOCKING (unlike the shellcheck advisory above): these are real
+      # regression tests, not style lint. Each one is a standalone script
+      # that sources the exact production code it covers (no re-implemented
+      # copy to drift), so a failure here means shipped behavior broke.
+      - name: Run tests/unit/*.sh
+        run: |
+          shopt -s nullglob
+          rc=0
+          for t in tests/unit/*.sh; do
+            echo "::group::$t"
+            bash "$t" || rc=1
+            echo "::endgroup::"
+          done
+          exit "$rc"
+
+  mcp:
+    name: mcp tests (pytest + ruff + mypy) — py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: mcp
+    strategy:
+      fail-fast: false
+      # Both ends of the supported range, because they mean different things:
+      #   3.12 -- the floor mcp/pyproject.toml declares (requires-python = ">=3.12").
+      #           Without it, a 3.13+-only construct would merge while we still
+      #           advertise 3.12 support.
+      #   3.14 -- what mcp/Dockerfile actually ships. This is the one that has to
+      #           be green for the released control-plane image to be trustworthy.
+      # Bump the upper entry whenever the Dockerfile's base image moves.
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv + Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+          enable-cache: true
+          cache-dependency-glob: "mcp/uv.lock"
+      # Tests are the hard gate. ruff + mypy run AFTER tests (a sibling change
+      # adds them to mcp/pyproject.toml's `dev` extra). They are blocking by
+      # design once that lands: a lint/type regression should fail CI.
+      - name: pytest
+        run: uv run --extra dev pytest -q
+      - name: ruff
+        run: uv run --extra dev ruff check .
+      - name: mypy
+        run: uv run --extra dev mypy src

@@ -1,0 +1,171 @@
+name: aidc-${SESSION}
+
+networks:
+  default:
+    name: aidc-${SESSION}-net
+    driver: bridge
+
+volumes:
+  blocklist:
+    name: aidc-${SESSION}-blocklist
+  state:
+    name: aidc-${SESSION}-state
+  squid-log:
+    name: aidc-${SESSION}-squid-log
+  aidc-log:
+    name: aidc-${SESSION}-aidc-log
+  dev-home:
+    name: aidc-${SESSION}-dev-home
+  # Cross-session pyenv versions cache. external: true means this volume
+  # is shared across every aidc session on the host AND survives `aidc kill`
+  # (which removes per-session volumes but leaves externals alone). First-ever
+  # session is initialized from the image's baked Pythons; all subsequently
+  # installed versions persist here for every future session.
+  pyenv-versions:
+    name: aidc-pyenv-versions
+    external: true
+${OVERLAY_VOLUMES_DECLARATIONS}
+services:
+  squid:
+    image: aidc/squid:${AIDC_VERSION_TAG}
+    container_name: aidc-${SESSION}-squid
+    environment:
+      # Per-session DNS override (space-separated IPs). Empty = keep the
+      # image's baked-in Quad9 dns_nameservers (direct). When set, the squid
+      # entrypoint REMOVES dns_nameservers so squid resolves via Docker's
+      # embedded DNS (127.0.0.11), which forwards to the dns: list below
+      # with correct REFUSED-failover semantics (squid's own resolver only
+      # fails over on timeout -- a split-horizon dnsmasq answering REFUSED
+      # would kill public lookups).
+      AIDC_DNS_SERVERS: "${DNS_SERVERS}"
+    dns:
+${DNS_BLOCK}
+    networks:
+      default:
+        aliases:
+          - aidc-proxy
+    volumes:
+      - blocklist:/etc/squid:rw    # blocklist.txt + state-actor-tlds.txt live here
+      - squid-log:/var/log/squid
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  refresher:
+    image: aidc/refresher:${AIDC_VERSION_TAG}
+    container_name: aidc-${SESSION}-refresher
+    pid: "service:squid"           # shares PID namespace so kill -HUP 1 reaches squid
+    volumes:
+      - blocklist:/etc/squid:rw    # writes /etc/squid/blocklist.txt
+      - aidc-log:/var/log/aidc     # writes refresher.log
+    depends_on:
+      squid:
+        condition: service_healthy
+    restart: unless-stopped
+
+  policy:
+    image: aidc/policy:${AIDC_VERSION_TAG}
+    container_name: aidc-${SESSION}-policy
+    environment:
+      AIDC_SESSION: "${SESSION}"
+      AIDC_TAINT_RESPONSE: "${TAINT_RESPONSE}"
+      AIDC_TLD_TAINTS: "${TLD_TAINTS}"
+      AIDC_NOTIFY_WEBHOOK: "${NOTIFY_WEBHOOK}"
+    volumes:
+      - blocklist:/etc/squid:ro
+      - squid-log:/var/log/squid:ro
+      - aidc-log:/var/log/aidc:rw   # writes policy-events.log
+      - state:/var/state:rw
+      - ${AUDIT_DIR}:/var/aidc/audit:rw
+      ${DOCKER_SOCK_MOUNT}          # added only in freeze mode
+    depends_on:
+      squid:
+        condition: service_healthy
+    restart: unless-stopped
+
+  audit:
+    image: aidc/audit:${AIDC_VERSION_TAG}
+    container_name: aidc-${SESSION}-audit
+    environment:
+      AIDC_SESSION: "${SESSION}"
+      AIDC_PROFILE: "${PROFILE}"
+    volumes:
+      - squid-log:/var/log/squid:ro
+      - aidc-log:/var/log/aidc:ro
+      - state:/var/state:ro
+      - dev-home:/var/aidc/dev-home:ro
+      - ${AUDIT_DIR}:/var/aidc/audit:rw
+    depends_on:
+      squid:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dev:
+    image: aidc/dev-base:${AIDC_VERSION_TAG}
+    container_name: aidc-${SESSION}-dev
+    privileged: true                # required for DinD
+    networks:
+      - default
+    working_dir: ${REPO_PATH}       # CWD matches the mounted repo path
+    environment:
+      # Both case-variants set: many CLI tools (curl, wget) read uppercase;
+      # many Node / Python / Rust libraries (incl. claude-code's OAuth path)
+      # check lowercase first. Setting only one breaks the other class.
+      HTTP_PROXY:  "http://aidc-proxy:3128"
+      HTTPS_PROXY: "http://aidc-proxy:3128"
+      NO_PROXY:    "localhost,127.0.0.1"
+      http_proxy:  "http://aidc-proxy:3128"
+      https_proxy: "http://aidc-proxy:3128"
+      no_proxy:    "localhost,127.0.0.1"
+      AIDC_SESSION: "${SESSION}"
+      AIDC_PROFILE: "${PROFILE}"
+      AIDC_REPO_PATH: "${REPO_PATH}"
+      AIDC_CLAUDE_MODE: "${CLAUDE_MODE}"
+      AIDC_CLAUDE_RESUME: "${CLAUDE_RESUME}"
+      AIDC_SHARE_PLUGINS: "${AIDC_SHARE_PLUGINS}"
+      AIDC_GIT_USER_NAME: "${GIT_USER_NAME}"
+      AIDC_GIT_USER_EMAIL: "${GIT_USER_EMAIL}"
+      # CLAUDE_CODE_OAUTH_TOKEN: long-lived OAuth token from `aidc claude-token setup`.
+      # Empty string when not configured; claude treats empty CLAUDE_CODE_OAUTH_TOKEN
+      # the same as unset (falls through to other auth precedence rules).
+      # When set, takes precedence over any bridged credentials file and bypasses
+      # the OAuth refresh-token race (Anthropic issues #24317, #54443).
+      CLAUDE_CODE_OAUTH_TOKEN: "${AIDC_CLAUDE_TOKEN}"
+    # Dev container's DIRECT-lookup resolvers (proxied HTTP goes through
+    # squid, which has its own dns_nameservers — see the squid service env).
+    # Rendered from --dns flags / dns_servers config; defaults to Quad9.
+    dns:
+${DNS_BLOCK}
+    volumes:
+      # Mirror the host path inside the container so paths in commits,
+      # logs, and Claude's memory dir all line up. WORKSPACE_PATH equals
+      # REPO_PATH when --workspace wasn't given; otherwise it's the parent
+      # directory that contains the repo + its siblings.
+      - ${WORKSPACE_PATH}:${WORKSPACE_PATH}:rw
+      - dev-home:/home/vscode:rw
+      # Shared pyenv-versions cache. First session ever copies the image's
+      # baked 3.12 + 3.13 + 3.14 here; subsequent sessions reuse, and any
+      # other Python version installed by the entrypoint persists too.
+      - pyenv-versions:/usr/local/pyenv/versions:rw
+      - ${AUDIT_DIR}:/var/aidc/audit:ro     # transparency: Claude can see logs about it
+      ${CLAUDE_MEMORY_MOUNT}                # per-project memory dir (optional; share_memory config)
+      ${CLAUDE_CREDS_MOUNT}                 # auth bridge (toggleable; share_auth config)
+      ${CLAUDE_SETTINGS_MOUNT}              # settings.json (theme, output style, env)
+      ${CLAUDE_STATE_MOUNT}                 # ~/.claude.json — onboarding marker, oauth account, project state
+      ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
+      ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)
+      ${TRANSCRIPT_MIRROR_MOUNT}           # design-09: in-container mirror copies transcripts here for MCP to read
+${OVERLAY_VOLUMES_MOUNTS}${PORTS_BLOCK}
+    depends_on:
+      squid:
+        condition: service_healthy
+      refresher:
+        condition: service_started
+    restart: unless-stopped
+    # No explicit command — Dockerfile's CMD defaults to /usr/local/bin/aidc-user-main.sh
+    # which prints "[aidc-user-main] ready" once tmux is up. aidc create's
+    # dev-wait watches for that marker to know the container is fully ready.

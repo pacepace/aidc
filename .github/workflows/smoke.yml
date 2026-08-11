@@ -1,0 +1,159 @@
+# Smoke: full-stack functional check via `make smoke` (Docker required).
+#
+# This is the authoritative end-to-end gate. It spins real containers, so it is
+# HEAVY (cold dev-base build ~10-15 min; warm ~2 min with the GHA layer cache).
+# To keep the everyday feedback loop fast, smoke is scoped to main-targeting
+# changes only:
+#   - pull_request -> main   (feature/develop PRs get the fast ci.yml gate)
+#   - push         -> main
+#   - workflow_call          (release.yml re-runs smoke on the tagged commit)
+#
+# If smoke ever proves flaky on GitHub-hosted runners, the cheapest next step is
+# to gate the PR/push triggers behind a label (e.g. `run-smoke`) or move them to
+# `main`-push-only, while the fast ci.yml keeps gating every PR. Prefer a green
+# lint+test gate over a red flaky smoke.
+#
+# Security posture (docs/done/task-12-ci-smoke.md):
+#   - Top-level permissions empty; the job gets `contents: read` only.
+#   - `pull_request` (never `pull_request_target`) so fork PRs run with no secrets.
+#   - No secrets are used or inherited -- smoke has no business with credentials.
+#   - All actions pinned by 40-char SHA. No `set -x` / env dumps.
+name: smoke
+
+# NOT triggered by pull_request or push any more. This job's real work is
+# building dev-base, and a GitHub-hosted runner is the worst possible place to
+# do it. Measured on the v0.6.0 candidate (run 30958897134):
+#
+#     reclaim disk      1m31s
+#     build dev-base   15m26s   <-- 94% of the job
+#     actual smoke        53s   <-- the part that tests anything
+#
+# 15 minutes of image build to run 53 seconds of assertions, on 2 cores, for an
+# image every user builds locally anyway (REL-08). The same build takes ~7 min on
+# a maintainer workstation and the assertions are unchanged. It also failed twice
+# in a row on infrastructure limits (runner disk) rather than on real defects,
+# which is the signature of a gate that costs more than it catches.
+#
+# `make smoke` is now the gate, run locally before a release tag -- see
+# CONTRIBUTING.md. workflow_call is kept so this can be pointed at a self-hosted
+# runner (`runs-on:`) if one ever exists; it does nothing until something calls it.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label (e.g. ubuntu-latest, or a self-hosted label).
+        type: string
+        required: false
+        default: ubuntu-latest
+      ref:
+        description: >
+          Git ref to run smoke against. When called from the release workflow
+          against a tag, the caller MUST pass the tag ref explicitly. The default
+          is empty; the checkout step then falls back to github.ref, which on
+          workflow_call is the CALLEE's ref (correct for pull_request/push, wrong
+          for a release -- hence the explicit pass from release.yml).
+        type: string
+        required: false
+        default: ""
+      cache-backend:
+        description: BuildKit cache backend. 'gha' for GitHub-hosted; 'local' for self-hosted.
+        type: string
+        required: false
+        default: gha
+      cache-path:
+        description: >
+          Local filesystem path for the BuildKit cache when cache-backend=local.
+          Ignored when cache-backend=gha. Callers on persistent/concurrent
+          self-hosted runners MUST override to a per-job-unique path (e.g. one
+          including the github.run_id) to avoid cache corruption from concurrent
+          writers.
+        type: string
+        required: false
+        default: /tmp/buildkit-cache
+    # secrets: intentionally NONE. The smoke job MUST NOT have access to any
+    # secret. Do NOT add `secrets: inherit` or list secrets here.
+
+permissions: {}
+
+# The `smoke-` prefix namespaces this away from `release-smoke-*`/`release-*` so a
+# rapid PR/push during a tagged release cannot cancel the in-flight release run.
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    # Without this the job inherits GitHub's 6-hour default, so a wedged build
+    # sits burning a runner all day before anyone notices. A cold-cache run
+    # (every layer rebuilt, CPython compiled from source) is ~20 min; 60 leaves
+    # generous headroom while still failing fast on a genuine hang.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      # NOTE: a "reclaim runner disk" step lived here briefly, deleting GitHub's
+      # preinstalled toolchains (/usr/share/dotnet, the Android SDK, GHC, ...) to
+      # make room for the dev-base build. It is deliberately gone. Now that this
+      # workflow only runs via workflow_call -- i.e. plausibly on a SELF-HOSTED
+      # runner -- that step would `rm -rf` a real machine's toolchains. Do not
+      # reintroduce it without gating it on a GitHub-hosted runner.
+
+      # Docker-tag-safe form of the VERSION file, used only to tag the pre-warm
+      # image. Computed directly from VERSION so this workflow is self-contained
+      # (no dependency on the CLI's AIDC_VERSION_TAG export).
+      - name: Compute version tag
+        run: |
+          raw="$(tr -d '[:space:]' < VERSION)"
+          safe="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_.-' '-')"
+          echo "AIDC_VERSION_TAG=${safe}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Pre-warm the dev-base image so the plain `docker build` inside `make smoke`
+      # hits a warm layer cache. dev-base is the expensive image (pyenv compiling
+      # multiple Pythons + Rust/Go/Node toolchains); the proxy sidecars are small
+      # and are built by the smoke harness itself. Only one of the two steps below
+      # runs per invocation (the `||` coalesce makes the default 'gha' apply on
+      # pull_request/push, where inputs.* are unset).
+      #
+      # cache-to mode=min, not max: max additionally exports the layers of
+      # intermediate build stages, which costs runner disk during export. This
+      # Dockerfile is single-stage, so every layer worth reusing is already in the
+      # final image and min caches it -- we pay max's disk cost for essentially
+      # nothing.
+      - name: Pre-warm dev-base (gha cache)
+        if: (inputs.cache-backend || 'gha') == 'gha'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .devcontainer
+          file: .devcontainer/Dockerfile
+          push: false
+          load: true
+          tags: aidc/dev-base:${{ env.AIDC_VERSION_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Pre-warm dev-base (local cache)
+        if: (inputs.cache-backend || 'gha') == 'local'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .devcontainer
+          file: .devcontainer/Dockerfile
+          push: false
+          load: true
+          tags: aidc/dev-base:${{ env.AIDC_VERSION_TAG }}
+          cache-from: type=local,src=${{ inputs.cache-path || '/tmp/buildkit-cache' }}
+          cache-to: type=local,dest=${{ inputs.cache-path || '/tmp/buildkit-cache' }},mode=min
+
+      # Runs the authoritative harness verbatim. No AIDC_* env is set -- smoke must
+      # exercise the same config-defaults path a real user hits. Output goes
+      # straight to the job log (no tee/pipe): the log is the only flake evidence.
+      - name: make smoke
+        run: make smoke

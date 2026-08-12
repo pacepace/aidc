@@ -21,7 +21,9 @@ So inside the container you're still you. Just sandboxed.
 
 ## Install
 
-From source (works everywhere, and what you want for hacking on aidc itself):
+From source — the primary path on Linux, and what you want for hacking on aidc
+itself. `make install` just symlinks `scripts/aidc` into `~/.local/bin`; there is
+nothing to compile:
 
 ```bash
 git clone https://github.com/pacepace/aidc.git
@@ -29,12 +31,27 @@ cd aidc
 make install      # symlinks scripts/aidc into ~/.local/bin
 ```
 
-Or via Homebrew (macOS / Linuxbrew):
+Upgrade with `git pull` + `aidc rebuild` (then `aidc upgrade <session>` per
+session).
+
+Or via Homebrew (macOS, or Linux if you already run Linuxbrew):
 
 ```bash
 brew tap pacepace/aidc
 brew install aidc
 ```
+
+Or from a pinned release tarball (no git, auditable bytes — the sha256 for each
+tag is in the tap's [formula](https://github.com/pacepace/homebrew-aidc/blob/main/Formula/aidc.rb)):
+
+```bash
+curl -fsSLO https://github.com/pacepace/aidc/archive/refs/tags/v1.0.0.tar.gz
+tar xzf v1.0.0.tar.gz && cd aidc-1.0.0
+make install
+```
+
+Upgrading a tarball install = download the new tag's tarball and re-run
+`make install` from it (the symlink follows the newest extracted dir).
 
 ### Requirements
 

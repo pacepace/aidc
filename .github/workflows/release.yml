@@ -1,9 +1,12 @@
-# Release: tag-triggered GitHub Release + Homebrew tap update.
+# Release: validates a published GitHub Release + updates the Homebrew tap.
 #
 # Flow (docs/done/task-14-release-and-brew-tap.md, docs/release-process.md):
-#   1. release    - verifies tag<->commit<->VERSION, downloads the *published*
-#                   source tarball (same bytes brew users get), audits it, and
-#                   creates the GitHub Release with auto-generated notes.
+#   The operator tags main, pushes the tag, then publishes a GitHub Release for
+#   it with hand-written notes. Publishing fires this workflow:
+#   1. release    - verifies tag<->commit<->VERSION, verifies the tagged commit
+#                   is on main (releases ship released code only), downloads the
+#                   *published* source tarball (same bytes brew users get), and
+#                   audits it.
 #   2. update-tap - renders Formula/aidc.rb (+ Formula/aidc@MAJOR.MINOR.rb) and
 #                   commits them to the separate pacepace/homebrew-aidc tap repo.
 #
@@ -14,14 +17,14 @@
 # cheap gates: the tag<->commit<->VERSION checks and the two tarball audits below.
 #
 # Triggers:
-#   push: tags ['v*']   -> a REAL release (the only way to ship).
-#   workflow_dispatch   -> DRY-RUN ONLY. Every step runs except the two with
-#                          side effects (GitHub Release create, tap push), which
-#                          are gated on `github.event_name == 'push'`. There is no
+#   release: published  -> a REAL release (the only way to ship to the tap).
+#   workflow_dispatch   -> DRY-RUN ONLY. Every step runs except the one with a
+#                          side effect (tap push), which is gated on
+#                          `github.event_name == 'release'`. There is no
 #                          `dry_run=false` input by construction, so a compromised
-#                          maintainer with workflow-trigger rights cannot ship a
-#                          release without pushing a tag. Used to verify token
-#                          rotation (see docs/release-process.md).
+#                          maintainer with workflow-trigger rights cannot ship to
+#                          the tap without publishing a GitHub Release. Used to
+#                          verify token rotation (see docs/release-process.md).
 #
 # Docker images are deliberately NOT built or pushed here (REL-08): every user's
 # machine builds locally on first `aidc create`.
@@ -32,8 +35,8 @@
 name: release
 
 on:
-  push:
-    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -52,11 +55,12 @@ concurrency:
 
 jobs:
   release:
-    name: create GitHub Release
+    name: validate release
     runs-on: ubuntu-latest
-    # justify: contents: write is required to create the GitHub Release on tag push.
+    # justify: read-only -- the GitHub Release already exists (publishing it is
+    # what triggered this run); this job only validates and audits.
     permissions:
-      contents: write
+      contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
@@ -74,7 +78,7 @@ jobs:
       - name: Validate tag input
         id: meta
         env:
-          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+          RAW_TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: |
           TAG="$RAW_TAG"
           case "$TAG" in
@@ -109,6 +113,20 @@ jobs:
             echo "::error::tag ${TAG} points at ${ACTUAL_SHA}, not the built commit ${EXPECTED_SHA}"
             exit 1
           fi
+
+      # Releases ship released code only: the tagged commit must be on main.
+      # compare/main...TAG: "identical" (tag == main head) or "behind" (tag is
+      # an ancestor of main) both mean on-main; "ahead"/"diverged" mean the tag
+      # points at unreleased work -- refuse to ship it.
+      - name: Verify tag commit is on main
+        run: |
+          STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${TAG}" --jq '.status')"
+          case "$STATUS" in
+            identical|behind) : ;;
+            *)
+              echo "::error::tag ${TAG} is not on main (compare status: '${STATUS}'); releases are cut from main only"
+              exit 1 ;;
+          esac
 
       # Download the published tarball (not `actions/checkout`) so our sha256 is
       # over the exact bytes GitHub serves for the tag. The formula's `url` is
@@ -165,20 +183,11 @@ jobs:
             echo "::notice::TAP_REPO_TOKEN secret not set; skipping Homebrew tap update (see docs/release-process.md)."
           fi
 
-      - name: Create GitHub Release
-        if: github.event_name == 'push'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Dry-run summary
-        if: github.event_name != 'push'
+        if: github.event_name != 'release'
         run: |
           echo "DRY-RUN OK: ${TAG} sha256=${SHA256}"
-          echo "No GitHub Release created and no tap push (workflow_dispatch is dry-run only)."
+          echo "No tap push (workflow_dispatch is dry-run only)."
 
   update-tap:
     name: update Homebrew tap
@@ -279,5 +288,5 @@ jobs:
             -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Push to tap
-        if: github.event_name == 'push'
+        if: github.event_name == 'release'
         run: git -C tap push origin HEAD:main

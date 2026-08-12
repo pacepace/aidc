@@ -71,8 +71,11 @@ Keep the summary short and imperative. Explain the *why* in the body when it isn
 
 A release is a `chore(release):` commit that bumps every version reference together (the
 `VERSION` file, `mcp/pyproject.toml`, and the image tags) so no built image is left at an
-uncommitted version, followed by a tag and a GitHub release. Update `CHANGELOG.md` in the
-same change.
+uncommitted version, followed by a tag on `main` and a GitHub release. Pushing the tag
+triggers nothing on its own; **publishing the GitHub Release** (with hand-written notes) is
+what fires the release workflow, which validates the tag — including that its commit is on
+`main` — and updates the Homebrew tap. Update `CHANGELOG.md` in the same change. Full
+operator checklist: `docs/release-process.md`.
 
 **Run `make smoke` locally before tagging.** CI does not run it. The smoke harness builds
 the full dev-base image and stands up a real session, which on a 2-core GitHub-hosted runner

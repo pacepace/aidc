@@ -14,10 +14,13 @@ make lint && (cd mcp && uv run pytest)
 make smoke                          # THE pre-tag gate. CI does not run this.
 # PR -> develop -> main, then:
 git checkout main && git pull
-git tag vX.Y.Z && git push origin vX.Y.Z
+git tag -a vX.Y.Z -m "aidc vX.Y.Z" && git push origin vX.Y.Z
+gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes>
 ```
 
-The tag push triggers `release.yml`, which creates the GitHub Release and (if the
+Pushing the tag triggers nothing by itself. **Publishing the GitHub Release**
+(with hand-written notes) triggers `release.yml`, which validates the release —
+tag format, `VERSION` sync, tag-commit-on-main — audits the tarball, and (if the
 tap token is configured) updates the Homebrew tap.
 
 ## 1. Bump every version reference together
@@ -42,29 +45,39 @@ an uncommitted version:
   hosted CI at all (`smoke.yml` is `workflow_call`-only); this local run is the
   only end-to-end validation a release gets.
 
-## 3. Merge and tag
+## 3. Merge, tag, publish
 
 Releases flow `feature/* → develop → main` (see CONTRIBUTING.md). Tag the `main`
-merge commit; `release.yml` verifies tag ↔ commit ↔ `VERSION` agreement and fails
-the release on any mismatch.
+merge commit — the workflow refuses any tag whose commit is not on `main` — then
+publish the GitHub Release for it. Write the release notes by hand (summarize
+the CHANGELOG section; notes are for users, not a commit dump).
 
 ```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
+git tag -a vX.Y.Z -m "aidc vX.Y.Z" && git push origin vX.Y.Z
+gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes>
 ```
 
-## 4. What the workflow does with the tag
+The title is the bare tag, e.g. `v1.0.0`. `--verify-tag` refuses to publish if
+the tag doesn't already exist — publishing is deliberate, never tag-creating.
+
+## 4. What the workflow does when the release is published
 
 1. Validates the tag format and that it matches `VERSION` and the checked-out
    commit (TOCTOU-checked before and after download).
-2. Downloads the tag archive from codeload — the same byte stream users and
+2. Verifies the tagged commit is on `main` (compare status `identical`/`behind`);
+   a tag on unreleased work fails the run.
+3. Downloads the tag archive from codeload — the same byte stream users and
    `brew` fetch via `archive/refs/tags/vX.Y.Z.tar.gz` — and computes its sha256.
-3. Runs both tarball audits (`release/tarball-audit.sh` against the git tree,
+4. Runs both tarball audits (`release/tarball-audit.sh` against the git tree,
    `release/tarball-audit-extracted.sh` against the extracted tarball).
-4. Creates the GitHub Release with auto-generated notes.
 5. If the tap PAT secret is set: renders `Formula/aidc.rb` and
    `Formula/aidc@MAJOR.MINOR.rb` from `release/Formula/*.tmpl` and pushes them to
    `pacepace/homebrew-aidc`. If the secret is absent the tap step is skipped with
-   a notice and the Release still ships.
+   a notice.
+
+If validation fails, the published Release is already public — fix the problem,
+delete the Release **and** the tag, and redo the tag + publish. Don't leave a
+Release whose validation run is red.
 
 `workflow_dispatch` on an existing tag is a **dry-run only** — it exercises every
 step except the two with side effects. Use it to verify token rotation.

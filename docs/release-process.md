@@ -15,13 +15,15 @@ make smoke                          # THE pre-tag gate. CI does not run this.
 # PR -> develop -> main, then:
 git checkout main && git pull
 git tag -a vX.Y.Z -m "aidc vX.Y.Z" && git push origin vX.Y.Z
-gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes>
+gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes> install.sh
 ```
 
 Pushing the tag triggers nothing by itself. **Publishing the GitHub Release**
-(with hand-written notes) triggers `release.yml`, which validates the release —
-tag format, `VERSION` sync, tag-commit-on-main — audits the tarball, and (if the
-tap token is configured) updates the Homebrew tap.
+(with hand-written notes, and `install.sh` attached as an asset — it serves the
+documented `releases/latest/download/install.sh` bootstrap URL) triggers
+`release.yml`, which validates the release — tag format, `VERSION` sync,
+tag-commit-on-main, asset-matches-tree — audits the tarball, and (if the tap
+token is configured) updates the Homebrew tap.
 
 ## 1. Bump every version reference together
 
@@ -54,11 +56,15 @@ the CHANGELOG section; notes are for users, not a commit dump).
 
 ```bash
 git tag -a vX.Y.Z -m "aidc vX.Y.Z" && git push origin vX.Y.Z
-gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes>
+gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <notes> install.sh
 ```
 
 The title is the bare tag, e.g. `v1.0.0`. `--verify-tag` refuses to publish if
 the tag doesn't already exist — publishing is deliberate, never tag-creating.
+Attach `install.sh` (run the command from the tag's checkout so the asset is the
+tagged tree's copy) — it serves the README's
+`releases/latest/download/install.sh` bootstrap URL, and the workflow fails the
+release if the asset is missing or differs from the tagged tree.
 
 ## 4. What the workflow does when the release is published
 
@@ -70,7 +76,9 @@ the tag doesn't already exist — publishing is deliberate, never tag-creating.
    `brew` fetch via `archive/refs/tags/vX.Y.Z.tar.gz` — and computes its sha256.
 4. Runs both tarball audits (`release/tarball-audit.sh` against the git tree,
    `release/tarball-audit-extracted.sh` against the extracted tarball).
-5. If the tap PAT secret is set: renders `Formula/aidc.rb` and
+5. Verifies the Release's `install.sh` asset is byte-identical to the tagged
+   tree's `install.sh` (real releases only; dry-runs skip this).
+6. If the tap PAT secret is set: renders `Formula/aidc.rb` and
    `Formula/aidc@MAJOR.MINOR.rb` from `release/Formula/*.tmpl` and pushes them to
    `pacepace/homebrew-aidc`. If the secret is absent the tap step is skipped with
    a notice.
@@ -79,8 +87,9 @@ If validation fails, the published Release is already public — fix the problem
 delete the Release **and** the tag, and redo the tag + publish. Don't leave a
 Release whose validation run is red.
 
-`workflow_dispatch` on an existing tag is a **dry-run only** — it exercises every
-step except the two with side effects. Use it to verify token rotation.
+`workflow_dispatch` on an existing tag is a **dry-run only** — it exercises
+everything except the asset check and the tap push. Use it to verify token
+rotation.
 
 ## 5. Homebrew tap
 

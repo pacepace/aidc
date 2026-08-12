@@ -13,6 +13,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Added
+- **`install.sh` — one-command install.** `curl -fsSL
+  https://github.com/pacepace/aidc/releases/latest/download/install.sh | bash`
+  resolves the latest release (or `--version vX.Y.Z`), verifies the tarball's
+  sha256 against the checksum published in the Homebrew tap, installs to
+  `~/.local/share/aidc/aidc-<version>/`, and symlinks `~/.local/bin/aidc`.
+  Previous versions stay on disk for rollback; `--prune` clears them. The
+  release workflow now requires the Release to carry `install.sh` as an asset
+  byte-identical to the tagged tree's copy.
+
 ## [1.0.0] - 2026-08-11
 
 First public release, under the MIT license.

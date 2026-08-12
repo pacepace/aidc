@@ -168,6 +168,21 @@ jobs:
       - name: Audit extracted tarball
         run: bash release/tarball-audit-extracted.sh release-tarball.tar.gz
 
+      # The Release must carry install.sh as an asset (the documented
+      # `releases/latest/download/install.sh` bootstrap), and the asset must be
+      # byte-identical to the tagged tree's install.sh -- a missing or tampered
+      # asset fails validation. Real releases only: old tags dry-run via
+      # dispatch may predate the asset convention.
+      - name: Verify install.sh release asset matches the tagged tree
+        if: github.event_name == 'release'
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern install.sh --output asset-install.sh
+          if ! cmp -s install.sh asset-install.sh; then
+            echo "::error::release asset install.sh does not match install.sh in the tagged tree"
+            exit 1
+          fi
+
       # Does the tap PAT exist? If not, skip the tap update gracefully (the
       # GitHub Release still ships). Auto-enables once the secret is configured;
       # no operator flag needed. Presence-only check -- the value is never logged.

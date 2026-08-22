@@ -8,11 +8,25 @@ container/tmux helper monkeypatched, so the async contract is pinned without a
 real Docker session.
 """
 import asyncio
+import json
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 
 from aidc_mcp import tools
+
+# The wiring fixture patches asyncio.sleep MODULE-WIDE (tools.asyncio is the real
+# asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
+# hand control to a background task. Capture the genuine one at import time.
+_REAL_SLEEP = asyncio.sleep
+
+
+async def _let_drainer_run(session: str, ticks: int = 50) -> None:
+    """Yield to the event loop until the drainer has emptied `session`'s queue."""
+    for _ in range(ticks):
+        await _REAL_SLEEP(0)
+        if session not in tools._pending_sends:
+            return
 
 
 def _make_send():
@@ -188,18 +202,122 @@ async def test_errors_when_claude_not_running(wiring):
     assert not wiring.paste_calls  # nothing injected
 
 
-async def test_errors_when_session_busy(wiring):
-    """If the session never goes idle, the previous turn is still in flight:
-    refuse rather than paste into a running turn."""
+async def test_queues_instead_of_dropping_when_session_busy(wiring):
+    """A busy session must not COST the prompt. The old behaviour waited 30s and
+    returned an error, discarding it — prod 2026-08-22 conv 01a01cf6 lost a 1021-char
+    prompt that way to a turn which ran 22 minutes, and nothing on either side
+    retried it. Now it queues: ok=True, status "queued", nothing pasted yet."""
     app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
-    assert res["ok"] is False
-    assert "busy" in res["error"]
+    assert res["ok"] is True
+    assert res["data"]["status"] == "queued"
+    assert res["data"]["queued_behind"] == 0
+    # Held, not injected into the running turn.
     assert not wiring.paste_calls
     assert not _sent_enter(wiring.tmux_calls)
+    assert [text for text, _ in tools._pending_sends["proj"]] == ["hello"]
+    # The caller is told plainly not to retry — re-sending is what produced the
+    # duplicate-prompt shape this replaces.
+    assert "do NOT re-send" in res["data"]["delivery"]
+    assert "session_resend" in res["data"]["delivery"]
+
+
+async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
+    """The drainer injects the backlog once the pane frees up, oldest first."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+
+    assert (await send(name="proj", prompt="first", conversation_id="c1"))["data"][
+        "status"] == "queued"
+    second = await send(name="proj", prompt="second", conversation_id="c1")
+    assert second["data"]["queued_behind"] == 1
+
+    # The turn ends: the pane goes idle and the drainer catches up.
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+
+    assert [text for _, text, _ in wiring.paste_calls] == ["first", "second"]
+    assert _sent_enter(wiring.tmux_calls)
+    assert "proj" not in tools._pending_sends
+
+
+async def test_send_queues_behind_a_waiting_prompt_even_when_idle(wiring):
+    """Order is the whole point: with something already queued, a new send must
+    NOT jump the line by pasting just because the pane looks idle right now."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    tools._pending_sends["proj"] = [("earlier", 0)]
+
+    res = await send(name="proj", prompt="later", conversation_id="c1")
+
+    assert res["data"]["status"] == "queued"
+    assert not wiring.paste_calls
+    assert [text for text, _ in tools._pending_sends["proj"]] == ["earlier", "later"]
+
+
+async def test_refuses_once_the_queue_is_full(wiring):
+    """A wedged session must not accumulate prompts without bound."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    tools._pending_sends["proj"] = [(f"q{i}", 0) for i in range(tools._PENDING_MAX_DEPTH)]
+
+    res = await send(name="proj", prompt="one too many", conversation_id="c1")
+
+    assert res["ok"] is False
+    assert "queued" in res["error"]
+    assert len(tools._pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
+
+
+async def test_abandons_the_queue_when_the_pane_never_goes_idle(wiring):
+    """A pane that is wedged rather than working must not hold prompts forever.
+    The bound is deliberately generous (hours) so a long-but-real turn still lands;
+    past it the queue is dead-lettered so the state is recorded, not silently lost."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False  # never idle, but Claude is alive throughout
+
+    await send(name="proj", prompt="hello", conversation_id="c1")
+    await _let_drainer_run("proj", ticks=tools._PENDING_MAX_IDLE_POLLS + 20)
+
+    assert "proj" not in tools._pending_sends
+    assert not wiring.paste_calls
+    dead = list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
+    assert json.loads(dead[0].read_text())["reason"] == "never_went_idle"
+
+
+async def test_spawn_drainer_does_not_start_a_second_one(wiring):
+    """One drainer per session. Two would race to pop the same queue head and
+    could paste the same prompt twice."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+
+    await send(name="proj", prompt="a", conversation_id="c1")
+    first = tools._pending_drainers["proj"]
+    await send(name="proj", prompt="b", conversation_id="c1")
+
+    assert tools._pending_drainers["proj"] is first
+
+
+async def test_abandons_the_queue_when_claude_dies(wiring, tmp_path):
+    """A queued prompt that can never be injected is dead-lettered, not vanished."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="hello", conversation_id="c1")
+
+    wiring.claude_running = False
+    await _let_drainer_run("proj")
+
+    assert "proj" not in tools._pending_sends
+    dead = list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
+    assert len(dead) == 1
+    assert json.loads(dead[0].read_text())["prompt"] == "hello"
 
 
 async def test_errors_when_paste_fails(wiring):

@@ -1162,9 +1162,11 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
 
 async def _resend_reply(session: str, conversation_id: str, callback_base: str, *,
                         turn_uuid: str | None = None,
+                        force: bool = False,
                         transcripts_base: Path | None = None,
                         state_dir: Path | None = None,
-                        post_fn=None, sleep_fn=asyncio.sleep) -> tuple[bool, ts.Turn | None]:
+                        post_fn=None,
+                        sleep_fn=asyncio.sleep) -> tuple[str, ts.Turn | None]:
     """Re-deliver ONE already-produced reply to metallm, out-of-band.
 
     Recovers a reply that was lost or never arrived (a dropped callback, a watcher
@@ -1173,13 +1175,31 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     watermark. The forward-only watcher keeps its own anchor, so a resend can never
     cause the connect-catch-up flood — that separation is the whole point.
 
+    NEVER re-POSTs a turn the delivery ledger already holds, unless ``force``.
+    The ledger records only fingerprints CONFIRMED delivered (a 2xx ack), so
+    "in the ledger" means metallm demonstrably received this exact content — and
+    POSTing it again injects a verbatim duplicate into the conversation, which is
+    strictly harmful: it re-answers a question that was already answered and
+    corrupts the history the next turn reads. Returning the content to the CALLER
+    instead gives the model everything it needs with none of that damage.
+
+    This distinction is why the gate is the ledger and not the watermark. The
+    watermark advances past a turn even when delivery was abandoned to the
+    dead-letter dir, so a genuinely-lost reply is absent from the ledger and stays
+    resendable — exactly the case this tool exists for (prod 2026-08-22 conv
+    01a01cf6: a no-uuid resend of an already-acked turn put a verbatim 4851-char
+    duplicate of the previous answer into the conversation).
+
     Picks the turn matching ``turn_uuid``; when unset, the LAST completed
     (non-empty) turn — the session's most recent reply, the usual "it never came
     back, send it again" case. Resolves the transcript preferring the watermark's
     pinned session_id so it targets the same file the watcher tracks.
 
-    Returns ``(ok, turn)``: ``turn`` is None when there is nothing to resend;
-    ``ok`` is False when the POST could not be confirmed.
+    Returns ``(status, turn)`` where status is one of:
+      - ``"resent"``            — POSTed and acked;
+      - ``"already_delivered"`` — in the ledger, NOT posted (pass force to override);
+      - ``"no_reply"``          — nothing resendable (``turn`` is None);
+      - ``"failed"``            — POSTed but never acked.
 
     The base dirs resolve at CALL time (not as def-time defaults) so patching the
     module globals redirects this path too — the session_resend tool passes neither.
@@ -1196,22 +1216,33 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         Path(transcripts_base) / session, prefer_session_id=prefer
     )
     if active is None:
-        return (False, None)
+        return ("no_reply", None)
     try:
         data = active.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return (False, None)
+        return ("no_reply", None)
     # Only non-empty (deliverable) turns can be resent — an empty tool-only turn was
     # never a reply to metallm in the first place.
     deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data)) if not t.is_empty]
     if not deliverable:
-        return (False, None)
+        return ("no_reply", None)
     if turn_uuid:
         target = next((t for t in deliverable if t.terminal_uuid == turn_uuid), None)
     else:
         target = deliverable[-1]
     if target is None:
-        return (False, None)
+        return ("no_reply", None)
+
+    # The ledger holds fingerprints CONFIRMED delivered (2xx). A hit means metallm
+    # already has this exact content, so re-POSTing can only duplicate it. Refuse
+    # by default and let the caller read the content from the tool result instead.
+    fingerprint = ts.content_fingerprint(target.text)
+    if not force and fingerprint in ts.load_delivered(state_dir, session, conversation_id):
+        log_event("transcript_resend_suppressed", session=session,
+                  conversation_id=conversation_id, turn_uuid=target.terminal_uuid,
+                  content_len=len(target.text), fingerprint=fingerprint)
+        return ("already_delivered", target)
+
     if post_fn is None:
         async def post_fn(turn, attempt):  # noqa: E306
             return await _post_turn(callback_base, conversation_id, turn,
@@ -1219,15 +1250,13 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     ok = await _deliver_with_retry(target, post_fn=post_fn, sleep_fn=sleep_fn)
     if ok:
         # Record the resent turn in the delivery ledger so the watcher never ALSO
-        # delivers it (a double-send). A manual resend deliberately IGNORES the
-        # ledger for the send itself — the operator is explicitly asking for the
-        # turn again — but once it lands, the exactly-once invariant must hold for
-        # every other delivery path too.
-        ts.record_delivered(state_dir, session, conversation_id,
-                            ts.content_fingerprint(target.text))
+        # delivers it (a double-send). Once it lands, the exactly-once invariant
+        # must hold for every other delivery path too.
+        ts.record_delivered(state_dir, session, conversation_id, fingerprint)
     log_event("transcript_resend", session=session, conversation_id=conversation_id,
-              turn_uuid=target.terminal_uuid, content_len=len(target.text), ok=ok)
-    return (ok, target)
+              turn_uuid=target.terminal_uuid, content_len=len(target.text), ok=ok,
+              forced=force)
+    return ("resent" if ok else "failed", target)
 
 
 async def _run_transcript_watcher(session: str, conversation_id: str, callback_base: str, *,
@@ -1958,20 +1987,40 @@ def register(app: Any) -> None:
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
         turn_uuid: Annotated[
             str | None,
-            Field(description="Optional: resend a specific reply by its turn uuid. "
-                              "Omit to resend the session's most recent reply."),
+            Field(description="Optional: target a specific reply by its turn uuid. "
+                              "Omit to target the session's most recent reply."),
         ] = None,
+        force: Annotated[
+            bool,
+            Field(description="Re-POST even if this reply was already confirmed "
+                              "delivered here. Almost never correct — the content "
+                              "comes back in this tool's result either way. Use ONLY "
+                              "when metallm acknowledged the callback but genuinely "
+                              "lost the message downstream."),
+        ] = False,
     ) -> dict[str, Any]:
-        """Re-deliver a session reply that was lost or never arrived here.
+        """Fetch a session reply again when it did not land in this conversation.
 
-        Use when a reply from session_send did not land in this conversation (a
-        dropped callback, a missed turn). Re-sends ONE reply — the session's most
-        recent by default, or turn_uuid for a specific one — and never replays the
-        backlog. Leaves the webhook and its position untouched.
+        WHEN TO USE: a reply from session_send is genuinely absent here — a dropped
+        callback, a watcher gap, an MCP restart at the wrong moment.
+        WHEN NOT: a reply is merely SLOW. A session mid-turn has not answered yet,
+        and the newest COMPLETED reply answers an EARLIER prompt — reading it as the
+        pending answer makes the conversation respond to the wrong question. Wait for
+        the webhook instead; it always arrives.
+
+        This never duplicates. If the reply was already confirmed delivered here, it
+        is NOT re-posted — the content is returned in this result instead, so you can
+        read it without a second copy landing in the conversation. `status` says which
+        happened:
+
+          resent            - the reply was re-posted and will arrive over the webhook
+          already_delivered - NOT re-posted; it is in `content` below, and it is
+                              already somewhere above in this conversation
 
         Args:
-            name: the aidc session whose reply to resend.
+            name: the aidc session whose reply to fetch.
             turn_uuid: a specific reply's uuid; omit for the latest reply.
+            force: re-POST a reply already delivered here (almost never correct).
         """
         if not conversation_id:
             return _envelope_err("conversation_id is required (metallm injects it automatically)")
@@ -1979,15 +2028,7 @@ def register(app: Any) -> None:
         if not base_url:
             return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml")
         log_event("tool_call", tool="session_resend", session=name,
-                  conversation_id=conversation_id, turn_uuid=turn_uuid or "")
-        # Snapshot the watcher's anchor BEFORE resending: _resend_reply records the
-        # turn in the delivery ledger on success, so "was this already delivered?"
-        # is unanswerable afterwards.
-        already = ""
-        if ts.watermark_exists(_WATCHER_STATE_DIR, name, conversation_id):
-            already = ts.load_watermark(
-                _WATCHER_STATE_DIR, name, conversation_id
-            ).last_delivered_uuid
+                  conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)
         # Is the agent mid-turn right now? If so, the newest COMPLETED turn cannot
         # be the answer to the prompt still in flight — the caller must be told, or
         # it reads a stale reply as the response to its last question (prod
@@ -1996,40 +2037,49 @@ def register(app: Any) -> None:
         busy = not await _wait_for_idle(
             f"aidc-{name}-dev", _SESSION_WINDOW, timeout=_SEND_IDLE_TIMEOUT
         )
-        ok, turn = await _resend_reply(name, conversation_id, base_url, turn_uuid=turn_uuid)
+        status, turn = await _resend_reply(name, conversation_id, base_url,
+                                           turn_uuid=turn_uuid, force=force)
         if turn is None:
             return _envelope_err(
                 "no completed reply found to resend for this session "
                 "(the session may not have produced a reply yet)"
             )
-        if not ok:
+        if status == "failed":
             return _envelope_err(
                 "resend reached the transcript but the callback to metallm failed "
                 "(see logs); the reply was not delivered"
             )
-        stale = bool(already) and turn.terminal_uuid == already
-        note = ""
-        if busy and not turn_uuid:
-            note = (
-                "WARNING: this session is STILL WORKING on a later prompt. What was "
-                "resent is the most recent COMPLETED reply, which answers an EARLIER "
-                "prompt — it is not the answer you are waiting for. Do not treat it as "
-                "one and do not resend again; the pending reply will arrive over the "
-                "webhook on its own."
+
+        notes: list[str] = []
+        if status == "already_delivered":
+            notes.append(
+                "This reply was ALREADY delivered to this conversation — it is "
+                "somewhere above. It was NOT re-sent, deliberately: a second copy "
+                "would answer the same question twice and corrupt the history. Its "
+                "full text is in `content` here; read it from there."
             )
-        elif stale and not turn_uuid:
-            note = (
-                "NOTE: this reply had already been delivered to this conversation by "
-                "the webhook — it is a duplicate, not a new answer."
+        if busy:
+            notes.append(
+                "The session is STILL WORKING on a later prompt. This is the most "
+                "recent COMPLETED reply, so it answers an EARLIER prompt — not the "
+                "one you are waiting for. Do not treat it as the pending answer, and "
+                "do not call this tool again; that reply arrives over the webhook on "
+                "its own."
+            )
+        if status == "already_delivered" and not busy:
+            notes.append(
+                "If a reply you expected is genuinely missing, the likeliest cause is "
+                "that it was never requested: check that your session_send actually "
+                "ran rather than assuming it did."
             )
         log_event("transcript_resend_result", session=name,
                   conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-                  session_busy=busy, already_delivered=stale)
+                  status=status, session_busy=busy, forced=force)
         return _envelope_ok(
-            {"status": "resent", "session": name,
-             "turn_uuid": turn.terminal_uuid, "content": turn.text,
-             "session_busy": busy, "already_delivered": stale,
-             **({"note": note} if note else {})}
+            {"status": status, "session": name, "turn_uuid": turn.terminal_uuid,
+             "content": turn.text, "session_busy": busy,
+             "already_delivered": status == "already_delivered",
+             **({"note": " ".join(notes)} if notes else {})}
         )
 
     # --- session_unwatch -----------------------------------------

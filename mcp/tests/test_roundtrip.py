@@ -157,10 +157,10 @@ def harness(tmp_path, monkeypatch):
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
-    async def resend(turn_uuid=None):
+    async def resend(turn_uuid=None, force=False):
         """The REAL resend path, pointed at the tmp dirs + FakeMetallm boundary."""
         return await tools._resend_reply(
-            "proj", "conv-1", "http://metallm.local", turn_uuid=turn_uuid,
+            "proj", "conv-1", "http://metallm.local", turn_uuid=turn_uuid, force=force,
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
@@ -304,16 +304,20 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
 
 
 # --- Deliverable 2: resend a lost/missed reply, WITHOUT a backlog replay -------
+#
+# The governing rule: a resend must NEVER put a second copy of a reply into the
+# conversation. The delivery ledger (confirmed 2xx acks) decides — a turn in it
+# demonstrably reached metallm, so re-POSTing it can only duplicate. A turn
+# absent from it was genuinely lost, which is what this tool is for.
 
 
-async def test_resend_redelivers_last_reply_and_does_not_replay_backlog(harness):
-    """The user's explicit need: re-deliver a reply that was lost/missed. Resend
-    re-sends the session's most recent reply exactly once, WITHOUT moving the
-    watermark — so the forward-only watcher is undisturbed and no backlog replays."""
+async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
+    """The regression this rule exists for (prod 2026-08-22 conv 01a01cf6): a
+    no-uuid resend re-POSTed a reply metallm had already acked, putting a verbatim
+    duplicate of the previous answer into the conversation. The content must come
+    back to the CALLER instead, with no callback at all."""
     h = harness
     (h.base / "proj").mkdir(parents=True)
-
-    # A two-turn exchange, both delivered normally by the watcher.
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [
         _user("u1", "q1"), _assistant("a1", "ANSWER ONE"),
@@ -322,50 +326,113 @@ async def test_resend_redelivers_last_reply_and_does_not_replay_backlog(harness)
     await h.drain()
     assert [p["json"]["content"] for p in h.metallm.posts] == ["ANSWER ONE", "ANSWER TWO"]
     mark_before = ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid
-    assert mark_before == "a2"
 
-    # metallm says "the last reply never arrived" — resend it.
-    ok, turn = await h.resend()
-    assert ok is True
+    status, turn = await h.resend()
+
+    assert status == "already_delivered"
     assert turn.terminal_uuid == "a2"
-    # Exactly ONE new callback, carrying the exact last reply + correct URL.
-    assert len(h.metallm.posts) == 3
-    last = h.metallm.posts[-1]
-    assert last["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
-    assert last["json"] == {"content": "ANSWER TWO", "ok": True,
-                            "source": "agent_watch", "session": "proj"}
-
-    # The watermark did NOT move — resend is out-of-band.
+    assert turn.text == "ANSWER TWO"          # content still available to the caller
+    assert len(h.metallm.posts) == 2          # <-- nothing new was posted
+    # And the watermark is untouched, so the watcher is undisturbed either way.
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == mark_before
-    # And a normal drain still delivers nothing (NO backlog replay from the resend).
     await h.drain()
-    assert len(h.metallm.posts) == 3
+    assert len(h.metallm.posts) == 2
+
+
+async def test_resend_tool_returns_the_text_inline_instead_of_duplicating(harness):
+    """The tool surface of the same rule: the model gets the reply to read, the
+    conversation does not get a second copy of it."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
+    await h.drain()
+
+    res = await h.resend_tool(name="proj", conversation_id="conv-1")
+
+    assert res["ok"] is True
+    assert res["data"]["status"] == "already_delivered"
+    assert res["data"]["already_delivered"] is True
+    assert res["data"]["content"] == "ANSWER"          # readable inline
+    assert len(h.metallm.posts) == 1                   # not re-delivered
+    assert "NOT re-sent" in res["data"]["note"]
+    # Steer the caller at the real cause of a "missing" reply — an un-run send.
+    assert "never requested" in res["data"]["note"]
+
+
+async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
+    """The legitimate recovery case must still work: a completed turn the watcher
+    has NOT delivered is absent from the ledger, so the resend posts it."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()                                  # baseline, nothing delivered
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "THE REPLY")])
+
+    status, turn = await h.resend()
+
+    assert status == "resent"
+    assert turn.terminal_uuid == "a1"
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+
+
+async def test_resend_of_a_dead_lettered_reply_still_delivers(harness):
+    """A turn whose delivery was ABANDONED is recorded in the watermark but NOT in
+    the ledger — precisely so it stays recoverable. Gating on the watermark instead
+    of the ledger would strand exactly the replies this tool exists to rescue."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    h.metallm.succeed = False                        # every POST fails -> dead-letter
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "LOST REPLY")])
+    await h.drain()
+    assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == "a1"
+    h.metallm.succeed = True
+    h.metallm.posts.clear()
+
+    status, turn = await h.resend()
+
+    assert status == "resent"                        # not suppressed
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["LOST REPLY"]
 
 
 async def test_resend_then_watcher_does_not_double_deliver(harness):
     """A resent turn is recorded in the delivery ledger, so if the watcher later
-    drains that same turn (resend can target a reply the watcher has not yet
-    reached), it dedups instead of delivering a second copy. Closes the resend
-    double-delivery hole: the exactly-once invariant holds across BOTH paths."""
+    drains that same turn it dedups instead of delivering a second copy. The
+    exactly-once invariant holds across BOTH paths."""
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    await h.drain()                                  # baseline, nothing delivered yet
-    # The agent produces a reply the watcher has NOT drained yet.
-    _agent_writes(h.base, "proj", "sid-A", [
-        _user("u1", "q1"), _assistant("a1", "THE REPLY"),
-    ])
-    # Operator resends it out-of-band (e.g. the watcher was wedged/late).
-    ok, turn = await h.resend()
-    assert ok is True and turn.terminal_uuid == "a1"
+    await h.drain()
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "THE REPLY")])
+
+    status, turn = await h.resend()
+    assert status == "resent" and turn.terminal_uuid == "a1"
     assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
-    # The watcher now catches up and drains a1 — it must NOT re-send it.
+
     await h.drain()
     assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]  # still one
 
 
-async def test_resend_specific_turn_by_uuid(harness):
-    """A specific earlier reply can be resent by its turn uuid (not just the last)."""
+async def test_force_reposts_an_already_delivered_reply(harness):
+    """The escape hatch for the one case the ledger cannot see: metallm acked the
+    callback but lost the message downstream. Explicit, never the default."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
+    await h.drain()
+    assert len(h.metallm.posts) == 1
+
+    res = await h.resend_tool(name="proj", conversation_id="conv-1", force=True)
+
+    assert res["data"]["status"] == "resent"
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["ANSWER", "ANSWER"]
+
+
+async def test_resend_targets_a_specific_turn_under_the_same_rule(harness):
+    """turn_uuid selects WHICH reply, it does not bypass the duplicate rule — the
+    harm of a second copy is identical however the turn was chosen."""
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
@@ -376,8 +443,13 @@ async def test_resend_specific_turn_by_uuid(harness):
     await h.drain()
     h.metallm.posts.clear()
 
-    ok, turn = await h.resend(turn_uuid="a1")
-    assert ok is True and turn.terminal_uuid == "a1"
+    status, turn = await h.resend(turn_uuid="a1")
+    assert status == "already_delivered"
+    assert turn.text == "FIRST REPLY"
+    assert h.metallm.posts == []
+
+    status, turn = await h.resend(turn_uuid="a1", force=True)
+    assert status == "resent"
     assert [p["json"]["content"] for p in h.metallm.posts] == ["FIRST REPLY"]
 
 
@@ -387,37 +459,18 @@ async def test_resend_nothing_to_send_when_no_reply(harness):
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    # Only a user line + an empty (tool-only) assistant turn — no deliverable reply.
-    _agent_writes(h.base, "proj", "sid-A", [
-        _user("u1", "q1"), _assistant("a1", None),
-    ])
-    ok, turn = await h.resend()
-    assert ok is False and turn is None
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", None)])
+
+    status, turn = await h.resend()
+
+    assert status == "no_reply" and turn is None
     assert h.metallm.posts == []
 
 
-async def test_resend_tool_flags_a_reply_already_delivered(harness):
-    """A no-uuid resend of the turn the watcher already delivered is a DUPLICATE,
-    and must say so. Silence here is how an orchestrator reads the same answer
-    twice and believes it got a second reply."""
-    h = harness
-    (h.base / "proj").mkdir(parents=True)
-    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
-    await h.drain()
-
-    res = await h.resend_tool(name="proj", conversation_id="conv-1")
-
-    assert res["ok"] is True
-    assert res["data"]["already_delivered"] is True
-    assert res["data"]["session_busy"] is False
-    assert "already been delivered" in res["data"]["note"]
-
-
 async def test_resend_tool_warns_when_the_session_is_still_working(harness, monkeypatch):
-    """The prod shape (2026-08-22 conv 01a01cf6): the agent is mid-turn, so the
-    newest COMPLETED turn answers an EARLIER prompt. Resending it without a warning
-    hands the orchestrator a stale reply as if it were the answer it is waiting for."""
+    """A session mid-turn has not answered yet, so the newest COMPLETED reply
+    answers an EARLIER prompt. Handing that back unlabelled is how a conversation
+    ends up responding to the wrong question."""
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
@@ -434,7 +487,7 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
     assert res["data"]["content"] == "OLD ANSWER"
     assert res["data"]["session_busy"] is True
     assert "STILL WORKING" in res["data"]["note"]
-    assert "not the answer you are waiting for" in res["data"]["note"]
+    assert "not the one you are waiting for" in res["data"]["note"]
 
 
 async def test_resend_tool_requires_conversation_id(harness):

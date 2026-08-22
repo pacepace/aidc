@@ -136,6 +136,10 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
     monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://metallm.local")
+    # The session_resend TOOL passes no base dirs — it resolves the module globals
+    # at call time — so point those at the tmp dirs as well. (conftest already
+    # redirects _WATCHER_STATE_DIR to this same tmp_path/"watcher-state".)
+    monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", base)
     monkeypatch.setattr(tools, "_load_token", lambda: "tok")
     monkeypatch.setattr(tools.httpx, "AsyncClient", metallm.client_factory())
     monkeypatch.setattr(tools.asyncio, "sleep", _nosleep)
@@ -390,6 +394,47 @@ async def test_resend_nothing_to_send_when_no_reply(harness):
     ok, turn = await h.resend()
     assert ok is False and turn is None
     assert h.metallm.posts == []
+
+
+async def test_resend_tool_flags_a_reply_already_delivered(harness):
+    """A no-uuid resend of the turn the watcher already delivered is a DUPLICATE,
+    and must say so. Silence here is how an orchestrator reads the same answer
+    twice and believes it got a second reply."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
+    await h.drain()
+
+    res = await h.resend_tool(name="proj", conversation_id="conv-1")
+
+    assert res["ok"] is True
+    assert res["data"]["already_delivered"] is True
+    assert res["data"]["session_busy"] is False
+    assert "already been delivered" in res["data"]["note"]
+
+
+async def test_resend_tool_warns_when_the_session_is_still_working(harness, monkeypatch):
+    """The prod shape (2026-08-22 conv 01a01cf6): the agent is mid-turn, so the
+    newest COMPLETED turn answers an EARLIER prompt. Resending it without a warning
+    hands the orchestrator a stale reply as if it were the answer it is waiting for."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "OLD ANSWER")])
+    await h.drain()
+
+    async def never_idle(container, window, timeout):
+        return False
+
+    monkeypatch.setattr(tools, "_wait_for_idle", never_idle)
+    res = await h.resend_tool(name="proj", conversation_id="conv-1")
+
+    assert res["ok"] is True
+    assert res["data"]["content"] == "OLD ANSWER"
+    assert res["data"]["session_busy"] is True
+    assert "STILL WORKING" in res["data"]["note"]
+    assert "not the answer you are waiting for" in res["data"]["note"]
 
 
 async def test_resend_tool_requires_conversation_id(harness):

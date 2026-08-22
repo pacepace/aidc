@@ -650,4 +650,5 @@ aidc was built with [Enforcement-Accelerated Development](https://doi.org/10.528
 Violations caught at commit time. Not production.
 
 - [EAD Whitepaper](https://doi.org/10.5281/zenodo.17968797) — Full methodology
+- [aidc on pace.org](https://pace.org/projects/aidc/) — Project page
 - [Mark Pace](https://pace.org) — Author

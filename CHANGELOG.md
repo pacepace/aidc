@@ -13,6 +13,24 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-22
+
+### Added
+- **`install.sh` — one-command install.** `curl -fsSL
+  https://github.com/pacepace/aidc/releases/latest/download/install.sh | bash`
+  resolves the latest release (or `--version vX.Y.Z`), verifies the tarball's
+  sha256 against the checksum published in the Homebrew tap, installs to
+  `~/.local/share/aidc/aidc-<version>/`, and symlinks `~/.local/bin/aidc`.
+  Previous versions stay on disk for rollback; `--prune` clears them. The
+  release workflow now requires the Release to carry `install.sh` as an asset
+  byte-identical to the tagged tree's copy.
+
+### Changed
+- Releases now ship on **Release publish from `main`**, not on a tag push. A bare
+  tag triggers nothing; publishing the GitHub Release fires the workflow, which
+  validates the tag rather than creating it (so the job is read-only on contents)
+  and refuses any tag whose commit is not on `main`.
+
 ### Fixed
 - **`session_send` no longer discards a prompt sent to a busy session.** A
   dev-agent turn routinely outlives any inline wait — one ran 22 minutes after an
@@ -32,16 +50,6 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   answers an earlier prompt, not the one the caller is waiting for. The result now
   carries `session_busy` / `already_delivered` and a plain-language note, instead
   of passing an old answer off as the pending one.
-
-### Added
-- **`install.sh` — one-command install.** `curl -fsSL
-  https://github.com/pacepace/aidc/releases/latest/download/install.sh | bash`
-  resolves the latest release (or `--version vX.Y.Z`), verifies the tarball's
-  sha256 against the checksum published in the Homebrew tap, installs to
-  `~/.local/share/aidc/aidc-<version>/`, and symlinks `~/.local/bin/aidc`.
-  Previous versions stay on disk for rollback; `--prune` clears them. The
-  release workflow now requires the Release to carry `install.sh` as an asset
-  byte-identical to the tagged tree's copy.
 
 ## [1.0.0] - 2026-08-11
 
@@ -615,5 +623,6 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/pacepace/aidc/releases/tag/v1.0.0

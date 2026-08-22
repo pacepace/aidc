@@ -13,6 +13,31 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-22
+
+### Fixed
+- **`session_resend` no longer puts a duplicate reply into the conversation.** It
+  warned about a duplicate but still delivered one: the warning went to the
+  caller's tool result while the callback injected a verbatim second copy of an
+  already-answered reply into the conversation (prod conv 01a01cf6: a 4851-char
+  duplicate of the previous answer). A reply whose fingerprint is in the delivery
+  ledger — meaning metallm acked it — is now **not re-posted at all**; its text
+  comes back in the tool result instead, so the caller can read it without a
+  second copy landing anywhere. `status` reports `already_delivered` vs `resent`.
+  Pass `force` for the one case the ledger cannot see: metallm acked the callback
+  but lost the message downstream.
+
+  The gate is the ledger, not the watermark, on purpose — the watermark advances
+  past a turn even when delivery was abandoned to the dead-letter dir, so a
+  genuinely lost reply stays absent from the ledger and remains resendable. That
+  is the case this tool exists for.
+
+- **`session_resend`'s description now steers away from the misuse that caused
+  the incident.** It was reached for whenever a reply seemed slow; the reply that
+  looked missing had usually never been requested. It now says plainly that a
+  session mid-turn has not answered yet, and points at an un-run `session_send`
+  as the likeliest cause of a genuinely absent reply.
+
 ## [1.1.0] - 2026-08-22
 
 ### Added
@@ -623,6 +648,7 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/pacepace/aidc/releases/tag/v1.0.0

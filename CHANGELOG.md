@@ -13,6 +13,26 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **`session_send` no longer discards a prompt sent to a busy session.** A
+  dev-agent turn routinely outlives any inline wait — one ran 22 minutes after an
+  auto-compaction — and the old path waited 30s for an idle pane and then returned
+  an error, dropping the prompt with nothing retrying it. Prompts are now queued
+  per session and injected the moment the turn ends, in order; the tool returns
+  `status: "queued"` (still `ok`), so an orchestrator that tracks busy sessions on
+  a successful send keeps tracking this one. A queue that can never drain (Claude
+  gone, or a pane that never goes idle) is dead-lettered under `watcher-state/`
+  rather than lost.
+- **Every `session_send` refusal is now audited.** The "Claude not running",
+  paste-failed, and queue-full paths returned silently, so the only trace of a
+  dropped prompt was the *absence* of a `session_send_sent` line. They now log
+  `session_send_failed` with the reason that closed the gate.
+- **`session_resend` says when its reply is stale.** With no `turn_uuid` it
+  re-delivers the newest *completed* turn, which — while the agent is mid-turn —
+  answers an earlier prompt, not the one the caller is waiting for. The result now
+  carries `session_busy` / `already_delivered` and a plain-language note, instead
+  of passing an old answer off as the pending one.
+
 ### Added
 - **`install.sh` — one-command install.** `curl -fsSL
   https://github.com/pacepace/aidc/releases/latest/download/install.sh | bash`

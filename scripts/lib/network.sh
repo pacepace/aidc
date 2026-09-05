@@ -225,6 +225,27 @@ aidc_adhoc_networks() {
     done
 }
 
+# ---- egress posture (NET-14) -------------------------------------------------
+#
+# Prints "enforced" when the session bridge is a Docker internal network (no NAT,
+# so squid is the only way out), "direct" when it is an ordinary NATed bridge,
+# and "unknown" when the network is missing.
+#
+# A session created before v1.3.0 -- or with --egress direct -- reports "direct".
+# `aidc upgrade` reuses the compose file rendered at create time, so upgrading
+# such a session does NOT switch it to enforced; only kill + create does. That
+# gap is worth surfacing rather than letting someone assume protection they do
+# not have.
+aidc_session_egress_mode() {
+    local internal
+    internal=$(docker network inspect "$(aidc_session_network "$1")" -f '{{.Internal}}' 2>/dev/null || printf '')
+    case "$internal" in
+        true)  printf 'enforced' ;;
+        false) printf 'direct' ;;
+        *)     printf 'unknown' ;;
+    esac
+}
+
 # ---- capability probes -------------------------------------------------------
 #
 # Feature-detect rather than parse version strings: distro compose builds carry

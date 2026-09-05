@@ -115,6 +115,17 @@ if [ -n "$ADHOC_NETS" ]; then
 fi
 printf '  - declared networks (--network at create time) survive\n' >&2
 printf '  - the proxy stack, dev-home volume, repo mount, memory, and audit dir all survive\n' >&2
+# NET-14: upgrade re-uses the compose file rendered at create time, so a session
+# created before v1.3.0 (or with --egress direct) keeps its NATed bridge. Say so
+# here rather than let someone upgrade and assume they gained enforcement.
+if [ "$(aidc_session_egress_mode "$NAME")" = "direct" ]; then
+    printf '\n' >&2
+    printf '  NOTE: this session'"'"'s egress is NOT enforced -- its bridge is NATed, so a\n' >&2
+    printf '        process inside can bypass squid entirely (no blocklist, no taint).\n' >&2
+    printf '        Upgrading does NOT change that: it reuses the compose file rendered\n' >&2
+    printf '        at create time. To enforce, recreate the session instead:\n' >&2
+    printf '            aidc kill %s && aidc create %s ...\n' "$NAME" "$NAME" >&2
+fi
 printf '\n' >&2
 printf '  current image: %s\n' "${OLD_DIGEST:-(unknown)}" >&2
 printf '  new image:     %s (%s)\n' "$NEW_DIGEST" "$NEW_TAG" >&2

@@ -247,6 +247,12 @@ and most compose bridges are NATed, so attaching one restores general internet
 egress as a side effect. aidc can't prevent that — it doesn't own that network.
 Detaching closes it again.
 
+**Existing sessions are not converted.** `aidc upgrade` reuses the compose file rendered
+at create time, so a session created before v1.3.0 keeps its NATed bridge — upgraded, but
+still bypassable. `aidc status <name>` reports which posture a session is in, and
+`aidc upgrade` warns before preserving an unenforced one. Recreate to convert:
+`aidc kill <name> && aidc create <name> ...`.
+
 Declared `--port` forwards and `aidc proxy` still work: each becomes a small
 dual-homed `aidc/forwarder` sidecar that publishes the host port and reaches dev
 across the internal bridge, since an internal network can't publish ports itself.

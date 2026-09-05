@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-05
+
 ### Fixed
 - **Egress is now actually enforced, not merely configured.** The proxy was advisory:
   `HTTP_PROXY` pointed at squid, but the session bridge was an ordinary NATed Docker
@@ -40,6 +42,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   cannot go green on the bug it missed for three releases. (NET-10a)
 
 ### Added
+- **`aidc status` reports the session's egress posture**, and `aidc upgrade` warns when
+  it is about to preserve an unenforced one. This matters more than it sounds: `upgrade`
+  reuses the compose file rendered at *create* time, so upgrading a session created
+  before v1.3.0 does **not** switch it to enforced — it stays bypassable while looking
+  upgraded. Both commands now say so and point at `aidc kill` + `aidc create`.
 - **`--egress proxied|direct` and an `egress:` config key.** `direct` restores the
   pre-v1.3.0 NATed bridge for sessions needing reachability an attached network cannot
   provide (ZeroTier/Tailscale, direct DNS). `aidc create` states plainly that enforcement
@@ -734,7 +741,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0

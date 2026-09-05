@@ -33,6 +33,9 @@ than kill+create and preserves memory (claude --continue resumes). Adhoc port
 forwards are dropped (re-add via 'aidc proxy <name> add ...'); declared --port
 forwards ride the compose stack and come back.
 
+Network attachments (aidc network / --network) all survive: this restarts the
+container rather than recreating it, and endpoints are container state.
+
 Use 'aidc upgrade <name>' to swap onto a freshly rebuilt image instead.
 EOF
         exit 0 ;;

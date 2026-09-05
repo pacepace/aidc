@@ -46,6 +46,34 @@ The blocklist is good but not omniscient. A brand-new domain that hasn't hit thr
 
 The dev container runs `--privileged`. A kernel-level escape is possible in principle. **Mitigation:** keep the host kernel patched; consider Sysbox runtime to drop the privileged flag entirely (`design-03-docker-isolation.md`). Not addressed beyond that in v1.
 
+### Networks you attach on purpose (NET-13)
+
+`aidc create --network <net>`, the `networks:` config key, and `aidc network <session> add`
+attach the dev container to another Docker bridge — typically another compose project's,
+so the session can reach its database or queue for troubleshooting. This is a deliberate
+hole in the model above, and it is worth being precise about its size:
+
+- **Every service on that network is reachable, on every port.** Not just the one you had
+  in mind. Docker's embedded DNS resolves the whole project by container name.
+- **That traffic never touches Squid.** The blocklist, the TLD policy, and Quad9 all sit on
+  the HTTP proxy path. A direct TCP connection to a container on an attached network is not
+  proxied, is not in `access.log`, and therefore **cannot taint the session** — the policy
+  sidecar has nothing to see.
+- **It is bidirectional.** Containers on that network can reach `aidc-<session>-dev`.
+- **Credentials on the attached network are in reach.** If the agent can talk to your
+  postgres, it can read whatever that postgres will serve it.
+
+What aidc does still guarantee: only the `dev` service is attached — squid, refresher,
+policy, and audit stay on the session network alone — and the session's own bridge keeps
+the default gateway, so ordinary egress still leaves through the proxied path rather than
+silently rerouting through the network you attached (`gw_priority`; see
+`scripts/lib/network.sh` for the measurements behind that).
+
+**Mitigation:** attach the narrowest network that does the job, never Docker's default
+`bridge` (refused outright, along with `host` and `none`), and treat anything on an
+attached network as being inside the blast radius. `aidc status` lists current attachments
+for exactly this reason.
+
 ### Host network position attacks
 
 If the host is on a network where attackers can reach Docker's exposed ports, aidc itself doesn't harden the host. **Mitigation:** out of scope. aidc assumes the host's perimeter is secured by other means.

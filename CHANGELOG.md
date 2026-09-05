@@ -13,6 +13,58 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-05
+
+### Fixed
+- **Egress is now actually enforced, not merely configured.** The proxy was advisory:
+  `HTTP_PROXY` pointed at squid, but the session bridge was an ordinary NATed Docker
+  network, so `env -u HTTP_PROXY curl https://example.com` returned **200** and produced
+  **no entry in `access.log`** — meaning the blocklist did not apply and the policy
+  sidecar could not taint on it. NET-10 claimed processes inside the dev container
+  "cannot reconfigure or bypass" the proxy. They could, with four `env -u` flags.
+
+  The session bridge is now a Docker **`internal`** network: Docker installs no
+  masquerade rule, so there is no route off it at all. Squid is dual-homed onto a
+  separate `egress` network and is the only way out. The fix is topological on purpose —
+  the dev container is `--privileged` for DinD, so any rule inside it can be flushed by
+  whatever is running there. Verified against a privileged process that stripped the
+  proxy vars, added an explicit default route via squid, enabled `ip_forward`, and
+  installed its own `MASQUERADE`: every attempt returns `Network is unreachable`, while
+  proxied traffic still returns 200 and a blocklisted domain still returns 403.
+
+  Only `squid`, `refresher` (threat feeds) and `policy` (taint webhook) join the egress
+  network. `dev` and `audit` never do.
+
+- **`make smoke` no longer passes a sandbox that isn't sandboxing.** Step 7 tested only
+  the *proxied* path (`curl -x http://aidc-proxy:3128`), which succeeds just as happily
+  when nothing is enforced. It now also asserts that stripping the proxy variables fails,
+  that raw TCP to a public IP fails, and that squid is still reachable — so the suite
+  cannot go green on the bug it missed for three releases. (NET-10a)
+
+### Added
+- **`aidc status` reports the session's egress posture**, and `aidc upgrade` warns when
+  it is about to preserve an unenforced one. This matters more than it sounds: `upgrade`
+  reuses the compose file rendered at *create* time, so upgrading a session created
+  before v1.3.0 does **not** switch it to enforced — it stays bypassable while looking
+  upgraded. Both commands now say so and point at `aidc kill` + `aidc create`.
+- **`--egress proxied|direct` and an `egress:` config key.** `direct` restores the
+  pre-v1.3.0 NATed bridge for sessions needing reachability an attached network cannot
+  provide (ZeroTier/Tailscale, direct DNS). `aidc create` states plainly that enforcement
+  is off for that session. Default is `proxied`. (NET-14)
+
+### Changed
+- **Declared `--port` forwards and `aidc proxy` are now dual-homed forwarder sidecars.**
+  An internal network cannot publish ports, so `ports:` on the dev service would have
+  silently done nothing. Each declared port becomes an `aidc/forwarder` service
+  (`aidc-<session>-dfwd-<port>`) that publishes on the egress network and reaches dev
+  across the internal one; `aidc proxy` starts its adhoc sidecar the same way. Behaviour
+  from the user's side is unchanged.
+- **`aidc network` is unaffected** — attaching a network still grants full access to that
+  network's services, which is the point of it. Because most compose bridges are NATed and
+  an internal bridge has no default route of its own, an attachment does restore general
+  internet egress as a side effect; aidc cannot prevent that, since it does not own that
+  network. Detaching closes it again, and the smoke suite now asserts exactly that scoping.
+
 ## [1.2.0] - 2026-09-05
 
 ### Added
@@ -689,7 +741,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0

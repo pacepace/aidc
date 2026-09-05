@@ -115,6 +115,23 @@ else
     printf '  adhoc: (none)\n'
 fi
 
+# Egress posture (NET-14). Printed before attachments because it is the coarser
+# fact: whether this session can reach the internet without passing through squid.
+printf '\n-- egress --\n'
+case "$(aidc_session_egress_mode "$NAME")" in
+    enforced)
+        printf '  enforced: session bridge is a docker internal network (no NAT).\n'
+        printf '  squid is the only route out; direct egress is not possible.\n' ;;
+    direct)
+        printf '  DIRECT: session bridge is NATed -- squid is configured but NOT enforced.\n'
+        printf '  A process here can reach the internet without passing through the proxy,\n'
+        printf '  which means the blocklist does not apply and taint detection cannot see it.\n'
+        printf '  Either this session used --egress direct, or it predates v1.3.0.\n'
+        printf '  To enforce: aidc kill %s && aidc create %s ...  (upgrade will NOT switch it)\n' "$NAME" "$NAME" ;;
+    *)
+        printf '  unknown (session network not found)\n' ;;
+esac
+
 # Attached foreign bridge networks (NET-13). Listed unconditionally, including
 # the "(none)" case: an attachment is a widening of the sandbox, and status is
 # where someone looks to find out what a session can currently reach.

@@ -51,6 +51,7 @@ aidc_config_defaults() {
     AIDC_CONTAINER_ONLY_PATHS=""  # paths overlaid by session-scoped volumes (CLI-18); newline-separated
     AIDC_DNS_SERVERS=""           # per-session DNS override; newline-separated IPs; empty = Quad9 default
     AIDC_NETWORKS=""              # foreign docker bridges to attach (NET-13); newline-separated
+    AIDC_EGRESS="proxied"         # proxied|direct -- internal session bridge vs NATed (NET-14)
 }
 
 # ---- default config template -------------------------------------------------
@@ -272,6 +273,7 @@ load_config() {
         val=$(_aidc_yaml_scalar "$f" "share_memory");    [ -n "$val" ] && AIDC_SHARE_MEMORY="$val"
         val=$(_aidc_yaml_scalar "$f" "share_auth");      [ -n "$val" ] && AIDC_SHARE_AUTH="$val"
         val=$(_aidc_yaml_scalar "$f" "share_plugins");   [ -n "$val" ] && AIDC_SHARE_PLUGINS="$val"
+        val=$(_aidc_yaml_scalar "$f" "egress");          [ -n "$val" ] && AIDC_EGRESS="$val"
 
         # Lists: append to running aggregate, dedupe at the end.
         local tlds adds ports cops dnss nets
@@ -313,7 +315,8 @@ load_config() {
            AIDC_STATE_ACTOR_TLDS AIDC_BLOCKLIST_ADDITIONS AIDC_NOTIFY_WEBHOOK \
            AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY AIDC_SHARE_AUTH \
            AIDC_SHARE_PLUGINS \
-           AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS
+           AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS \
+           AIDC_EGRESS
 }
 
 # Emit the loaded config as YAML, for `aidc config` printing.
@@ -327,6 +330,7 @@ emit_loaded_config_yaml() {
     printf 'share_memory: %s\n' "$AIDC_SHARE_MEMORY"
     printf 'share_auth: %s\n' "$AIDC_SHARE_AUTH"
     printf 'share_plugins: %s\n' "$AIDC_SHARE_PLUGINS"
+    printf 'egress: %s\n' "$AIDC_EGRESS"
     printf 'notify_webhook: "%s"\n' "$AIDC_NOTIFY_WEBHOOK"
     printf 'state_actor_tlds:\n'
     if [ -n "$AIDC_STATE_ACTOR_TLDS" ]; then

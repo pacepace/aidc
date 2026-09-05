@@ -64,6 +64,7 @@ session_exists "$NAME" || die "no such session: $NAME (try: aidc list)"
 
 DEV_CT="$(container_name "$NAME" dev)"
 NET_NAME="aidc-${NAME}-net"
+EGRESS_NET="aidc-${NAME}-egress"
 
 # ---- helpers -----------------------------------------------------------------
 
@@ -110,19 +111,31 @@ do_add() {
     ensure_image forwarder
 
     # `-d --rm`: ephemeral, intentionally lost on restart (per CLI-14).
-    # `--network aidc-${SESSION}-net`: joins the session's docker network
-    #     so socat can resolve `aidc-${SESSION}-dev` via compose DNS.
+    # DUAL-HOMED (NET-14): started on the session's EGRESS network so the
+    #     published port actually works, then joined to the session network so
+    #     socat can resolve `aidc-<session>-dev` via compose DNS. Since NET-14
+    #     the session bridge is `internal` -- Docker installs no NAT for it, so
+    #     a sidecar attached only there would publish a port that nothing can
+    #     reach. Publishing must be requested at run time, hence run-then-connect
+    #     rather than the reverse.
     # `-p H:C`: publish host:HOST_PORT into the sidecar's CONTAINER_PORT,
     #     where socat is listening.
     if ! docker run -d --rm \
             --name "$ct_name" \
-            --network "$NET_NAME" \
+            --network "$EGRESS_NET" \
             -p "${HOST_PORT}:${CONTAINER_PORT}" \
             "$FORWARDER_IMAGE" \
             "TCP-LISTEN:${CONTAINER_PORT},fork,reuseaddr" \
             "TCP:${DEV_CT}:${CONTAINER_PORT}" \
             >/dev/null 2>&1; then
         die "docker run failed (host port ${HOST_PORT} may already be in use by another process; try a different port)"
+    fi
+    # Join the session network so the dev container is resolvable. Roll the
+    # sidecar back on failure rather than leaving a forwarder that can never
+    # reach its target.
+    if ! docker network connect "$NET_NAME" "$ct_name" >/dev/null 2>&1; then
+        docker rm -f "$ct_name" >/dev/null 2>&1 || true
+        die "could not join ${ct_name} to ${NET_NAME}"
     fi
     info "forward: localhost:${HOST_PORT} -> ${DEV_CT}:${CONTAINER_PORT}"
 }

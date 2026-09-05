@@ -4,6 +4,7 @@ networks:
   default:
     name: aidc-${SESSION}-net
     driver: bridge
+${EXTNET_DECLARATIONS}
 
 volumes:
   blocklist:
@@ -108,8 +109,14 @@ ${DNS_BLOCK}
     image: aidc/dev-base:${AIDC_VERSION_TAG}
     container_name: aidc-${SESSION}-dev
     privileged: true                # required for DinD
+    # Rendered by aidc_render_extnet_blocks (scripts/lib/network.sh). With no
+    # --network / `networks:` config this is the bare `- default` sequence,
+    # byte-identical to pre-NET-13 aidc. With attachments it becomes a mapping
+    # that pins gw_priority so the session's own bridge keeps the default
+    # gateway -- see that file for why `priority` alone does not.
+    # Only `dev` ever joins a foreign network; the proxy sidecars never do.
     networks:
-      - default
+${DEV_NETWORKS_BLOCK}
     working_dir: ${REPO_PATH}       # CWD matches the mounted repo path
     environment:
       # Both case-variants set: many CLI tools (curl, wget) read uppercase;

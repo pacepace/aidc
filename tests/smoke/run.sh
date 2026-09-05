@@ -50,6 +50,14 @@ cleanup() {
     echo
     echo "[cleanup] tearing down session $SESSION"
     "$AIDC" kill "$SESSION" >/dev/null 2>&1 || true
+    # Step 6's throwaway bridge. Unset when we died before that step, hence the
+    # :-. Removed AFTER the kill: docker refuses to remove a network that still
+    # has an endpoint on it. Written as an `if` rather than a `&&` chain so a
+    # false test cannot abort the trap under set -e and skip the rm -rf below.
+    if [ -n "${SMOKE_NET:-}" ]; then
+        docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+    fi
+
     # git commit inside the dev container (uid 1000) leaves .git objects owned by
     # 1000; a host runner at a different uid (CI: 1001) can't rm them. Fall back to
     # a throwaway root container to clear the tree. `|| true` so a cleanup hiccup
@@ -111,7 +119,7 @@ docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon unreachable" >&2; ex
 chmod -R a+rwX "$TMP_REPO"
 
 # --- step 1: create session ----------------------------------------------
-echo "[1/10] aidc create"
+echo "[1/11] aidc create"
 "$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi 2>&1 | tee "$CREATE_OUT"
 # Extract audit dir from the 'audit:   <path>' line in create output.
 AUDIT_DIR=$(grep -E '^[[:space:]]*audit:' "$CREATE_OUT" | head -n1 | awk '{print $2}')
@@ -133,7 +141,7 @@ echo "audit:   $AUDIT_DIR"
 echo
 
 # --- step 2: isolation ----------------------------------------------------
-echo "[2/10] isolation assertions"
+echo "[2/11] isolation assertions"
 assert "no docker.sock from host in dev container" \
     "! dev_exec 'test -S /var/run/docker.sock.host'"
 assert "gh CLI not installed" \
@@ -147,7 +155,7 @@ assert "no GITHUB_TOKEN env" \
 echo
 
 # --- step 3: git asymmetry -----------------------------------------------
-echo "[3/10] git asymmetry"
+echo "[3/11] git asymmetry"
 assert "git status works locally" \
     "dev_exec 'cd $TMP_REPO && git status'"
 assert "git commit works locally" \
@@ -159,7 +167,7 @@ assert "system pre-push hook is installed" \
 echo
 
 # --- step 4: DinD ---------------------------------------------------------
-echo "[4/10] DinD"
+echo "[4/11] DinD"
 assert "inner docker daemon works" \
     "dev_exec 'docker version'"
 assert "inner docker ps does NOT show host containers" \
@@ -173,7 +181,7 @@ echo
 # (`aidc create --port`) is exercised by the manual test plan in
 # docs/tasks/task-11-port-forwarding.md -- adding a declared port to the
 # smoke create would conflict with parallel runs.
-echo "[5/10] port forwarding"
+echo "[5/11] port forwarding"
 PF_PORT=$((28000 + RANDOM % 1000))
 dev_exec "nohup python3 -m http.server ${PF_PORT} >/tmp/pfhttp.log 2>&1 &" >/dev/null 2>&1 || true
 # Give the in-container server a beat to bind.
@@ -204,8 +212,71 @@ assert "aidc proxy clear with no forwards is idempotent" \
 dev_exec "pkill -f 'http.server ${PF_PORT}'" >/dev/null 2>&1 || true
 echo
 
-# --- step 6: proxy enforcement -------------------------------------------
-echo "[6/10] proxy enforcement"
+# --- step 6: attached bridge networks (NET-13) ---------------------------
+# Covers the Docker-facing half of `aidc network`, which the no-Docker unit
+# job (tests/unit/test-network-attach.sh) cannot reach: the real attach, the
+# guard rails, and -- the one that matters -- that attaching a foreign bridge
+# does NOT steal the session's default route.
+#
+# That last assertion is the whole reason --gw-priority is passed. Measured on
+# Docker 29.1.3: a plain `docker network connect` moves the default gateway to
+# the network being attached, which would silently route every byte of the
+# session's egress (squid-proxied traffic included) out through someone else's
+# bridge. Nothing else in the suite would notice.
+#
+# Declarative attachment (`aidc create --network`) is not exercised here: it
+# would need a second full create, and its rendering is pinned by the unit
+# test plus `docker compose config` validation.
+echo "[6/11] attached bridge networks"
+SMOKE_NET="aidc-smoke-net-$$"
+docker network create "$SMOKE_NET" >/dev/null 2>&1 || true
+assert "aidc network ls shows no foreign networks initially" \
+    "$AIDC network ${SESSION} ls | grep -q 'no foreign networks attached'"
+assert "aidc network add attaches the bridge" \
+    "$AIDC network ${SESSION} add ${SMOKE_NET}"
+assert "docker reports the dev container on it" \
+    "docker inspect -f '{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}' aidc-${SESSION}-dev | grep -q ${SMOKE_NET}"
+assert "aidc network ls lists it as adhoc" \
+    "$AIDC network ${SESSION} ls | grep '${SMOKE_NET}' | grep -q adhoc"
+assert "aidc status surfaces the attachment" \
+    "$AIDC status ${SESSION} | grep -q ${SMOKE_NET}"
+
+# The default route must still point at the session's own bridge. Read the
+# container's real routing table via /proc/net/route (dev-base ships no `ip`)
+# and compare against the gateway docker assigned to aidc-<session>-net.
+OWN_GW=$(docker network inspect "aidc-${SESSION}-net" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "?")
+DEV_GW=$(dev_exec "python3 -c \"
+import socket, struct
+for line in open('/proc/net/route').readlines()[1:]:
+    f = line.split()
+    if f[1] == '00000000':
+        print(socket.inet_ntoa(struct.pack('<L', int(f[2], 16))))
+        break
+\"" 2>/dev/null | tr -d '\r\n' || echo "?")
+assert "attaching did NOT steal the default route (gw ${DEV_GW} == own ${OWN_GW})" \
+    "[ -n '${OWN_GW}' ] && [ '${DEV_GW}' = '${OWN_GW}' ]"
+
+assert "add is idempotent" \
+    "$AIDC network ${SESSION} add ${SMOKE_NET}"
+assert "refuses the host network" \
+    "! $AIDC network ${SESSION} add host"
+assert "refuses docker's default bridge" \
+    "! $AIDC network ${SESSION} add bridge"
+assert "refuses a nonexistent network" \
+    "! $AIDC network ${SESSION} add definitely-not-a-real-network"
+assert "refuses to detach the session's own network" \
+    "! $AIDC network ${SESSION} rm aidc-${SESSION}-net"
+assert "aidc network rm detaches it" \
+    "$AIDC network ${SESSION} rm ${SMOKE_NET}"
+assert "dev container is off it afterwards" \
+    "! docker inspect -f '{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}' aidc-${SESSION}-dev | grep -q ${SMOKE_NET}"
+assert "rm is idempotent" \
+    "$AIDC network ${SESSION} rm ${SMOKE_NET}"
+docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+echo
+
+# --- step 7: proxy enforcement -------------------------------------------
+echo "[7/11] proxy enforcement"
 # Use explicit -x so curl ALWAYS routes through squid regardless of how it
 # resolves *_PROXY env (curl as root ignores HTTP_PROXY; some libcurl builds
 # only honor lowercase). Without this, assertions can pass for the wrong
@@ -255,8 +326,8 @@ assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid" \
     "[ '$MALWARE_CODE' = '403' ]"
 echo
 
-# --- step 6: taint detection ---------------------------------------------
-echo "[7/10] taint detection"
+# --- step 8: taint detection ---------------------------------------------
+echo "[8/11] taint detection"
 # Policy sidecar tails squid access.log; once the malware curl above is
 # logged as TCP_DENIED, it writes /var/state/tainted. Poll for up to 15s.
 TAINT_OK=0
@@ -295,8 +366,8 @@ done
 [ "$PAUSE_OK" = "1" ] || echo "  (dev container did not reach paused state within 6s -- list assertion may race)"
 echo
 
-# --- step 7: status surfaces taint ---------------------------------------
-echo "[8/10] aidc status surfaces taint"
+# --- step 9: status surfaces taint ---------------------------------------
+echo "[9/11] aidc status surfaces taint"
 # cmd-status.sh prints 'TAINTED.' on tainted sessions; cmd-list (used by
 # `aidc list`) prints 'YES' in the tainted column. Check both surfaces.
 # Capture output first so the assertion only depends on string content,
@@ -309,12 +380,12 @@ assert "aidc list shows YES in tainted column for $SESSION" \
     "printf '%s' \"\$LIST_OUT\" | grep -E \"^${SESSION}\" | grep -q 'YES'"
 echo
 
-# --- step 8: kill tears everything down ----------------------------------
+# --- step 10: kill tears everything down ----------------------------------
 # We kill BEFORE the audit-content assertions because the audit aggregator's
 # default sweep interval is 60s -- we'd otherwise need to wait a full cycle
 # for taint-time logs to land. SIGTERM triggers a final sweep + finalize,
 # which is what produces the complete on-disk snapshot in practice.
-echo "[9/10] aidc kill"
+echo "[10/11] aidc kill"
 "$AIDC" kill "$SESSION" >/dev/null 2>&1
 assert "dev container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-dev\""
@@ -324,8 +395,8 @@ assert "policy container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-policy\""
 echo
 
-# --- step 9: audit dir populated after kill ------------------------------
-echo "[10/10] audit"
+# --- step 11: audit dir populated after kill ------------------------------
+echo "[11/11] audit"
 assert "audit dir exists on host" \
     "test -d \"$AUDIT_DIR\""
 assert "audit dir is under in-repo scratch (no host pollution)" \

@@ -50,6 +50,7 @@ aidc_config_defaults() {
     AIDC_PORTS=""                 # declared host:container forwards (CLI-13); newline-separated
     AIDC_CONTAINER_ONLY_PATHS=""  # paths overlaid by session-scoped volumes (CLI-18); newline-separated
     AIDC_DNS_SERVERS=""           # per-session DNS override; newline-separated IPs; empty = Quad9 default
+    AIDC_NETWORKS=""              # foreign docker bridges to attach (NET-13); newline-separated
 }
 
 # ---- default config template -------------------------------------------------
@@ -85,6 +86,17 @@ state_actor_tlds:
   - .kp
 
 blocklist_additions: []
+
+# Foreign docker bridge networks to attach the dev container to, so the session
+# can reach another stack's services (its postgres, NATS, redis) by container
+# name on any port. Same as `aidc create --network <net>`; survives restart,
+# upgrade, and recreate.
+#
+# This WIDENS THE SANDBOX: everything on an attached network is reachable from
+# the session on every port, the traffic does not pass through squid, and taint
+# detection never sees it. The attachment is bidirectional. List the narrowest
+# networks that do the job -- never Docker's default `bridge`.
+networks: []
 
 notify_webhook: ""
 
@@ -262,12 +274,13 @@ load_config() {
         val=$(_aidc_yaml_scalar "$f" "share_plugins");   [ -n "$val" ] && AIDC_SHARE_PLUGINS="$val"
 
         # Lists: append to running aggregate, dedupe at the end.
-        local tlds adds ports cops dnss
+        local tlds adds ports cops dnss nets
         tlds=$(_aidc_yaml_list "$f" "state_actor_tlds" || true)
         adds=$(_aidc_yaml_list "$f" "blocklist_additions" || true)
         ports=$(_aidc_yaml_list "$f" "ports" || true)
         cops=$(_aidc_yaml_list "$f" "container_only_paths" || true)
         dnss=$(_aidc_yaml_list "$f" "dns_servers" || true)
+        nets=$(_aidc_yaml_list "$f" "networks" || true)
         if [ -n "$tlds" ]; then
             AIDC_STATE_ACTOR_TLDS=$(printf '%s\n%s' "$AIDC_STATE_ACTOR_TLDS" "$tlds" | _aidc_dedupe_lines)
         fi
@@ -283,6 +296,9 @@ load_config() {
         if [ -n "$dnss" ]; then
             AIDC_DNS_SERVERS=$(printf '%s\n%s' "$AIDC_DNS_SERVERS" "$dnss" | _aidc_dedupe_lines)
         fi
+        if [ -n "$nets" ]; then
+            AIDC_NETWORKS=$(printf '%s\n%s' "$AIDC_NETWORKS" "$nets" | _aidc_dedupe_lines)
+        fi
     done
 
     # Final dedupe pass on defaults-only paths too (idempotent under -e).
@@ -291,12 +307,13 @@ load_config() {
     AIDC_CONTAINER_ONLY_PATHS=$(printf '%s\n' "$AIDC_CONTAINER_ONLY_PATHS" | _aidc_dedupe_lines)
     AIDC_PORTS=$(printf '%s\n' "$AIDC_PORTS" | _aidc_dedupe_lines)
     AIDC_DNS_SERVERS=$(printf '%s\n' "$AIDC_DNS_SERVERS" | _aidc_dedupe_lines)
+    AIDC_NETWORKS=$(printf '%s\n' "$AIDC_NETWORKS" | _aidc_dedupe_lines)
 
     export AIDC_PROFILE AIDC_TAINT_RESPONSE AIDC_TLD_TAINTS AIDC_AUDIT_DIR \
            AIDC_STATE_ACTOR_TLDS AIDC_BLOCKLIST_ADDITIONS AIDC_NOTIFY_WEBHOOK \
            AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY AIDC_SHARE_AUTH \
            AIDC_SHARE_PLUGINS \
-           AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS
+           AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS
 }
 
 # Emit the loaded config as YAML, for `aidc config` printing.
@@ -340,5 +357,11 @@ emit_loaded_config_yaml() {
         printf '%s\n' "$AIDC_DNS_SERVERS" | awk 'NF { printf "  - %s\n", $0 }'
     else
         printf '  []  # default: Quad9 (9.9.9.9, 149.112.112.112)\n'
+    fi
+    printf 'networks:\n'
+    if [ -n "$AIDC_NETWORKS" ]; then
+        printf '%s\n' "$AIDC_NETWORKS" | awk 'NF { printf "  - %s\n", $0 }'
+    else
+        printf '  []\n'
     fi
 }

@@ -13,6 +13,47 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-05
+
+### Added
+- **Sessions can reach another stack's services.** A session's dev container can now attach
+  to named Docker bridge networks, so it resolves another compose project's containers by
+  name and can talk to that project's database, queue, or cache directly — the case that
+  motivated this was troubleshooting a metallm session against metallm's own postgres.
+
+  Two forms, differing only in how long they last:
+
+  - `aidc create <name> --network <net>` (repeatable) and a `networks:` list in
+    `.aidc/config.yaml` — **declared**; survives restart, upgrade, and recreate. CLI and
+    config *merge* here, unlike `--dns` which overrides. Networks are validated before any
+    image build, so a typo costs a message rather than a `dev-base` rebuild.
+  - `aidc network <session> add|rm|ls` — **adhoc**; attaches a session that is already
+    running, no recreate needed. Survives `aidc restart` (a network endpoint is dev-container
+    state, so there is nothing to sweep) but not `aidc upgrade` or `aidc kill`. `ls` marks
+    each attachment declared or adhoc so that difference is visible.
+
+  `aidc status <name>` gained an **attached networks** section, listed even when empty.
+
+  Only the `dev` service is ever attached — squid, refresher, policy, and audit stay isolated
+  on the session's own network. `host`, `none`, and Docker's default `bridge` are refused.
+
+  **Every attachment pins `gw_priority` so `aidc-<session>-net` keeps the default route.**
+  This is not a detail: measured on Docker 29.1.3, a plain `docker network connect` moves the
+  default gateway onto the network being attached, and Compose's `priority` key — which only
+  orders the connect sequence — does not prevent it. Without the pin, attaching a network
+  silently reroutes *all* of the session's egress, squid-proxied traffic included, out through
+  someone else's bridge, with nothing in the audit trail to show for it.
+
+  Because `gw_priority` needs Compose 2.34+, `aidc create` probes for it and fails with that
+  reason rather than rendering a file whose gateway pin would be dropped. Sessions with no
+  attachment render a byte-identical compose file to before and are unaffected.
+
+  This is a deliberate, documented widening of the sandbox: traffic to an attached network
+  does not pass through squid, so the blocklist does not apply and taint detection cannot see
+  it, and the attachment is bidirectional. `docs/done/design-07-safety-model.md` now sizes
+  that honestly, and both the CLI and the config template say so at the point of use.
+  (NET-13, CLI-24, CLI-25)
+
 ## [1.1.1] - 2026-08-22
 
 ### Fixed
@@ -648,7 +689,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/pacepace/aidc/releases/tag/v1.0.0

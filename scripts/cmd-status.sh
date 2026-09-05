@@ -21,6 +21,8 @@ trap '' PIPE
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"
+# shellcheck source=lib/network.sh
+. "$AIDC_SCRIPTS/lib/network.sh"
 
 case "${1:-}" in
     -h|--help)
@@ -111,6 +113,22 @@ if [ -n "$adhoc" ]; then
     done <<<"$adhoc"
 else
     printf '  adhoc: (none)\n'
+fi
+
+# Attached foreign bridge networks (NET-13). Listed unconditionally, including
+# the "(none)" case: an attachment is a widening of the sandbox, and status is
+# where someone looks to find out what a session can currently reach.
+printf '\n-- attached networks --\n'
+attached_nets=$(aidc_session_attached_networks "$NAME")
+if [ -n "$attached_nets" ]; then
+    printf '%s\n' "$attached_nets" | while IFS= read -r n; do
+        [ -z "$n" ] && continue
+        printf '    %s\n' "$n"
+    done
+    printf '  reachable on every port, not proxied by squid, not taint-visible\n'
+    printf '  manage with: aidc network %s ls|add|rm\n' "$NAME"
+else
+    printf '  (none -- session reaches only %s)\n' "$(aidc_session_network "$NAME")"
 fi
 
 # Recent dev-container logs (last 10 lines).

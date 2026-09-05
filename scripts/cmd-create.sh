@@ -23,6 +23,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/config.sh
 . "$AIDC_SCRIPTS/lib/config.sh"
+# shellcheck source=lib/network.sh
+. "$AIDC_SCRIPTS/lib/network.sh"
 
 trap 'err "command failed at line $LINENO (exit=$?)"' ERR
 
@@ -35,6 +37,7 @@ WORKSPACE_ARG=""
 RESUME_OVERRIDE=""   # "", "true", or "false" — empty means defer to config
 PORT_FLAGS=()         # repeatable --port N or --port H:C (CLI-13)
 DNS_FLAGS=()          # repeatable --dns <ip>; overrides Quad9 + config dns_servers
+NETWORK_FLAGS=()      # repeatable --network <net>; merges with config networks: (NET-13)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -60,6 +63,10 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--dns requires a value"
             DNS_FLAGS+=("$2"); shift 2 ;;
         --dns=*) DNS_FLAGS+=("${1#--dns=}"); shift ;;
+        --network)
+            [ $# -ge 2 ] || die "--network requires a value"
+            NETWORK_FLAGS+=("$2"); shift 2 ;;
+        --network=*) NETWORK_FLAGS+=("${1#--network=}"); shift ;;
         -h|--help)
             cat <<'EOF'
 aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no-resume] [--port H:C ...]
@@ -82,6 +89,17 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                 Applies to BOTH the dev container's direct lookups AND
                 squid's resolution of proxied traffic.
                 Example: --dns 10.147.17.1 --dns 9.9.9.9
+  --network     attach the dev container to an existing docker bridge network
+                so the session can reach another stack's services by container
+                name, on any port. Repeatable. Merges with the `networks:`
+                config list. Survives restart, upgrade, and recreate.
+                Example: --network metallm_default
+
+                This WIDENS THE SANDBOX. Traffic to an attached network does
+                not pass through squid and is invisible to taint detection,
+                and the attachment is bidirectional. Attach the narrowest
+                network that does the job. For a temporary attachment to a
+                session that is already running, use 'aidc network <s> add'.
 EOF
             exit 0 ;;
         --*) die "unknown flag: $1" ;;
@@ -147,6 +165,68 @@ case "$AIDC_TAINT_RESPONSE" in
     log|notify|freeze) : ;;
     *) die "invalid taint_response '$AIDC_TAINT_RESPONSE' (must be: log|notify|freeze)" ;;
 esac
+
+# ---- attached bridge networks (NET-13) ---------------------------------------
+#
+# MERGE semantics (unlike --dns, which overrides): every named network is
+# something the session needs to reach, so more sources means more networks.
+# Sources, deduped first-wins:
+#   1. --network flags (CLI), in command-line order
+#   2. `networks:` list from the config layers
+#
+# Resolved and validated HERE -- immediately after config load, before the
+# audit dir is created and long before `ensure_image` starts building. A typo'd
+# network name must not cost a 20-minute dev-base build first. The rendered
+# blocks are just carried forward to the compose render further down.
+#
+# Each network must already exist and be a bridge: compose declares them
+# `external: true` and will not create them.
+EXTNET_DECLARATIONS=""
+DEV_NETWORKS_BLOCK="      - default"
+_net_list=""
+for _net in ${NETWORK_FLAGS[@]+"${NETWORK_FLAGS[@]}"}; do
+    _net_list="${_net_list}${_net}
+"
+done
+if [ -n "${AIDC_NETWORKS:-}" ]; then
+    _net_list="${_net_list}${AIDC_NETWORKS}
+"
+fi
+_net_list=$(printf '%s' "$_net_list" | _aidc_dedupe_lines)
+
+if [ -n "$_net_list" ]; then
+    while IFS= read -r _net; do
+        [ -z "$_net" ] && continue
+        aidc_assert_attachable "$NAME" "$_net"
+    done <<EOFNET
+${_net_list}
+EOFNET
+
+    # gw_priority is what keeps aidc-<session>-net as the default gateway.
+    # Compose learned the key in 2.34; older ones reject the rendered file
+    # outright. Fail here with the reason rather than letting compose emit a
+    # schema error about a key the user never typed.
+    if ! aidc_compose_supports_gw_priority; then
+        err "this docker compose does not support the 'gw_priority' network key (needs 2.34+):"
+        err "  $(docker compose version 2>/dev/null || printf 'unknown version')"
+        err "Without it, an attached network takes over the session's default route and all"
+        err "outbound traffic -- squid-proxied included -- would exit through it."
+        die "upgrade docker compose, or drop --network / the networks: config entries"
+    fi
+
+    aidc_render_extnet_blocks "$_net_list"
+    # Replace the raw list with the validated one so the audit dir's
+    # config-snapshot.yaml (written just below) records what was actually
+    # attached, including networks that came in via --network rather than config.
+    AIDC_NETWORKS="$_net_list"
+    export AIDC_NETWORKS
+    info "networks: $(printf '%s' "$_net_list" | tr '\n' ' ')"
+    info "  attached to the dev container only; the proxy sidecars stay isolated"
+    info "  traffic to these networks does NOT pass through squid and is NOT"
+    info "  visible to taint detection -- this is a deliberate sandbox widening"
+fi
+unset _net_list _net
+export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
 
 # ---- audit dir + snapshot ----------------------------------------------------
 

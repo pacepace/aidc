@@ -12,6 +12,11 @@
 # Adhoc port forwards (aidc proxy) are removed; re-add explicitly post-upgrade.
 # Declared ports (--port at create time) survive.
 #
+# Adhoc network attachments (aidc network <s> add) are ALSO dropped, because
+# the recreate below builds a new container and endpoints are container state.
+# Note the asymmetry with `aidc restart`, which they survive. Declared networks
+# (--network at create time) ride the compose file and come back.
+#
 # In-flight claude conversation IS interrupted -- the dev container is
 # stopped mid-call. claude --continue re-attaches to the same conversation
 # when the container comes back up.
@@ -24,6 +29,8 @@ trap '' PIPE
 : "${AIDC_ROOT:?AIDC_ROOT not set}"
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"
+# shellcheck source=lib/network.sh
+. "$AIDC_SCRIPTS/lib/network.sh"
 
 NAME=""
 YES=0
@@ -35,6 +42,8 @@ aidc upgrade <session> [--yes]
 Swaps just the dev container of <session> onto the current aidc/dev-base
 image. Proxy stack, dev-home, repo mount, memory, audit dir all survive.
 Adhoc port forwards are removed (re-add via 'aidc proxy <session> add ...').
+Adhoc network attachments are removed too (re-add via 'aidc network <session>
+add ...'); declared --network attachments survive.
 In-flight claude conversation is interrupted; claude --continue re-attaches.
 
 Run 'aidc rebuild' first if you want the latest image content.
@@ -92,6 +101,19 @@ printf '  - any in-flight claude conversation tool call is aborted\n' >&2
 printf '    (claude --continue re-attaches to the same conversation when the container comes back)\n' >&2
 printf '  - adhoc port forwards (aidc proxy) are removed; re-add after upgrade\n' >&2
 printf '  - declared ports (--port at create time) survive\n' >&2
+# Adhoc network attachments live in the dev container's own config, so the
+# recreate below drops them silently -- unlike `aidc restart`, which they
+# survive. Name them here so the user knows what to re-add, rather than
+# discovering it when the session can no longer reach a database.
+ADHOC_NETS=$(aidc_adhoc_networks "$NAME" "$COMPOSE_FILE" 2>/dev/null || true)
+if [ -n "$ADHOC_NETS" ]; then
+    printf '  - adhoc network attachments (aidc network) are dropped; re-add after upgrade:\n' >&2
+    printf '%s\n' "$ADHOC_NETS" | while IFS= read -r n; do
+        [ -z "$n" ] && continue
+        printf '        aidc network %s add %s\n' "$NAME" "$n" >&2
+    done
+fi
+printf '  - declared networks (--network at create time) survive\n' >&2
 printf '  - the proxy stack, dev-home volume, repo mount, memory, and audit dir all survive\n' >&2
 printf '\n' >&2
 printf '  current image: %s\n' "${OLD_DIGEST:-(unknown)}" >&2

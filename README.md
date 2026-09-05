@@ -149,6 +149,67 @@ A tiny `aidc/forwarder` (alpine + socat) sidecar handles each adhoc forward. Lif
 
 `aidc status <name>` shows both kinds.
 
+### Reaching another stack's services (databases, queues, caches)
+
+Port forwards go host → container. The other direction — the session needs to reach a
+postgres, a NATS, a redis that's already running in **another compose project** on the same
+host — is a network attachment. Point the session at that project's bridge and it resolves
+those containers by name.
+
+**Declared** (survives restart, upgrade, and recreate):
+
+```bash
+docker network ls                                  # find the network
+aidc create metallm --network metallm_default      # attach at create time
+```
+
+```yaml
+# or in .aidc/config.yaml
+networks:
+  - metallm_default
+```
+
+Repeatable, and CLI **merges** with config (unlike `--dns`, which overrides) — more sources
+just means more networks. Everything is validated before any image build, so a typo costs
+you a message, not a `dev-base` rebuild.
+
+**Adhoc** (attach a session that's already running, no recreate):
+
+```bash
+aidc network metallm add metallm_default
+aidc network metallm ls                            # marks declared vs adhoc
+aidc network metallm rm metallm_default
+```
+
+Then, from inside the session:
+
+```bash
+psql -h metallm-postgres-1 -U metallm              # resolves over docker DNS
+```
+
+| | `aidc restart` | `aidc upgrade` | `aidc kill` + `create` |
+|---|---|---|---|
+| declared (`--network` / config) | survives | survives | survives |
+| adhoc (`aidc network … add`) | survives | lost | lost |
+
+Adhoc attachments survive a restart — unlike adhoc *port forwards*, which `aidc restart`
+sweeps. The difference is real: a port forward is a separate sidecar container pointed at a
+container that's going away, while a network endpoint is part of the dev container's own
+config and comes back with it.
+
+**This widens the sandbox, and you should size that honestly.** Everything on an attached
+network is reachable from the session on **every port**; that traffic does **not** go through
+squid, so the blocklist doesn't apply and **taint detection can't see it**; and the
+attachment is bidirectional. Attach the narrowest network that does the job. `host`, `none`,
+and Docker's default `bridge` are refused outright. `aidc status <name>` lists current
+attachments so you can see what a session can reach.
+
+Only the dev container is attached — squid, refresher, policy, and audit stay isolated on
+the session's own network, which also keeps the default route, so ordinary egress still
+leaves through the proxied path instead of silently rerouting through the network you
+attached. (That last part needs `gw_priority`, so declared attachments require Docker
+Compose 2.34+; `aidc create` checks and tells you if yours is older.)
+
 ### Per-session DNS (overlay networks like ZeroTier / Tailscale)
 
 By default every session resolves through Quad9 (`9.9.9.9`, `149.112.112.112`) — a threat-intel resolver that blocks known-malware domains at the DNS layer. But sessions that need to reach hosts on an overlay network (ZeroTier-managed DNS names, Tailscale MagicDNS) need that network's resolver instead.
@@ -457,11 +518,12 @@ aidc attach <name>
 
 | Command | What it does |
 |---------|--------------|
-| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). |
+| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. |
 | `aidc list` | All sessions; status + taint flag. |
-| `aidc status <name>` | Component health, taint, declared + adhoc ports, audit dir path. |
+| `aidc status <name>` | Component health, taint, declared + adhoc ports, attached networks, audit dir path. |
 | `aidc attach <name>` | `docker exec -it -u vscode` into tmux. |
 | `aidc proxy <name> {add\|rm\|ls\|clear}` | Manage adhoc host->container port forwards (not persisted across restart/kill). |
+| `aidc network <name> {add\|rm\|ls}` | Attach a running session's dev container to another docker bridge so it can reach that stack's services by name. Survives `restart`, not `upgrade`/`kill` — use `create --network` for permanent. Widens the sandbox: see "Reaching another stack's services". |
 | `aidc logs <name> [--component dev\|squid\|refresher\|policy\|audit]` | Tail logs. |
 | `aidc refresh <name>` | Force a blocklist refresh. |
 | `aidc restart <name>` | Restart the dev container in place from its existing image (proxy stack stays; adhoc forwards do NOT survive). Does **not** pick up image rebuilds — use `upgrade` for that. |
@@ -533,6 +595,14 @@ dns_servers:                          # OVERRIDES Quad9 when set (no merge; orde
                                       # Applies to container lookups AND squid's resolution.
   - 10.147.17.1                       #   e.g. ZeroTier-managed DNS
   - 9.9.9.9                           #   explicit Quad9 fallback
+
+networks:                             # foreign docker bridges the dev container attaches to,
+                                      # so the session can reach that stack by container name.
+                                      # Additive; same as `aidc create --network`.
+                                      # WIDENS THE SANDBOX -- everything on an attached network
+                                      # is reachable on every port, unproxied and invisible to
+                                      # taint detection. See "Reaching another stack's services".
+  - metallm_default
 
 notify_webhook: ""                    # POSTed to on taint events
 

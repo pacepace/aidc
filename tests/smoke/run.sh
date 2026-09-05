@@ -241,20 +241,43 @@ assert "aidc network ls lists it as adhoc" \
 assert "aidc status surfaces the attachment" \
     "$AIDC status ${SESSION} | grep -q ${SMOKE_NET}"
 
-# The default route must still point at the session's own bridge. Read the
-# container's real routing table via /proc/net/route (dev-base ships no `ip`)
-# and compare against the gateway docker assigned to aidc-<session>-net.
+# What the default route does on attach depends on the egress mode, so read it
+# rather than assume:
+#
+#   --egress direct (NATed bridge): the session network supplies the default
+#     route, and gw_priority must keep it there. That is the NET-13 regression
+#     guard -- without the pin, an attached bridge captures ALL session egress.
+#
+#   --egress proxied (internal bridge, the default): the session network has NO
+#     default route to begin with -- that is the whole point of NET-14 -- so the
+#     attached bridge's gateway becomes the default by forfeit. gw_priority has
+#     nothing to demote it below. Asserting gw == own here would be asserting a
+#     pre-NET-14 invariant that no longer holds.
+#
+# In proxied mode the property worth testing is different and stronger: the
+# widening must be SCOPED TO THE ATTACHMENT -- egress opens only while a network
+# is attached, and closes again when it is detached.
 OWN_GW=$(docker network inspect "aidc-${SESSION}-net" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "?")
-DEV_GW=$(dev_exec "python3 -c \"
+IS_INTERNAL=$(docker network inspect "aidc-${SESSION}-net" -f '{{.Internal}}' 2>/dev/null || echo "?")
+# dev-base ships no `ip`, so read the kernel's routing table directly.
+dev_default_gw() {
+    dev_exec "python3 -c \"
 import socket, struct
 for line in open('/proc/net/route').readlines()[1:]:
     f = line.split()
     if f[1] == '00000000':
         print(socket.inet_ntoa(struct.pack('<L', int(f[2], 16))))
         break
-\"" 2>/dev/null | tr -d '\r\n' || echo "?")
-assert "attaching did NOT steal the default route (gw ${DEV_GW} == own ${OWN_GW})" \
-    "[ -n '${OWN_GW}' ] && [ '${DEV_GW}' = '${OWN_GW}' ]"
+\"" 2>/dev/null | tr -d '\r\n'
+}
+if [ "$IS_INTERNAL" = "true" ]; then
+    assert "attached network is the only egress path (session bridge is internal)" \
+        "[ '${IS_INTERNAL}' = 'true' ]"
+else
+    DEV_GW=$(dev_default_gw)
+    assert "attaching did NOT steal the default route (gw ${DEV_GW} == own ${OWN_GW})" \
+        "[ -n '${OWN_GW}' ] && [ '${DEV_GW}' = '${OWN_GW}' ]"
+fi
 
 assert "add is idempotent" \
     "$AIDC network ${SESSION} add ${SMOKE_NET}"
@@ -272,6 +295,13 @@ assert "dev container is off it afterwards" \
     "! docker inspect -f '{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}' aidc-${SESSION}-dev | grep -q ${SMOKE_NET}"
 assert "rm is idempotent" \
     "$AIDC network ${SESSION} rm ${SMOKE_NET}"
+# The widening must be scoped to the attachment: with the network detached, an
+# internal-bridge session is back to having no route out at all. This is what
+# makes `aidc network add` a door rather than a permanent hole.
+if [ "$IS_INTERNAL" = "true" ]; then
+    assert "detaching closes the egress the attachment opened" \
+        "! dev_exec 'timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/80\"'"
+fi
 docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
 echo
 
@@ -284,6 +314,28 @@ echo "[7/11] proxy enforcement"
 PROXY="http://aidc-proxy:3128"
 assert "egress to example.com via proxy returns 200" \
     "dev_exec 'curl -fsS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://example.com' | grep -q 200"
+
+# NET-14: the assertion this suite was missing for three releases. Everything
+# else here tests the PROXIED path -- which passes just as happily on a sandbox
+# that does not enforce anything, because squid still answers when you ask it to.
+# What matters is that going AROUND squid fails. Before NET-14 an agent that
+# unset four env vars got unfiltered, unlogged internet and nothing noticed.
+#
+# `env -u` strips every proxy variable, so curl has no proxy configured at all
+# and must reach the internet on its own. On an internal session bridge there is
+# no route for it to use, so this times out / fails to connect. Deliberately not
+# asserting a specific exit code: "did not succeed" is the property under test.
+assert "DIRECT egress (proxy env stripped) is BLOCKED" \
+    "! dev_exec 'env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -fsS --max-time 12 -o /dev/null https://example.com/'"
+# Same claim one layer down: no raw TCP to the outside either, so the block is
+# the absence of a route rather than something HTTP-specific.
+assert "DIRECT raw TCP to a public IP is BLOCKED" \
+    "! dev_exec 'timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/80\"'"
+# And the enforcement must not have been achieved by simply breaking the network:
+# the proxied path above still returned 200, and the dev container can still
+# reach squid by name.
+assert "squid is still reachable from dev" \
+    "dev_exec 'timeout 8 bash -c \"exec 3<>/dev/tcp/aidc-proxy/3128\"'"
 assert "egress to a TLD-blocked .cn domain returns 403 from squid" \
     "dev_exec 'curl -sS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://anything.cn' | grep -q 403"
 

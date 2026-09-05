@@ -38,6 +38,7 @@ RESUME_OVERRIDE=""   # "", "true", or "false" — empty means defer to config
 PORT_FLAGS=()         # repeatable --port N or --port H:C (CLI-13)
 DNS_FLAGS=()          # repeatable --dns <ip>; overrides Quad9 + config dns_servers
 NETWORK_FLAGS=()      # repeatable --network <net>; merges with config networks: (NET-13)
+EGRESS_OVERRIDE=""    # "", "proxied", or "direct" -- empty defers to config (NET-14)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -67,6 +68,10 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--network requires a value"
             NETWORK_FLAGS+=("$2"); shift 2 ;;
         --network=*) NETWORK_FLAGS+=("${1#--network=}"); shift ;;
+        --egress)
+            [ $# -ge 2 ] || die "--egress requires a value (proxied|direct)"
+            EGRESS_OVERRIDE="$2"; shift 2 ;;
+        --egress=*) EGRESS_OVERRIDE="${1#--egress=}"; shift ;;
         -h|--help)
             cat <<'EOF'
 aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no-resume] [--port H:C ...]
@@ -100,6 +105,16 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                 and the attachment is bidirectional. Attach the narrowest
                 network that does the job. For a temporary attachment to a
                 session that is already running, use 'aidc network <s> add'.
+  --egress      proxied (default) | direct
+                proxied: the session bridge is a Docker `internal` network, so
+                  there is NO route to the internet except through squid. This
+                  is real enforcement -- not a firewall rule the container could
+                  flush, but the absence of a path.
+                direct: the pre-v1.3.0 NATed bridge. The proxy still works and
+                  is still the default for HTTP, but nothing STOPS a process
+                  from going around it. Use only when the session genuinely
+                  needs direct reachability an attached --network can't give it
+                  (overlay networks like ZeroTier/Tailscale, direct DNS).
 EOF
             exit 0 ;;
         --*) die "unknown flag: $1" ;;
@@ -165,6 +180,39 @@ case "$AIDC_TAINT_RESPONSE" in
     log|notify|freeze) : ;;
     *) die "invalid taint_response '$AIDC_TAINT_RESPONSE' (must be: log|notify|freeze)" ;;
 esac
+
+# ---- egress enforcement (NET-14) ---------------------------------------------
+#
+# proxied (default): the session bridge renders `internal: true`. Docker installs
+#   no NAT for it, so there is NO route off that bridge -- squid, dual-homed onto
+#   the egress network, is the only way out. This is the enforcement NET-10 always
+#   claimed: not a rule inside the (privileged) dev container that it could flush,
+#   but the absence of a path. Verified against a privileged container that added
+#   an explicit default route via squid and still could not get out.
+#
+# direct: the pre-v1.3.0 NATed bridge. HTTP_PROXY still points at squid, but
+#   nothing STOPS a process going around it. For sessions needing reachability an
+#   attached --network cannot provide (ZeroTier/Tailscale, direct DNS).
+#
+# Precedence: --egress flag > `egress:` config > proxied.
+_egress="${EGRESS_OVERRIDE:-}"
+if [ -z "$_egress" ]; then
+    _egress="${AIDC_EGRESS:-proxied}"
+fi
+case "$_egress" in
+    proxied) NET_INTERNAL="true" ;;
+    direct)  NET_INTERNAL="false" ;;
+    *) die "invalid --egress/egress value '${_egress}' (must be: proxied|direct)" ;;
+esac
+AIDC_EGRESS="$_egress"
+export AIDC_EGRESS NET_INTERNAL
+if [ "$NET_INTERNAL" = "false" ]; then
+    info "egress: direct -- the session bridge is NOT internal."
+    info "  squid stays the configured proxy, but nothing prevents a process in the"
+    info "  session from bypassing it. Blocklist and taint detection see only"
+    info "  proxied traffic. Use --egress proxied for enforcement."
+fi
+unset _egress
 
 # ---- attached bridge networks (NET-13) ---------------------------------------
 #
@@ -493,7 +541,7 @@ export NOTIFY_WEBHOOK="$AIDC_NOTIFY_WEBHOOK"
 # Spec accepted as "H:C" or "N" (shorthand for "N:N"). Validation is a cheap
 # regex bound to 1-5 digits per side; docker compose enforces the real range
 # at create time.
-PORTS_BLOCK=""
+PORT_FORWARDER_SERVICES=""
 # Bash 3.2 doesn't support associative arrays; track seen host ports in a
 # delimited string. Wrap with spaces so substring tests match whole tokens.
 _ports_seen=" "
@@ -505,6 +553,15 @@ _validate_port_pair() {
         *) return 1 ;;
     esac
 }
+# Each declared port becomes a dual-homed aidc/forwarder SERVICE rather than a
+# `ports:` entry on dev. Since NET-14 the session bridge is `internal`, which
+# has no NAT, so publishing from dev itself would silently do nothing. The
+# sidecar publishes on `egress` and reaches dev across `default`.
+#
+# Named aidc-<session>-dfwd-<hostport> ("declared forward"), deliberately
+# distinct from the adhoc aidc-<session>-fwd-<hostport> that `aidc proxy`
+# creates -- remove_adhoc_forwards() filters on "-fwd-", which does not match
+# "-dfwd-", so a restart/upgrade sweep never touches these.
 _emit_port_pair() {
     local spec="$1" host_p container_p
     case "$spec" in
@@ -517,7 +574,21 @@ _emit_port_pair() {
         *" ${host_p} "*) return 0 ;;   # first-wins; later duplicates dropped silently
     esac
     _ports_seen="${_ports_seen}${host_p} "
-    _ports_yaml="${_ports_yaml}      - \"${host_p}:${container_p}\"
+    _ports_yaml="${_ports_yaml}
+  dfwd-${host_p}:
+    image: aidc/forwarder:${AIDC_VERSION_TAG}
+    container_name: aidc-${NAME}-dfwd-${host_p}
+    networks:
+      default: {}
+      egress: {}
+    ports:
+      - \"${host_p}:${container_p}\"
+    command:
+      - \"TCP-LISTEN:${container_p},fork,reuseaddr\"
+      - \"TCP:aidc-${NAME}-dev:${container_p}\"
+    depends_on:
+      - dev
+    restart: unless-stopped
 "
     if [ -z "$_ports_summary" ]; then
         _ports_summary="${host_p}:${container_p}"
@@ -537,14 +608,11 @@ ${AIDC_PORTS}
 EOF
 fi
 if [ -n "$_ports_yaml" ]; then
-    # Command substitution strips one trailing newline, which is exactly
-    # what we want -- _ports_yaml ends with "\n" after the last entry.
-    PORTS_BLOCK="    ports:
-$(printf '%s' "$_ports_yaml")"
-    info "ports: ${_ports_summary}"
+    PORT_FORWARDER_SERVICES=$(printf '%s' "$_ports_yaml")
+    info "ports: ${_ports_summary} (via dual-homed forwarder sidecars)"
 fi
 unset _ports_seen _ports_yaml _ports_summary _spec
-export PORTS_BLOCK
+export PORT_FORWARDER_SERVICES
 
 # ---- per-session DNS (--dns flags / dns_servers config) ----------------------
 #

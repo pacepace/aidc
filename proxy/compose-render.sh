@@ -73,14 +73,24 @@ export CLAUDE_CREDS_MOUNT CLAUDE_MEMORY_MOUNT CLAUDE_SETTINGS_MOUNT CLAUDE_STATE
 : "${AIDC_SHARE_PLUGINS:=}"
 export CLAUDE_PLUGINS_MOUNT CLAUDE_PLUGINS_MOUNT_ABS AIDC_SHARE_PLUGINS
 
-# Declared port forwards (CLI-13). Set by `aidc create` from --port flags +
-# config. Either empty (no ports key emitted -- becomes a blank line) or a
-# properly-indented multiline `ports:` block:
-#     ports:
-#       - "3000:3000"
-#       - "8080:80"
-: "${PORTS_BLOCK:=}"
-export PORTS_BLOCK
+# Declared port forwards (CLI-13), rendered as SERVICES rather than a `ports:`
+# key on dev. Since NET-14 the session bridge is internal, which has no NAT --
+# `ports:` on the dev service would silently do nothing. Each declared port
+# instead becomes a dual-homed aidc/forwarder sidecar that publishes the host
+# port on `egress` and reaches dev across `default`. Empty when none declared.
+: "${PORT_FORWARDER_SERVICES:=}"
+export PORT_FORWARDER_SERVICES
+
+# NET-14 egress enforcement. "true" (default) renders the session bridge
+# `internal: true`: Docker installs no NAT for it, so nothing on that bridge can
+# reach the outside except through dual-homed squid. `--egress direct` renders
+# "false", restoring the pre-NET-14 NATed bridge.
+: "${NET_INTERNAL:=true}"
+case "$NET_INTERNAL" in
+    true|false) ;;
+    *) printf 'compose-render: NET_INTERNAL must be true or false (got %s)\n' "$NET_INTERNAL" >&2; exit 1 ;;
+esac
+export NET_INTERNAL
 
 # Container-only-path overlays (CLI-18/19). Two blocks:
 #   - OVERLAY_VOLUMES_DECLARATIONS: top-level `volumes:` block additions, e.g.
@@ -124,4 +134,4 @@ export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
 
 # Restrict envsubst to the known variable set so unrelated `${...}` tokens
 # (e.g. shell-style references inside service commands) survive untouched.
-exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_CREDS_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_STATE_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORTS_BLOCK} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'
+exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_CREDS_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_STATE_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORT_FORWARDER_SERVICES} ${NET_INTERNAL} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'

@@ -1,8 +1,20 @@
 name: aidc-${SESSION}
 
 networks:
+  # NET-14: the session bridge is `internal: true` by default, which means Docker
+  # installs NO masquerade/NAT rule for it -- there is no route off this bridge to
+  # the outside world. That is the enforcement: not a firewall rule the dev
+  # container could flush (it is privileged, for DinD), but the absence of a path.
+  # Squid is dual-homed onto `egress` below and is the only way out.
+  # `--egress direct` renders internal: false, restoring the pre-NET-14 NATed
+  # bridge for sessions that need direct reachability (overlay networks, etc).
   default:
     name: aidc-${SESSION}-net
+    driver: bridge
+    internal: ${NET_INTERNAL}
+  # Carries real egress. ONLY squid, refresher and policy join it -- never dev.
+  egress:
+    name: aidc-${SESSION}-egress
     driver: bridge
 ${EXTNET_DECLARATIONS}
 
@@ -45,6 +57,7 @@ ${DNS_BLOCK}
       default:
         aliases:
           - aidc-proxy
+      egress: {}          # squid is the session's only path out (NET-14)
     volumes:
       - blocklist:/etc/squid:rw    # blocklist.txt + state-actor-tlds.txt live here
       - squid-log:/var/log/squid
@@ -60,6 +73,9 @@ ${DNS_BLOCK}
     image: aidc/refresher:${AIDC_VERSION_TAG}
     container_name: aidc-${SESSION}-refresher
     pid: "service:squid"           # shares PID namespace so kill -HUP 1 reaches squid
+    networks:
+      default: {}
+      egress: {}          # fetches URLhaus / ThreatFox / HaGeZi feeds directly
     volumes:
       - blocklist:/etc/squid:rw    # writes /etc/squid/blocklist.txt
       - aidc-log:/var/log/aidc     # writes refresher.log
@@ -76,6 +92,9 @@ ${DNS_BLOCK}
       AIDC_TAINT_RESPONSE: "${TAINT_RESPONSE}"
       AIDC_TLD_TAINTS: "${TLD_TAINTS}"
       AIDC_NOTIFY_WEBHOOK: "${NOTIFY_WEBHOOK}"
+    networks:
+      default: {}
+      egress: {}          # POSTs notify_webhook on taint
     volumes:
       - blocklist:/etc/squid:ro
       - squid-log:/var/log/squid:ro
@@ -166,7 +185,7 @@ ${DNS_BLOCK}
       ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
       ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)
       ${TRANSCRIPT_MIRROR_MOUNT}           # design-09: in-container mirror copies transcripts here for MCP to read
-${OVERLAY_VOLUMES_MOUNTS}${PORTS_BLOCK}
+${OVERLAY_VOLUMES_MOUNTS}
     depends_on:
       squid:
         condition: service_healthy
@@ -176,3 +195,4 @@ ${OVERLAY_VOLUMES_MOUNTS}${PORTS_BLOCK}
     # No explicit command — Dockerfile's CMD defaults to /usr/local/bin/aidc-user-main.sh
     # which prints "[aidc-user-main] ready" once tmux is up. aidc create's
     # dev-wait watches for that marker to know the container is fully ready.
+${PORT_FORWARDER_SERVICES}

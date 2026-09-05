@@ -110,6 +110,18 @@ export AIDC_CLAUDE_TOKEN
       - 149.112.112.112}"
 export DNS_SERVERS DNS_BLOCK
 
+# Attached foreign bridge networks (NET-13). Set by `aidc create` from
+# --network flags + the `networks:` config key, via aidc_render_extnet_blocks
+# in scripts/lib/network.sh. Two blocks:
+#   EXTNET_DECLARATIONS  top-level `networks:` additions (external: true)
+#   DEV_NETWORKS_BLOCK   the dev service's `networks:` value
+# The DEV_NETWORKS_BLOCK default below is the no-attachment rendering, so a
+# standalone render (or any session without --network) produces exactly the
+# pre-NET-13 compose file.
+: "${EXTNET_DECLARATIONS:=}"
+: "${DEV_NETWORKS_BLOCK:=      - default}"
+export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
+
 # Restrict envsubst to the known variable set so unrelated `${...}` tokens
 # (e.g. shell-style references inside service commands) survive untouched.
-exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_CREDS_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_STATE_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORTS_BLOCK} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK}'
+exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_CREDS_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_STATE_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORTS_BLOCK} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'

@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-05
+
 ### Added
 - **Sessions can reach another stack's services.** A session's dev container can now attach
   to named Docker bridge networks, so it resolves another compose project's containers by
@@ -687,7 +689,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pacepace/aidc/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/pacepace/aidc/releases/tag/v1.0.0

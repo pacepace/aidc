@@ -13,6 +13,31 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-10
+
+### Added
+- **The Homebrew tap updates itself on every release, with no token to rotate.**
+  The release workflow pushed rendered formulae with a fine-grained PAT stored under
+  a date-stamped secret name that had to be re-issued every few weeks. When the secret
+  lapsed, the v1.3.1 release silently skipped the tap and left `install.sh` (which
+  verifies downloads against the tap) unable to install it. It now pushes over SSH with
+  a write deploy key on the tap repo: never expires, reaches nothing else, revocable
+  from that repo's settings. `release/tap-deploy-key.sh` creates or rotates the key
+  end to end and prints only the fingerprint; `--status` shows what is installed.
+- **`aidc update`** updates the CLI itself, the way `brew upgrade` or `apt upgrade`
+  would. It detects how this copy was installed — the release installer under
+  `~/.local/share/aidc/`, a Homebrew keg, or a git checkout — and runs the matching
+  step: re-fetches the latest release's `install.sh`, runs `brew upgrade` on the
+  installed formula (`aidc` or `aidc@X.Y`), or fast-forwards the checkout. `--check` reports the installed and latest versions
+  without changing anything; `--version vX.Y.Z` pins a release (installer copies
+  only). An already-current copy is left alone; an unrecognised layout refuses
+  rather than guessing. The CLI and the images are separate, so the command ends
+  by pointing at `aidc rebuild` and `aidc upgrade <session>`.
+
+  This exists because the failure mode is quiet: a stale installed copy rebuilds
+  images from its own old tree, and nothing tells you the checkout you just pulled
+  is not the `aidc` on your PATH.
+
 ## [1.3.1] - 2026-09-10
 
 ### Fixed
@@ -758,7 +783,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/pacepace/aidc/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/pacepace/aidc/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0

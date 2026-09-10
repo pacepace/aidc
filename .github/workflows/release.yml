@@ -24,14 +24,15 @@
 #                          `dry_run=false` input by construction, so a compromised
 #                          maintainer with workflow-trigger rights cannot ship to
 #                          the tap without publishing a GitHub Release. Used to
-#                          verify token rotation (see docs/release-process.md).
+#                          verify a new deploy key (see docs/release-process.md).
 #
 # Docker images are deliberately NOT built or pushed here (REL-08): every user's
 # machine builds locally on first `aidc create`.
 #
 # Security posture: top-level permissions empty; per-job grants only. All actions
-# SHA-pinned. No `set -x`/env dumps. The cross-repo tap write uses TAP_REPO_TOKEN
-# (a fine-scoped PAT), never GITHUB_TOKEN.
+# SHA-pinned. No `set -x`/env dumps. The cross-repo tap write uses TAP_DEPLOY_KEY
+# (a write deploy key on the tap repo: never expires, can reach nothing else;
+# created by release/tap-deploy-key.sh), never GITHUB_TOKEN.
 name: release
 
 on:
@@ -183,19 +184,19 @@ jobs:
             exit 1
           fi
 
-      # Does the tap PAT exist? If not, skip the tap update gracefully (the
+      # Does the tap deploy key exist? If not, skip the tap update gracefully (the
       # GitHub Release still ships). Auto-enables once the secret is configured;
       # no operator flag needed. Presence-only check -- the value is never logged.
-      - name: Check tap token availability
+      - name: Check tap deploy key availability
         id: tapcheck
         env:
-          TAP_TOKEN: ${{ secrets.TAP_REPO_TOKEN_EXPIRES_2026_09_30 }}
+          TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
-          if [ -n "${TAP_TOKEN}" ]; then
+          if [ -n "${TAP_KEY}" ]; then
             echo "tap_enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "tap_enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::TAP_REPO_TOKEN secret not set; skipping Homebrew tap update (see docs/release-process.md)."
+            echo "::notice::TAP_DEPLOY_KEY secret not set; skipping Homebrew tap update (run release/tap-deploy-key.sh; see docs/release-process.md)."
           fi
 
       - name: Dry-run summary
@@ -207,10 +208,10 @@ jobs:
   update-tap:
     name: update Homebrew tap
     needs: [release]
-    # Skipped when the tap PAT isn't configured yet (first-boot / pre-tap-setup).
+    # Skipped when the tap deploy key isn't configured yet (first-boot / pre-tap-setup).
     if: needs.release.outputs.tap_enabled == 'true'
     runs-on: ubuntu-latest
-    # The cross-repo write uses TAP_REPO_TOKEN; GITHUB_TOKEN needs only read here.
+    # The cross-repo write uses the TAP_DEPLOY_KEY over SSH; GITHUB_TOKEN needs only read here.
     permissions:
       contents: read
     steps:
@@ -220,11 +221,13 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           path: src
 
+      # ssh-key makes checkout clone over SSH with the deploy key and leaves it
+      # configured for the push step below; the post-job step removes it.
       - name: Checkout tap repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: pacepace/homebrew-aidc
-          token: ${{ secrets.TAP_REPO_TOKEN_EXPIRES_2026_09_30 }}
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: tap
 
       - name: Render + validate formulae
@@ -301,6 +304,13 @@ jobs:
           fi
           git -C tap commit -m "aidc ${{ needs.release.outputs.version }}" \
             -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      # Dry runs prove the key can PUSH, not just clone: --dry-run goes through
+      # git-receive-pack authorization (a read-only deploy key is refused there)
+      # without moving any ref, so the no-side-effect property of dispatch holds.
+      - name: Verify push authorization (dry run)
+        if: github.event_name != 'release'
+        run: git -C tap push --dry-run origin HEAD:main
 
       - name: Push to tap
         if: github.event_name == 'release'

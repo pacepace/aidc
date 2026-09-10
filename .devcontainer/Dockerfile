@@ -333,8 +333,15 @@ RUN mkdir -p /home/vscode/.npm-global \
 #
 # The bake provides the floor version; auto-update within the running session moves
 # forward from there (mirroring what a host install does).
+#
+# CLAUDE_CODE_REFRESH exists only to bust Docker's layer cache. Without it a
+# rebuild reuses this layer and ships whatever version was fetched the first
+# time the layer was built. `aidc rebuild` passes a fresh value every run so the
+# bake always picks up the current release; everything above stays cached.
+ARG CLAUDE_CODE_REFRESH=0
 USER vscode
-RUN curl -fsSL https://claude.ai/install.sh | bash \
+RUN echo "claude-code refresh: ${CLAUDE_CODE_REFRESH}" \
+    && curl -fsSL https://claude.ai/install.sh | bash \
     && /home/vscode/.local/bin/claude --version
 USER root
 

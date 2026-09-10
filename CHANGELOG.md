@@ -13,6 +13,23 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-10
+
+### Fixed
+- **`aidc rebuild` now actually refreshes Claude Code.** The dev-base image bakes
+  Claude Code with Anthropic's native installer, but that step was an ordinary cached
+  Docker layer with nothing above it changing between releases — so every rebuild
+  silently reused the version fetched the first time the layer was built (an image
+  rebuilt today still carried the release from a month ago). The install step now
+  takes a `CLAUDE_CODE_REFRESH` build arg used purely to invalidate that one layer,
+  and `aidc rebuild` passes a fresh value each run. Everything above the step stays
+  cached; only the installer re-runs.
+
+  Note that a session's home directory is a named volume seeded from the image only
+  on first create, so `aidc upgrade` keeps the session's existing copy of Claude Code.
+  Existing sessions pick up new releases through Claude Code's in-session auto-update;
+  a fresh `aidc create` starts from the newly baked version.
+
 ## [1.3.0] - 2026-09-05
 
 ### Fixed
@@ -741,7 +758,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/pacepace/aidc/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1

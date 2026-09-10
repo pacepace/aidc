@@ -78,7 +78,7 @@ release if the asset is missing or differs from the tagged tree.
    `release/tarball-audit-extracted.sh` against the extracted tarball).
 5. Verifies the Release's `install.sh` asset is byte-identical to the tagged
    tree's `install.sh` (real releases only; dry-runs skip this).
-6. If the tap PAT secret is set: renders `Formula/aidc.rb` and
+6. If the tap deploy key secret is set: renders `Formula/aidc.rb` and
    `Formula/aidc@MAJOR.MINOR.rb` from `release/Formula/*.tmpl` and pushes them to
    `pacepace/homebrew-aidc`. If the secret is absent the tap step is skipped with
    a notice.
@@ -88,16 +88,21 @@ delete the Release **and** the tag, and redo the tag + publish. Don't leave a
 Release whose validation run is red.
 
 `workflow_dispatch` on an existing tag is a **dry-run only** — it exercises
-everything except the asset check and the tap push. Use it to verify token
-rotation.
+everything except the asset check and the tap push. Use it to verify a new
+deploy key.
 
 ## 5. Homebrew tap
 
 - The tap repo is `pacepace/homebrew-aidc` (public; `Formula/` dir). Users:
   `brew tap pacepace/aidc && brew install aidc`.
-- The PAT lives in the secret named `TAP_REPO_TOKEN_EXPIRES_<date>` — a
-  fine-scoped token with contents write on the tap repo only. Rotate before the
-  date in the name; verify rotation with a dry-run dispatch.
+- The workflow pushes with a **write deploy key** on the tap repo, stored as
+  the `TAP_DEPLOY_KEY` Actions secret here. A deploy key never expires and can
+  reach nothing but that one repo, so there is no rotation calendar.
+  `bash release/tap-deploy-key.sh` creates or rotates it end to end (generate,
+  install the public half on the tap, store the private half as the secret,
+  wipe both; only the fingerprint is printed); `--status` shows what is
+  installed. Revoke a compromised key under the tap repo's Settings → Deploy
+  keys. Verify a fresh key with a dry-run dispatch.
 - Manual first-time seeding (before automation): see `Formula/README.md`.
 - After a release that touches the formula, validate on a Mac:
   `brew update && brew audit --strict aidc && brew install aidc && brew test aidc`.

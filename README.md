@@ -48,13 +48,6 @@ make install      # symlinks scripts/aidc into ~/.local/bin
 Upgrade with `git pull` + `aidc rebuild` (then `aidc upgrade <session>` per
 session).
 
-However you installed it, `aidc update` moves the CLI to the latest release the
-same way: it re-runs the installer, runs `brew upgrade aidc`, or fast-forwards
-the checkout, whichever applies. `aidc update --check` only reports. The CLI
-and the images are separate: after an update, `aidc rebuild` bakes images at
-the new version, then `aidc upgrade <session>` swaps each running session onto
-them.
-
 Or via Homebrew (macOS, or Linux if you already run Linuxbrew):
 
 ```bash
@@ -71,6 +64,13 @@ sha256sum v1.0.0.tar.gz   # compare against the formula's sha256
 tar xzf v1.0.0.tar.gz && cd aidc-1.0.0
 make install
 ```
+
+However you installed it, `aidc update` moves the CLI to the latest release the
+same way: it re-runs the installer, runs `brew upgrade` on the installed
+formula, or fast-forwards the checkout, whichever applies. `aidc update --check` only reports. The CLI
+and the images are separate: after an update, `aidc rebuild` bakes images at
+the new version, then `aidc upgrade <session>` swaps each running session onto
+them.
 
 ### Requirements
 

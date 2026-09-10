@@ -56,6 +56,11 @@ eq "install.sh pre-release"    installer "$(aidc_install_kind "$TMP/share/aidc/a
 eq "aidc-<ver> outside share/aidc is unknown" unknown "$(aidc_install_kind "$TMP/random/aidc-1.3.1")"
 eq "arbitrary dir is unknown"  unknown   "$(aidc_install_kind "$TMP/opt/aidc-tools")"
 
+echo
+echo "-- brew formula from keg path --"
+eq "plain keg"     aidc     "$(aidc_brew_formula "$TMP/Cellar/aidc/1.3.1/libexec")"
+eq "versioned keg" aidc@1.3 "$(aidc_brew_formula "$TMP/Cellar/aidc@1.3/1.3.1/libexec")"
+
 # --- 2. tag comparison --------------------------------------------------------
 echo
 echo "-- semver compare --"
@@ -86,6 +91,7 @@ case "\$url" in
     *releases/latest/download/install.sh)
         printf '%s\n' '#!/usr/bin/env bash' 'echo "install.sh \$*" >> "$TMP/calls.log"' > "\$out" ;;
     *releases/latest)
+        [ -z "\${CURL_FAIL:-}" ] || exit 22
         printf '{"tag_name": "%s"}\n' "\${LATEST_TAG}" ;;
     *) exit 22 ;;
 esac
@@ -125,6 +131,8 @@ echo "-- dispatch: brew --"
 run_update "$TMP/Cellar/aidc/1.3.0/libexec" v1.3.0 v1.3.1
 eq "exit 0" 0 "$RC"
 eq "runs brew upgrade aidc" "brew upgrade aidc;" "$(calls)"
+run_update "$TMP/Cellar/aidc@1.3/1.3.0/libexec" v1.3.0 v1.3.1
+eq "versioned keg upgrades its own formula" "brew upgrade aidc@1.3;" "$(calls)"
 run_update "$TMP/Cellar/aidc/1.3.0/libexec" v1.3.0 v1.3.1 --version v1.3.1
 eq "--version refused for brew" 1 "$RC"
 eq "and nothing ran" "" "$(calls)"
@@ -133,7 +141,7 @@ echo
 echo "-- dispatch: git --"
 run_update "$TMP/clone" v1.3.0 v1.3.1
 eq "exit 0" 0 "$RC"
-eq "status check then ff-only pull" "git -C $TMP/clone status --porcelain;git -C $TMP/clone pull --ff-only;" "$(calls)"
+eq "status check then ff-only pull" "git -C $TMP/clone status --porcelain --untracked-files=no;git -C $TMP/clone pull --ff-only;" "$(calls)"
 
 echo
 echo "-- --check and up-to-date --"
@@ -145,6 +153,15 @@ run_update "$TMP/share/aidc/aidc-1.3.1" v1.3.1 v1.3.1
 eq "current copy exits 0" 0 "$RC"
 eq "current copy is left alone" "" "$(calls)"
 eq "and says so" 1 "$(said 'already up to date')"
+
+echo
+echo "-- releases API unreachable --"
+# curl exits 22 on the API call when CURL_FAIL is set (stub honours it below).
+CURL_FAIL=1 run_update "$TMP/share/aidc/aidc-1.3.0" v1.3.0 v1.3.1 --check
+eq "--check exits 1 with no latest" 1 "$RC"
+eq "and says the API was unreachable" 1 "$(said 'could not reach')"
+CURL_FAIL=1 run_update "$TMP/share/aidc/aidc-1.3.0" v1.3.0 v1.3.1
+eq "plain run still updates (cannot prove current, so try)" "install.sh ;" "$(calls)"
 
 echo
 echo "-- unknown layout --"

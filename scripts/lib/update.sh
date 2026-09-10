@@ -26,6 +26,14 @@ aidc_install_kind() { # root
     printf 'unknown\n'
 }
 
+# Print the Homebrew formula name a keg path was installed from: `aidc` for
+# …/Cellar/aidc/<ver>/libexec, `aidc@1.3` for the versioned line. The tap
+# publishes both, and `brew upgrade` must name the one that is installed.
+aidc_brew_formula() { # root
+    local rest="${1##*/Cellar/}"
+    printf '%s\n' "${rest%%/*}"
+}
+
 # Compare two release tags (vX.Y.Z, optional pre-release/build suffix which
 # is ignored). Prints -1, 0 or 1 for a<b, a=b, a>b.
 aidc_semver_cmp() { # a b

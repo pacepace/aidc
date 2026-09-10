@@ -17,8 +17,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 - **`aidc update`** updates the CLI itself, the way `brew upgrade` or `apt upgrade`
   would. It detects how this copy was installed — the release installer under
   `~/.local/share/aidc/`, a Homebrew keg, or a git checkout — and runs the matching
-  step: re-fetches the latest release's `install.sh`, runs `brew upgrade aidc`, or
-  fast-forwards the checkout. `--check` reports the installed and latest versions
+  step: re-fetches the latest release's `install.sh`, runs `brew upgrade` on the
+  installed formula (`aidc` or `aidc@X.Y`), or fast-forwards the checkout. `--check` reports the installed and latest versions
   without changing anything; `--version vX.Y.Z` pins a release (installer copies
   only). An already-current copy is left alone; an unrecognised layout refuses
   rather than guessing. The CLI and the images are separate, so the command ends

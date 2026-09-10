@@ -99,12 +99,13 @@ case "$KIND" in
         ;;
     brew)
         require_cmd brew
-        info "running: brew upgrade aidc"
-        brew upgrade aidc
+        formula="$(aidc_brew_formula "$AIDC_ROOT")"
+        info "running: brew upgrade ${formula}"
+        brew upgrade "$formula"
         ;;
     git)
         require_cmd git
-        if [ -n "$(git -C "$AIDC_ROOT" status --porcelain 2>/dev/null)" ]; then
+        if [ -n "$(git -C "$AIDC_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
             die "checkout at ${AIDC_ROOT} has uncommitted changes; commit or stash them, then re-run"
         fi
         info "running: git pull --ff-only in ${AIDC_ROOT}"

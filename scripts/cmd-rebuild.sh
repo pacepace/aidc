@@ -43,7 +43,13 @@ count=0
 while IFS='|' read -r tag context dockerfile; do
     [ -z "$tag" ] && continue
     info "==> building ${tag}"
-    if ! docker build -t "$tag" -f "$dockerfile" "$context"; then
+    # dev-base bakes Claude Code from Anthropic's installer; bust that one
+    # layer so every rebuild fetches the current release (see Dockerfile).
+    build_args=()
+    case "$tag" in
+        aidc/dev-base:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
+    esac
+    if ! docker build "${build_args[@]}" -t "$tag" -f "$dockerfile" "$context"; then
         die "build failed for ${tag}; aborting rebuild (other images unchanged)"
     fi
     count=$((count + 1))

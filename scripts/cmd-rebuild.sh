@@ -49,7 +49,9 @@ while IFS='|' read -r tag context dockerfile; do
     case "$tag" in
         aidc/dev-base:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
     esac
-    if ! docker build "${build_args[@]}" -t "$tag" -f "$dockerfile" "$context"; then
+    # ${arr[@]+"${arr[@]}"}: bash 3.2 (stock macOS) treats an empty array as
+    # unbound under `set -u`; this idiom expands to nothing instead of dying.
+    if ! docker build ${build_args[@]+"${build_args[@]}"} -t "$tag" -f "$dockerfile" "$context"; then
         die "build failed for ${tag}; aborting rebuild (other images unchanged)"
     fi
     count=$((count + 1))

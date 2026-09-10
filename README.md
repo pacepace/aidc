@@ -575,7 +575,7 @@ aidc attach <name>
 | `aidc refresh <name>` | Force a blocklist refresh. |
 | `aidc restart <name>` | Restart the dev container in place from its existing image (proxy stack stays; adhoc forwards do NOT survive). Does **not** pick up image rebuilds — use `upgrade` for that. |
 | `aidc rebuild` | Rebuild all `aidc/*` images at the current VERSION, always fetching the current Claude Code release into `dev-base`. Does NOT touch any running session. Pair with `aidc upgrade`. |
-| `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Prompts before interrupting an in-flight claude conversation. |
+| `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Does **not** replace the session's Claude Code: it lives in the dev-home volume and auto-updates in-session. Prompts before interrupting an in-flight claude conversation. |
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
 | `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. |
 | `aidc claude-token <verb>` | **Recommended for any setup with multiple concurrent claude sessions.** Manage a long-lived OAuth token that bypasses the Anthropic refresh-token race. `setup\|show\|clear`. See "Claude auth" section above. |

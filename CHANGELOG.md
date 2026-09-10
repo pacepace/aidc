@@ -16,7 +16,7 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ### Fixed
 - **`aidc rebuild` now actually refreshes Claude Code.** The dev-base image bakes
   Claude Code with Anthropic's native installer, but that step was an ordinary cached
-  Docker layer with nothing above it changing between releases -- so every rebuild
+  Docker layer with nothing above it changing between releases — so every rebuild
   silently reused the version fetched the first time the layer was built (an image
   rebuilt today still carried the release from a month ago). The install step now
   takes a `CLAUDE_CODE_REFRESH` build arg used purely to invalidate that one layer,

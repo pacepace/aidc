@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-10
+
 ### Added
 - **The Homebrew tap updates itself on every release, with no token to rotate.**
   The release workflow pushed rendered formulae with a fine-grained PAT stored under
@@ -781,7 +783,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/pacepace/aidc/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/pacepace/aidc/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0

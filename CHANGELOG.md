@@ -14,6 +14,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ## [Unreleased]
 
 ### Added
+- **The Homebrew tap updates itself on every release, with no token to rotate.**
+  The release workflow pushed rendered formulae with a fine-grained PAT stored under
+  a date-stamped secret name that had to be re-issued every few weeks. When the secret
+  lapsed, the v1.3.1 release silently skipped the tap and left `install.sh` (which
+  verifies downloads against the tap) unable to install it. It now pushes over SSH with
+  a write deploy key on the tap repo: never expires, reaches nothing else, revocable
+  from that repo's settings. `release/tap-deploy-key.sh` creates or rotates the key
+  end to end and prints only the fingerprint; `--status` shows what is installed.
 - **`aidc update`** updates the CLI itself, the way `brew upgrade` or `apt upgrade`
   would. It detects how this copy was installed — the release installer under
   `~/.local/share/aidc/`, a Homebrew keg, or a git checkout — and runs the matching

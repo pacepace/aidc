@@ -305,6 +305,13 @@ jobs:
           git -C tap commit -m "aidc ${{ needs.release.outputs.version }}" \
             -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
+      # Dry runs prove the key can PUSH, not just clone: --dry-run goes through
+      # git-receive-pack authorization (a read-only deploy key is refused there)
+      # without moving any ref, so the no-side-effect property of dispatch holds.
+      - name: Verify push authorization (dry run)
+        if: github.event_name != 'release'
+        run: git -C tap push --dry-run origin HEAD:main
+
       - name: Push to tap
         if: github.event_name == 'release'
         run: git -C tap push origin HEAD:main

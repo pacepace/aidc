@@ -16,8 +16,9 @@ cannot live here.
 
 ## Publishing the tap by hand (one-time bootstrap, before automation)
 
-The release workflow does this for you once `TAP_REPO_TOKEN` is configured. To
-seed the tap manually the first time:
+The release workflow does this for you once the `TAP_DEPLOY_KEY` secret exists
+(`bash release/tap-deploy-key.sh` creates it). To seed the tap manually the
+first time:
 
 1. Create the public repo `pacepace/homebrew-aidc` with a one-line `README.md`
    and an empty `Formula/` dir.

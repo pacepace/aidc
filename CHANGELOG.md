@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-10
+
 ### Fixed
 - **`aidc rebuild` now actually refreshes Claude Code.** The dev-base image bakes
   Claude Code with Anthropic's native installer, but that step was an ordinary cached
@@ -756,7 +758,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/pacepace/aidc/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/pacepace/aidc/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/pacepace/aidc/compare/v1.1.0...v1.1.1

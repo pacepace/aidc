@@ -48,6 +48,13 @@ make install      # symlinks scripts/aidc into ~/.local/bin
 Upgrade with `git pull` + `aidc rebuild` (then `aidc upgrade <session>` per
 session).
 
+However you installed it, `aidc update` moves the CLI to the latest release the
+same way: it re-runs the installer, runs `brew upgrade aidc`, or fast-forwards
+the checkout, whichever applies. `aidc update --check` only reports. The CLI
+and the images are separate: after an update, `aidc rebuild` bakes images at
+the new version, then `aidc upgrade <session>` swaps each running session onto
+them.
+
 Or via Homebrew (macOS, or Linux if you already run Linuxbrew):
 
 ```bash
@@ -575,6 +582,7 @@ aidc attach <name>
 | `aidc refresh <name>` | Force a blocklist refresh. |
 | `aidc restart <name>` | Restart the dev container in place from its existing image (proxy stack stays; adhoc forwards do NOT survive). Does **not** pick up image rebuilds — use `upgrade` for that. |
 | `aidc rebuild` | Rebuild all `aidc/*` images at the current VERSION, always fetching the current Claude Code release into `dev-base`. Does NOT touch any running session. Pair with `aidc upgrade`. |
+| `aidc update [--check]` | Update the aidc CLI itself to the latest release, by whichever method installed it (install.sh, Homebrew, or git). Then `aidc rebuild`. |
 | `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Does **not** replace the session's Claude Code: it lives in the dev-home volume and auto-updates in-session. Prompts before interrupting an in-flight claude conversation. |
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
 | `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. |

@@ -404,9 +404,11 @@ what it sent can.
 
 Mechanism (`transcript.py` + the drain in `tools.py`):
 
-- **Send record.** Every successful paste (`session_send` direct or queued, `session_run`)
-  appends the prompt's whitespace-normalized sha256 to a per-*session* file under the
-  watcher-state dir (`<session>.sent-prompts.json`, atomic temp+rename like the watermark).
+- **Send record.** `_inject` is the only way a prompt reaches the pane, and it is the only
+  writer of the record: every successful paste (`session_send` direct or queued,
+  `session_run`) appends the prompt's whitespace-normalized sha256 to a per-*session* file
+  under the watcher-state dir (`<session>.sent-prompts.json`, atomic temp+rename like the
+  watermark).
   Durable so an MCP restart between a send and its reply does not mislabel the
   orchestrator's own prompt as the person's. Bounded (200 entries, 24h TTL) so a paste that
   never landed cannot linger and swallow a person later typing the same words.
@@ -417,12 +419,16 @@ Mechanism (`transcript.py` + the drain in `tools.py`):
   instead of being dropped by the boundary flush. `human_prompt_text` excludes what Claude
   Code writes on the user's behalf: `isMeta` lines (hook feedback, skill bodies, system
   reminders, "Continue from where you left off."), `promptSource != "typed"` /
-  `origin.kind != "human"` (task notifications), `<local-command-stdout>` / `-caveat>`
-  output, and the `[Request interrupted by user]` marker. A typed slash command is
-  rendered compactly as `/name args`.
+  `origin.kind != "human"` (task notifications), any line that *opens* with a wrapper tag
+  (`<local-command-stdout>`, `<bash-input>` / `<bash-stdout>` from `!` mode, and whatever
+  wrapper a later Claude Code adds — these carry no provenance fields, so the rule fails
+  closed), and the `[Request interrupted by user ...]` markers with or without an
+  `interruptedMessageId`. The one tagged line a person types is a slash command, rendered
+  compactly as `/name args`.
 - **Attribution at delivery.** For every extracted turn (empty ones too, so each record
-  entry is consumed exactly once) the drain matches each prompt against the send record;
-  a match consumes one entry. Prompts that do not match were typed at the terminal and are
+  entry is consumed exactly once; a turn the ledger already holds is skipped, so a
+  re-surfaced turn cannot eat the entry of the next identical send) the drain matches
+  each prompt against the send record; a match consumes one entry. Prompts that do not match were typed at the terminal and are
   prepended to the delivered content under a note addressed to the orchestrating LLM
   (`TERMINAL_PROMPT_NOTE`), followed by a `---` rule and the reply. `prompt_origin` is
   `"terminal"` when any prompt was typed, `"orchestrator"` when all matched, `""` when the
@@ -431,6 +437,10 @@ Mechanism (`transcript.py` + the drain in `tools.py`):
   reply text: a re-surfaced turn's record entry is gone by then, so its framing would
   differ, and keying on framed content would let the ledger miss it. `session_resend`
   therefore re-posts the bare reply (no note) — it cannot know the origin after the fact.
+- **Observability.** `transcript_terminal_prompt` carries `record_remaining`, the count of
+  live unmatched entries. A real typed prompt leaves it flat; a count that climbs with
+  every reply means matching has drifted (e.g. a Claude Code that collapses pastes) and
+  every reply is going out under the note.
 - **Failure posture.** A record that cannot be written after a paste, or read/updated at
   delivery, is logged (`session_send_record_failed`, `transcript_sent_record_failed`) and
   the prompt counts as the orchestrator's own. Claiming "the user typed this" about a

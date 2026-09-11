@@ -467,11 +467,18 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...], state_dir: Path) -
     return typed
 
 
-async def _inject(container: str, text: str, window: str) -> bool:
-    """Paste one prompt into the window and press Enter. True when it went in."""
+async def _inject(container: str, text: str, window: str, *, session: str) -> bool:
+    """Paste one prompt into the window and press Enter. True when it went in.
+
+    The ONLY way a prompt reaches the pane, so it is also the only place the send
+    record is written: a paste that landed is recorded here, on success, for
+    `session` — the drain tells the orchestrator's prompts from a person's by that
+    record alone, so a paste path that skipped it would ship a reply falsely
+    framed as answering something the person typed."""
     if not await _load_and_paste(container, text, window):
         return False
     await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
+    _record_sent(session, text)
     # Let the turn visibly start before the caller releases the send lock, so a
     # rapid follow-up's idle check sees a turn in flight rather than the pre-send
     # pane still looking stable.
@@ -524,9 +531,8 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     waited += 1
                     continue
                 text, attempts = queue[0]
-                if await _inject(container, text, _SESSION_WINDOW):
+                if await _inject(container, text, _SESSION_WINDOW, session=name):
                     queue.pop(0)
-                    _record_sent(name, text)
                     log_event("session_send_queued_injected", session=name,
                               prompt_len=len(text), remaining=len(queue))
                     if not queue:
@@ -1157,8 +1163,14 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # in context. Resolved for EVERY turn (empty ones too) so each injected
         # prompt consumes its record entry exactly once. The ledger fingerprint
         # stays on the bare reply (turn.text): a re-surfaced turn must dedup even
-        # though its record entry is gone by then and its framing would differ.
-        terminal_prompts = _terminal_prompts(session, turn.prompts, state_dir)
+        # though its record entry is gone by then and its framing would differ —
+        # and a re-surfaced turn is NOT attributed at all, or its (already consumed)
+        # prompt would eat a fresh record entry meant for the next identical send.
+        fingerprint = "" if turn.is_empty else ts.content_fingerprint(turn.text)
+        already_delivered = bool(fingerprint) and fingerprint in delivered_fps
+        terminal_prompts = (
+            [] if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
+        )
         outgoing = dataclasses.replace(
             turn,
             text=ts.render_delivery(turn.text, terminal_prompts),
@@ -1166,16 +1178,19 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                            else "orchestrator" if turn.prompts else ""),
         )
         if terminal_prompts:
+            # record_remaining is the health signal: entries that keep piling up
+            # while replies arrive mean matching has drifted (every reply would then
+            # carry the note), which a real typed prompt never causes.
             log_event("transcript_terminal_prompt", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                       prompts=len(terminal_prompts),
-                      prompt_len=sum(len(p) for p in terminal_prompts))
+                      prompt_len=sum(len(p) for p in terminal_prompts),
+                      record_remaining=ts.sent_prompts_remaining(state_dir, session))
         if turn.is_empty:
             log_event("transcript_empty_turn", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         else:
-            fingerprint = ts.content_fingerprint(turn.text)
-            if fingerprint in delivered_fps:
+            if already_delivered:
                 # Already delivered this exact content to this conversation. A
                 # watermark bug re-surfaced it; drop it at the door. This is NOT a
                 # loop-guard event (it is a re-read, not a fresh echo) and is never
@@ -1860,12 +1875,10 @@ def register(app: Any) -> None:
                     )
                 log_event("tool_call", tool="session_send_queued", session=name,
                           prompt_len=len(prompt), depth=queued_depth)
-            elif not await _inject(container, sanitized, _SESSION_WINDOW):
+            elif not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                 log_event("tool_call", tool="session_send_failed", session=name,
                           prompt_len=len(prompt), reason="paste_failed")
                 return _envelope_err("failed to inject prompt into session window")
-            else:
-                _record_sent(name, sanitized)
 
         # Non-blocking: the reply is delivered by the transcript watcher, not returned
         # here. If no watcher is open, the reply has nowhere to go — say so plainly.
@@ -1989,13 +2002,9 @@ def register(app: Any) -> None:
                 baseline = await _capture_pane(container, _SESSION_WINDOW)
 
                 sanitized = turn_prompt.replace("\n", " ").strip()
-                if not await _load_and_paste(container, sanitized, _SESSION_WINDOW):
+                if not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                     err = f"failed to inject turn {i + 1}"
                     return _envelope_err(err, {"completed_turns": transcript})
-                await _tmux_exec(container, ["send-keys", "-t", f"main:{_SESSION_WINDOW}", "Enter"])
-                _record_sent(name, sanitized)
-
-                await asyncio.sleep(2.0)
 
                 if not await _wait_for_idle(container, _SESSION_WINDOW, timeout=_TURN_TIMEOUT_S):
                     err = f"timed out waiting for response to turn {i + 1}"

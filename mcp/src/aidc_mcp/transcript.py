@@ -233,9 +233,17 @@ def _is_real_user_prompt(obj: dict) -> bool:
 # `<command-name>/x</command-name><command-message>x</command-message><command-args>...`.
 _COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
-# Local-command output lines are Claude Code's, not the person's, even though they
-# share the command's promptId and are not flagged isMeta.
-_NOT_TYPED_PREFIXES = ("<local-command-stdout>", "<local-command-caveat>")
+# A user line that OPENS with a tag is one Claude Code wrapped on the user's
+# behalf — local-command output and its caveat, `!` bash-mode input and output
+# (<bash-input>/<bash-stdout>, which can carry shell output such as an auth code),
+# and any wrapper a later Claude Code adds. Most carry no provenance fields at
+# all, so "no provenance means typed" would post them under "the user typed the
+# following". The one wrapper a person does type is a slash command
+# (<command-name>), rendered below; everything else tagged is never attributed.
+_OPENS_WITH_TAG_RE = re.compile(r"^<[A-Za-z][\w-]*>")
+# The interrupt marker is not always accompanied by interruptedMessageId (the
+# tool-use variant "[Request interrupted by user for tool use]" is not).
+_INTERRUPT_PREFIX = "[Request interrupted by user"
 
 
 def human_prompt_text(obj: dict) -> str:
@@ -251,12 +259,18 @@ def human_prompt_text(obj: dict) -> str:
         "Continue from where you left off." auto-continue;
       - ``promptSource`` other than "typed" / ``origin.kind`` other than "human":
         task notifications and other system-sourced prompts;
-      - local-command output and its caveat banner;
-      - the "[Request interrupted by user]" marker (an interruptedMessageId line).
+      - any line that opens with a wrapper tag: local-command output and its
+        caveat, `!` bash-mode input/output, and the like (_OPENS_WITH_TAG_RE);
+      - the "[Request interrupted by user ...]" markers, with or without an
+        interruptedMessageId.
     A typed slash command is rendered compactly as ``/name args``.
 
-    Absent fields are treated as "typed" so older transcripts (and fixtures)
-    without the provenance keys still attribute plain prompts to the person.
+    Absent provenance fields are otherwise treated as "typed" so older
+    transcripts (and fixtures) still attribute plain prompts to the person. The
+    tag rule is deliberately broader than the wrappers seen so far: a plain prompt
+    that happens to open with a tag loses its note (harmless), whereas a wrapper
+    that slipped through would be posted as the person's words (the failure this
+    mechanism must never produce).
     """
     if obj.get("isMeta") or obj.get("interruptedMessageId"):
         return ""
@@ -269,10 +283,12 @@ def human_prompt_text(obj: dict) -> str:
     raw_msg = obj.get("message")
     msg = raw_msg if isinstance(raw_msg, dict) else {}
     text = _text_of(msg).strip()
-    if not text or text.startswith(_NOT_TYPED_PREFIXES):
+    if not text or text.startswith(_INTERRUPT_PREFIX):
         return ""
-    m = _COMMAND_NAME_RE.search(text)
-    if m:
+    if _OPENS_WITH_TAG_RE.match(text):
+        m = _COMMAND_NAME_RE.search(text)
+        if not m:
+            return ""
         args_m = _COMMAND_ARGS_RE.search(text)
         args = args_m.group(1).strip() if args_m else ""
         return f"{m.group(1).strip()} {args}".strip()
@@ -707,6 +723,13 @@ def record_sent_prompt(base_dir: Path, session: str, text: str, *,
     entries.append({"fp": prompt_fingerprint(text), "at": now})
     del entries[:-_SENT_PROMPTS_MAX]
     _save_sent_prompts(base_dir, session, entries)
+
+
+def sent_prompts_remaining(base_dir: Path, session: str, *, now_fn=time.time) -> int:
+    """Live (unexpired) entries still waiting to be matched — the health signal
+    for the record: a count that only grows while replies keep arriving means
+    matching has drifted (every reply then goes out under the terminal note)."""
+    return len(_load_sent_prompts(base_dir, session, now_fn()))
 
 
 def consume_sent_prompt(base_dir: Path, session: str, text: str, *,

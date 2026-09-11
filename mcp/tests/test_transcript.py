@@ -663,6 +663,29 @@ class TestHumanPromptText:
                "message": {"role": "user",
                            "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
         assert human_prompt_text(obj) == ""
+        # The tool-use variant carries no interruptedMessageId; the text alone decides.
+        bare = _user("u2", "[Request interrupted by user for tool use]")
+        assert human_prompt_text(bare) == ""
+
+    def test_bash_mode_lines_are_not_typed(self):
+        """`!` bash mode: the input and its output are wrapped and provenance-less,
+        and the output can hold anything the shell printed (an auth code, say)."""
+        assert human_prompt_text(_user("u1", "<bash-input>gh auth login</bash-input>")) == ""
+        assert human_prompt_text(_user("u2", "<bash-stdout>! First copy your code: XYZ</bash-stdout>")) == ""
+
+    def test_any_unknown_wrapper_tag_is_not_typed(self):
+        # Fail closed on wrappers not seen yet: the only tagged line a person
+        # types is a slash command.
+        assert human_prompt_text(_user("u1", "<some-future-wrapper>x</some-future-wrapper>")) == ""
+        assert human_prompt_text(_typed("u2", "<ide_selection>foo</ide_selection>")) == ""
+
+    def test_command_message_first_wrapper_still_renders_the_command(self):
+        raw = ("<command-message>run</command-message>"
+               "<command-name>/run</command-name><command-args>the app</command-args>")
+        assert human_prompt_text(_user("u1", raw)) == "/run the app"
+
+    def test_prose_mentioning_a_tag_mid_sentence_is_typed(self):
+        assert human_prompt_text(_typed("u1", "the <div> is misaligned")) == "the <div> is misaligned"
 
     def test_slash_command_rendered_compactly(self):
         raw = ("<command-name>/goal</command-name>\n            "
@@ -763,6 +786,16 @@ class TestSentPromptRecord:
         record_sent_prompt(tmp_path, "s", "old", now_fn=lambda: 1000.0)
         late = 1000.0 + 24 * 3600 + 1
         assert consume_sent_prompt(tmp_path, "s", "old", now_fn=lambda: late) is False
+
+    def test_remaining_counts_live_entries(self, tmp_path):
+        from aidc_mcp.transcript import sent_prompts_remaining
+        assert sent_prompts_remaining(tmp_path, "s") == 0
+        record_sent_prompt(tmp_path, "s", "a", now_fn=lambda: 1000.0)
+        record_sent_prompt(tmp_path, "s", "b", now_fn=lambda: 1000.0)
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1001.0) == 2
+        consume_sent_prompt(tmp_path, "s", "a", now_fn=lambda: 1001.0)
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1001.0) == 1
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1000.0 + 24 * 3600 + 1) == 0
 
     def test_bounded_by_count_oldest_dropped(self, tmp_path):
         for i in range(205):

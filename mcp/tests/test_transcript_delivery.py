@@ -1263,6 +1263,41 @@ class TestTerminalPromptAttribution:
         await _drain(base, state, rec)
         assert [t.text for t in rec.turns] == ["R"]     # not re-posted, framed or not
 
+    async def test_resurfaced_turn_does_not_consume_a_fresh_record_entry(self, tmp_path):
+        """After a watermark rewind the already-delivered turn is re-read. Its own
+        record entry was consumed the first time; if attribution ran again it would
+        eat the entry for the orchestrator's NEXT identical send, and that later
+        reply would go out framed as the person's."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "continue")
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "continue"), _assistant("a1", "R1")])
+        await _drain(base, state, rec)
+        assert rec.turns[0].prompt_origin == "orchestrator"
+        # The orchestrator sends "continue" again; then the watermark rewinds.
+        ts.record_sent_prompt(state, "sess", "continue")
+        mark = ts.load_watermark(state, "sess", "conv")
+        mark.last_delivered_uuid = "a0"
+        ts.save_watermark(state, mark)
+        await _drain(base, state, rec)                       # deduped, no attribution
+        assert len(rec.turns) == 1
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "continue"), _assistant("a1", "R1"),
+            _typed("u2", "continue"), _assistant("a2", "R2"),
+        ])
+        await _drain(base, state, rec)
+        assert rec.turns[1].text == "R2"                     # entry was still there
+        assert rec.turns[1].prompt_origin == "orchestrator"
+
+    async def test_terminal_prompt_event_reports_record_health(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "never matched")   # a stuck entry
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed"), _assistant("a1", "R")])
+        events = []
+        with patch("aidc_mcp.tools.log_event", side_effect=lambda k, **f: events.append((k, f))):
+            await _drain(base, state, rec)
+        ev = next(f for k, f in events if k == "transcript_terminal_prompt")
+        assert ev["prompts"] == 1 and ev["record_remaining"] == 1
+
     async def test_dead_letter_carries_the_framed_content(self, tmp_path):
         base, state, _, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed q"), _assistant("a1", "R")])

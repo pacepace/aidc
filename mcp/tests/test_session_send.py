@@ -360,6 +360,17 @@ async def test_queued_send_records_only_once_injected(wiring):
     assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")
 
 
+async def test_inject_is_the_single_recording_point(wiring):
+    """Every paste path goes through _inject, and _inject records on success —
+    so no caller can forget to (the record is what keeps a reply from being
+    framed as the person's)."""
+    assert await tools._inject("aidc-proj-dev", "via inject", tools._SESSION_WINDOW, session="proj")
+    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "via inject")
+    wiring.paste_ok = False
+    assert not await tools._inject("aidc-proj-dev", "lost", tools._SESSION_WINDOW, session="proj")
+    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "lost")
+
+
 async def test_failed_paste_records_nothing(wiring):
     app, send = _make_send()
     wiring.paste_ok = False

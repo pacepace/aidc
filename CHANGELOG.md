@@ -13,6 +13,29 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Changed
+- **The dev container owns its Claude login.** Each session keeps Claude's config
+  directory on its own volume (`CLAUDE_CONFIG_DIR=/home/vscode/.claude`, the layout
+  Anthropic's reference devcontainer uses) and you `/login` inside it once. The login
+  refreshes itself, survives `restart` and `upgrade`, supports Remote Control, and can
+  be a different account from the host's — `/login` again inside to switch. The host's
+  `.credentials.json` and `~/.claude.json` are no longer bind-mounted: Claude Code
+  replaces both files by rename, so a single-file bind mount went stale on the host's
+  first refresh (anthropics/claude-code#18443) and could not be written from inside.
+  That is why in-container logins expired after a few hours and why `/login` with
+  another account never took. Onboarding state (theme, output style, this project's
+  trust) is seeded once from the host's `~/.claude.json` without the account, so the
+  first launch goes straight to the login prompt. Memory, settings and plugins are
+  bridged exactly as before. The long-lived token path (`aidc claude-token`) is
+  unchanged and still skips the login, at the cost of Remote Control. Sessions
+  created before this version keep their old bind mounts through `restart` and
+  `upgrade`; `aidc kill` + `aidc create` moves one onto the new model.
+
+### Removed
+- `aidc auth-bridge` (the macOS Keychain sync daemon), `aidc reauth`, the per-session
+  Keychain extraction, and the `share_auth` config key. With nothing bridged there is
+  nothing to keep fresh; a session that says "Please run /login" just needs a `/login`.
+
 ## [1.4.1] - 2026-09-11
 
 ### Fixed

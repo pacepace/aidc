@@ -152,6 +152,33 @@ assert "no ~/.ssh dir" \
     "! dev_exec 'test -d ~/.ssh'"
 assert "no GITHUB_TOKEN env" \
     "dev_exec 'test -z \"\$GITHUB_TOKEN\"'"
+# Claude auth is container-owned (see cmd-create.sh "Authentication"): the host's
+# credentials and ~/.claude.json are never bind-mounted (a single-file bind mount
+# goes stale on the first rename, anthropics/claude-code#18443), CLAUDE_CONFIG_DIR
+# pins Claude's state to the dev-home volume, and the seeded ~/.claude.json never
+# carries the host's account.
+assert "host credentials file is not mounted into the dev container" \
+    "! docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' aidc-${SESSION}-dev | grep -q '.credentials.json'"
+assert "host ~/.claude.json is not mounted into the dev container" \
+    "! docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' aidc-${SESSION}-dev | grep -q '/home/vscode/.claude.json'"
+assert "CLAUDE_CONFIG_DIR points Claude's state at the dev-home volume" \
+    "dev_exec 'test \"\$CLAUDE_CONFIG_DIR\" = /home/vscode/.claude'"
+# Conversation history and memory stay the host's: the per-project directory
+# (transcripts for --continue, memory/) is bind-mounted read-write at the same
+# path Claude reads under CLAUDE_CONFIG_DIR, and settings.json is bridged too.
+assert "host per-project memory dir is mounted read-write at Claude's projects path" \
+    "docker inspect -f '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' aidc-${SESSION}-dev | tr ' ' '\\n' | grep -q '^/home/vscode/.claude/projects/.*=true$'"
+assert "Claude resolves its projects dir to that mount" \
+    "dev_exec 'test \"\$(readlink -f \"\$CLAUDE_CONFIG_DIR/projects\")\" = /home/vscode/.claude/projects'"
+if [ -f "$HOME/.claude.json" ]; then
+    # Existence alone would also pass for a file Claude created itself on a
+    # missed seed; the onboarding flag is what only the seed can carry over.
+    HOST_ONBOARDED=$(jq -r '.hasCompletedOnboarding // false' "$HOME/.claude.json" 2>/dev/null || echo false)
+    assert "seeded ~/.claude.json carries the host's onboarding state (${HOST_ONBOARDED})" \
+        "dev_exec 'jq -e \".hasCompletedOnboarding // false | . == ${HOST_ONBOARDED}\" /home/vscode/.claude/.claude.json'"
+    assert "seeded ~/.claude.json carries no host account" \
+        "! dev_exec 'grep -q oauthAccount /home/vscode/.claude/.claude.json'"
+fi
 echo
 
 # --- step 3: git asymmetry -----------------------------------------------
@@ -424,7 +451,9 @@ echo "[9/11] aidc status surfaces taint"
 # `aidc list`) prints 'YES' in the tainted column. Check both surfaces.
 # Capture output first so the assertion only depends on string content,
 # never on the (sometimes flaky) exit code of `aidc status` under pipefail.
+# shellcheck disable=SC2034  # both are read inside the eval'd assert strings below
 STATUS_OUT=$("$AIDC" status "$SESSION" 2>&1 || true)
+# shellcheck disable=SC2034
 LIST_OUT=$("$AIDC" list 2>&1 || true)
 assert "aidc status <session> reports TAINTED" \
     "printf '%s' \"\$STATUS_OUT\" | grep -qi 'TAINTED'"

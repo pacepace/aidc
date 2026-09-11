@@ -155,11 +155,16 @@ ${DEV_NETWORKS_BLOCK}
       AIDC_SHARE_PLUGINS: "${AIDC_SHARE_PLUGINS}"
       AIDC_GIT_USER_NAME: "${GIT_USER_NAME}"
       AIDC_GIT_USER_EMAIL: "${GIT_USER_EMAIL}"
+      # The container owns its Claude config directory, on the dev-home volume
+      # (same layout as Anthropic's reference devcontainer): credentials,
+      # .claude.json and session state live here and are never bind-mounted from
+      # the host. See cmd-create.sh "Authentication" for why sharing them breaks.
+      CLAUDE_CONFIG_DIR: "/home/vscode/.claude"
       # CLAUDE_CODE_OAUTH_TOKEN: long-lived OAuth token from `aidc claude-token setup`.
       # Empty string when not configured; claude treats empty CLAUDE_CODE_OAUTH_TOKEN
-      # the same as unset (falls through to other auth precedence rules).
-      # When set, takes precedence over any bridged credentials file and bypasses
-      # the OAuth refresh-token race (Anthropic issues #24317, #54443).
+      # the same as unset and the user logs in inside the session instead.
+      # When set, it takes precedence over any stored login (inference-only:
+      # Remote Control is unavailable with it).
       CLAUDE_CODE_OAUTH_TOKEN: "${AIDC_CLAUDE_TOKEN}"
     # Dev container's DIRECT-lookup resolvers (proxied HTTP goes through
     # squid, which has its own dns_nameservers — see the squid service env).
@@ -179,9 +184,7 @@ ${DNS_BLOCK}
       - pyenv-versions:/usr/local/pyenv/versions:rw
       - ${AUDIT_DIR}:/var/aidc/audit:ro     # transparency: Claude can see logs about it
       ${CLAUDE_MEMORY_MOUNT}                # per-project memory dir (optional; share_memory config)
-      ${CLAUDE_CREDS_MOUNT}                 # auth bridge (toggleable; share_auth config)
       ${CLAUDE_SETTINGS_MOUNT}              # settings.json (theme, output style, env)
-      ${CLAUDE_STATE_MOUNT}                 # ~/.claude.json — onboarding marker, oauth account, project state
       ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
       ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)
       ${TRANSCRIPT_MIRROR_MOUNT}           # design-09: in-container mirror copies transcripts here for MCP to read

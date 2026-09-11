@@ -5,6 +5,21 @@ set -uo pipefail
 
 log() { printf '[aidc-user-main] %s\n' "$*" >&2; }
 
+# Onboarding seed (see cmd-create.sh "Onboarding seed"). Installed on the FIRST
+# start only: once Claude has written its own ~/.claude.json on the volume --
+# the account you logged in with, settings you changed -- the seed must never
+# overwrite it, or a restart/upgrade would undo the login.
+CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CLAUDE_STATE_SEED=/var/aidc/audit/claude-state-seed.json
+if [ ! -e "${CLAUDE_CONFIG_DIR}/.claude.json" ] && [ -s "$CLAUDE_STATE_SEED" ]; then
+    if mkdir -p "$CLAUDE_CONFIG_DIR" \
+        && ( umask 0077; cp "$CLAUDE_STATE_SEED" "${CLAUDE_CONFIG_DIR}/.claude.json" ); then
+        log "claude state: seeded ${CLAUDE_CONFIG_DIR}/.claude.json from the host (first start)"
+    else
+        log "WARN: could not install the claude state seed; first launch will run onboarding"
+    fi
+fi
+
 # Set up tmux session (idempotent).
 log "starting tmux session 'main'"
 /usr/local/bin/aidc-tmux-start.sh || log "WARN: tmux-start exited non-zero"

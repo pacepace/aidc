@@ -23,6 +23,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/config.sh
 . "$AIDC_SCRIPTS/lib/config.sh"
+# shellcheck source=lib/claude-state.sh
+. "$AIDC_SCRIPTS/lib/claude-state.sh"
 # shellcheck source=lib/network.sh
 . "$AIDC_SCRIPTS/lib/network.sh"
 
@@ -334,77 +336,46 @@ else
     info "memory: NOT shared (share_memory=false); container will use its own memory"
 fi
 
-# Authentication: three possible paths, checked in this order.
+# Authentication: the container owns its Claude config directory.
 #
-# 1. Long-lived OAuth token (~/.config/aidc/claude-oauth-token)
-#    Set by `aidc claude-token setup`. Bypasses the Anthropic OAuth
-#    refresh-token race entirely (issues #24317, #54443). When present,
-#    we inject CLAUDE_CODE_OAUTH_TOKEN into the dev container's env and
-#    SKIP the Keychain/file bridge (the long-lived token takes precedence
-#    over any creds file inside the container, and skipping the bridge
-#    means the auth-bridge daemon has no per-session file to keep fresh).
+# The compose template sets CLAUDE_CONFIG_DIR=/home/vscode/.claude, so Claude's
+# credentials, its ~/.claude.json and its session state all live on the
+# dev-home volume -- the same layout as Anthropic's reference devcontainer.
+# Nothing auth-related is bind-mounted from the host: Claude Code replaces
+# .credentials.json and .claude.json by rename on every refresh and login, so
+# a single-file bind mount goes stale on one side (dangling inode,
+# anthropics/claude-code#18443) and cannot be written on the other (EBUSY).
+# That is what made in-container logins expire and account switches not stick.
 #
-# 2. Keychain/file bridge (the older default; what we shipped first).
-#    macOS extracts the Keychain entry into a per-session file and
-#    bind-mounts it. Linux/WSL2 bind-mounts the host's credentials file
-#    directly. Subject to the refresh-token race when N containers refresh
-#    concurrently. The auth-bridge daemon partially mitigates by syncing
-#    Keychain changes; `aidc reauth` is the manual recovery.
+# Two ways in:
 #
-# 3. share_auth=false (config). User runs `claude /login` inside the
-#    container; auth persists via the dev-home volume.
-CLAUDE_CREDS_MOUNT=""
+# 1. Long-lived OAuth token (~/.config/aidc/claude-oauth-token, written by
+#    `aidc claude-token setup`): injected as CLAUDE_CODE_OAUTH_TOKEN. No login,
+#    no refresh -- but the token is inference-only, so Remote Control is not
+#    available in sessions that use it.
+# 2. Otherwise, `/login` once inside the session (aidc attach <name>). That
+#    claude.ai session belongs to the container: it refreshes on the volume,
+#    survives restart and upgrade, supports Remote Control, and may be a
+#    different account from the host's. `aidc kill` discards it.
 AIDC_CLAUDE_TOKEN_FILE="${HOME}/.config/aidc/claude-oauth-token"
 AIDC_CLAUDE_TOKEN=""
 USING_LONG_LIVED_TOKEN=0
 
-if [ "${AIDC_SHARE_AUTH:-true}" = "true" ]; then
-    if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
-        AIDC_CLAUDE_TOKEN=$(cat "$AIDC_CLAUDE_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]' || true)
-        case "$AIDC_CLAUDE_TOKEN" in
-            sk-ant-oat01-*)
-                USING_LONG_LIVED_TOKEN=1
-                info "auth: using long-lived CLAUDE_CODE_OAUTH_TOKEN from ${AIDC_CLAUDE_TOKEN_FILE} (refresh-race-immune)"
-                ;;
-            *)
-                info "auth: ${AIDC_CLAUDE_TOKEN_FILE} exists but token shape is invalid; falling back to Keychain bridge (run 'aidc claude-token setup' to fix)"
-                AIDC_CLAUDE_TOKEN=""
-                ;;
-        esac
-    fi
-
-    if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ]; then
-        case "$(uname -s)" in
-            Darwin)
-                if creds=$(security find-generic-password \
-                            -s "Claude Code-credentials" -w 2>/dev/null) \
-                        && [ -n "$creds" ]; then
-                    CREDS_FILE="${AUDIT_DIR}/.claude-credentials.json"
-                    umask 0177
-                    printf '%s' "$creds" > "$CREDS_FILE"
-                    umask 0022
-                    # RW so Claude can refresh the access token in-place. The
-                    # refresh writes back to the per-session extracted file, not
-                    # to the host's Keychain — next aidc create re-extracts fresh
-                    # from Keychain anyway.
-                    CLAUDE_CREDS_MOUNT="- ${CREDS_FILE}:/home/vscode/.claude/.credentials.json:rw"
-                    info "auth: bridged from macOS Keychain (use 'aidc claude-token setup' to bypass the refresh-token race)"
-                else
-                    info "auth: Keychain extraction failed (run 'claude login' inside; persists via dev-home volume)"
-                fi
-                ;;
-            *)
-                if [ -f "${HOME}/.claude/.credentials.json" ]; then
-                    CLAUDE_CREDS_MOUNT="- ${HOME}/.claude/.credentials.json:/home/vscode/.claude/.credentials.json:rw"
-                    info "auth: bridged from host ~/.claude/.credentials.json"
-                else
-                    info "auth: no host credentials found (run 'claude login' inside; persists via dev-home volume)"
-                fi
-                ;;
-        esac
-    fi
-else
-    info "auth: NOT shared (share_auth=false); run 'claude login' inside the container"
+if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
+    AIDC_CLAUDE_TOKEN=$(cat "$AIDC_CLAUDE_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+    case "$AIDC_CLAUDE_TOKEN" in
+        sk-ant-oat01-*)
+            USING_LONG_LIVED_TOKEN=1
+            info "auth: long-lived CLAUDE_CODE_OAUTH_TOKEN from ${AIDC_CLAUDE_TOKEN_FILE} (no login needed; Remote Control unavailable)"
+            ;;
+        *)
+            info "auth: ${AIDC_CLAUDE_TOKEN_FILE} exists but token shape is invalid; ignoring it (run 'aidc claude-token setup' to fix)"
+            AIDC_CLAUDE_TOKEN=""
+            ;;
+    esac
+fi
+if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ]; then
+    info "auth: log in inside the session once it is up ('aidc attach ${NAME}', then /login)"
 fi
 export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
 
@@ -418,16 +389,22 @@ else
     info "settings: no host settings.json"
 fi
 
-# State bridge. ~/.claude.json (note: file at HOME root, NOT inside .claude/)
-# holds hasCompletedOnboarding, oauthAccount, project state — the markers
-# claude looks at to decide whether to run first-launch onboarding. Without
-# this, the theme picker + OAuth flow runs every time even with creds.json
-# present. This is the actual onboarding-skip lever.
-CLAUDE_STATE_MOUNT=""
+# Onboarding seed. ~/.claude.json holds hasCompletedOnboarding, theme, output
+# style and the per-project trust decision; without it the container's first
+# launch runs the theme picker and the trust dialog before the login. The
+# container's own copy is seeded ONCE, from the host's file minus the host's
+# account and every other project's state (lib/claude-state.sh); user-main.sh
+# installs it on first start only, so whatever Claude writes there afterwards
+# (the account you log in with, settings you change) is never overwritten.
+CLAUDE_STATE_SEED="${AUDIT_DIR}/claude-state-seed.json"
 HOST_CLAUDE_STATE="${HOME}/.claude.json"
 if [ -f "$HOST_CLAUDE_STATE" ]; then
-    CLAUDE_STATE_MOUNT="- ${HOST_CLAUDE_STATE}:/home/vscode/.claude.json:ro"
-    info "state: bridged from host ~/.claude.json (skips onboarding, read-only)"
+    if ( umask 0077; aidc_claude_state_seed "$HOST_CLAUDE_STATE" "$REPO_PATH" "$WORKSPACE_PATH" > "$CLAUDE_STATE_SEED" ); then
+        info "state: seeded from host ~/.claude.json (onboarding + this project's trust; no account)"
+    else
+        rm -f "$CLAUDE_STATE_SEED"
+        info "state: could not read host ~/.claude.json (Claude will run first-launch onboarding inside)"
+    fi
 else
     info "state: no host ~/.claude.json (Claude will run first-launch onboarding inside)"
 fi
@@ -498,10 +475,8 @@ export WORKSPACE_PATH
 export AUDIT_DIR
 export ENCODED_REPO
 export HOST_CLAUDE_PROJECT_DIR
-export CLAUDE_CREDS_MOUNT
 export CLAUDE_MEMORY_MOUNT
 export CLAUDE_SETTINGS_MOUNT
-export CLAUDE_STATE_MOUNT
 export CLAUDE_PLUGINS_MOUNT
 export CLAUDE_PLUGINS_MOUNT_ABS
 export AIDC_SHARE_PLUGINS
@@ -870,34 +845,12 @@ if ! wait_for_dev_ready "$NAME"; then
     die "dev container did not become ready in time; check 'docker logs $DEV_CT'"
 fi
 
-# ---- auto-start the host-side auth bridge (macOS only) ----------------------
-#
-# Idempotent: if the bridge is already running, this is a no-op. If the user
-# previously ran `aidc auth-bridge stop` (disabled sentinel present), the
-# auto-start is suppressed and a note is appended to the auth-bridge log.
-# On Linux/WSL2 the auth bridge is a no-op (host creds.json is bind-mounted
-# directly into the container, so updates propagate for free).
-#
-# Failure here does NOT fail the create -- the session works fine without
-# the bridge; it just won't auto-refresh credentials when a host /login
-# rotates the refresh token.
-# Skip auth-bridge auto-start when this session is using the long-lived
-# OAuth token -- there's no per-session bridged file for the daemon to
-# keep fresh, so the daemon has no job for this session.
-if [ "$(uname -s)" = "Darwin" ] && [ "${USING_LONG_LIVED_TOKEN:-0}" -ne 1 ]; then
-    if ! bash "$AIDC_SCRIPTS/cmd-auth-bridge.sh" ensure-running 2>/dev/null; then
-        info "auth-bridge: failed to auto-start (in-container claude credentials will not auto-refresh on host /login; retry with 'aidc auth-bridge start')"
-    fi
-fi
-
 # ---- summary -----------------------------------------------------------------
 
 if [ "${USING_LONG_LIVED_TOKEN:-0}" = "1" ]; then
-    CLAUDE_AUTH_LINE="  claude:     long-lived OAuth token (refresh-race-immune)"
-elif [ -n "$CLAUDE_CREDS_MOUNT" ]; then
-    CLAUDE_AUTH_LINE="  claude:     pre-authenticated from host (subject to OAuth refresh race; use 'aidc claude-token setup' to bypass)"
+    CLAUDE_AUTH_LINE="  claude:     long-lived OAuth token (no login; Remote Control unavailable)"
 else
-    CLAUDE_AUTH_LINE="  claude:     login required (run 'claude login' inside)"
+    CLAUDE_AUTH_LINE="  claude:     log in once inside: 'aidc attach ${NAME}', then /login (persists across restart/upgrade)"
 fi
 
 if [ "$WORKSPACE_PATH" != "$REPO_PATH" ]; then

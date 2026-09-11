@@ -192,17 +192,6 @@ EOF
     docker build -t "$tag" -f "$dockerfile" "$context"
 }
 
-# Returns 0 if any aidc-managed container is alive on this host. Used to
-# decide whether to tear down host-side daemons (auth-bridge) on
-# `aidc kill` / `aidc mcp stop`. Catches both per-session containers
-# (aidc-<session>-*) and the global MCP container (aidc-mcp).
-aidc_anything_running() {
-    if docker ps --filter 'name=^aidc-' -q 2>/dev/null | grep -q .; then
-        return 0
-    fi
-    return 1
-}
-
 # ---- adhoc port-forward sidecars --------------------------------------------
 #
 # `aidc proxy <session> add` launches one socat sidecar per forward, named

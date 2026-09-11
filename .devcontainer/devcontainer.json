@@ -22,7 +22,7 @@
     "  - The Squid blocklist proxy",
     "  - The policy sidecar / taint detection",
     "  - The audit aggregator",
-    "  - Bridged Claude Code auth, settings, memory, and ~/.claude.json",
+    "  - Bridged Claude Code settings, memory and plugins; the seeded onboarding state",
     "  - The git-identity bridge from your host config",
     "  - `aidc-claude --continue` auto-resume",
     "",

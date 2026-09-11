@@ -339,10 +339,23 @@ RUN mkdir -p /home/vscode/.npm-global \
 # time the layer was built. `aidc rebuild` passes a fresh value every run so the
 # bake always picks up the current release; everything above stays cached.
 ARG CLAUDE_CODE_REFRESH=0
+# The container owns its Claude config directory (see cmd-create.sh
+# "Authentication"): credentials, .claude.json and session state live under
+# CLAUDE_CONFIG_DIR on the dev-home volume, never bridged from the host. Set in
+# the image, not only in compose, so every way of running claude here -- the
+# tmux window, `docker exec`, the VS Code devcontainer path -- agrees on it.
+ENV CLAUDE_CONFIG_DIR=/home/vscode/.claude
 USER vscode
 RUN echo "claude-code refresh: ${CLAUDE_CODE_REFRESH}" \
     && curl -fsSL https://claude.ai/install.sh | bash \
-    && /home/vscode/.local/bin/claude --version
+    && /home/vscode/.local/bin/claude --version \
+    # The version check above writes first-run state (a .claude.json, its
+    # backup, sessions/). Ship the config dir EMPTY: a session's first start
+    # installs the seeded .claude.json, and a stale image-time backup would
+    # otherwise greet every new session with "configuration file not found".
+    && rm -rf /home/vscode/.claude.json /home/vscode/.claude/.claude.json \
+              /home/vscode/.claude/backups /home/vscode/.claude/sessions \
+              /home/vscode/.claude/downloads
 USER root
 
 # System-level git hooks directory (GIT-05). The pre-push hook lives here

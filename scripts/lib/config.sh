@@ -45,7 +45,6 @@ aidc_config_defaults() {
     AIDC_CLAUDE_MODE="yolo"       # yolo|safe|default|acceptEdits|auto|bypassPermissions|dontAsk|plan
     AIDC_CLAUDE_RESUME="true"     # auto-pass --continue to claude on launch
     AIDC_SHARE_MEMORY="true"      # mount host's ~/.claude/projects/<repo>/ into container
-    AIDC_SHARE_AUTH="true"        # bridge host's Claude Code auth into container (macOS Keychain or ~/.claude/.credentials.json)
     AIDC_SHARE_PLUGINS="true"     # bridge host's ~/.claude/plugins/ (read-only) and enable them in-container
     AIDC_PORTS=""                 # declared host:container forwards (CLI-13); newline-separated
     AIDC_CONTAINER_ONLY_PATHS=""  # paths overlaid by session-scoped volumes (CLI-18); newline-separated
@@ -76,7 +75,6 @@ claude_mode: yolo           # yolo (--dangerously-skip-permissions) | safe (=def
                             # Non-yolo modes surface approve prompts the orchestrator answers over session_send.
 claude_resume: true         # auto-pass --continue so claude picks up prior conversation
 share_memory: true          # mount host's ~/.claude/projects/<encoded>/ into session
-share_auth: true            # bridge host Claude Code auth (Keychain / creds.json)
 share_plugins: true         # bridge host ~/.claude/plugins (read-only) + enable them in-container
 
 state_actor_tlds:
@@ -271,7 +269,6 @@ load_config() {
         val=$(_aidc_yaml_scalar "$f" "claude_mode");     [ -n "$val" ] && AIDC_CLAUDE_MODE="$val"
         val=$(_aidc_yaml_scalar "$f" "claude_resume");   [ -n "$val" ] && AIDC_CLAUDE_RESUME="$val"
         val=$(_aidc_yaml_scalar "$f" "share_memory");    [ -n "$val" ] && AIDC_SHARE_MEMORY="$val"
-        val=$(_aidc_yaml_scalar "$f" "share_auth");      [ -n "$val" ] && AIDC_SHARE_AUTH="$val"
         val=$(_aidc_yaml_scalar "$f" "share_plugins");   [ -n "$val" ] && AIDC_SHARE_PLUGINS="$val"
         val=$(_aidc_yaml_scalar "$f" "egress");          [ -n "$val" ] && AIDC_EGRESS="$val"
 
@@ -313,7 +310,7 @@ load_config() {
 
     export AIDC_PROFILE AIDC_TAINT_RESPONSE AIDC_TLD_TAINTS AIDC_AUDIT_DIR \
            AIDC_STATE_ACTOR_TLDS AIDC_BLOCKLIST_ADDITIONS AIDC_NOTIFY_WEBHOOK \
-           AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY AIDC_SHARE_AUTH \
+           AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY \
            AIDC_SHARE_PLUGINS \
            AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS \
            AIDC_EGRESS
@@ -328,7 +325,6 @@ emit_loaded_config_yaml() {
     printf 'claude_mode: %s\n' "$AIDC_CLAUDE_MODE"
     printf 'claude_resume: %s\n' "$AIDC_CLAUDE_RESUME"
     printf 'share_memory: %s\n' "$AIDC_SHARE_MEMORY"
-    printf 'share_auth: %s\n' "$AIDC_SHARE_AUTH"
     printf 'share_plugins: %s\n' "$AIDC_SHARE_PLUGINS"
     printf 'egress: %s\n' "$AIDC_EGRESS"
     printf 'notify_webhook: "%s"\n' "$AIDC_NOTIFY_WEBHOOK"

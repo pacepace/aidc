@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-11
+
 ### Changed
 - **The docs and the MCP tool text describe "the orchestrator", not a specific product.**
   The README sections on callback delivery now document the contract itself (endpoint,
@@ -846,7 +848,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/pacepace/aidc/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/pacepace/aidc/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/pacepace/aidc/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/pacepace/aidc/compare/v1.3.1...v1.4.0

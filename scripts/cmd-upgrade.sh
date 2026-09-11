@@ -126,6 +126,25 @@ if [ "$(aidc_session_egress_mode "$NAME")" = "direct" ]; then
     printf '        at create time. To enforce, recreate the session instead:\n' >&2
     printf '            aidc kill %s && aidc create %s ...\n' "$NAME" "$NAME" >&2
 fi
+# A session created before the container owned its Claude login (v1.5.0) still
+# carries the host's ~/.claude.json and .credentials.json bind mounts in its
+# create-time compose file. The credentials mount lands exactly where the new
+# image reads its login, so leaving it would keep the stale-inode bridge this
+# release removes; the mounts are stripped from the compose file just before
+# the recreate (below). Only `create` seeds the onboarding state, so this
+# session's first launch after the upgrade runs Claude's onboarding and then
+# asks for /login. Say so; the seeded path is one kill + create away.
+LEGACY_AUTH_MOUNTS=0
+if grep -qE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$COMPOSE_FILE" 2>/dev/null; then
+    LEGACY_AUTH_MOUNTS=1
+    printf '\n' >&2
+    printf '  NOTE: this session was created before aidc v1.5.0, when Claude'"'"'s login was\n' >&2
+    printf '        bridged from the host. Claude'"'"'s login now lives inside the session:\n' >&2
+    printf '        the old host mounts are removed by this upgrade, so afterwards Claude\n' >&2
+    printf '        runs its first-launch onboarding and then asks for /login.\n' >&2
+    printf '        To skip onboarding (seeded from your host) recreate the session:\n' >&2
+    printf '            aidc kill %s && aidc create %s ...\n' "$NAME" "$NAME" >&2
+fi
 printf '\n' >&2
 printf '  current image: %s\n' "${OLD_DIGEST:-(unknown)}" >&2
 printf '  new image:     %s (%s)\n' "$NEW_DIGEST" "$NEW_TAG" >&2
@@ -145,6 +164,19 @@ fi
 # (They'd be gone either way -- CLI-14 -- but removing up front keeps it clean.)
 remove_adhoc_forwards "$NAME" "removing adhoc port-forwards (re-add via 'aidc proxy ${NAME} add ...' after upgrade)"
 
+if [ "$LEGACY_AUTH_MOUNTS" -eq 1 ]; then
+    if aidc_strip_legacy_auth_mounts "$COMPOSE_FILE"; then
+        info "removed the pre-v1.5.0 host login mounts from ${COMPOSE_FILE}"
+    else
+        die "could not remove the host login mounts from ${COMPOSE_FILE}; recreate the session instead (aidc kill ${NAME} && aidc create ${NAME} ...)"
+    fi
+fi
+
+# The create-time compose file pins the dev image at the tag current back then;
+# left alone, --force-recreate would bring the container back on that OLD tag.
+aidc_set_compose_dev_image "$COMPOSE_FILE" "$NEW_TAG" \
+    || die "could not point ${COMPOSE_FILE} at ${NEW_TAG}; recreate the session instead (aidc kill ${NAME} && aidc create ${NAME} ...)"
+
 info "swapping ${DEV_CT} onto ${NEW_TAG}"
 # `up -d --force-recreate --no-deps dev` is the atomic swap primitive:
 #   --force-recreate    rebuild the dev container even if config looks fine
@@ -163,6 +195,13 @@ fi
 info "waiting for ${DEV_CT} setup to finish..."
 if ! wait_for_dev_ready "$NAME"; then
     die "dev container did not become ready in time; check 'docker logs ${DEV_CT}'"
+fi
+
+# Prove the swap happened rather than report the intent: the recreated
+# container's image id must be the one we resolved for NEW_TAG.
+GOT_DIGEST=$(docker inspect "$DEV_CT" --format '{{.Image}}' 2>/dev/null || true)
+if [ "$GOT_DIGEST" != "$NEW_DIGEST" ]; then
+    die "${DEV_CT} came back on ${GOT_DIGEST:-(unknown)}, not ${NEW_TAG} (${NEW_DIGEST}); check ${COMPOSE_FILE}"
 fi
 
 info "upgraded ${DEV_CT} to ${NEW_TAG}"

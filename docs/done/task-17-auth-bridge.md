@@ -1,5 +1,7 @@
 # task-17: Host-Side Auth Bridge Daemon
 
+> **Superseded.** Since the container owns its Claude config directory (requirement CTR-13; README "Claude auth"), no host credentials are bridged and this daemon, `aidc reauth`, and the Keychain extraction no longer exist. Kept as the record of the earlier design.
+
 ## Objective
 
 Close the gap where a host `claude /login` (caused by Anthropic revoking refresh tokens, OAuth client rotation, or a token-format migration) leaves in-container Claude installs stuck on the rejected old token forever — recoverable today only by `aidc kill && aidc create`.

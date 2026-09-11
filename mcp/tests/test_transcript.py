@@ -8,15 +8,21 @@ isSidechain/isCompactSummary/isVisibleInTranscriptOnly skip flags.
 from pathlib import Path
 
 from aidc_mcp.transcript import (
+    TERMINAL_PROMPT_NOTE,
     Turn,
     Watermark,
+    consume_sent_prompt,
     delay_for_attempt,
     extract_completed_turns,
+    human_prompt_text,
     load_watermark,
     objs_after_uuid,
     parse_jsonl,
+    record_sent_prompt,
+    render_delivery,
     resolve_active_transcript,
     save_watermark,
+    sent_prompts_path,
     watermark_path,
 )
 
@@ -100,7 +106,7 @@ class TestExtractTurns:
     def test_simple_single_turn(self):
         objs = [_user("u1", "hi"), _assistant("a1", [_text("hello")], "end_turn")]
         turns = extract_completed_turns(objs)
-        assert turns == [Turn(terminal_uuid="a1", text="hello")]
+        assert turns == [Turn(terminal_uuid="a1", text="hello", prompts=("hi",))]
 
     def test_tool_use_lines_continue_turn_until_terminal(self):
         objs = [
@@ -112,7 +118,7 @@ class TestExtractTurns:
         ]
         turns = extract_completed_turns(objs)
         # Tool-result does NOT break the turn; intermediate + final text accumulate.
-        assert turns == [Turn(terminal_uuid="a2", text="working\ndone")]
+        assert turns == [Turn(terminal_uuid="a2", text="working\ndone", prompts=("do it",))]
 
     def test_tool_result_user_line_is_not_a_turn_boundary(self):
         # A bare tool_result (no text) must not start a new turn or be delivered.
@@ -123,7 +129,7 @@ class TestExtractTurns:
              "content": [{"type": "tool_result", "content": "data"}]}},
             _assistant("a2", [_text("final")], "end_turn"),
         ]
-        assert extract_completed_turns(objs) == [Turn("a2", "final")]
+        assert extract_completed_turns(objs) == [Turn("a2", "final", prompts=("go",))]
 
     def test_stop_sequence_also_completes(self):
         objs = [_user("u1", "x"), _assistant("a1", [_text("y")], "stop_sequence")]
@@ -136,7 +142,7 @@ class TestExtractTurns:
     def test_excludes_thinking_and_tool_use_blocks(self):
         objs = [_user("u1", "x"),
                 _assistant("a1", [_thinking(), _text("answer"), _tool()], "end_turn")]
-        assert extract_completed_turns(objs) == [Turn("a1", "answer")]
+        assert extract_completed_turns(objs) == [Turn("a1", "answer", prompts=("x",))]
 
     def test_skips_sidechain(self):
         objs = [_user("u1", "x"),
@@ -153,7 +159,7 @@ class TestExtractTurns:
             _user("u1", "real prompt"),
             _assistant("a1", [_text("real answer")], "end_turn"),
         ]
-        assert extract_completed_turns(objs) == [Turn("a1", "real answer")]
+        assert extract_completed_turns(objs) == [Turn("a1", "real answer", prompts=("real prompt",))]
 
     def test_api_error_turn_marked_not_ok(self):
         objs = [_user("u1", "x"),
@@ -607,3 +613,221 @@ class TestResolveActive:
         assert resolve_active_transcript(tmp_path) is None  # only a symlink present
         real = tmp_path / "real.jsonl"; real.write_text("{}")
         assert resolve_active_transcript(tmp_path) == real  # picks the regular file
+
+
+# --- terminal-typed prompt attribution ----------------------------------------
+# Shapes below are copied from a live aidc transcript (2026-09-11): a prompt the
+# MCP pasted and one a person typed are IDENTICAL on the wire (origin.kind human,
+# promptSource typed), so what human_prompt_text excludes is everything Claude
+# Code writes on the user's behalf that nobody typed.
+
+def _typed(uuid, text, **extra):
+    return {"type": "user", "uuid": uuid, "promptSource": "typed",
+            "origin": {"kind": "human"}, "entrypoint": "cli",
+            "message": {"role": "user", "content": text}, **extra}
+
+
+class TestHumanPromptText:
+    def test_typed_prompt_is_the_text(self):
+        assert human_prompt_text(_typed("u1", "  next  ")) == "next"
+
+    def test_absent_provenance_fields_count_as_typed(self):
+        # Older transcripts / fixtures carry no promptSource or origin.
+        assert human_prompt_text(_user("u1", "plain")) == "plain"
+
+    def test_meta_lines_are_not_typed(self):
+        hook = _typed("u1", "Stop hook feedback:\n[...]", isMeta=True)
+        cont = {"type": "user", "uuid": "u2", "isMeta": True,
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": "Continue from where you left off."}]}}
+        assert human_prompt_text(hook) == ""
+        assert human_prompt_text(cont) == ""
+
+    def test_system_sourced_prompts_are_not_typed(self):
+        note = {"type": "user", "uuid": "u1", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>...</task-notification>"}}
+        assert human_prompt_text(note) == ""
+        # Either marker alone is enough.
+        assert human_prompt_text(_typed("u2", "x", promptSource="system")) == ""
+        assert human_prompt_text(_typed("u3", "x", origin={"kind": "task-notification"})) == ""
+
+    def test_local_command_output_is_not_typed(self):
+        out = _user("u1", "<local-command-stdout>Login successful</local-command-stdout>")
+        caveat = _user("u2", "<local-command-caveat>Caveat: ...</local-command-caveat>")
+        assert human_prompt_text(out) == ""
+        assert human_prompt_text(caveat) == ""
+
+    def test_interrupt_marker_is_not_typed(self):
+        obj = {"type": "user", "uuid": "u1", "interruptedMessageId": "msg_1",
+               "message": {"role": "user",
+                           "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
+        assert human_prompt_text(obj) == ""
+        # The tool-use variant carries no interruptedMessageId; the text alone decides.
+        bare = _user("u2", "[Request interrupted by user for tool use]")
+        assert human_prompt_text(bare) == ""
+
+    def test_bash_mode_lines_are_not_typed(self):
+        """`!` bash mode: the input and its output are wrapped and provenance-less,
+        and the output can hold anything the shell printed (an auth code, say)."""
+        assert human_prompt_text(_user("u1", "<bash-input>gh auth login</bash-input>")) == ""
+        assert human_prompt_text(_user("u2", "<bash-stdout>! First copy your code: XYZ</bash-stdout>")) == ""
+
+    def test_any_unknown_wrapper_tag_is_not_typed(self):
+        # Fail closed on wrappers not seen yet: the only tagged line a person
+        # types is a slash command.
+        assert human_prompt_text(_user("u1", "<some-future-wrapper>x</some-future-wrapper>")) == ""
+        assert human_prompt_text(_typed("u2", "<ide_selection>foo</ide_selection>")) == ""
+
+    def test_command_message_first_wrapper_still_renders_the_command(self):
+        raw = ("<command-message>run</command-message>"
+               "<command-name>/run</command-name><command-args>the app</command-args>")
+        assert human_prompt_text(_user("u1", raw)) == "/run the app"
+
+    def test_prose_mentioning_a_tag_mid_sentence_is_typed(self):
+        assert human_prompt_text(_typed("u1", "the <div> is misaligned")) == "the <div> is misaligned"
+
+    def test_slash_command_rendered_compactly(self):
+        raw = ("<command-name>/goal</command-name>\n            "
+               "<command-message>goal</command-message>\n            "
+               "<command-args>finish the build plan</command-args>")
+        assert human_prompt_text(_user("u1", raw)) == "/goal finish the build plan"
+        bare = "<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>"
+        assert human_prompt_text(_user("u2", bare)) == "/clear"
+
+    def test_non_text_and_malformed_lines_are_empty(self):
+        assert human_prompt_text({"type": "user", "uuid": "u1", "message": "junk"}) == ""
+        assert human_prompt_text(_tool_result()) == ""
+
+
+class TestTurnPrompts:
+    def test_each_turn_carries_its_own_prompt(self):
+        objs = [_typed("u1", "first"), _assistant("a1", [_text("r1")], "end_turn"),
+                _typed("u2", "second"), _assistant("a2", [_text("r2")], "end_turn")]
+        assert [t.prompts for t in extract_completed_turns(objs)] == [("first",), ("second",)]
+
+    def test_consecutive_prompts_accumulate_onto_the_next_turn(self):
+        """An auto-continue (meta) then the person's ask, with no assistant line
+        between: the ask must not be lost to the boundary flush of the meta line."""
+        cont = {"type": "user", "uuid": "u1", "isMeta": True,
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": "Continue from where you left off."}]}}
+        objs = [cont, _typed("u2", "please do as asked above"),
+                _assistant("a1", [_text("ok")], "end_turn")]
+        assert extract_completed_turns(objs) == [
+            Turn("a1", "ok", prompts=("please do as asked above",)),
+        ]
+
+    def test_two_typed_prompts_both_kept(self):
+        objs = [_typed("u1", "/login"), _typed("u2", "please continue"),
+                _assistant("a1", [_text("ok")], "end_turn")]
+        assert extract_completed_turns(objs)[0].prompts == ("/login", "please continue")
+
+    def test_hook_feedback_after_the_prompt_is_excluded(self):
+        objs = [_typed("u1", "ship it"),
+                _typed("u2", "Stop hook feedback: BLOCKED", isMeta=True),
+                _assistant("a1", [_text("ok")], "end_turn")]
+        assert extract_completed_turns(objs)[0].prompts == ("ship it",)
+
+    def test_tool_result_between_does_not_reset_prompts(self):
+        objs = [_typed("u1", "go"), _assistant("a1", [_tool()], "tool_use"),
+                _tool_result(), _assistant("a2", [_text("done")], "end_turn")]
+        assert extract_completed_turns(objs)[0].prompts == ("go",)
+
+    def test_continuation_without_a_prompt_has_none(self):
+        # A read window that starts mid-conversation (resume after a delivered
+        # terminal): the next segment has no prompt of its own.
+        objs = [_assistant("a2", [_text("more")], "end_turn")]
+        assert extract_completed_turns(objs) == [Turn("a2", "more")]
+
+    def test_prompt_of_a_system_sourced_turn_is_empty(self):
+        note = {"type": "user", "uuid": "u1", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        objs = [note, _assistant("a1", [_text("noted")], "end_turn")]
+        assert extract_completed_turns(objs)[0].prompts == ()
+
+    def test_ask_turn_carries_prompt_and_continuation_does_not(self):
+        objs = [_typed("u1", "decide"), _assistant("a1", [_ask()], "tool_use"),
+                _tool_result("tr", "A"), _assistant("a2", [_text("chose A")], "end_turn")]
+        turns = extract_completed_turns(objs)
+        assert [t.prompts for t in turns] == [("decide",), ()]
+
+
+class TestSentPromptRecord:
+    def test_record_then_consume_once(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", "fix the test")
+        assert consume_sent_prompt(tmp_path, "s", "fix the test") is True
+        assert consume_sent_prompt(tmp_path, "s", "fix the test") is False  # consumed
+
+    def test_unrecorded_prompt_does_not_match(self, tmp_path):
+        assert consume_sent_prompt(tmp_path, "s", "next") is False
+        record_sent_prompt(tmp_path, "s", "something else")
+        assert consume_sent_prompt(tmp_path, "s", "next") is False
+
+    def test_same_words_sent_twice_match_twice_not_thrice(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", "continue")
+        record_sent_prompt(tmp_path, "s", "continue")
+        assert consume_sent_prompt(tmp_path, "s", "continue")
+        assert consume_sent_prompt(tmp_path, "s", "continue")
+        assert not consume_sent_prompt(tmp_path, "s", "continue")
+
+    def test_whitespace_differences_still_match(self, tmp_path):
+        # session_send folds newlines to spaces; Claude Code trims. Nothing else.
+        record_sent_prompt(tmp_path, "s", "line one\nline two  ")
+        assert consume_sent_prompt(tmp_path, "s", "line one line two") is True
+
+    def test_is_per_session(self, tmp_path):
+        record_sent_prompt(tmp_path, "a", "hi")
+        assert consume_sent_prompt(tmp_path, "b", "hi") is False
+        assert consume_sent_prompt(tmp_path, "a", "hi") is True
+
+    def test_entries_expire(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", "old", now_fn=lambda: 1000.0)
+        late = 1000.0 + 24 * 3600 + 1
+        assert consume_sent_prompt(tmp_path, "s", "old", now_fn=lambda: late) is False
+
+    def test_remaining_counts_live_entries(self, tmp_path):
+        from aidc_mcp.transcript import sent_prompts_remaining
+        assert sent_prompts_remaining(tmp_path, "s") == 0
+        record_sent_prompt(tmp_path, "s", "a", now_fn=lambda: 1000.0)
+        record_sent_prompt(tmp_path, "s", "b", now_fn=lambda: 1000.0)
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1001.0) == 2
+        consume_sent_prompt(tmp_path, "s", "a", now_fn=lambda: 1001.0)
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1001.0) == 1
+        assert sent_prompts_remaining(tmp_path, "s", now_fn=lambda: 1000.0 + 24 * 3600 + 1) == 0
+
+    def test_bounded_by_count_oldest_dropped(self, tmp_path):
+        for i in range(205):
+            record_sent_prompt(tmp_path, "s", f"p{i}")
+        assert consume_sent_prompt(tmp_path, "s", "p0") is False    # evicted
+        assert consume_sent_prompt(tmp_path, "s", "p204") is True   # newest kept
+
+    def test_corrupt_file_is_an_empty_record(self, tmp_path):
+        sent_prompts_path(tmp_path, "s").parent.mkdir(parents=True, exist_ok=True)
+        sent_prompts_path(tmp_path, "s").write_text("{not json")
+        assert consume_sent_prompt(tmp_path, "s", "x") is False
+        record_sent_prompt(tmp_path, "s", "x")   # recovers by rewriting
+        assert consume_sent_prompt(tmp_path, "s", "x") is True
+
+    def test_path_neutralizes_traversal(self, tmp_path):
+        p = sent_prompts_path(tmp_path, "../../etc/passwd")
+        assert p.parent == Path(tmp_path) and p.name.endswith(".sent-prompts.json")
+
+    def test_record_is_atomic_no_leftover_temp(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", "x")
+        assert not list(tmp_path.glob("*.new"))
+
+
+class TestRenderDelivery:
+    def test_no_terminal_prompts_is_the_bare_reply(self):
+        assert render_delivery("reply", []) == "reply"
+
+    def test_terminal_prompt_is_prepended_under_the_note(self):
+        out = render_delivery("the reply", ["what is X?"])
+        assert out.startswith(TERMINAL_PROMPT_NOTE + "\nwhat is X?")
+        assert out.endswith("\n\n---\n\nthe reply")
+
+    def test_multiple_prompts_joined(self):
+        out = render_delivery("r", ["/login", " please continue "])
+        assert "/login\n\nplease continue\n\n---" in out

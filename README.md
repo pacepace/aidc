@@ -558,6 +558,8 @@ aidc attach <name>
 # Ctrl-b 0 → claude window
 ```
 
+You can type into that window yourself. A reply to a prompt you typed there is still delivered to the orchestrator, prefixed with your prompt and a note that it came from the terminal rather than from `session_send`, so the orchestrator is never left guessing where an instruction came from.
+
 **Which tool to use:**
 
 | Tool | Use when |

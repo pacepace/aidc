@@ -13,6 +13,24 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-11
+
+### Fixed
+- **A prompt typed straight into a watched session no longer reaches the orchestrator as
+  an unexplained reply.** A person attached to the session's tmux window can talk to the
+  same Claude the orchestrator drives over `session_send`; the reply came back over the
+  webhook with no trace of the prompt, so the orchestrator read it as an answer to whatever
+  it had last sent and could not tell where the new instructions came from. In the JSONL
+  transcript a pasted prompt and a typed one are identical, so the MCP now keeps a durable,
+  bounded record of every prompt it injects itself (`<session>.sent-prompts.json` beside
+  the watermarks) and, at delivery, prepends any prompt on the turn that is *not* in that
+  record — under a note saying the user typed it at the terminal — so the reply reads in
+  context. Slash commands are rendered as `/name args`; hook feedback, task notifications,
+  auto-continues, interrupt markers, and any wrapped line (local-command output, `!`
+  bash-mode input and output) are never attributed to the person. The callback
+  payload gains `prompt_origin` (`terminal` / `orchestrator` / `""`); the exactly-once
+  ledger still keys on the bare reply, so replay protection is unchanged.
+
 ## [1.4.0] - 2026-09-10
 
 ### Added
@@ -783,7 +801,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/pacepace/aidc/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/pacepace/aidc/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/pacepace/aidc/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/pacepace/aidc/compare/v1.2.0...v1.3.0

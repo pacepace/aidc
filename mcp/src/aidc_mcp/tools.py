@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -436,11 +437,48 @@ def _write_send_dead_letter(session: str, prompt: str, reason: str) -> None:
                   error_type=type(exc).__name__)
 
 
-async def _inject(container: str, text: str, window: str) -> bool:
-    """Paste one prompt into the window and press Enter. True when it went in."""
+def _record_sent(name: str, text: str) -> None:
+    """Remember a prompt the MCP just injected into `name`'s pane, so the drain can
+    tell it apart from one a person typed at the terminal (see
+    ts.record_sent_prompt). Best-effort: a failure to persist must not fail the
+    send that already landed — it degrades to that one reply carrying a
+    terminal-typed note it should not have, which the audit line explains."""
+    try:
+        ts.record_sent_prompt(_WATCHER_STATE_DIR, name, text)
+    except OSError as exc:
+        log_event("session_send_record_failed", session=name, prompt_len=len(text),
+                  error_type=type(exc).__name__, error=repr(exc))
+
+
+def _terminal_prompts(session: str, prompts: tuple[str, ...], state_dir: Path) -> list[str]:
+    """The subset of a turn's opening prompts that a PERSON typed at the terminal:
+    every prompt that does not match one the MCP itself injected (each match
+    consumes its record entry). A record that cannot be updated counts the prompt
+    as the MCP's own — an orchestrator prompt mislabelled as the person's is the
+    confusion this exists to remove, so it is the side never to err on."""
+    typed: list[str] = []
+    for prompt in prompts:
+        try:
+            if not ts.consume_sent_prompt(state_dir, session, prompt):
+                typed.append(prompt)
+        except OSError as exc:
+            log_event("transcript_sent_record_failed", session=session,
+                      error_type=type(exc).__name__, error=repr(exc))
+    return typed
+
+
+async def _inject(container: str, text: str, window: str, *, session: str) -> bool:
+    """Paste one prompt into the window and press Enter. True when it went in.
+
+    The ONLY way a prompt reaches the pane, so it is also the only place the send
+    record is written: a paste that landed is recorded here, on success, for
+    `session` — the drain tells the orchestrator's prompts from a person's by that
+    record alone, so a paste path that skipped it would ship a reply falsely
+    framed as answering something the person typed."""
     if not await _load_and_paste(container, text, window):
         return False
     await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
+    _record_sent(session, text)
     # Let the turn visibly start before the caller releases the send lock, so a
     # rapid follow-up's idle check sees a turn in flight rather than the pre-send
     # pane still looking stable.
@@ -493,7 +531,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     waited += 1
                     continue
                 text, attempts = queue[0]
-                if await _inject(container, text, _SESSION_WINDOW):
+                if await _inject(container, text, _SESSION_WINDOW, session=name):
                     queue.pop(0)
                     log_event("session_send_queued_injected", session=name,
                               prompt_len=len(text), remaining=len(queue))
@@ -684,8 +722,13 @@ async def _post_turn(
                 # (set when its own send is accepted) and needs this to know which
                 # session just became READY -- without it a multi-session
                 # conversation cannot tell whose reply arrived.
+                # ``prompt_origin`` says whose prompt this turn answers: "terminal"
+                # (a person typed it at the session's pane — the content then opens
+                # with that prompt), "orchestrator" (a prompt this MCP injected),
+                # or "" (unknown: a continuation, or a prompt Claude Code
+                # synthesized). Informational; the content already reads right.
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
-                      "session": session},
+                      "session": session, "prompt_origin": turn.prompt_origin},
                 headers={"Authorization": f"Bearer {bearer}"},
             )
         elapsed_s = round(time.monotonic() - start, 3)
@@ -1111,12 +1154,43 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     # turns in the same pass also dedup against each other.
     delivered_fps = ts.load_delivered(state_dir, session, conversation_id)
     for turn in new:
+        # Whose prompt does this turn answer? A person at the session's tmux pane
+        # can type straight into Claude, and that reply comes over this same
+        # webhook — but the orchestrator never saw the prompt, so it read the
+        # reply as an answer to whatever IT last sent. Prompts that match the
+        # MCP's own send record are the orchestrator's; the rest were typed at the
+        # terminal and are prepended to the delivered content so the reply reads
+        # in context. Resolved for EVERY turn (empty ones too) so each injected
+        # prompt consumes its record entry exactly once. The ledger fingerprint
+        # stays on the bare reply (turn.text): a re-surfaced turn must dedup even
+        # though its record entry is gone by then and its framing would differ —
+        # and a re-surfaced turn is NOT attributed at all, or its (already consumed)
+        # prompt would eat a fresh record entry meant for the next identical send.
+        fingerprint = "" if turn.is_empty else ts.content_fingerprint(turn.text)
+        already_delivered = bool(fingerprint) and fingerprint in delivered_fps
+        terminal_prompts = (
+            [] if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
+        )
+        outgoing = dataclasses.replace(
+            turn,
+            text=ts.render_delivery(turn.text, terminal_prompts),
+            prompt_origin=("terminal" if terminal_prompts
+                           else "orchestrator" if turn.prompts else ""),
+        )
+        if terminal_prompts:
+            # record_remaining is the health signal: entries that keep piling up
+            # while replies arrive mean matching has drifted (every reply would then
+            # carry the note), which a real typed prompt never causes.
+            log_event("transcript_terminal_prompt", session=session,
+                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
+                      prompts=len(terminal_prompts),
+                      prompt_len=sum(len(p) for p in terminal_prompts),
+                      record_remaining=ts.sent_prompts_remaining(state_dir, session))
         if turn.is_empty:
             log_event("transcript_empty_turn", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         else:
-            fingerprint = ts.content_fingerprint(turn.text)
-            if fingerprint in delivered_fps:
+            if already_delivered:
                 # Already delivered this exact content to this conversation. A
                 # watermark bug re-surfaced it; drop it at the door. This is NOT a
                 # loop-guard event (it is a re-read, not a fresh echo) and is never
@@ -1141,18 +1215,18 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 mark.consecutive_deliveries += 1
                 mark.last_delivery_at = wall_now
                 if mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE:
-                    _write_dead_letter(state_dir, session, conversation_id, turn)
+                    _write_dead_letter(state_dir, session, conversation_id, outgoing)
                     log_event("transcript_delivery_loop_guard_tripped", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                               consecutive_deliveries=mark.consecutive_deliveries,
                               cap=_LOOP_GUARD_MAX_CONSECUTIVE)
-                elif await _deliver_with_retry(turn, post_fn=post_fn, sleep_fn=sleep_fn):
+                elif await _deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn):
                     # Record ONLY a confirmed delivery, so a dead-lettered or
                     # dropped turn stays eligible for a later resend.
                     delivered_fps.add(fingerprint)
                     ts.record_delivered(state_dir, session, conversation_id, fingerprint)
                 else:
-                    _write_dead_letter(state_dir, session, conversation_id, turn)
+                    _write_dead_letter(state_dir, session, conversation_id, outgoing)
                     log_event("transcript_delivery_abandoned", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         mark.last_delivered_uuid = turn.terminal_uuid
@@ -1801,7 +1875,7 @@ def register(app: Any) -> None:
                     )
                 log_event("tool_call", tool="session_send_queued", session=name,
                           prompt_len=len(prompt), depth=queued_depth)
-            elif not await _inject(container, sanitized, _SESSION_WINDOW):
+            elif not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                 log_event("tool_call", tool="session_send_failed", session=name,
                           prompt_len=len(prompt), reason="paste_failed")
                 return _envelope_err("failed to inject prompt into session window")
@@ -1928,12 +2002,9 @@ def register(app: Any) -> None:
                 baseline = await _capture_pane(container, _SESSION_WINDOW)
 
                 sanitized = turn_prompt.replace("\n", " ").strip()
-                if not await _load_and_paste(container, sanitized, _SESSION_WINDOW):
+                if not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                     err = f"failed to inject turn {i + 1}"
                     return _envelope_err(err, {"completed_turns": transcript})
-                await _tmux_exec(container, ["send-keys", "-t", f"main:{_SESSION_WINDOW}", "Enter"])
-
-                await asyncio.sleep(2.0)
 
                 if not await _wait_for_idle(container, _SESSION_WINDOW, timeout=_TURN_TIMEOUT_S):
                     err = f"timed out waiting for response to turn {i + 1}"

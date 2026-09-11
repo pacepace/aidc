@@ -192,6 +192,23 @@ EOF
     docker build -t "$tag" -f "$dockerfile" "$context"
 }
 
+# Retire the host-side auth-bridge watcher that aidc < 1.5.0 left running on
+# macOS. It was a nohup-detached loop whose only stop paths were commands that
+# no longer exist, so a host that upgraded the CLI would otherwise keep a
+# Keychain poller alive until reboot, rewriting credentials files nobody
+# reads. Idempotent and silent when there is nothing to retire; called from
+# `aidc create` and `aidc kill`, the commands every host runs eventually.
+aidc_retire_auth_bridge() {
+    local dir="${HOME}/.config/aidc" pid
+    [ -e "${dir}/auth-bridge.pid" ] || [ -e "${dir}/auth-bridge.log" ] || [ -e "${dir}/auth-bridge.disabled" ] || return 0
+    pid=$(cat "${dir}/auth-bridge.pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        info "retired the auth-bridge watcher (pid ${pid}) left by an earlier aidc; logins now live inside each session"
+    fi
+    rm -f "${dir}/auth-bridge.pid" "${dir}/auth-bridge.log" "${dir}/auth-bridge.disabled"
+}
+
 # ---- adhoc port-forward sidecars --------------------------------------------
 #
 # `aidc proxy <session> add` launches one socat sidecar per forward, named

@@ -40,8 +40,15 @@ cat > "$HOST" <<'EOF'
   "editorMode": "vim",
   "numStartups": 42,
   "oauthAccount": {"emailAddress": "someone@example.com", "organizationUuid": "org-1"},
+  "primaryApiKey": "sk-ant-api03-not-for-the-container",
+  "customApiKeyResponses": {"approved": ["abcd"]},
+  "mcpServers": {"corp": {"command": "x", "env": {"CORP_TOKEN": "hunter2"}}},
+  "someFutureAccessToken": "leak",
+  "claudeCodeFirstTokenDate": "2026-01-01",
   "projects": {
-    "/code/org/app": {"hasTrustDialogAccepted": true, "allowedTools": ["Bash"]},
+    "/code/org/app": {"hasTrustDialogAccepted": true, "allowedTools": ["Bash"],
+                      "history": [{"display": "host prompt text"}],
+                      "mcpServers": {"proj": {"command": "y", "env": {"K": "v"}}}},
     "/code/org/lib": {"hasTrustDialogAccepted": true},
     "/code/org/app/sub": {"hasTrustDialogAccepted": true},
     "/code/other": {"hasTrustDialogAccepted": true, "history": [{"display": "secret prompt"}]},
@@ -56,6 +63,18 @@ aidc_claude_state_seed "$HOST" /code/org/app /code/org/app > "$OUT"
 assert "output is valid JSON" "jq -e . '$OUT'"
 assert "onboarding state is kept" "jq -e '.hasCompletedOnboarding == true and .theme == \"dark\" and .editorMode == \"vim\"' '$OUT'"
 assert "host account is dropped" "jq -e 'has(\"oauthAccount\") | not' '$OUT'"
+assert "API key, approved-key hashes and user MCP servers are dropped" \
+    "jq -e '(has(\"primaryApiKey\") or has(\"customApiKeyResponses\") or has(\"mcpServers\")) | not' '$OUT'"
+assert "a key that merely LOOKS like a secret is dropped too (name pattern)" \
+    "jq -e '(has(\"someFutureAccessToken\") or has(\"claudeCodeFirstTokenDate\")) | not' '$OUT'"
+assert "no remaining top-level key matches the secret-name pattern" \
+    "jq -e '[keys[] | test(\"apikey|token|secret|credential|password|oauth|mcp\"; \"i\")] | any | not' '$OUT'"
+assert "this repo's prompt history is not copied" \
+    "jq -e '.projects[\"/code/org/app\"] | has(\"history\") | not' '$OUT'"
+assert "this repo's project-scope MCP servers are not copied" \
+    "jq -e '.projects[\"/code/org/app\"] | has(\"mcpServers\") | not' '$OUT'"
+assert "this repo's allowed-tools list is kept" \
+    "jq -e '.projects[\"/code/org/app\"].allowedTools == [\"Bash\"]' '$OUT'"
 assert "this repo's project entry is kept" "jq -e '.projects[\"/code/org/app\"].hasTrustDialogAccepted == true' '$OUT'"
 assert "a subdirectory of the repo is kept" "jq -e '.projects | has(\"/code/org/app/sub\")' '$OUT'"
 assert "a sibling project is dropped" "jq -e '.projects | has(\"/code/org/lib\") | not' '$OUT'"

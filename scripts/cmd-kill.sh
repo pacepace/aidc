@@ -32,6 +32,7 @@ esac
 NAME="${1:-}"
 validate_session_name "$NAME"
 require_docker
+aidc_retire_auth_bridge
 session_exists "$NAME" || die "no such session: $NAME"
 
 DEV="$(container_name "$NAME" dev)"

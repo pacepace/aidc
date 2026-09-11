@@ -168,16 +168,20 @@ assert "CLAUDE_CONFIG_DIR points Claude's state at the dev-home volume" \
 # path Claude reads under CLAUDE_CONFIG_DIR, and settings.json is bridged too.
 assert "host per-project memory dir is mounted read-write at Claude's projects path" \
     "docker inspect -f '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' aidc-${SESSION}-dev | tr ' ' '\\n' | grep -q '^/home/vscode/.claude/projects/.*=true$'"
-assert "Claude resolves its projects dir to that mount" \
-    "dev_exec 'test \"\$(readlink -f \"\$CLAUDE_CONFIG_DIR/projects\")\" = /home/vscode/.claude/projects'"
+SMOKE_ENC=$(printf '%s' "$TMP_REPO" | tr '/.' '-')
+SMOKE_PROBE="$HOME/.claude/projects/${SMOKE_ENC}/.aidc-smoke-probe"
+touch "$SMOKE_PROBE"
+assert "a file the host writes into the project memory dir is visible where Claude reads it" \
+    "dev_exec 'test -e \"\$CLAUDE_CONFIG_DIR/projects/${SMOKE_ENC}/.aidc-smoke-probe\"'"
+rm -f "$SMOKE_PROBE"
 if [ -f "$HOME/.claude.json" ]; then
     # Existence alone would also pass for a file Claude created itself on a
     # missed seed; the onboarding flag is what only the seed can carry over.
     HOST_ONBOARDED=$(jq -r '.hasCompletedOnboarding // false' "$HOME/.claude.json" 2>/dev/null || echo false)
     assert "seeded ~/.claude.json carries the host's onboarding state (${HOST_ONBOARDED})" \
         "dev_exec 'jq -e \".hasCompletedOnboarding // false | . == ${HOST_ONBOARDED}\" /home/vscode/.claude/.claude.json'"
-    assert "seeded ~/.claude.json carries no host account" \
-        "! dev_exec 'grep -q oauthAccount /home/vscode/.claude/.claude.json'"
+    assert "seeded ~/.claude.json carries no account, key, token or MCP definition" \
+        "dev_exec 'jq -e \"[keys[] | test(\\\"apikey|token|secret|credential|password|oauth|mcp\\\"; \\\"i\\\")] | any | not\" /home/vscode/.claude/.claude.json'"
 fi
 echo
 

@@ -131,6 +131,7 @@ done
 
 validate_session_name "$NAME"
 require_docker
+aidc_retire_auth_bridge
 require_cmd jq envsubst
 
 # ---- pre-flight: existing session? -------------------------------------------
@@ -312,7 +313,7 @@ for _role in squid refresher policy audit dev-base; do
 done
 unset _role
 
-# ---- Claude Code memory + auth bridging --------------------------------------
+# ---- Claude Code memory bridge -----------------------------------------------
 #
 # Claude Code stores per-project memory at:
 #   $HOME/.claude/projects/<encoded-repo-path>/
@@ -326,7 +327,7 @@ unset _role
 ENCODED_REPO=$(printf '%s' "$REPO_PATH" | sed 's|[/.]|-|g')
 HOST_CLAUDE_PROJECT_DIR="${HOME}/.claude/projects/${ENCODED_REPO}"
 
-# Memory mount toggleable via config. Auth is always mounted (see below).
+# Memory mount toggleable via config.
 CLAUDE_MEMORY_MOUNT=""
 if [ "${AIDC_SHARE_MEMORY:-true}" = "true" ]; then
     mkdir -p "$HOST_CLAUDE_PROJECT_DIR"

@@ -15,7 +15,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
 - `settings.json` — env vars, status line, editor mode.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
-- Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust decision, so the first launch goes straight to the login prompt. Your account is not copied.
+- Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
 
 Claude auth is deliberately **not** bridged. The container owns its Claude config directory and you log in inside it once (or configure a long-lived token). See [Claude auth](#claude-auth--the-container-logs-in-on-its-own).
 
@@ -348,7 +348,7 @@ Glob patterns supported. The expansion happens at `aidc create` time. `**` (recu
 
 Each session owns its Claude config directory: `CLAUDE_CONFIG_DIR=/home/vscode/.claude`, on the session's `dev-home` volume, the same layout Anthropic's reference devcontainer uses. Credentials, `.claude.json` and session state live there. Nothing auth-related is bind-mounted from the host.
 
-**Why not share the host's login?** Claude Code replaces `.credentials.json` and `.claude.json` by writing a new file and renaming it into place, on every refresh and every `/login`. Many Claude processes on one host coexist because they share the same *directory*: a write lock serialises refreshes and each process re-reads the file when it changes. A single-file bind mount breaks both halves. After the host's first refresh the container is left holding the old inode ([anthropics/claude-code#18443](https://github.com/anthropics/claude-code/issues/18443)), and the container's own writes fail because you cannot rename over a mount point. That is what made in-container logins expire after a few hours and account switches not stick.
+**Why not share the host's login?** Claude Code replaces `.credentials.json` and `.claude.json` by writing a new file and renaming it into place, on every refresh and every `/login`. Many Claude processes on one host coexist because they share the same *directory*: a write lock serialises refreshes and each process re-reads the file when it changes. A single-file bind mount breaks both halves. After the host's first refresh the container is left holding the old inode ([anthropics/claude-code#18443](https://github.com/anthropics/claude-code/issues/18443)), and the container's own writes fail because you cannot rename over a mount point. That is what made in-container logins expire after a few hours and account switches not stick. Sharing the whole `~/.claude` *directory* would keep the renames working, but it hands the sandboxed container every project's memory and history, and `~/.claude.json` sits at the home root outside any directory that could be shared, so the container gets its own.
 
 **Two ways in. Both are supported; pick per host.**
 

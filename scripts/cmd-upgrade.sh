@@ -126,6 +126,21 @@ if [ "$(aidc_session_egress_mode "$NAME")" = "direct" ]; then
     printf '        at create time. To enforce, recreate the session instead:\n' >&2
     printf '            aidc kill %s && aidc create %s ...\n' "$NAME" "$NAME" >&2
 fi
+# A session created before the container owned its Claude login (v1.5.0) still
+# carries the host's ~/.claude.json and .credentials.json bind mounts in its
+# create-time compose file. The new image reads neither (CLAUDE_CONFIG_DIR),
+# and only `create` seeds the onboarding state, so this session's first launch
+# after the upgrade runs Claude's onboarding and then asks for /login. Say so;
+# the seeded path is one kill + create away.
+if grep -qE '/home/vscode/\.claude\.json:ro|/home/vscode/\.claude/\.credentials\.json' "$COMPOSE_FILE" 2>/dev/null; then
+    printf '\n' >&2
+    printf '  NOTE: this session was created before aidc v1.5.0, when Claude'"'"'s login was\n' >&2
+    printf '        bridged from the host. The new image keeps Claude'"'"'s login inside the\n' >&2
+    printf '        session instead and ignores those old mounts, so after this upgrade\n' >&2
+    printf '        Claude runs its first-launch onboarding and then asks for /login.\n' >&2
+    printf '        To skip onboarding (seeded from your host) recreate the session:\n' >&2
+    printf '            aidc kill %s && aidc create %s ...\n' "$NAME" "$NAME" >&2
+fi
 printf '\n' >&2
 printf '  current image: %s\n' "${OLD_DIGEST:-(unknown)}" >&2
 printf '  new image:     %s (%s)\n' "$NEW_DIGEST" "$NEW_TAG" >&2

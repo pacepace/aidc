@@ -25,16 +25,20 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   That is why in-container logins expired after a few hours and why `/login` with
   another account never took. Onboarding state (theme, output style, this project's
   trust) is seeded once from the host's `~/.claude.json` without the account, so the
-  first launch goes straight to the login prompt. Memory, settings and plugins are
-  bridged exactly as before. The long-lived token path (`aidc claude-token`) is
-  unchanged and still skips the login, at the cost of Remote Control. Sessions
-  created before this version keep their old bind mounts through `restart` and
-  `upgrade`; `aidc kill` + `aidc create` moves one onto the new model.
+  first launch goes straight to the login prompt; API keys, MCP server definitions
+  and prompt history are never copied. Memory, settings and plugins are bridged
+  exactly as before. The long-lived token path (`aidc claude-token`) is unchanged
+  and still skips the login, at the cost of Remote Control. A session created
+  before this version can be upgraded, but its first launch afterwards runs
+  Claude's onboarding and then asks for `/login` (`aidc upgrade` says so);
+  `aidc kill` + `aidc create` gives it the seeded start instead.
 
 ### Removed
 - `aidc auth-bridge` (the macOS Keychain sync daemon), `aidc reauth`, the per-session
   Keychain extraction, and the `share_auth` config key. With nothing bridged there is
   nothing to keep fresh; a session that says "Please run /login" just needs a `/login`.
+  A watcher left running by an earlier aidc on macOS is stopped, and its pid, log
+  and sentinel files removed, by the next `aidc create` or `aidc kill`.
 
 ## [1.4.1] - 2026-09-11
 

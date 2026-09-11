@@ -29,9 +29,17 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   and prompt history are never copied. Memory, settings and plugins are bridged
   exactly as before. The long-lived token path (`aidc claude-token`) is unchanged
   and still skips the login, at the cost of Remote Control. A session created
-  before this version can be upgraded, but its first launch afterwards runs
-  Claude's onboarding and then asks for `/login` (`aidc upgrade` says so);
-  `aidc kill` + `aidc create` gives it the seeded start instead.
+  before this version can be upgraded: `aidc upgrade` removes its old host login
+  mounts and says so, and its first launch afterwards runs Claude's onboarding and
+  then asks for `/login`; `aidc kill` + `aidc create` gives it the seeded start.
+
+### Fixed
+- **`aidc upgrade` now actually moves a session onto the new version's image.** It
+  recreated the dev container from the compose file rendered at create time, which
+  pins the dev image at the tag current back then, so across a version bump the
+  container came back on the old image while the command reported the new one. The
+  dev image line is now pointed at the current tag before the recreate, and the
+  command verifies the recreated container's image id before reporting success.
 
 ### Removed
 - `aidc auth-bridge` (the macOS Keychain sync daemon), `aidc reauth`, the per-session

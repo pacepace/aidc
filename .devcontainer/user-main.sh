@@ -11,6 +11,16 @@ log() { printf '[aidc-user-main] %s\n' "$*" >&2; }
 # overwrite it, or a restart/upgrade would undo the login.
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CLAUDE_STATE_SEED=/var/aidc/audit/claude-state-seed.json
+# A session created before v1.5.0 bind-mounted the host's login files here;
+# Docker materialises a bind-mount target as an empty file, and that empty
+# file outlives the mount in the volume once `aidc upgrade` strips it. An empty
+# credentials file is not a login and an empty .claude.json is not state, so
+# clear them before Claude reads either.
+for _placeholder in "${CLAUDE_CONFIG_DIR}/.credentials.json" "${HOME}/.claude.json"; do
+    if [ -f "$_placeholder" ] && [ ! -s "$_placeholder" ]; then
+        rm -f "$_placeholder" && log "removed empty pre-v1.5.0 mount placeholder ${_placeholder}"
+    fi
+done
 if [ ! -e "${CLAUDE_CONFIG_DIR}/.claude.json" ] && [ -s "$CLAUDE_STATE_SEED" ]; then
     if mkdir -p "$CLAUDE_CONFIG_DIR" \
         && ( umask 0077; cp "$CLAUDE_STATE_SEED" "${CLAUDE_CONFIG_DIR}/.claude.json" ); then

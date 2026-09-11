@@ -57,12 +57,14 @@ bash "$WATCHER" & LIVE_PID=$!
 BG_PIDS+=("$LIVE_PID")
 printf '%s\n' "$LIVE_PID" > "$CFG/auth-bridge.pid"
 printf 'old log\n' > "$CFG/auth-bridge.log"
+printf 'older log\n' > "$CFG/auth-bridge.log.1"
+printf 'abc\n' > "$CFG/auth-bridge.last-hash"
 touch "$CFG/auth-bridge.disabled"
 assert "retire returns 0" "aidc_retire_auth_bridge"
 sleep 0.5
 assert "the watcher process is gone" "! kill -0 $LIVE_PID"
-assert "pid, log and sentinel files are removed" \
-    "[ ! -e '$CFG/auth-bridge.pid' ] && [ ! -e '$CFG/auth-bridge.log' ] && [ ! -e '$CFG/auth-bridge.disabled' ]"
+assert "pid, logs, hash and sentinel files are removed" \
+    "[ ! -e '$CFG/auth-bridge.pid' ] && [ ! -e '$CFG/auth-bridge.log' ] && [ ! -e '$CFG/auth-bridge.log.1' ] && [ ! -e '$CFG/auth-bridge.last-hash' ] && [ ! -e '$CFG/auth-bridge.disabled' ]"
 echo
 
 echo "[3/4] a stale pid file naming an unrelated process (pid reuse after reboot)"

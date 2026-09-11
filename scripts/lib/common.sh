@@ -200,7 +200,8 @@ EOF
 # `aidc create` and `aidc kill`, the commands every host runs eventually.
 aidc_retire_auth_bridge() {
     local dir="${HOME}/.config/aidc" pid
-    [ -e "${dir}/auth-bridge.pid" ] || [ -e "${dir}/auth-bridge.log" ] || [ -e "${dir}/auth-bridge.disabled" ] || return 0
+    [ -e "${dir}/auth-bridge.pid" ] || [ -e "${dir}/auth-bridge.log" ] || [ -e "${dir}/auth-bridge.log.1" ] \
+        || [ -e "${dir}/auth-bridge.disabled" ] || [ -e "${dir}/auth-bridge.last-hash" ] || return 0
     pid=$(cat "${dir}/auth-bridge.pid" 2>/dev/null || true)
     # The pid file outlives reboots and the watcher did not, so a number in it
     # may belong to an unrelated process by now: signal it only if its command
@@ -214,7 +215,39 @@ aidc_retire_auth_bridge() {
             fi
             ;;
     esac
-    rm -f "${dir}/auth-bridge.pid" "${dir}/auth-bridge.log" "${dir}/auth-bridge.disabled"
+    rm -f "${dir}/auth-bridge.pid" "${dir}/auth-bridge.log" "${dir}/auth-bridge.log.1" \
+          "${dir}/auth-bridge.disabled" "${dir}/auth-bridge.last-hash"
+}
+
+# A compose file rendered before v1.5.0 bind-mounts the host's Claude login
+# into the dev container. `aidc upgrade` reuses that file, and the new image
+# reads /home/vscode/.claude/.credentials.json -- exactly where the old mount
+# lands -- so an upgraded session would keep the stale-inode bridge this
+# release removes. Drop the two legacy mount lines in place (the file stays
+# 0600; sed -i is not portable, so write via a temp file). Returns 0 when it
+# removed something, 1 when there was nothing to strip.
+aidc_strip_legacy_auth_mounts() {
+    local file="$1" tmp
+    grep -qE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" 2>/dev/null || return 1
+    tmp="${file}.strip.$$"
+    ( umask 0077; grep -vE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$file"
+}
+
+# `aidc upgrade` reuses the compose file rendered at create time, whose dev
+# service pins `image: aidc/dev-base:<tag-at-create-time>`. Recreating from it
+# unchanged brings the container back on the OLD tag, so across a version bump
+# "upgrade" moved nothing (CLI-17 requires the CURRENT tag). Point the dev
+# service at the given tag, in place, via a temp file (sed -i is not portable;
+# the file stays 0600). The sidecar image lines are left alone: `--no-deps dev`
+# never recreates them, and only kill + create replaces the proxy stack.
+aidc_set_compose_dev_image() {
+    local file="$1" tag="$2" tmp
+    tmp="${file}.image.$$"
+    ( umask 0077; sed -E "s|^([[:space:]]*image:[[:space:]]*)aidc/dev-base:[^[:space:]]+|\\1${tag}|" "$file" > "$tmp" ) \
+        || { rm -f "$tmp"; return 1; }
+    grep -q "image: ${tag}\$" "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$file"
 }
 
 # ---- adhoc port-forward sidecars --------------------------------------------

@@ -202,10 +202,18 @@ aidc_retire_auth_bridge() {
     local dir="${HOME}/.config/aidc" pid
     [ -e "${dir}/auth-bridge.pid" ] || [ -e "${dir}/auth-bridge.log" ] || [ -e "${dir}/auth-bridge.disabled" ] || return 0
     pid=$(cat "${dir}/auth-bridge.pid" 2>/dev/null || true)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        info "retired the auth-bridge watcher (pid ${pid}) left by an earlier aidc; logins now live inside each session"
-    fi
+    # The pid file outlives reboots and the watcher did not, so a number in it
+    # may belong to an unrelated process by now: signal it only if its command
+    # line is the watcher's.
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            if ps -o command= -p "$pid" 2>/dev/null | grep -q 'aidc-auth-bridge-watcher'; then
+                kill "$pid" 2>/dev/null || true
+                info "retired the auth-bridge watcher (pid ${pid}) left by an earlier aidc; logins now live inside each session"
+            fi
+            ;;
+    esac
     rm -f "${dir}/auth-bridge.pid" "${dir}/auth-bridge.log" "${dir}/auth-bridge.disabled"
 }
 

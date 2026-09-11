@@ -428,8 +428,9 @@ Mechanism (`transcript.py` + the drain in `tools.py`):
 - **Attribution at delivery.** For every extracted turn (empty ones too, so each record
   entry is consumed exactly once; a turn the ledger already holds is skipped, so a
   re-surfaced turn cannot eat the entry of the next identical send) the drain matches
-  each prompt against the send record; a match consumes one entry. Prompts that do not match were typed at the terminal and are
-  prepended to the delivered content under a note addressed to the orchestrating LLM
+  each prompt against the send record; a match consumes one entry. Prompts that do not
+  match were typed at the terminal and are prepended to the delivered content under a
+  note addressed to the orchestrating LLM
   (`TERMINAL_PROMPT_NOTE`), followed by a `---` rule and the reply. `prompt_origin` is
   `"terminal"` when any prompt was typed, `"orchestrator"` when all matched, `""` when the
   turn had no prompt of its own (a continuation, or a system-sourced prompt).

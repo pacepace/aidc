@@ -585,7 +585,7 @@ def save_watermark(base_dir: Path, mark: Watermark) -> None:
 # drain consults it right before every POST and refuses to send a fingerprint it
 # already holds. So exactly-once becomes a property of the delivery boundary
 # itself, independent of the watermark: even if a watermark bug re-surfaces a
-# turn, the ledger drops it before it reaches metallm. The watermark bugs
+# turn, the ledger drops it before it reaches the orchestrator. The watermark bugs
 # degrade from "double-deliver and poison the agent" to "waste a disk read".
 #
 # Growth: one ~65-byte line per delivered turn, bounded per conversation by its

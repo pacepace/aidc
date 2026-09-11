@@ -100,7 +100,7 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                 so the session can reach another stack's services by container
                 name, on any port. Repeatable. Merges with the `networks:`
                 config list. Survives restart, upgrade, and recreate.
-                Example: --network metallm_default
+                Example: --network webapp_default
 
                 This WIDENS THE SANDBOX. Traffic to an attached network does
                 not pass through squid and is invisible to taint detection,

@@ -79,12 +79,12 @@ echo
 
 # --- 1: session network naming ----------------------------------------------
 echo "-- session network naming --"
-eq "session network name" "aidc-metallm-net" "$(aidc_session_network metallm)"
+eq "session network name" "aidc-webapp-net" "$(aidc_session_network webapp)"
 
 # --- 2: network name validation ---------------------------------------------
 echo
 echo "-- name validation --"
-ok    "plain name"                    aidc_valid_network_name "metallm_default"
+ok    "plain name"                    aidc_valid_network_name "webapp_default"
 ok    "dashes"                        aidc_valid_network_name "my-stack-net"
 ok    "dots"                          aidc_valid_network_name "stack.v2_default"
 ok    "digits only"                   aidc_valid_network_name "123"
@@ -107,7 +107,7 @@ echo "-- reserved networks --"
 ok    "host is reserved"              aidc_is_reserved_network "host"
 ok    "none is reserved"              aidc_is_reserved_network "none"
 ok    "default bridge is reserved"    aidc_is_reserved_network "bridge"
-notok "a compose net is not"          aidc_is_reserved_network "metallm_default"
+notok "a compose net is not"          aidc_is_reserved_network "webapp_default"
 notok "'bridged' is not 'bridge'"     aidc_is_reserved_network "bridged"
 notok "empty is not reserved"         aidc_is_reserved_network ""
 
@@ -130,10 +130,10 @@ eq "blank lines -> bare sequence form" "      - default" "$DEV_NETWORKS_BLOCK"
 # --- 5: rendering with one attachment ---------------------------------------
 echo
 echo "-- rendering: one attachment --"
-aidc_render_extnet_blocks "metallm_default"
+aidc_render_extnet_blocks "webapp_default"
 eq "single declaration block" \
 "  extnet0:
-    name: metallm_default
+    name: webapp_default
     external: true" "$EXTNET_DECLARATIONS"
 eq "single dev networks block" \
 "      default:
@@ -146,8 +146,8 @@ eq "single dev networks block" \
 # --- 6: rendering with several attachments -----------------------------------
 echo
 echo "-- rendering: several attachments --"
-aidc_render_extnet_blocks "$(printf 'metallm_default\nfaidh_default\nthird.net\n')"
-contains "declares extnet0 by name" "name: metallm_default" "$EXTNET_DECLARATIONS"
+aidc_render_extnet_blocks "$(printf 'webapp_default\nfaidh_default\nthird.net\n')"
+contains "declares extnet0 by name" "name: webapp_default" "$EXTNET_DECLARATIONS"
 contains "declares extnet1 by name" "name: faidh_default"   "$EXTNET_DECLARATIONS"
 contains "declares extnet2 by name" "name: third.net"       "$EXTNET_DECLARATIONS"
 contains "marks them external"      "external: true"        "$EXTNET_DECLARATIONS"

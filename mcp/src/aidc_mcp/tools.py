@@ -41,7 +41,7 @@ _NAME_DESC = (
     "open-webhook sessions named in this tool's description."
 )
 _CONV_ID_DESC = (
-    "Injected automatically by metallm. Leave this unset — do NOT supply, invent, or "
+    "Injected automatically by the orchestrator. Leave this unset — do NOT supply, invent, or "
     "reason about it."
 )
 _PROMPT_DESC = "The prompt / message text to send to the session."
@@ -60,7 +60,7 @@ def _yaml_scalar(raw: str) -> str:
     NOT optional politeness: the config template shipped in the README (and by
     `aidc config default`) documents every key with a trailing comment —
 
-        callback_url: ""    # base URL of your MetaLLM instance (e.g. https://...)
+        callback_url: ""    # base URL of the orchestrator's callback endpoint (e.g. https://...)
 
     — so filling it in the obvious way (replace the `""`, keep the comment) used
     to yield a URL with the whole comment glued onto it, and every callback POST
@@ -182,14 +182,14 @@ _session_send_locks: dict[str, asyncio.Lock] = {}
 # [(prompt, paste_attempts)]. A dev-agent turn routinely outlives any sane
 # inline wait — prod 2026-08-22 conv 01a01cf6 ran ONE turn for 22 minutes after
 # an auto-compaction — and the old behaviour was to wait 30s and then return an
-# error, DISCARDING the prompt. Nothing on either side retried it: metallm's
+# error, DISCARDING the prompt. Nothing on either side retried it: the orchestrator's
 # busy marker (services/agent_session_busy) deliberately does not arm on an
 # `ok: false` envelope, so the message simply evaporated and the orchestrator
 # sat waiting for a reply to a prompt the agent never received.
 #
 # Queueing instead makes the send lossless: the prompt is held here and injected
 # the moment the pane goes idle, and session_send returns ok=True/"queued" — which
-# metallm's marker DOES arm on, so the session correctly reads busy meanwhile.
+# the orchestrator's marker DOES arm on, so the session correctly reads busy meanwhile.
 _pending_sends: dict[str, list[tuple[str, int]]] = {}
 
 # Per-session drainer tasks: one long-lived injector per session with a non-empty
@@ -679,7 +679,7 @@ def _evict_session_state(name: str) -> None:
 # conditions that a later identical POST can plausibly succeed on. Every OTHER
 # 4xx is PERMANENT — the request itself is unacceptable to the endpoint, so
 # retrying the identical payload can only flood it. 404 in particular means the
-# conversation is gone on metallm's side (prod 2026-07-21, conv 019f6cf5: a
+# conversation is gone on the orchestrator's side (prod 2026-07-21, conv 019f6cf5: a
 # discarded conversation returned 404 to all 34 retries of one turn over the full
 # 30-minute budget — the "same message repeated" meltdown).
 _RETRYABLE_STATUSES = frozenset({408, 429})
@@ -797,7 +797,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
     """Forward-only anchor on EVERY watcher (re)start (MCP-17, forward-only-on-connect).
 
     Re-anchor ``last_delivered_uuid`` to the current LAST completed turn of the
-    active transcript, so a (re)connecting metallm session is NEVER caught up with
+    active transcript, so a (re)connecting orchestrator conversation is NEVER caught up with
     a backlog — only turns that complete AFTER the (re)connect are delivered.
 
     Previously this no-op'd when a mark already existed ("resume"), which meant a
@@ -876,7 +876,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 # Loop guard for the delivery watcher. An aidc session has no human at the pane:
 # every turn is driven by the orchestrator's session_send, so a runaway where the
 # orchestrator and this session answer each other forever (prod incident
-# 2026-07-03, MetaLLM conv 019f1fde) has no natural terminator. TIMING is NOT the
+# 2026-07-03, orchestrator conv 019f1fde) has no natural terminator. TIMING is NOT the
 # signal: the earlier rate-based guard reset its run on any >45 s gap, but the
 # runaway's turns grew slow as context ballooned (observed gaps up to ~250 s), so
 # it never tripped while it flooded the orchestrator. The signal is an unbroken RUN
@@ -1241,7 +1241,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
                         state_dir: Path | None = None,
                         post_fn=None,
                         sleep_fn=asyncio.sleep) -> tuple[str, ts.Turn | None]:
-    """Re-deliver ONE already-produced reply to metallm, out-of-band.
+    """Re-deliver ONE already-produced reply to the orchestrator, out-of-band.
 
     Recovers a reply that was lost or never arrived (a dropped callback, a watcher
     gap, an MCP restart at the wrong moment) WITHOUT replaying the backlog: it
@@ -1251,7 +1251,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
 
     NEVER re-POSTs a turn the delivery ledger already holds, unless ``force``.
     The ledger records only fingerprints CONFIRMED delivered (a 2xx ack), so
-    "in the ledger" means metallm demonstrably received this exact content — and
+    "in the ledger" means the orchestrator demonstrably received this exact content — and
     POSTing it again injects a verbatim duplicate into the conversation, which is
     strictly harmful: it re-answers a question that was already answered and
     corrupts the history the next turn reads. Returning the content to the CALLER
@@ -1296,7 +1296,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     except OSError:
         return ("no_reply", None)
     # Only non-empty (deliverable) turns can be resent — an empty tool-only turn was
-    # never a reply to metallm in the first place.
+    # never a reply to the orchestrator in the first place.
     deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data)) if not t.is_empty]
     if not deliverable:
         return ("no_reply", None)
@@ -1307,7 +1307,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     if target is None:
         return ("no_reply", None)
 
-    # The ledger holds fingerprints CONFIRMED delivered (2xx). A hit means metallm
+    # The ledger holds fingerprints CONFIRMED delivered (2xx). A hit means the orchestrator
     # already has this exact content, so re-POSTing can only duplicate it. Refuse
     # by default and let the caller read the content from the tool result instead.
     fingerprint = ts.content_fingerprint(target.text)
@@ -1540,7 +1540,7 @@ def register(app: Any) -> None:
     # The kill capability is KEPT — the ``aidc kill`` CLI is untouched and this
     # thin wrapper stays — but it is deliberately NOT registered via
     # ``@app.tool()``, so MCP clients can neither discover nor call it. A weak
-    # metallm client agent called ``session_kill`` and tore down the live faidh
+    # orchestrator's client agent called ``session_kill`` and tore down a live
     # session (prod audit 2026-07-04 17:53). Tearing a session down is an
     # operator action via the CLI, not something an MCP client should drive.
     # Re-advertise by restoring the ``@app.tool()`` decorator below.
@@ -1663,7 +1663,7 @@ def register(app: Any) -> None:
         Args:
             name: the aidc session to run in.
             prompt: the prompt to run.
-            conversation_id: this conversation's id (metallm injects it) — where the
+            conversation_id: this conversation's id (the orchestrator injects it) — where the
                 result is delivered.
         """
         base_url = _metallm_callback_url()
@@ -1820,8 +1820,8 @@ def register(app: Any) -> None:
             base_url = _metallm_callback_url() if conversation_id else ""
             if not conversation_id:
                 no_watch_reason = (
-                    "no conversation_id was supplied — metallm injects it automatically, "
-                    "so this call did not come from a metallm conversation"
+                    "no conversation_id was supplied — the orchestrator injects it automatically, "
+                    "so this call did not come from an orchestrated conversation"
                 )
             elif not base_url:
                 no_watch_reason = (
@@ -1925,7 +1925,7 @@ def register(app: Any) -> None:
     # The multi-turn capability is KEPT — this wrapper stays intact — but it is
     # deliberately NOT registered via ``@app.tool()``, so MCP clients can neither
     # discover nor call it. session_run blocks synchronously while it runs every
-    # turn in sequence; on metallm the round-trip regularly outlasts the request
+    # turn in sequence; on an orchestrator the round-trip regularly outlasts the request
     # window and times out the whole session. Multi-turn work should be driven as
     # repeated session_send calls instead.
     #
@@ -1957,7 +1957,7 @@ def register(app: Any) -> None:
         Args:
             name: the aidc session to talk to (see the open-webhook list below).
             turns: the ordered list of prompts to send.
-            conversation_id: this conversation's id (metallm injects it).
+            conversation_id: this conversation's id (the orchestrator injects it).
 
         Injects each turn into the 'claude' tmux window and waits for Claude to finish before
         sending the next. Returns a JSON transcript of all turns and responses when complete.
@@ -2041,7 +2041,9 @@ def register(app: Any) -> None:
         if not base_url:
             return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml")
         if not conversation_id:
-            return _envelope_err("conversation_id is required (metallm injects it automatically)")
+            return _envelope_err(
+                "conversation_id is required (the orchestrator injects it automatically)"
+            )
         # _start_watcher atomically cancels any existing watcher and installs the
         # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
         await _start_watcher(app, name, conversation_id, base_url)
@@ -2066,7 +2068,7 @@ def register(app: Any) -> None:
             Field(description="Re-POST even if this reply was already confirmed "
                               "delivered here. Almost never correct — the content "
                               "comes back in this tool's result either way. Use ONLY "
-                              "when metallm acknowledged the callback but genuinely "
+                              "when the orchestrator acknowledged the callback but genuinely "
                               "lost the message downstream."),
         ] = False,
     ) -> dict[str, Any]:
@@ -2094,7 +2096,9 @@ def register(app: Any) -> None:
             force: re-POST a reply already delivered here (almost never correct).
         """
         if not conversation_id:
-            return _envelope_err("conversation_id is required (metallm injects it automatically)")
+            return _envelope_err(
+                "conversation_id is required (the orchestrator injects it automatically)"
+            )
         base_url = _metallm_callback_url()
         if not base_url:
             return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml")
@@ -2117,7 +2121,7 @@ def register(app: Any) -> None:
             )
         if status == "failed":
             return _envelope_err(
-                "resend reached the transcript but the callback to metallm failed "
+                "resend reached the transcript but the callback to the orchestrator failed "
                 "(see logs); the reply was not delivered"
             )
 

@@ -24,7 +24,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   the watermarks) and, at delivery, prepends any prompt on the turn that is *not* in that
   record — under a note saying the user typed it at the terminal — so the reply reads in
   context. Slash commands are rendered as `/name args`; hook feedback, task notifications,
-  auto-continues, and local-command output are never attributed to the person. The callback
+  auto-continues, interrupt markers, and any wrapped line (local-command output, `!`
+  bash-mode input and output) are never attributed to the person. The callback
   payload gains `prompt_origin` (`terminal` / `orchestrator` / `""`); the exactly-once
   ledger still keys on the bare reply, so replay protection is unchanged.
 

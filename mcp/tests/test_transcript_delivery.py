@@ -585,6 +585,26 @@ class TestPostTurnInstrumentation:
         assert captured["content"] == "hi"
         assert captured["source"] == "agent_watch"
 
+    async def test_payload_carries_prompt_origin(self):
+        """Whose prompt the turn answers travels as its own field, so the
+        orchestrator can render a terminal-typed exchange differently later
+        without parsing the content framing."""
+        captured = {}
+
+        async def ok_post(url, **kw):
+            captured.update(kw.get("json") or {})
+            return MagicMock(is_success=True, status_code=202, text="")
+
+        with (
+            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("aidc_mcp.tools.log_event"),
+        ):
+            await _post_turn("http://cb", "conv",
+                             ts.Turn("a1", "hi", prompt_origin="terminal"),
+                             attempt=0, session="faidh")
+        assert captured["prompt_origin"] == "terminal"
+
     async def test_failed_post_logs_type_and_nonempty_repr(self):
         async def boom(*a, **kw):
             raise _EmptyStrError()
@@ -1125,3 +1145,175 @@ class TestExactlyOnceUnderConcurrentPasses:
         ])
         await drain()
         assert rec.delivered == ["a2", "a3"]            # later turn still delivered once
+
+
+# --- terminal-typed prompt attribution (the "where did that come from?" bug) ---
+# A person attached to the session's tmux pane types straight into Claude; the
+# reply comes over the same webhook, and the orchestrator — which never saw the
+# prompt — read it as an answer to whatever IT last sent. The drain now prepends
+# any prompt the MCP did not inject itself.
+
+class ContentRecorder:
+    """post_fn that keeps the whole delivered Turn, not just its uuid."""
+
+    def __init__(self):
+        self.turns = []
+
+    async def __call__(self, turn, attempt):
+        self.turns.append(turn)
+        return True
+
+
+def _typed(uuid, text):
+    """A user line exactly as Claude Code writes a typed OR pasted prompt."""
+    return {"type": "user", "uuid": uuid, "promptSource": "typed",
+            "origin": {"kind": "human"}, "message": {"role": "user", "content": text}}
+
+
+class TestTerminalPromptAttribution:
+    async def _seeded(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)          # baseline past SEED
+        return base, state, rec, seed
+
+    async def test_typed_prompt_is_prepended_to_the_reply(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "what is the NATS rewrite?"), _assistant("a1", "It is X."),
+        ])
+        await _drain(base, state, rec)
+        assert len(rec.turns) == 1
+        out = rec.turns[0]
+        assert out.text == ts.render_delivery("It is X.", ["what is the NATS rewrite?"])
+        assert out.text.startswith(ts.TERMINAL_PROMPT_NOTE)
+        assert out.prompt_origin == "terminal"
+
+    async def test_orchestrator_prompt_is_delivered_bare(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "fix the failing test")   # what session_send did
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "fix the failing test"), _assistant("a1", "Fixed."),
+        ])
+        await _drain(base, state, rec)
+        assert [t.text for t in rec.turns] == ["Fixed."]
+        assert rec.turns[0].prompt_origin == "orchestrator"
+        # The record entry was consumed by the match.
+        assert ts.consume_sent_prompt(state, "sess", "fix the failing test") is False
+
+    async def test_record_entry_is_consumed_once(self, tmp_path):
+        """The orchestrator sends 'next' once; the person then types 'next' too.
+        Only the first is the orchestrator's."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "next")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "next"), _assistant("a1", "step 2"),
+            _typed("u2", "next"), _assistant("a2", "step 3"),
+        ])
+        await _drain(base, state, rec)
+        assert [t.prompt_origin for t in rec.turns] == ["orchestrator", "terminal"]
+        assert rec.turns[0].text == "step 2"
+        assert rec.turns[1].text == ts.render_delivery("step 3", ["next"])
+
+    async def test_mixed_prompts_prepend_only_the_typed_ones(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "queued ask")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "/login"), _typed("u2", "queued ask"),
+            _assistant("a1", "done"),
+        ])
+        await _drain(base, state, rec)
+        assert rec.turns[0].text == ts.render_delivery("done", ["/login"])
+        assert rec.turns[0].prompt_origin == "terminal"
+
+    async def test_system_sourced_turn_has_unknown_origin_and_no_note(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        note = {"type": "user", "uuid": "u1", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [note, _assistant("a1", "The task finished.")])
+        await _drain(base, state, rec)
+        assert rec.turns[0].text == "The task finished."
+        assert rec.turns[0].prompt_origin == ""
+
+    async def test_empty_turn_still_consumes_its_record_entry(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "just run it")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "just run it"), _assistant("a1", None),   # tool-only, no text
+        ])
+        await _drain(base, state, rec)
+        assert rec.turns == []
+        assert ts.consume_sent_prompt(state, "sess", "just run it") is False
+
+    async def test_ledger_dedups_on_the_bare_reply_after_a_rewind(self, tmp_path):
+        """Exactly-once must survive attribution: a re-surfaced turn's record entry
+        is gone by then (so its framing would differ), and the ledger must still
+        recognise it. The fingerprint is therefore on the bare reply."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "q")
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
+        await _drain(base, state, rec)
+        assert [t.text for t in rec.turns] == ["R"]
+        mark = ts.load_watermark(state, "sess", "conv")
+        mark.last_delivered_uuid = "a0"                 # rewind into delivered region
+        ts.save_watermark(state, mark)
+        await _drain(base, state, rec)
+        assert [t.text for t in rec.turns] == ["R"]     # not re-posted, framed or not
+
+    async def test_resurfaced_turn_does_not_consume_a_fresh_record_entry(self, tmp_path):
+        """After a watermark rewind the already-delivered turn is re-read. Its own
+        record entry was consumed the first time; if attribution ran again it would
+        eat the entry for the orchestrator's NEXT identical send, and that later
+        reply would go out framed as the person's."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "continue")
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "continue"), _assistant("a1", "R1")])
+        await _drain(base, state, rec)
+        assert rec.turns[0].prompt_origin == "orchestrator"
+        # The orchestrator sends "continue" again; then the watermark rewinds.
+        ts.record_sent_prompt(state, "sess", "continue")
+        mark = ts.load_watermark(state, "sess", "conv")
+        mark.last_delivered_uuid = "a0"
+        ts.save_watermark(state, mark)
+        await _drain(base, state, rec)                       # deduped, no attribution
+        assert len(rec.turns) == 1
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "continue"), _assistant("a1", "R1"),
+            _typed("u2", "continue"), _assistant("a2", "R2"),
+        ])
+        await _drain(base, state, rec)
+        assert rec.turns[1].text == "R2"                     # entry was still there
+        assert rec.turns[1].prompt_origin == "orchestrator"
+
+    async def test_terminal_prompt_event_reports_record_health(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "never matched")   # a stuck entry
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed"), _assistant("a1", "R")])
+        events = []
+        with patch("aidc_mcp.tools.log_event", side_effect=lambda k, **f: events.append((k, f))):
+            await _drain(base, state, rec)
+        ev = next(f for k, f in events if k == "transcript_terminal_prompt")
+        assert ev["prompts"] == 1 and ev["record_remaining"] == 1
+
+    async def test_dead_letter_carries_the_framed_content(self, tmp_path):
+        base, state, _, seed = await self._seeded(tmp_path)
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed q"), _assistant("a1", "R")])
+        rec = Recorder(always_fail=True)
+        await _drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
+                                     state_dir=state, post_fn=rec, sleep_fn=_nosleep)
+        dead = list((state / "dead-letter").glob("sess__conv__a1.json"))
+        assert len(dead) == 1
+        assert json.loads(dead[0].read_text())["content"] == ts.render_delivery("R", ["typed q"])
+
+    async def test_unwritable_record_counts_prompt_as_the_orchestrators(self, tmp_path):
+        """Never err toward 'the person said this': if the record cannot be
+        updated the prompt is treated as the MCP's own (no note)."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
+        with patch("aidc_mcp.tools.ts.consume_sent_prompt", side_effect=OSError("ro")):
+            await _drain(base, state, rec)
+        assert rec.turns[0].text == "R"
+        assert rec.turns[0].prompt_origin == "orchestrator"

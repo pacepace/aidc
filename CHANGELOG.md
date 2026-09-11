@@ -13,6 +13,22 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **A prompt typed straight into a watched session no longer reaches the orchestrator as
+  an unexplained reply.** A person attached to the session's tmux window can talk to the
+  same Claude the orchestrator drives over `session_send`; the reply came back over the
+  webhook with no trace of the prompt, so the orchestrator read it as an answer to whatever
+  it had last sent and could not tell where the new instructions came from. In the JSONL
+  transcript a pasted prompt and a typed one are identical, so the MCP now keeps a durable,
+  bounded record of every prompt it injects itself (`<session>.sent-prompts.json` beside
+  the watermarks) and, at delivery, prepends any prompt on the turn that is *not* in that
+  record — under a note saying the user typed it at the terminal — so the reply reads in
+  context. Slash commands are rendered as `/name args`; hook feedback, task notifications,
+  auto-continues, interrupt markers, and any wrapped line (local-command output, `!`
+  bash-mode input and output) are never attributed to the person. The callback
+  payload gains `prompt_origin` (`terminal` / `orchestrator` / `""`); the exactly-once
+  ledger still keys on the bare reply, so replay protection is unchanged.
+
 ## [1.4.0] - 2026-09-10
 
 ### Added

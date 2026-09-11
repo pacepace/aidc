@@ -218,8 +218,10 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     assert len(h.metallm.posts) == 1
     post = h.metallm.posts[0]
     assert post["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
+    # prompt_origin: the prompt matched the one session_send injected above.
     assert post["json"] == {"content": "foo() returns the answer.", "ok": True,
-                            "source": "agent_watch", "session": "proj"}
+                            "source": "agent_watch", "session": "proj",
+                            "prompt_origin": "orchestrator"}
     assert post["headers"]["Authorization"] == "Bearer tok"
 
     # Exactly-once: re-draining (the watcher polls repeatedly) does NOT re-deliver.
@@ -324,7 +326,11 @@ async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
         _user("u2", "q2"), _assistant("a2", "ANSWER TWO"),
     ])
     await h.drain()
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["ANSWER ONE", "ANSWER TWO"]
+    # q1 was sent by the orchestrator; q2 was NOT (the "agent" fixture wrote it as
+    # if a person typed it at the pane), so its reply is delivered with q2 prepended.
+    assert [p["json"]["content"] for p in h.metallm.posts] == [
+        "ANSWER ONE", ts.render_delivery("ANSWER TWO", ["q2"]),
+    ]
     mark_before = ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid
 
     status, turn = await h.resend()

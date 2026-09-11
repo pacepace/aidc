@@ -471,7 +471,7 @@ The MCP server is built for an orchestrating agent that runs somewhere else on y
 
 1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
 2. The agent calls `session_invoke_async(name, prompt, conversation_id)` (or `session_send`, below). The call returns immediately.
-3. aidc runs the task in the named session container.
+3. aidc runs the task in the named session container (`session_invoke_async` runs `aidc-claude --print <prompt>` with a 30-minute cap).
 4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|""}`.
 5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 

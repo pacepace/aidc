@@ -152,13 +152,6 @@ mcp_start() {
         "$IMAGE" >/dev/null
     sleep 1
     mcp_status
-
-    # Auto-start the host-side auth bridge so MCP's own Claude invocations
-    # benefit from auto-refresh too. No-op on Linux/WSL2 and when the
-    # bridge is already running. See task-17 for rationale.
-    if [ "$(uname -s)" = "Darwin" ]; then
-        bash "$AIDC_SCRIPTS/cmd-auth-bridge.sh" ensure-running 2>/dev/null || true
-    fi
 }
 
 mcp_stop() {
@@ -167,13 +160,6 @@ mcp_stop() {
         docker rm -f "$CONTAINER" >/dev/null
     else
         info "aidc-mcp not running"
-    fi
-
-    # Stop the host-side auth bridge if nothing aidc-managed remains on
-    # the host. ensure-stopped is no-op on Linux/WSL2 and when the daemon
-    # is already down or stopped by user intent.
-    if [ "$(uname -s)" = "Darwin" ] && ! aidc_anything_running; then
-        bash "$AIDC_SCRIPTS/cmd-auth-bridge.sh" ensure-stopped 2>/dev/null || true
     fi
 }
 

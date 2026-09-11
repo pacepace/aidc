@@ -19,9 +19,9 @@
 # Computed:
 #   DOCKER_SOCK_MOUNT        expands to a "- /var/run/docker.sock:..." mount line
 #                            only when TAINT_RESPONSE=freeze; empty otherwise.
-#   CLAUDE_CREDS_MOUNT       expands to a credentials bind-mount line when
-#                            the macOS Keychain bridge succeeded; empty otherwise.
-#                            Set by `aidc create` before invoking this script.
+#   CLAUDE_MEMORY_MOUNT etc. expand to optional bind-mount lines set by
+#                            `aidc create` before invoking this script; empty
+#                            otherwise (the line collapses).
 
 set -euo pipefail
 
@@ -55,10 +55,8 @@ export DOCKER_SOCK_MOUNT
 
 # Optional bind-mounts set by aidc create. Defaults are empty so the lines
 # collapse to nothing in the rendered YAML.
-: "${CLAUDE_CREDS_MOUNT:=}"
 : "${CLAUDE_MEMORY_MOUNT:=}"
 : "${CLAUDE_SETTINGS_MOUNT:=}"
-: "${CLAUDE_STATE_MOUNT:=}"
 # Plugin bridge (share_plugins): host ~/.claude/plugins/ read-only at both the
 # container home path (cache resolves by convention) and its own host-absolute
 # path (marketplace resolves by stored installLocation). ABS is empty when it
@@ -69,7 +67,7 @@ export DOCKER_SOCK_MOUNT
 # MCP-readable transcript dir into the dev container so the in-container mirror
 # can copy-forward Claude's JSONL there. Empty -> line collapses (no surfacing).
 : "${TRANSCRIPT_MIRROR_MOUNT:=}"
-export CLAUDE_CREDS_MOUNT CLAUDE_MEMORY_MOUNT CLAUDE_SETTINGS_MOUNT CLAUDE_STATE_MOUNT TRANSCRIPT_MIRROR_MOUNT
+export CLAUDE_MEMORY_MOUNT CLAUDE_SETTINGS_MOUNT TRANSCRIPT_MIRROR_MOUNT
 : "${AIDC_SHARE_PLUGINS:=}"
 export CLAUDE_PLUGINS_MOUNT CLAUDE_PLUGINS_MOUNT_ABS AIDC_SHARE_PLUGINS
 
@@ -134,4 +132,4 @@ export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
 
 # Restrict envsubst to the known variable set so unrelated `${...}` tokens
 # (e.g. shell-style references inside service commands) survive untouched.
-exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_CREDS_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_STATE_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORT_FORWARDER_SERVICES} ${NET_INTERNAL} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'
+exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORT_FORWARDER_SERVICES} ${NET_INTERNAL} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'

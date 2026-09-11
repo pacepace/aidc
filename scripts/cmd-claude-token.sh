@@ -1,32 +1,27 @@
 #!/usr/bin/env bash
-# desc: Manage the long-lived Claude OAuth token used to bypass the refresh-token race in containers.
+# desc: Manage a long-lived Claude OAuth token that new sessions use instead of logging in (inference-only).
 #
 # Usage:
 #   aidc claude-token setup     # walks you through generating + storing a 1-year token
 #   aidc claude-token show      # show last-6 chars + mtime (do not print full token)
-#   aidc claude-token clear     # remove the token file; next aidc create reverts to Keychain bridging
+#   aidc claude-token clear     # remove the token file; next aidc create logs in inside the session
 #
 # Why this exists:
-#   Anthropic's OAuth refresh tokens are single-use. When you run multiple
-#   concurrent claude processes (host + N dev containers), they race to
-#   refresh the same token; the loser ends up with an invalid token and
-#   prompts /login. See README "Claude auth -- the OAuth refresh-token race"
-#   for the full bug discussion.
-#
-#   `claude setup-token` generates a 1-year OAuth token (CLAUDE_CODE_OAUTH_TOKEN)
-#   that bypasses the refresh dance entirely. When this token is set in a
-#   container's env, claude uses it directly -- no refresh, no race.
+#   By default a session logs in on its own (`aidc attach <name>`, then /login):
+#   a full claude.ai session that refreshes itself, supports Remote Control,
+#   and can be a different account from the host's. This command is the
+#   alternative for hosts that do not want a login step per session, such as
+#   unattended or scripted creation: `claude setup-token` mints a 1-year token,
+#   aidc stores it, and every new session gets it as CLAUDE_CODE_OAUTH_TOKEN.
 #
 # Trade-offs (documented in `aidc claude-token setup`):
+#   - Inference-only: Remote Control does NOT work in a session that uses it,
+#     and /login inside such a session is ignored while the token is set.
 #   - One-time pain: running `claude setup-token` invalidates your host's
 #     existing OAuth session. You'll need to /login on host once.
-#   - After that, host stays on subscription OAuth, containers use the
-#     long-lived token. Different auth mechanisms, no shared refresh.
 #   - Token expires after 1 year; rotate by running `claude-token setup`
 #     again.
-#   - `/login` is not available inside containers using this token.
-#   - aidc-auth-bridge becomes unnecessary (no Keychain file to keep fresh
-#     in containers).
+#   - Billing stays on your subscription either way.
 
 set -euo pipefail
 
@@ -46,11 +41,12 @@ aidc claude-token <verb>
 Verbs:
   setup    Walk through generating + storing a 1-year Claude OAuth token.
            After setup, every new `aidc create` injects the token into the
-           dev container, bypassing the OAuth refresh-token race.
+           dev container and no /login is needed inside it. Inference-only:
+           Remote Control does not work in sessions that use it.
   show     Show token presence (last-6 chars + mtime). Does not print the
            full token.
-  clear    Remove the token file. Next `aidc create` reverts to Keychain
-           bridging (the older approach with the refresh-token race).
+  clear    Remove the token file. Next `aidc create` asks you to /login
+           inside the session instead (full session; Remote Control works).
 
 See `aidc claude-token setup` for the full trade-off explanation.
 EOF
@@ -89,14 +85,15 @@ aidc claude-token setup
 -----------------------
 
 Background:
-  Anthropic's OAuth refresh tokens are single-use. When multiple claude
-  processes refresh concurrently (e.g. host + N containers), they race
-  and the losers are forced to /login. Anthropic ships partial fixes
-  but the general fix is not yet in -- see https://github.com/anthropics/claude-code/issues/24317
+  By default each session logs in on its own (aidc attach <name>, then
+  /login) and gets a full claude.ai session: it refreshes itself, works
+  with Remote Control, and can be a different account from the host's.
 
-  `claude setup-token` generates a 1-year OAuth token that bypasses
-  the refresh dance entirely. Setting it as CLAUDE_CODE_OAUTH_TOKEN in
-  each dev container removes containers from the race.
+  This command is the no-login alternative. `claude setup-token` mints a
+  1-year token; aidc stores it and injects it into every new session as
+  CLAUDE_CODE_OAUTH_TOKEN. Useful for unattended or scripted session
+  creation. The token is inference-only, so Remote Control is unavailable
+  in sessions that use it.
 
 What this will do:
   1. You'll run `claude setup-token` in another terminal on the host.
@@ -109,14 +106,15 @@ What this will do:
   2. You'll paste the printed token here.
   3. aidc will store it at ~/.config/aidc/claude-oauth-token (mode 0600).
   4. From then on, every `aidc create` injects the token as
-     CLAUDE_CODE_OAUTH_TOKEN in the dev container's environment.
-     Containers no longer participate in the OAuth refresh race.
+     CLAUDE_CODE_OAUTH_TOKEN in the dev container's environment, and no
+     /login is needed inside it.
 
 Trade-offs:
   - HOST's existing OAuth session is invalidated (one-time /login on host)
   - Host continues to use /login subscription OAuth
   - Containers use the long-lived token
-  - The auth-bridge daemon is no longer needed when this is in use
+  - Inference-only token: Remote Control does NOT work in sessions that
+    use it (a /login inside the session gives a full claude.ai session)
   - Token expires after 1 year; rotate by re-running this setup
   - `claude /login` inside containers does NOT work with this auth mode
     (the env var token takes precedence over interactive OAuth)
@@ -168,7 +166,7 @@ Next steps:
      token: aidc kill <name> && aidc create <name> ...
   3. New sessions automatically use the token.
 
-To stop using the long-lived token and revert to Keychain bridging:
+To stop using the long-lived token (sessions then /login inside instead):
   aidc claude-token clear
 EOF
 }
@@ -205,7 +203,7 @@ do_clear() {
     case "$REPLY" in y|Y) : ;; *) info "aborted"; exit 0 ;; esac
     rm -f "$TOKEN_FILE"
     info "removed token file"
-    info "new aidc create runs will fall back to Keychain bridging (the race-prone path)"
+    info "new aidc create runs will ask for a /login inside the session (full session; Remote Control works)"
     info "existing sessions are unaffected"
 }
 

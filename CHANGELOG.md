@@ -13,6 +13,41 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Changed
+- **The dev container owns its Claude login.** Each session keeps Claude's config
+  directory on its own volume (`CLAUDE_CONFIG_DIR=/home/vscode/.claude`, the layout
+  Anthropic's reference devcontainer uses) and you `/login` inside it once. The login
+  refreshes itself, survives `restart` and `upgrade`, supports Remote Control, and can
+  be a different account from the host's — `/login` again inside to switch. The host's
+  `.credentials.json` and `~/.claude.json` are no longer bind-mounted: Claude Code
+  replaces both files by rename, so a single-file bind mount went stale on the host's
+  first refresh (anthropics/claude-code#18443) and could not be written from inside.
+  That is why in-container logins expired after a few hours and why `/login` with
+  another account never took. Onboarding state (theme, output style, this project's
+  trust) is seeded once from the host's `~/.claude.json` without the account, so the
+  first launch goes straight to the login prompt; API keys, MCP server definitions
+  and prompt history are never copied. Memory, settings and plugins are bridged
+  exactly as before. The long-lived token path (`aidc claude-token`) is unchanged
+  and still skips the login, at the cost of Remote Control. A session created
+  before this version can be upgraded: `aidc upgrade` removes its old host login
+  mounts and says so, and its first launch afterwards runs Claude's onboarding and
+  then asks for `/login`; `aidc kill` + `aidc create` gives it the seeded start.
+
+### Fixed
+- **`aidc upgrade` now actually moves a session onto the new version's image.** It
+  recreated the dev container from the compose file rendered at create time, which
+  pins the dev image at the tag current back then, so across a version bump the
+  container came back on the old image while the command reported the new one. The
+  dev image line is now pointed at the current tag before the recreate, and the
+  command verifies the recreated container's image id before reporting success.
+
+### Removed
+- `aidc auth-bridge` (the macOS Keychain sync daemon), `aidc reauth`, the per-session
+  Keychain extraction, and the `share_auth` config key. With nothing bridged there is
+  nothing to keep fresh; a session that says "Please run /login" just needs a `/login`.
+  A watcher left running by an earlier aidc on macOS is stopped, and its pid, log
+  and sentinel files removed, by the next `aidc create` or `aidc kill`.
+
 ## [1.4.1] - 2026-09-11
 
 ### Fixed

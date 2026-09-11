@@ -32,6 +32,7 @@ esac
 NAME="${1:-}"
 validate_session_name "$NAME"
 require_docker
+aidc_retire_auth_bridge
 session_exists "$NAME" || die "no such session: $NAME"
 
 DEV="$(container_name "$NAME" dev)"
@@ -87,13 +88,6 @@ fi
 
 # Drop the rendered compose file.
 rm -f "$COMPOSE_FILE"
-
-# Stop the host-side auth-bridge daemon if nothing aidc-managed remains
-# on the host. ensure-stopped is no-op on Linux/WSL2 and when the daemon
-# is already down; safe to call unconditionally.
-if [ "$(uname -s)" = "Darwin" ] && ! aidc_anything_running; then
-    bash "$AIDC_SCRIPTS/cmd-auth-bridge.sh" ensure-stopped 2>/dev/null || true
-fi
 
 if [ -n "$AUDIT_HOST" ]; then
     printf "Session '%s' killed. Audit preserved at %s\n" "$NAME" "$AUDIT_HOST"

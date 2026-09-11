@@ -192,15 +192,62 @@ EOF
     docker build -t "$tag" -f "$dockerfile" "$context"
 }
 
-# Returns 0 if any aidc-managed container is alive on this host. Used to
-# decide whether to tear down host-side daemons (auth-bridge) on
-# `aidc kill` / `aidc mcp stop`. Catches both per-session containers
-# (aidc-<session>-*) and the global MCP container (aidc-mcp).
-aidc_anything_running() {
-    if docker ps --filter 'name=^aidc-' -q 2>/dev/null | grep -q .; then
-        return 0
-    fi
-    return 1
+# Retire the host-side auth-bridge watcher that aidc < 1.5.0 left running on
+# macOS. It was a nohup-detached loop whose only stop paths were commands that
+# no longer exist, so a host that upgraded the CLI would otherwise keep a
+# Keychain poller alive until reboot, rewriting credentials files nobody
+# reads. Idempotent and silent when there is nothing to retire; called from
+# `aidc create` and `aidc kill`, the commands every host runs eventually.
+aidc_retire_auth_bridge() {
+    local dir="${HOME}/.config/aidc" pid
+    [ -e "${dir}/auth-bridge.pid" ] || [ -e "${dir}/auth-bridge.log" ] || [ -e "${dir}/auth-bridge.log.1" ] \
+        || [ -e "${dir}/auth-bridge.disabled" ] || [ -e "${dir}/auth-bridge.last-hash" ] || return 0
+    pid=$(cat "${dir}/auth-bridge.pid" 2>/dev/null || true)
+    # The pid file outlives reboots and the watcher did not, so a number in it
+    # may belong to an unrelated process by now: signal it only if its command
+    # line is the watcher's.
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            if ps -o command= -p "$pid" 2>/dev/null | grep -q 'aidc-auth-bridge-watcher'; then
+                kill "$pid" 2>/dev/null || true
+                info "retired the auth-bridge watcher (pid ${pid}) left by an earlier aidc; logins now live inside each session"
+            fi
+            ;;
+    esac
+    rm -f "${dir}/auth-bridge.pid" "${dir}/auth-bridge.log" "${dir}/auth-bridge.log.1" \
+          "${dir}/auth-bridge.disabled" "${dir}/auth-bridge.last-hash"
+}
+
+# A compose file rendered before v1.5.0 bind-mounts the host's Claude login
+# into the dev container. `aidc upgrade` reuses that file, and the new image
+# reads /home/vscode/.claude/.credentials.json -- exactly where the old mount
+# lands -- so an upgraded session would keep the stale-inode bridge this
+# release removes. Drop the two legacy mount lines in place (the file stays
+# 0600; sed -i is not portable, so write via a private mktemp file). Returns 0 when it
+# removed something, 1 when there was nothing to strip.
+aidc_strip_legacy_auth_mounts() {
+    local file="$1" tmp
+    grep -qE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" 2>/dev/null || return 1
+    tmp=$(umask 0077; mktemp "${file}.XXXXXX") || return 1
+    grep -vE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$file"
+}
+
+# `aidc upgrade` reuses the compose file rendered at create time, whose dev
+# service pins `image: aidc/dev-base:<tag-at-create-time>`. Recreating from it
+# unchanged brings the container back on the OLD tag, so across a version bump
+# "upgrade" moved nothing (CLI-17 requires the CURRENT tag). Point the dev
+# service at the given tag, in place, via a temp file (sed -i is not portable;
+# the file stays 0600). The sidecar image lines are left alone: `--no-deps dev`
+# never recreates them, and only kill + create replaces the proxy stack.
+aidc_set_compose_dev_image() {
+    local file="$1" tag="$2" tmp
+    tmp=$(umask 0077; mktemp "${file}.XXXXXX") || return 1
+    sed -E "s|^([[:space:]]*image:[[:space:]]*)aidc/dev-base:[^[:space:]]+|\\1${tag}|" "$file" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    grep -q "image: ${tag}\$" "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$file"
 }
 
 # ---- adhoc port-forward sidecars --------------------------------------------

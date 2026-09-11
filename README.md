@@ -12,10 +12,12 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 
 ## What's bridged from your host
 
-- Claude Code auth (extracted from macOS Keychain at create time; or read directly on Linux/WSL2).
-- Claude Code state (`~/.claude.json`) — onboarding marker, output style, theme, account.
-- Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations follow the repo.
+- Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
 - `settings.json` — env vars, status line, editor mode.
+- Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
+- Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
+
+Claude auth is deliberately **not** bridged. The container owns its Claude config directory and you log in inside it once (or configure a long-lived token). See [Claude auth](#claude-auth--the-container-logs-in-on-its-own).
 
 So inside the container you're still you. Just sandboxed.
 
@@ -342,75 +344,32 @@ Glob patterns supported. The expansion happens at `aidc create` time. `**` (recu
 
 **Committed venvs are your problem:** if your repo somehow has `.venv/` checked into git (don't do this), the container's overlay shadows the committed files from the container's view. Either gitignore properly or remove the path from `container_only_paths`.
 
-### Claude auth — the OAuth refresh-token race (known Anthropic bug)
+### Claude auth — the container logs in on its own
 
-**The problem:** there's an open Anthropic bug — [#24317](https://github.com/anthropics/claude-code/issues/24317), [#54443](https://github.com/anthropics/claude-code/issues/54443), [#56339](https://github.com/anthropics/claude-code/issues/56339) — where running multiple concurrent Claude Code processes (host + N dev containers) leads to **forced `/login` prompts every few hours**, often well before the locally cached token expires. Root cause: Anthropic's OAuth refresh tokens are single-use; concurrent processes race to refresh, the loser ends up with an invalidated token. The server may also early-revoke tokens hours before the stated `expiresAt`.
+Each session owns its Claude config directory: `CLAUDE_CONFIG_DIR=/home/vscode/.claude`, on the session's `dev-home` volume, the same layout Anthropic's reference devcontainer uses. Credentials, `.claude.json` and session state live there. Nothing auth-related is bind-mounted from the host.
 
-**This is not an aidc bug. Anthropic has shipped partial fixes for related races but not the general one. Their adjacent-issue recommendation is literally "log in frequently."**
+**Why not share the host's login?** Claude Code replaces `.credentials.json` and `.claude.json` by writing a new file and renaming it into place, on every refresh and every `/login`. Many Claude processes on one host coexist because they share the same *directory*: a write lock serialises refreshes and each process re-reads the file when it changes. A single-file bind mount breaks both halves. After the host's first refresh the container is left holding the old inode ([anthropics/claude-code#18443](https://github.com/anthropics/claude-code/issues/18443)), and the container's own writes fail because you cannot rename over a mount point. That is what made in-container logins expire after a few hours and account switches not stick. Sharing the whole `~/.claude` *directory* would keep the renames working, but it hands the sandboxed container every project's memory and history, and `~/.claude.json` sits at the home root outside any directory that could be shared, so the container gets its own.
 
-aidc gives you three strategies. **Use the first one** unless something stops you.
+**Two ways in. Both are supported; pick per host.**
 
----
+**1. Log in inside the session (default).** The first launch of a new session shows Claude's login prompt:
 
-#### Strategy 1 (recommended): long-lived OAuth token
+```bash
+aidc attach my-feature
+# window 0: /login  → open the URL, paste the code back
+```
 
-`claude setup-token` generates a 1-year OAuth token specifically for "CI pipelines, scripts, or other environments where interactive browser login isn't available" (per Anthropic's [authentication docs](https://code.claude.com/docs/en/authentication)). Setting it as `CLAUDE_CODE_OAUTH_TOKEN` in a container's environment **bypasses the refresh dance entirely** — the token doesn't rotate, so there's no race.
+That claude.ai session belongs to the container. It refreshes itself on the volume, survives `aidc restart` and `aidc upgrade`, and is discarded by `aidc kill`. Because it is a full login, **Remote Control works**, and the account can differ from the host's: run `/login` again inside the session to switch, for example when one account hits its session limit. The MCP tools (`session_invoke`, `session_send`) use the same login. Nothing you do inside touches the host's own login.
+
+**2. Long-lived token (no login step).** `claude setup-token` mints a one-year token; aidc injects it into every new session as `CLAUDE_CODE_OAUTH_TOKEN`:
 
 ```bash
 aidc claude-token setup       # one-time: walks you through generating + storing the token
-aidc claude-token show        # confirms token is stored (last-6 chars + mtime)
-aidc claude-token clear       # removes the token; future `aidc create` reverts to Keychain bridging
+aidc claude-token show        # confirms a token is stored (last-6 chars + mtime)
+aidc claude-token clear       # removes it; new sessions log in inside instead
 ```
 
-After setup, every `aidc create` automatically injects the token. Existing running sessions are unaffected until you `aidc kill <name> && aidc create <name>` them — which you should do at your convenience to switch them off the racey Keychain bridge and onto the long-lived token.
-
-**Trade-offs (be honest about these):**
-
-- **One-time host pain:** running `claude setup-token` invalidates your host's existing OAuth session. You'll need to run `claude /login` on host once after. After that, host stays on subscription OAuth, containers stay on the long-lived token — different mechanisms, no shared refresh, no race.
-- **`/login` inside containers does not work** while a token is configured. The env-var token takes precedence over interactive OAuth (see Anthropic's [authentication precedence](https://code.claude.com/docs/en/authentication)). If the token is revoked, recovery is `aidc claude-token setup` again on host, then kill+create the affected sessions.
-- **Manual once-a-year rotation.** Anthropic emails about token expiry; just re-run `aidc claude-token setup`.
-- **No `aidc-auth-bridge` daemon needed** for token-using sessions. Sessions on the long-lived token skip the daemon's auto-start entirely.
-- **Subscription billing is preserved.** The token authenticates against your Pro / Max / Team / Enterprise subscription, not API-key billing.
-
-The token is stored at `~/.config/aidc/claude-oauth-token` with mode 0600.
-
----
-
-#### Strategy 2 (default if no token configured): Keychain bridging + reauth
-
-This is what aidc shipped first; it's the fallback when you haven't run `aidc claude-token setup` (or have cleared the token). It IS subject to the OAuth refresh race; tools below mitigate the pain but don't eliminate it.
-
-**`aidc-auth-bridge` daemon (macOS only)** — auto-pushes host Keychain updates into all running sessions within 30 seconds. When you `/login` on host, the bridge gets the new credentials into every active session's bridged file fast. The bridge ALONE is NOT enough to recover an interactive claude (claude caches the refresh token in memory and doesn't re-read on auth failure), but it makes `aidc reauth` instant — the fresh credentials are already in place when you need them.
-
-```bash
-aidc auth-bridge start | stop | status | logs | restart
-```
-
-Auto-starts on first `aidc create` (or `aidc mcp start`) on macOS; auto-stops when no aidc-managed containers remain. Explicit `aidc auth-bridge stop` is respected via a sentinel at `~/.config/aidc/auth-bridge.disabled` — auto-start won't override it. On Linux/WSL2 the daemon is a no-op (the host's credentials file is bind-mounted directly into the container).
-
-**`aidc reauth <session>` — manual recovery in ~3 seconds.** When a container's claude shows `Please run /login`:
-
-```bash
-# After running `claude /login` on host (which refreshed your Keychain):
-aidc reauth metallm
-aidc reauth eng-ai-bot
-```
-
-It extracts fresh credentials from host, in-place writes them into the session's bridged credentials file (preserving the inode so the docker bind-mount stays valid), kills claude inside the session's tmux `claude` window, and relaunches `aidc-claude` (which resumes the conversation via `--continue`). The in-flight tool call (the one that hit 401) is lost; the conversation thread is preserved.
-
-**`aidc reauth` will recommend Strategy 1** when invoked if you haven't set up the long-lived token yet — reauth is a recovery, the token is the prevention.
-
----
-
-#### Strategy 3 (last resort): `aidc kill` + `aidc create`
-
-If reauth doesn't work — e.g. the bind-mount inode was broken by a prior mv-rename write, or the bridged file's content is itself invalid — tear down and recreate. The audit dir is preserved; Claude memory is preserved; the conversation continues via `--continue`.
-
----
-
-#### Why this hits aidc harder than host-alone claude
-
-Each container has its own copy of the credentials (bind-mounted from a per-session host file we snapshot from your Keychain at create time). With N containers + host claude, you have N+1 processes all racing to refresh the same OAuth token. The race window widens with each concurrent process. Strategy 1 (long-lived token) is the only path that breaks this — containers stop participating in the refresh race entirely because their token doesn't need refreshing.
+Trade-offs: running `claude setup-token` invalidates the host's current login once (`/login` on the host afterwards); the token is **inference-only**, so **Remote Control does not work** in sessions that use it, and `/login` inside such a session is ignored while the token is set; rotate yearly by re-running setup. Billing stays on your subscription. Existing sessions keep whatever they were created with; `aidc kill` + `aidc create` moves one onto the other path.
 
 ### Inside the session
 
@@ -420,7 +379,7 @@ Each container has its own copy of the credentials (bind-mounted from a per-sess
 
 | Window | What |
 |---|---|
-| `0` claude   | `aidc-claude` already running (yolo mode by default, with `--continue` so it resumes the previous conversation). This is also the window the MetaLLM `session_send` tool drives. |
+| `0` claude   | `aidc-claude` already running (yolo mode by default, with `--continue` so it resumes the previous conversation). On a brand-new session it is sitting at the login prompt: run `/login` once (see [Claude auth](#claude-auth--the-container-logs-in-on-its-own)). This is also the window the MetaLLM `session_send` tool drives. |
 | `1` shell    | bare bash, cwd = repo |
 | `2` logs     | empty; tail whatever you want here |
 
@@ -545,7 +504,9 @@ The bearer token must match `aidc mcp token show`. aidc reads the token from `~/
 
 `session_invoke` and `session_invoke_async` run `claude --print` — headless, no UI, result as text. For work that builds a conversation thread, needs visible progress, or spans many turns: use the session tools.
 
-**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the MetaLLM conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly.
+**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the MetaLLM conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session is still mid-turn, the prompt is queued and injected the moment that turn ends (the return says `queued`); nothing is lost and nothing needs re-sending.
+
+**`session_resend(name)`** — re-delivers the session's most recent reply when a callback was lost (a dropped POST, an MCP restart at the wrong moment). It refuses to re-post a reply that MetaLLM already acknowledged and returns the content to the caller instead, so it can never inject a duplicate.
 
 **`session_watch(name)`** — call this first to open the callback webhook for a session: every reply the session's Claude produces is then delivered into this conversation automatically. `session_send` auto-starts it on first use, so you only need it explicitly to watch a session you aren't actively sending to yet. Safe to re-call.
 
@@ -588,9 +549,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Does **not** replace the session's Claude Code: it lives in the dev-home volume and auto-updates in-session. Prompts before interrupting an in-flight claude conversation. |
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
 | `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. |
-| `aidc claude-token <verb>` | **Recommended for any setup with multiple concurrent claude sessions.** Manage a long-lived OAuth token that bypasses the Anthropic refresh-token race. `setup\|show\|clear`. See "Claude auth" section above. |
-| `aidc auth-bridge <verb>` | macOS only: manage the host-side daemon that syncs Keychain credentials into running sessions. Used by Strategy 2 (Keychain bridging). Auto-started by `create` / `mcp start`; auto-stopped by `kill` / `mcp stop` when no aidc containers remain. |
-| `aidc reauth <session>` | Recover a single session from `Please run /login` in ~3 seconds. Used by Strategy 2. Pushes current host credentials into the session and relaunches claude in tmux (conversation thread preserved via `--continue`). |
+| `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 
@@ -625,9 +584,12 @@ taint_response: freeze                # log | notify | freeze. freeze is the def
                                       # pauses the dev container on a malware-blocklist hit.
 tld_taints: false                     # also taint on state-actor TLD hits
 audit_dir: ~/aidc-audit               # where audit data lands
-claude_mode: yolo                     # yolo | safe (--dangerously-skip-permissions vs not)
+claude_mode: yolo                     # yolo (--dangerously-skip-permissions) | safe (= default) |
+                                      # default | acceptEdits | auto | bypassPermissions | dontAsk | plan
+                                      # (--permission-mode). Non-yolo modes surface approve prompts
+                                      # that an orchestrator answers over session_send.
+claude_resume: true                   # pass --continue so claude picks up the prior conversation
 share_memory: true                    # mount ~/.claude/projects/<encoded>/ into the session
-share_auth: true                      # bridge host Claude Code auth (Keychain / creds.json)
 share_plugins: true                   # bridge ~/.claude/plugins (read-only) + enable them in-container
 
 state_actor_tlds:                     # additive: appended to defaults (.ru .cn .by .ir .kp)

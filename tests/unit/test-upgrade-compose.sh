@@ -61,7 +61,7 @@ assert "the ~/.claude.json mount is gone" "! grep -q '/home/vscode/.claude.json:
 assert "settings, memory, repo and dev-home mounts survive" \
     "grep -q 'settings.json:rw' '$COMPOSE' && grep -q 'projects/-work-repo:rw' '$COMPOSE' && grep -q '/work/repo:rw' '$COMPOSE' && grep -q 'dev-home:/home/vscode:rw' '$COMPOSE'"
 assert "the file keeps its 0600 mode" "[ \"\$(mode_of '$COMPOSE')\" = 600 ]"
-assert "no temp file is left behind" "! ls '$SCRATCH'/aidc-old.yaml.strip.* >/dev/null 2>&1"
+assert "no temp file is left behind" "[ \"\$(ls '$SCRATCH' | wc -l)\" -eq 1 ]"
 assert "a second strip finds nothing and returns 1" "! aidc_strip_legacy_auth_mounts '$COMPOSE'"
 echo
 
@@ -71,7 +71,7 @@ assert "the dev service now pins the new tag" "grep -q '^    image: aidc/dev-bas
 assert "the old dev tag is gone" "! grep -q 'aidc/dev-base:v1.4.1' '$COMPOSE'"
 assert "sidecar images are untouched (--no-deps never recreates them)" "grep -q '^    image: aidc/squid:v1.4.1$' '$COMPOSE'"
 assert "the file keeps its 0600 mode" "[ \"\$(mode_of '$COMPOSE')\" = 600 ]"
-assert "no temp file is left behind" "! ls '$SCRATCH'/aidc-old.yaml.image.* >/dev/null 2>&1"
+assert "no temp file is left behind" "[ \"\$(ls '$SCRATCH' | wc -l)\" -eq 1 ]"
 assert "rewriting to the same tag is a no-op success" \
     "aidc_set_compose_dev_image '$COMPOSE' aidc/dev-base:v1.5.0 && grep -c 'aidc/dev-base:v1.5.0' '$COMPOSE' | grep -qx 1"
 printf 'services:\n  dev:\n    image: something-else:1\n' > "$SCRATCH/odd.yaml"

@@ -387,12 +387,14 @@ COPY tmux-start.sh         /usr/local/bin/aidc-tmux-start.sh
 COPY entrypoint.sh         /usr/local/bin/aidc-entrypoint.sh
 COPY user-main.sh          /usr/local/bin/aidc-user-main.sh
 COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
+COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
 RUN chmod 0755 /usr/local/bin/aidc-post-create.sh \
                 /usr/local/bin/aidc-tmux-start.sh \
                 /usr/local/bin/aidc-entrypoint.sh \
                 /usr/local/bin/aidc-user-main.sh \
                 /usr/local/bin/aidc-transcript-mirror.sh \
+                /usr/local/bin/aidc-claude-state-install.sh \
                 /usr/local/bin/aidc-dockerd-start.sh
 
 # tini is PID 1 — it reaps zombies (which a plain shell as PID 1 wouldn't)

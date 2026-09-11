@@ -224,13 +224,13 @@ aidc_retire_auth_bridge() {
 # reads /home/vscode/.claude/.credentials.json -- exactly where the old mount
 # lands -- so an upgraded session would keep the stale-inode bridge this
 # release removes. Drop the two legacy mount lines in place (the file stays
-# 0600; sed -i is not portable, so write via a temp file). Returns 0 when it
+# 0600; sed -i is not portable, so write via a private mktemp file). Returns 0 when it
 # removed something, 1 when there was nothing to strip.
 aidc_strip_legacy_auth_mounts() {
     local file="$1" tmp
     grep -qE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" 2>/dev/null || return 1
-    tmp="${file}.strip.$$"
-    ( umask 0077; grep -vE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+    tmp=$(umask 0077; mktemp "${file}.XXXXXX") || return 1
+    grep -vE ':/home/vscode/\.claude\.json:ro|:/home/vscode/\.claude/\.credentials\.json:' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$file"
 }
 
@@ -243,8 +243,8 @@ aidc_strip_legacy_auth_mounts() {
 # never recreates them, and only kill + create replaces the proxy stack.
 aidc_set_compose_dev_image() {
     local file="$1" tag="$2" tmp
-    tmp="${file}.image.$$"
-    ( umask 0077; sed -E "s|^([[:space:]]*image:[[:space:]]*)aidc/dev-base:[^[:space:]]+|\\1${tag}|" "$file" > "$tmp" ) \
+    tmp=$(umask 0077; mktemp "${file}.XXXXXX") || return 1
+    sed -E "s|^([[:space:]]*image:[[:space:]]*)aidc/dev-base:[^[:space:]]+|\\1${tag}|" "$file" > "$tmp" \
         || { rm -f "$tmp"; return 1; }
     grep -q "image: ${tag}\$" "$tmp" || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$file"

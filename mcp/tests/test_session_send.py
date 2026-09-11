@@ -14,6 +14,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from aidc_mcp import tools
+from aidc_mcp import transcript as ts
 
 # The wiring fixture patches asyncio.sleep MODULE-WIDE (tools.asyncio is the real
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
@@ -329,3 +330,54 @@ async def test_errors_when_paste_fails(wiring):
     assert res["ok"] is False
     assert "inject" in res["error"]
     assert not _sent_enter(wiring.tmux_calls)  # no Enter after a failed paste
+
+
+# --- injected-prompt record (terminal-typed prompt attribution) ----------------
+# The watcher tells a prompt the orchestrator sent from one a person typed at the
+# pane ONLY by this record, so every path that pastes must write it — and only
+# after the paste landed.
+
+async def test_direct_send_records_the_injected_prompt(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+
+    await send(name="proj", prompt="fix the\nfailing test", conversation_id="c1")
+
+    # Recorded in its pasted (newline-folded) form; matching is whitespace-insensitive.
+    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "fix the failing test")
+
+
+async def test_queued_send_records_only_once_injected(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+
+    await send(name="proj", prompt="later", conversation_id="c1")
+    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")  # not yet
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")
+
+
+async def test_failed_paste_records_nothing(wiring):
+    app, send = _make_send()
+    wiring.paste_ok = False
+
+    await send(name="proj", prompt="hello", conversation_id="c1")
+
+    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "hello")
+
+
+async def test_record_write_failure_does_not_fail_the_send(wiring, monkeypatch):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+
+    def boom(*a, **k):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(ts, "record_sent_prompt", boom)
+    res = await send(name="proj", prompt="hello", conversation_id="c1")
+
+    assert res["ok"] is True
+    assert res["data"]["status"] == "sent"

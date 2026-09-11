@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -54,6 +56,17 @@ class Turn:
     terminal_uuid: str
     text: str
     ok: bool = True  # False for API-error turns (delivered as a failure result)
+    # The person-typed prompt lines that opened this turn (see human_prompt_text),
+    # in file order. Empty when the turn was opened by something Claude Code
+    # synthesized (hook feedback, a task notification, an auto-continue) or when
+    # the turn is a continuation with no prompt of its own in the read window.
+    # The watcher matches these against the prompts IT injected to decide which
+    # were typed at the terminal by a person (consume_sent_prompt, in the drain).
+    prompts: tuple[str, ...] = ()
+    # Set by the watcher at delivery time: "terminal" when at least one prompt
+    # was typed at the terminal (the delivered content then carries it),
+    # "orchestrator" when every prompt was one the MCP injected, "" when unknown.
+    prompt_origin: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -216,6 +229,56 @@ def _is_real_user_prompt(obj: dict) -> bool:
     return False
 
 
+# A slash command typed at the terminal is transcribed as
+# `<command-name>/x</command-name><command-message>x</command-message><command-args>...`.
+_COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+# Local-command output lines are Claude Code's, not the person's, even though they
+# share the command's promptId and are not flagged isMeta.
+_NOT_TYPED_PREFIXES = ("<local-command-stdout>", "<local-command-caveat>")
+
+
+def human_prompt_text(obj: dict) -> str:
+    """The text a PERSON typed at the terminal for this user line, or "".
+
+    Verified against a live aidc transcript (2026-09-11): a prompt pasted by the
+    MCP and one typed by a person are structurally identical — both carry
+    ``origin.kind == "human"`` and ``promptSource == "typed"`` — so this cannot
+    tell them apart (the watcher does that by matching the MCP's own send record).
+    What it CAN exclude is everything Claude Code writes on the user's behalf and
+    that no one typed:
+      - ``isMeta`` lines: hook feedback, skill bodies, system reminders, the
+        "Continue from where you left off." auto-continue;
+      - ``promptSource`` other than "typed" / ``origin.kind`` other than "human":
+        task notifications and other system-sourced prompts;
+      - local-command output and its caveat banner;
+      - the "[Request interrupted by user]" marker (an interruptedMessageId line).
+    A typed slash command is rendered compactly as ``/name args``.
+
+    Absent fields are treated as "typed" so older transcripts (and fixtures)
+    without the provenance keys still attribute plain prompts to the person.
+    """
+    if obj.get("isMeta") or obj.get("interruptedMessageId"):
+        return ""
+    source = obj.get("promptSource")
+    if source is not None and source != "typed":
+        return ""
+    origin = obj.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+        return ""
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    text = _text_of(msg).strip()
+    if not text or text.startswith(_NOT_TYPED_PREFIXES):
+        return ""
+    m = _COMMAND_NAME_RE.search(text)
+    if m:
+        args_m = _COMMAND_ARGS_RE.search(text)
+        args = args_m.group(1).strip() if args_m else ""
+        return f"{m.group(1).strip()} {args}".strip()
+    return text
+
+
 def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     """Return completed assistant turns in file order, COALESCED by user-prompt
     boundary.
@@ -232,6 +295,12 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     Tool-result (user-role) lines and tool_use/thinking blocks do not break or
     contribute to the turn. Empty turns (tool-only, no text) are emitted with empty
     text so the caller can still advance past them.
+
+    Each turn also carries the person-typed prompt lines that opened it
+    (``Turn.prompts``). Consecutive real user prompts with no assistant line
+    between them (a slash command followed by its hook feedback, an auto-continue
+    followed by the person's actual ask) all belong to the turn that follows, so
+    they accumulate until an assistant line starts the reply.
     """
     turns: list[Turn] = []
     pending: list[str] = []   # text accumulated in the current group (all lines)
@@ -239,9 +308,12 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     terminal_uuid: str = ""   # uuid of the last TERMINAL_STOP seen in this group
     has_terminal = False      # has this group reached a TERMINAL_STOP yet?
     committed_ok = True        # False when the committed terminal is an API error
+    prompts: list[str] = []   # person-typed prompt lines that opened this group
+    saw_assistant = False     # has an assistant line been seen since the prompt(s)?
 
     def flush() -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
+        nonlocal prompts, saw_assistant
         # Only a group that reached a terminal is a completed (deliverable) turn.
         # Deliver the text COMMITTED at that terminal — never the trailing `pending`
         # text from non-terminal lines after it. Those lines sit past the turn's
@@ -250,12 +322,14 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         # delivered with their own terminal on a later poll.
         if has_terminal:
             turns.append(Turn(terminal_uuid=terminal_uuid, text=committed.strip(),
-                              ok=committed_ok))
+                              ok=committed_ok, prompts=tuple(prompts)))
         pending = []
         committed = ""
         terminal_uuid = ""
         has_terminal = False
         committed_ok = True
+        prompts = []
+        saw_assistant = False
 
     for obj in objs:
         # `type` is attacker-influenced; an unhashable value would raise on the
@@ -266,10 +340,20 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         role = _role(obj)
         if role == "user":
             if _is_real_user_prompt(obj):
-                flush()  # a real prompt closes the previous group
+                # A real prompt closes the previous group — but only once that
+                # group has assistant content. Back-to-back prompts with nothing
+                # between them (a command's hook feedback, an auto-continue and
+                # then the person's ask) all open the SAME upcoming turn, so their
+                # typed text accumulates rather than being dropped by a flush.
+                if saw_assistant:
+                    flush()
+                typed = human_prompt_text(obj)
+                if typed:
+                    prompts.append(typed)
             continue
 
         # assistant line
+        saw_assistant = True
         raw_message = obj.get("message")
         message = raw_message if isinstance(raw_message, dict) else {}
 
@@ -539,6 +623,127 @@ def record_delivered(base_dir: Path, session: str, conversation_id: str,
     base.mkdir(parents=True, exist_ok=True)
     with ledger_path(base, session, conversation_id).open("a", encoding="utf-8") as fh:
         fh.write(fingerprint + "\n")
+
+
+# --- injected-prompt record (terminal-typed prompt attribution) ---------------
+#
+# A person attached to the session's tmux window can type a prompt straight into
+# Claude, and the reply is delivered over the same webhook as a reply to a prompt
+# the orchestrator sent. In the transcript the two are indistinguishable (see
+# human_prompt_text), so the orchestrator received answers to questions it never
+# asked and could not tell where they came from. The watcher therefore records
+# every prompt the MCP itself injects, and at delivery time any prompt on the
+# turn that is NOT in that record was typed at the terminal — its text is
+# prepended to the delivered content so the reply reads in context.
+#
+# Keyed by normalized text (whitespace-collapsed), not by uuid: the MCP never
+# learns the uuid of the line its paste produced. Verified 2026-09-11 against a
+# live transcript that a pasted prompt is transcribed byte-for-byte. Durable on
+# disk (sibling of the watermark) so an MCP restart between a send and its reply
+# does not mislabel the orchestrator's own prompt as the person's. Bounded by
+# count and age: an entry that never matched (a dead-lettered paste) must not
+# linger forever and swallow a person later typing the same words.
+
+_SENT_PROMPTS_MAX = 200
+_SENT_PROMPTS_TTL_S = 24 * 3600.0
+
+
+def normalize_prompt(text: str) -> str:
+    """Whitespace-insensitive form of a prompt: the paste path already folds
+    newlines to spaces and Claude Code trims, so runs of whitespace are the only
+    expected difference between what was sent and what was transcribed."""
+    return " ".join(text.split())
+
+
+def prompt_fingerprint(text: str) -> str:
+    return hashlib.sha256(normalize_prompt(text).encode("utf-8")).hexdigest()
+
+
+def sent_prompts_path(base_dir: Path, session: str) -> Path:
+    """Per-session (not per-conversation) record: a session has one tmux pane, and
+    whichever conversation watches it needs the same answer."""
+    return Path(base_dir) / f"{_slug(session)}.sent-prompts.json"
+
+
+def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
+    """Entries as ``[{"fp": <sha256>, "at": <epoch>}]``, expired ones dropped.
+    A missing or corrupt file is an empty record (never raises)."""
+    try:
+        data = json.loads(sent_prompts_path(base_dir, session).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for e in data:
+        if not (isinstance(e, dict) and isinstance(e.get("fp"), str)):
+            continue
+        try:
+            at = float(e.get("at", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if now - at <= _SENT_PROMPTS_TTL_S:
+            out.append({"fp": e["fp"], "at": at})
+    return out
+
+
+def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> None:
+    """Atomic write (temp + rename), matching save_watermark."""
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = sent_prompts_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def record_sent_prompt(base_dir: Path, session: str, text: str, *,
+                       now_fn=time.time) -> None:
+    """Remember that the MCP injected ``text`` into ``session``'s pane. Call only
+    after the paste succeeded, so a prompt that never reached Claude is not on
+    record to mis-claim a person's identical words later."""
+    now = now_fn()
+    entries = _load_sent_prompts(base_dir, session, now)
+    entries.append({"fp": prompt_fingerprint(text), "at": now})
+    del entries[:-_SENT_PROMPTS_MAX]
+    _save_sent_prompts(base_dir, session, entries)
+
+
+def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
+                        now_fn=time.time) -> bool:
+    """True — and the entry is removed — when ``text`` matches a prompt the MCP
+    injected into ``session``. Removes ONE entry per call so the orchestrator
+    sending the same words twice ("continue") is matched twice, and a person
+    typing those words a third time is not."""
+    now = now_fn()
+    entries = _load_sent_prompts(base_dir, session, now)
+    fp = prompt_fingerprint(text)
+    for i, e in enumerate(entries):
+        if e["fp"] == fp:
+            del entries[i]
+            _save_sent_prompts(base_dir, session, entries)
+            return True
+    return False
+
+
+# Delivered-content framing for a reply whose prompt was typed at the terminal.
+# Addressed to the orchestrating LLM: it must learn, in the content it reads,
+# that this prompt did not come from it — otherwise it reads the reply as an
+# answer to whatever IT last sent and is "very confused about where the
+# instructions came from".
+TERMINAL_PROMPT_NOTE = (
+    "[Note: the user typed the following prompt directly into the session's terminal. "
+    "It was not sent by you. The reply below answers it.]"
+)
+
+
+def render_delivery(reply: str, terminal_prompts: Sequence[str]) -> str:
+    """The content to POST: the reply alone, or the terminal-typed prompt(s)
+    prepended under TERMINAL_PROMPT_NOTE with a rule between them and the reply."""
+    if not terminal_prompts:
+        return reply
+    quoted = "\n\n".join(p.strip() for p in terminal_prompts if p.strip())
+    return f"{TERMINAL_PROMPT_NOTE}\n{quoted}\n\n---\n\n{reply}"
 
 
 # --- active transcript resolution --------------------------------------------

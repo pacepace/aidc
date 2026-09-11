@@ -54,9 +54,9 @@ Subcommands:
   ls               list the networks the dev container is on
 
 Examples:
-  aidc network metallm add metallm_default
-  aidc network metallm ls
-  aidc network metallm rm metallm_default
+  aidc network api add webapp_default
+  aidc network api ls
+  aidc network api rm webapp_default
 
 Attachments survive 'aidc restart' but NOT 'aidc upgrade' or 'aidc kill'.
 Use 'aidc create --network <net>' for one that survives everything.

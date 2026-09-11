@@ -142,7 +142,7 @@
 
 ---
 
-## MCP — Control plane (Saoirse / external AI orchestration)
+## MCP — Control plane (external AI orchestration)
 
 | ID | Requirement | Priority | Source |
 |----|-------------|----------|--------|

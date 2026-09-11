@@ -169,13 +169,13 @@ those containers by name.
 
 ```bash
 docker network ls                                  # find the network
-aidc create metallm --network metallm_default      # attach at create time
+aidc create api --network webapp_default           # attach at create time
 ```
 
 ```yaml
 # or in .aidc/config.yaml
 networks:
-  - metallm_default
+  - webapp_default
 ```
 
 Repeatable, and CLI **merges** with config (unlike `--dns`, which overrides) — more sources
@@ -185,15 +185,15 @@ you a message, not a `dev-base` rebuild.
 **Adhoc** (attach a session that's already running, no recreate):
 
 ```bash
-aidc network metallm add metallm_default
-aidc network metallm ls                            # marks declared vs adhoc
-aidc network metallm rm metallm_default
+aidc network api add webapp_default
+aidc network api ls                                # marks declared vs adhoc
+aidc network api rm webapp_default
 ```
 
 Then, from inside the session:
 
 ```bash
-psql -h metallm-postgres-1 -U metallm              # resolves over docker DNS
+psql -h webapp-postgres-1 -U webapp                # resolves over docker DNS
 ```
 
 | | `aidc restart` | `aidc upgrade` | `aidc kill` + `create` |
@@ -379,7 +379,7 @@ Trade-offs: running `claude setup-token` invalidates the host's current login on
 
 | Window | What |
 |---|---|
-| `0` claude   | `aidc-claude` already running (yolo mode by default, with `--continue` so it resumes the previous conversation). On a brand-new session it is sitting at the login prompt: run `/login` once (see [Claude auth](#claude-auth--the-container-logs-in-on-its-own)). This is also the window the MetaLLM `session_send` tool drives. |
+| `0` claude   | `aidc-claude` already running (yolo mode by default, with `--continue` so it resumes the previous conversation). On a brand-new session it is sitting at the login prompt: run `/login` once (see [Claude auth](#claude-auth--the-container-logs-in-on-its-own)). This is also the window an orchestrator's `session_send` tool drives. |
 | `1` shell    | bare bash, cwd = repo |
 | `2` logs     | empty; tail whatever you want here |
 
@@ -463,50 +463,45 @@ aidc mcp token show           # the bearer token to put in the client's MCP conf
 
 From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mcp` with that bearer. It gets the full tool surface (`session_create`, `session_invoke`, `file_get`, etc.). See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md).
 
-### Async tasks with MetaLLM
+### Driving sessions from an orchestrator
 
-When aidc is registered as an MCP server in a [MetaLLM](https://github.com/pacepace/metallm) instance, Saoirse can fire off long-running Claude Code tasks and get the result injected back into the conversation — no polling, no waiting, no timeouts on her end.
+The MCP server is built for an orchestrating agent that runs somewhere else on your overlay network and talks to sessions over MCP. Tasks that take minutes should not block the orchestrator's request, so two tools finish asynchronously and deliver their result by POSTing to a callback endpoint the orchestrator exposes.
 
-**How it works:**
+**The callback contract:**
 
-1. MetaLLM injects the current `conversation_id` into Saoirse's system prompt.
-2. Saoirse calls `session_invoke_async(name, prompt, conversation_id)`. It returns immediately.
-3. aidc runs `aidc-claude --print <prompt>` inside the named session container (30-minute timeout).
-4. When it finishes, aidc POSTs `{"content": "...", "ok": true/false}` to `{metallm_url}/api/v1/internal/callback/{conversation_id}` authenticated with the MCP bearer token.
-5. MetaLLM verifies the token, injects the result into the conversation, and wakes Saoirse with the output.
+1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
+2. The agent calls `session_invoke_async(name, prompt, conversation_id)` (or `session_send`, below). The call returns immediately.
+3. aidc runs the task in the named session container (`session_invoke_async` runs `aidc-claude --print <prompt>` with a 30-minute cap).
+4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|""}`.
+5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 
 **Setup (one time):**
 
-**Step 1 — Tell aidc where MetaLLM lives.** Add `metallm.callback_url` to `~/.config/aidc/config.yaml`:
+**Step 1 — Tell aidc where the callback endpoint lives.** Add `metallm.callback_url` to `~/.config/aidc/config.yaml` (the key keeps its historical name):
 
 ```yaml
 metallm:
-  callback_url: https://your-metallm-instance.example.com
+  callback_url: https://orchestrator.example.com
 ```
 
-**Step 2 — Make sure `aidc mcp` is reachable from MetaLLM.** The callback goes MetaLLM → aidc; MetaLLM must be able to reach your aidc MCP server on the overlay network. Check `aidc mcp status` for the bind address and port.
+**Step 2 — Make sure the orchestrator can reach `aidc mcp`,** and aidc can reach the callback URL. Check `aidc mcp status` for the bind address and port.
 
-**Step 3 — Register aidc as an MCP server in MetaLLM.** Two routes:
+**Step 3 — Register aidc as an MCP server in the orchestrator:** URL `http://<your-overlay-ip>:7878/mcp`, bearer from `aidc mcp token show`. aidc reads the same token from `~/.config/aidc/mcp-token` at call time when it POSTs back, so `aidc mcp token rotate` takes effect on the next callback.
 
-- **Admin route** (registers for all users): Settings → MCP Servers → Add server. Set the URL to `http://<your-overlay-ip>:7878/mcp` and paste the token from `aidc mcp token show` as the bearer.
-- **User-owned route** (no admin needed): User Settings → MCP Servers → Add server with the same URL and token. Users can register their own aidc without admin involvement.
-
-The bearer token must match `aidc mcp token show`. aidc reads the token from `~/.config/aidc/mcp-token` at call time — rotating with `aidc mcp token rotate` takes effect on the next callback.
-
-**Step 4 — Verify.** Start a MetaLLM conversation, ask Saoirse to call `session_invoke_async` with a short task on a running aidc session. She'll confirm it's launched; when the task finishes you'll see the result injected without any further prompting.
+**Step 4 — Verify.** Ask the orchestrator's agent to call `session_invoke_async` with a short task on a running session. It confirms the launch; when the task finishes the result appears in the conversation without further prompting.
 
 **Notes:**
 - Use `session_status` before calling `session_invoke_async` to confirm the target session is alive.
 - If `metallm.callback_url` is not set, the tool returns an error immediately rather than silently losing the result.
-- Tasks that finish within MetaLLM's response window are better served by `session_invoke` (synchronous). Use async for anything that might take more than a minute or two.
+- Tasks that finish within the orchestrator's response window are better served by `session_invoke` (synchronous). Use async for anything that might take more than a minute or two.
 
-### Interactive sessions from MetaLLM
+### Interactive sessions from an orchestrator
 
 `session_invoke` and `session_invoke_async` run `claude --print` — headless, no UI, result as text. For work that builds a conversation thread, needs visible progress, or spans many turns: use the session tools.
 
-**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the MetaLLM conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session is still mid-turn, the prompt is queued and injected the moment that turn ends (the return says `queued`); nothing is lost and nothing needs re-sending.
+**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the orchestrator's conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session is still mid-turn, the prompt is queued and injected the moment that turn ends (the return says `queued`); nothing is lost and nothing needs re-sending.
 
-**`session_resend(name)`** — re-delivers the session's most recent reply when a callback was lost (a dropped POST, an MCP restart at the wrong moment). It refuses to re-post a reply that MetaLLM already acknowledged and returns the content to the caller instead, so it can never inject a duplicate.
+**`session_resend(name)`** — re-delivers the session's most recent reply when a callback was lost (a dropped POST, an MCP restart at the wrong moment). It refuses to re-post a reply the orchestrator already acknowledged and returns the content to the caller instead, so it can never inject a duplicate.
 
 **`session_watch(name)`** — call this first to open the callback webhook for a session: every reply the session's Claude produces is then delivered into this conversation automatically. `session_send` auto-starts it on first use, so you only need it explicitly to watch a session you aren't actively sending to yet. Safe to re-call.
 
@@ -526,7 +521,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | Tool | Use when |
 |---|---|
 | `session_invoke` | Short one-off, answer needed inline — blocks until done (no conversation memory) |
-| `session_invoke_async` | Headless fire-and-forget (e.g. a scheduled/skill job); result injected back into the MetaLLM conversation, no conversation memory |
+| `session_invoke_async` | Headless fire-and-forget (e.g. a scheduled/skill job); result delivered back into the orchestrator's conversation, no conversation memory |
 | `session_send` | Live back-and-forth with a session — non-blocking; reply delivered into the conversation via webhook. Call repeatedly for a multi-turn sequence |
 
 ## Reference
@@ -627,7 +622,7 @@ networks:                             # foreign docker bridges the dev container
                                       # WIDENS THE SANDBOX -- everything on an attached network
                                       # is reachable on every port, unproxied and invisible to
                                       # taint detection. See "Reaching another stack's services".
-  - metallm_default
+  - webapp_default
 
 notify_webhook: ""                    # POSTed to on taint events
 
@@ -636,10 +631,11 @@ mcp:
   bind_address: 127.0.0.1             # bind the MCP server here. Change to e.g. your ZeroTier/Tailscale IP for remote access.
   port: 7878
 
-# Only relevant if you use `session_invoke_async` with MetaLLM:
+# Only relevant if an orchestrator drives sessions over MCP (the key keeps its historical name):
 metallm:
-  callback_url: ""                    # base URL of your MetaLLM instance (e.g. https://metallm.example.com).
-                                      # Required for session_invoke_async to post results back. See "Async tasks with MetaLLM" above.
+  callback_url: ""                    # base URL of the orchestrator's callback endpoint (e.g. https://orchestrator.example.com).
+                                      # Required for session_invoke_async / session_send to deliver results back.
+                                      # See "Driving sessions from an orchestrator" above.
 ```
 
 ## Taint

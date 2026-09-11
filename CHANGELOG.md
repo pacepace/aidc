@@ -13,6 +13,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Changed
+- **The docs and the MCP tool text describe "the orchestrator", not a specific product.**
+  The README sections on callback delivery now document the contract itself (endpoint,
+  bearer, both payload shapes) for any MCP-capable orchestrator, the examples use neutral
+  names, and the tool descriptions and error messages an orchestrating model reads say
+  "the orchestrator". The `metallm.callback_url` config key is unchanged and documented
+  as keeping its historical name, so no configuration breaks.
+
 ## [1.5.0] - 2026-09-11
 
 ### Changed

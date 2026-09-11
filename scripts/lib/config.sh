@@ -104,10 +104,10 @@ mcp:
   bind_address: 127.0.0.1   # change to your ZeroTier / Tailscale interface IP for remote access
   port: 7878
 
-# Only relevant if you use claude_invoke_async (async Claude Code callbacks via metallm).
+# Only relevant if an orchestrator drives sessions over MCP (the key keeps its
+# historical name): where session_invoke_async / session_send POST results back.
 metallm:
-  callback_url: ""           # base URL of your metallm instance, e.g. https://metallm.example.com
-                             # set this so aidc can POST async results back to Saoirse
+  callback_url: ""           # base URL of the orchestrator's callback endpoint, e.g. https://orchestrator.example.com
 EOF
 }
 

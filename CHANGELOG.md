@@ -13,6 +13,27 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Added
+- **A session's scratchpad follows it across the container boundary.** Claude Code keeps
+  per-session working files at `/tmp/claude-<uid>/<encoded-repo>/<session-id>/` —
+  `scratchpad/` and `tasks/` — and inside a session those lived on the container's
+  writable layer, where `aidc upgrade` and `aidc kill` destroyed them. A session moved
+  between host and container therefore kept its conversation (which `share_memory` has
+  always bridged) and lost the files that went with it. `aidc create` now bind-mounts the
+  host's scratchpad dir for the repo at the identical path inside, keyed on the same
+  encoded repo path as the memory bridge, so resuming a session on either side finds its
+  own files. Toggle with `share_scratchpad: false`.
+
+  Only this repo's subdirectory is bridged — never the whole `/tmp/claude-<uid>` root,
+  which holds every other project's scratchpad. The bridge is skipped, with a message,
+  when the host uid is not the container's `vscode` (1000): those directories are mode
+  0700, so the mount would land unwritable and Claude could not write a scratchpad at
+  all. Being bound to `/tmp` on both sides, a bridged scratchpad is exactly as durable as
+  a host session's and is cleared by a host reboot.
+
+  Existing sessions do not gain the mount — `aidc upgrade` reuses the compose file
+  rendered at create time. Use `aidc kill` + `aidc create` to pick it up.
+
 ## [1.5.1] - 2026-09-11
 
 ### Changed

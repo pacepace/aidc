@@ -13,6 +13,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 ## What's bridged from your host
 
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
+- Per-project scratchpad (`/tmp/claude-<uid>/<encoded>/`) — the working files that go with those conversations (`scratchpad/` and `tasks/`), read-write, at the identical path on both sides. Pop a session out of the container and resume it on the host and it still has its own files; pop it back in and they are still there. Only this repo's subdirectory is bridged, never the whole scratchpad root. Like a host session's, it is cleared by a host reboot.
 - `settings.json` — env vars, status line, editor mode.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
 - Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
@@ -585,6 +586,7 @@ claude_mode: yolo                     # yolo (--dangerously-skip-permissions) | 
                                       # that an orchestrator answers over session_send.
 claude_resume: true                   # pass --continue so claude picks up the prior conversation
 share_memory: true                    # mount ~/.claude/projects/<encoded>/ into the session
+share_scratchpad: true                # bridge /tmp/claude-<uid>/<encoded>/ (scratchpad + tasks) into the session
 share_plugins: true                   # bridge ~/.claude/plugins (read-only) + enable them in-container
 
 state_actor_tlds:                     # additive: appended to defaults (.ru .cn .by .ir .kp)

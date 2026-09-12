@@ -337,6 +337,36 @@ else
     info "memory: NOT shared (share_memory=false); container will use its own memory"
 fi
 
+# ---- Claude scratchpad bridge ------------------------------------------------
+#
+# The memory bridge above carries the conversation; this one carries the working
+# files that go with it. Claude Code puts them at
+#   /tmp/claude-<uid>/<encoded-repo>/<session-id>/{scratchpad,tasks}
+# on the container's writable layer, where `aidc upgrade` and `aidc kill` destroy
+# them -- so a session moved between host and container kept its transcript and
+# lost its scratchpad. Bridging the same ENCODED_REPO the memory mount uses puts
+# both on the same footing: resume the session on either side and it finds its
+# own files.
+#
+# Bound to /tmp on the host, which is where Claude Code itself keeps them, so a
+# bridged scratchpad is as durable as a host session's -- no more, and a host
+# reboot clears both.
+CLAUDE_SCRATCHPAD_MOUNT=""
+if [ "${AIDC_SHARE_SCRATCHPAD:-true}" = "true" ]; then
+    HOST_UID=$(id -u)
+    HOST_CLAUDE_SCRATCHPAD_DIR=$(aidc_scratchpad_host_dir "$HOST_UID" "$ENCODED_REPO")
+    if CLAUDE_SCRATCHPAD_MOUNT=$(aidc_scratchpad_mount "$HOST_UID" "$ENCODED_REPO"); then
+        # 0700 matches what Claude Code creates these as on the host.
+        mkdir -p "$HOST_CLAUDE_SCRATCHPAD_DIR"
+        chmod 0700 "$HOST_CLAUDE_SCRATCHPAD_DIR"
+        info "scratchpad: sharing host's per-project Claude scratchpad dir"
+    else
+        info "scratchpad: NOT shared -- host uid ${HOST_UID} is not the container's ${AIDC_CONTAINER_UID}, so the mount would be unwritable inside"
+    fi
+else
+    info "scratchpad: NOT shared (share_scratchpad=false); scratchpad dies with the container"
+fi
+
 # Authentication: the container owns its Claude config directory.
 #
 # The compose template sets CLAUDE_CONFIG_DIR=/home/vscode/.claude, so Claude's
@@ -477,6 +507,7 @@ export AUDIT_DIR
 export ENCODED_REPO
 export HOST_CLAUDE_PROJECT_DIR
 export CLAUDE_MEMORY_MOUNT
+export CLAUDE_SCRATCHPAD_MOUNT
 export CLAUDE_SETTINGS_MOUNT
 export CLAUDE_PLUGINS_MOUNT
 export CLAUDE_PLUGINS_MOUNT_ABS

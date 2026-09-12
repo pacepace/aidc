@@ -86,6 +86,23 @@ if [ -n "${AIDC_REPO_PATH:-}" ] && [ -f "${AIDC_REPO_PATH}/.python-version" ]; t
     fi
 fi
 
+# Claude Code's scratchpad root (/tmp/claude-<uid>) has to belong to vscode.
+#
+# When share_scratchpad bridges this repo's scratchpad dir, the bind mount is
+# one level DOWN -- /tmp/claude-<uid>/<encoded-repo> -- and Docker materialises
+# the parent it needs as root-owned 0755. Claude also writes siblings of the
+# per-project dir directly in that root, so leaving it root-owned means those
+# writes fail for reasons that look nothing like a mount problem. Claiming the
+# root here fixes that without disturbing the bind mounted beneath it, and is
+# equally correct unbridged, where the whole tree is container-local.
+#
+# 0700 matches the mode Claude Code creates this root as on a host.
+CLAUDE_TMP_ROOT="/tmp/claude-$(id -u vscode)"
+mkdir -p "$CLAUDE_TMP_ROOT"
+chown vscode:vscode "$CLAUDE_TMP_ROOT"
+chmod 0700 "$CLAUDE_TMP_ROOT"
+log "claude scratchpad root ready at ${CLAUDE_TMP_ROOT}"
+
 # Drop privileges to vscode and exec the container's CMD (whatever was
 # passed — compose's tmux+tail script, VS Code Dev Containers' keep-alive
 # loop, or the Dockerfile's default of /usr/local/bin/aidc-user-main.sh

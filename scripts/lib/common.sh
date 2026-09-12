@@ -13,6 +13,7 @@
 #   container_name          -- (session, role) -> aidc-<session>-<role>
 #   session_exists          -- presence check via Docker label
 #   realpath_portable       -- macOS-safe realpath
+#   aidc_scratchpad_mount   -- compose line bridging Claude's scratchpad dir
 
 # ---- stderr logging ----------------------------------------------------------
 
@@ -121,6 +122,45 @@ realpath_portable() {
 # ---- timestamp helper --------------------------------------------------------
 
 aidc_timestamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+# ---- Claude scratchpad bridge ------------------------------------------------
+#
+# Claude Code keeps per-session working files -- scratchpad/ and tasks/ -- under
+# /tmp/claude-<uid>/<encoded-cwd>/<session-id>/. That is derived from the uid
+# Claude runs as and the directory it was launched in, so the container and the
+# host agree on it only because two other things already line up: the workspace
+# is bind-mounted at its own host path, and tmux starts Claude in REPO_PATH.
+# <encoded-cwd> is therefore the same string the memory bridge uses, which is
+# why both mounts take ENCODED_REPO.
+#
+# The dev container's `vscode` user is pinned to this uid (.devcontainer/
+# Dockerfile), which is what lets a host-owned scratchpad dir be written from
+# inside the container.
+AIDC_CONTAINER_UID=1000
+
+# Host-side scratchpad dir for one repo: (uid, encoded-repo).
+aidc_scratchpad_host_dir() {
+    printf '/tmp/claude-%s/%s' "$1" "$2"
+}
+
+# Compose volume line bridging that dir into the container: (uid, encoded-repo).
+#
+# Only this repo's subdirectory is bridged, never the whole /tmp/claude-<uid>
+# root -- the root holds every other project's scratchpad plus harness scratch,
+# and exposing all of it to the sandbox is the same mistake as sharing the whole
+# ~/.claude.
+#
+# Emits nothing and returns 1 when the host uid differs from the container's:
+# the host dirs are mode 0700, so the mount would land unwritable and Claude
+# could not create its own scratchpad. Not bridging degrades; bridging wrong
+# breaks.
+aidc_scratchpad_mount() {
+    local host_uid="$1" encoded_repo="$2"
+    [ "$host_uid" = "$AIDC_CONTAINER_UID" ] || return 1
+    printf -- '- %s:%s:rw' \
+        "$(aidc_scratchpad_host_dir "$host_uid" "$encoded_repo")" \
+        "$(aidc_scratchpad_host_dir "$AIDC_CONTAINER_UID" "$encoded_repo")"
+}
 
 # ---- dependency check --------------------------------------------------------
 #

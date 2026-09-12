@@ -34,6 +34,13 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   Existing sessions do not gain the mount — `aidc upgrade` reuses the compose file
   rendered at create time. Use `aidc kill` + `aidc create` to pick it up.
 
+  The bridged directories live on your host and are not reaped by `aidc kill`. Claiming
+  them can never fail a session: both levels sit under world-writable sticky `/tmp`, so a
+  path already held by someone else — or by a planted symlink — is refused rather than
+  followed, and the session is created without the bridge. On macOS the uid check is more
+  conservative than it needs to be, since Docker Desktop remaps bind-mount ownership;
+  the bridge is currently skipped there.
+
 ## [1.5.1] - 2026-09-11
 
 ### Changed

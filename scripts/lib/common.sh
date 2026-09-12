@@ -162,6 +162,33 @@ aidc_scratchpad_mount() {
         "$(aidc_scratchpad_host_dir "$AIDC_CONTAINER_UID" "$encoded_repo")"
 }
 
+# Create the host scratchpad dir and its root at 0700: (dir).
+#
+# Returns 1 instead of creating anything when the path cannot be claimed
+# safely. Both levels sit under /tmp, which is world-writable and sticky, so
+# either one may already exist as another user's directory -- or as a symlink
+# someone planted -- and `mkdir -p`/`chmod` would follow it. Refusing there
+# costs a session its scratchpad bridge; chmod'ing through it would hand a
+# stranger's directory the 0700 treatment, or retarget it entirely.
+#
+# Every failure is a refusal, never an abort: callers run under `set -e`, and
+# an optional convenience must not be able to take `aidc create` down with it.
+# The container entrypoint's half of this bridge is non-fatal for the same
+# reason.
+aidc_scratchpad_prepare_host_dir() {
+    local dir="$1" root p
+    root=$(dirname "$dir")
+    for p in "$root" "$dir"; do
+        # -O is "owned by the effective uid"; the -e guard lets a path that
+        # does not exist yet through to mkdir.
+        if [ -L "$p" ] || { [ -e "$p" ] && [ ! -O "$p" ]; }; then
+            return 1
+        fi
+    done
+    mkdir -p "$dir" 2>/dev/null || return 1
+    chmod 0700 "$root" "$dir" 2>/dev/null || return 1
+}
+
 # ---- dependency check --------------------------------------------------------
 #
 # Run on demand from subcommands that need Docker. The dispatcher itself

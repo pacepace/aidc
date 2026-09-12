@@ -355,20 +355,33 @@ CLAUDE_SCRATCHPAD_MOUNT=""
 if [ "${AIDC_SHARE_SCRATCHPAD:-true}" = "true" ]; then
     HOST_UID=$(id -u)
     HOST_CLAUDE_SCRATCHPAD_DIR=$(aidc_scratchpad_host_dir "$HOST_UID" "$ENCODED_REPO")
-    if CLAUDE_SCRATCHPAD_MOUNT=$(aidc_scratchpad_mount "$HOST_UID" "$ENCODED_REPO"); then
-        # 0700 on BOTH levels, matching what Claude Code creates them as. The
-        # parent matters independently: when this session is the first thing to
-        # need it, `mkdir -p` would otherwise create it under the invoking
-        # umask -- typically group-writable and world-listable, in shared /tmp,
-        # holding every project's scratchpad.
-        mkdir -p "$HOST_CLAUDE_SCRATCHPAD_DIR"
-        chmod 0700 "$(dirname "$HOST_CLAUDE_SCRATCHPAD_DIR")" "$HOST_CLAUDE_SCRATCHPAD_DIR"
-        info "scratchpad: sharing host's per-project Claude scratchpad dir"
-    else
+    # Both levels are created at 0700, matching what Claude Code creates them
+    # as. The root matters independently: when this session is the first thing
+    # to need it, `mkdir -p` would otherwise leave it at the invoking umask --
+    # typically group-writable and world-listable, in shared /tmp, holding
+    # every project's scratchpad names.
+    if ! CLAUDE_SCRATCHPAD_MOUNT=$(aidc_scratchpad_mount "$HOST_UID" "$ENCODED_REPO"); then
         info "scratchpad: NOT shared -- host uid ${HOST_UID} is not the container's ${AIDC_CONTAINER_UID}, so the mount would be unwritable inside"
+    elif ! aidc_scratchpad_prepare_host_dir "$HOST_CLAUDE_SCRATCHPAD_DIR"; then
+        # Refused, not failed: see aidc_scratchpad_prepare_host_dir. Losing the
+        # bridge costs this session its scratchpad continuity; letting the
+        # failure escape would cost it the whole session.
+        CLAUDE_SCRATCHPAD_MOUNT=""
+        info "scratchpad: NOT shared -- could not safely claim ${HOST_CLAUDE_SCRATCHPAD_DIR} (not yours, or a symlink)"
+    else
+        info "scratchpad: sharing host's per-project Claude scratchpad dir"
     fi
 else
     info "scratchpad: NOT shared (share_scratchpad=false); scratchpad dies with the container"
+fi
+
+# The audit dir's config snapshot was written before this decision, so it still
+# claims the bridge is on. Record what actually happened instead: a snapshot
+# that disagrees with the mounts is worse than no snapshot, and this one is the
+# artifact an audit reads to reconstruct the session.
+if [ -z "$CLAUDE_SCRATCHPAD_MOUNT" ] && [ "${AIDC_SHARE_SCRATCHPAD:-true}" = "true" ]; then
+    AIDC_SHARE_SCRATCHPAD="false"
+    emit_loaded_config_yaml > "${AUDIT_DIR}/config-snapshot.yaml"
 fi
 
 # Authentication: the container owns its Claude config directory.

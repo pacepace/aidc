@@ -149,6 +149,65 @@ assert "an unset bridge leaves no literal placeholder either" \
 DIFF_LINES=$(diff "$SCRATCH/without.yaml" "$SCRATCH/with.yaml" | grep -c '^>')
 assert_eq "enabling the bridge adds exactly one line to the compose file" "1" "$DIFF_LINES"
 
+echo "== the container uid has one source of truth =="
+
+# AIDC_CONTAINER_UID restates the uid the Dockerfile pins for vscode. They agree
+# today; a Dockerfile bump that left the constant behind would silently suppress
+# every bridge while `aidc create` still reported "sharing".
+assert "the Dockerfile still pins vscode to AIDC_CONTAINER_UID" \
+    "grep -qE 'useradd .*-u +${AIDC_CONTAINER_UID}\b.* vscode' \"$AIDC_ROOT/.devcontainer/Dockerfile\""
+
+echo "== preparing the host dir refuses unsafe paths =="
+
+# Both levels live under world-writable sticky /tmp, so a co-tenant's directory
+# or a planted symlink can already occupy either one. Refusing is the whole
+# point: chmod would otherwise follow the link or re-mode someone else's dir.
+SAFE_ROOT="$SCRATCH/safe/claude-uid"
+assert "creates both levels when the path is clean" \
+    "aidc_scratchpad_prepare_host_dir '$SAFE_ROOT/$ENC' && [ -d '$SAFE_ROOT/$ENC' ]"
+
+assert_eq "leaves the scratchpad root at 0700" "700" \
+    "$(stat -c %a "$SAFE_ROOT" 2>/dev/null || stat -f %Lp "$SAFE_ROOT" 2>/dev/null)"
+
+assert_eq "leaves the per-repo dir at 0700" "700" \
+    "$(stat -c %a "$SAFE_ROOT/$ENC" 2>/dev/null || stat -f %Lp "$SAFE_ROOT/$ENC" 2>/dev/null)"
+
+assert "is idempotent on a dir it already made" \
+    "aidc_scratchpad_prepare_host_dir '$SAFE_ROOT/$ENC'"
+
+LINK_ROOT="$SCRATCH/link/claude-uid"
+mkdir -p "$SCRATCH/link" "$SCRATCH/elsewhere"
+ln -s "$SCRATCH/elsewhere" "$LINK_ROOT"
+assert "refuses when the scratchpad root is a symlink" \
+    "! aidc_scratchpad_prepare_host_dir '$LINK_ROOT/$ENC'"
+
+LINK2_ROOT="$SCRATCH/link2/claude-uid"
+mkdir -p "$LINK2_ROOT"
+ln -s "$SCRATCH/elsewhere" "$LINK2_ROOT/$ENC"
+assert "refuses when the per-repo dir is a symlink" \
+    "! aidc_scratchpad_prepare_host_dir '$LINK2_ROOT/$ENC'"
+
+# A refusal must stay a refusal even under `set -e`, because aidc create runs
+# that way with an ERR trap: an optional bridge may cost itself, never the
+# session.
+#
+# This fixture must reach the mkdir/chmod, NOT stop at the symlink guard above
+# -- a guard-refusal exercises none of the code that can abort. So: a root we
+# own (passing the guard) but cannot write, which fails the mkdir underneath.
+UNWRITABLE_ROOT="$SCRATCH/unwritable/claude-uid"
+mkdir -p "$UNWRITABLE_ROOT"
+chmod 0500 "$UNWRITABLE_ROOT"
+assert "the fixture really does reach a failing mkdir" \
+    "[ -O '$UNWRITABLE_ROOT' ] && ! mkdir -p '$UNWRITABLE_ROOT/$ENC' 2>/dev/null"
+
+assert "refuses when the dir cannot be created" \
+    "! aidc_scratchpad_prepare_host_dir '$UNWRITABLE_ROOT/$ENC'"
+
+assert "refusal is a return, not an abort, under set -e" \
+    "bash -c 'set -euo pipefail; . \"$AIDC_ROOT/scripts/lib/common.sh\"; if aidc_scratchpad_prepare_host_dir \"$UNWRITABLE_ROOT/$ENC\"; then exit 1; fi; echo survived' | grep -q survived"
+
+chmod 0700 "$UNWRITABLE_ROOT"
+
 echo "== the toggle reaches subprocesses =="
 
 # load_config exports the other share_* toggles, so anything reading config in

@@ -430,7 +430,7 @@ aidc refresh <name>                        # force a blocklist refresh now
 aidc kill eng-ai-bot
 ```
 
-Removes every container + volume + network for the session. The audit dir on host stays.
+Removes every container + volume + network for the session. Two things on the host stay: the audit dir, and — when `share_scratchpad` is on — the bridged scratchpad at `/tmp/claude-<uid>/<encoded>/`, which is the point of bridging it (a session you pop back in later still finds its files). Nothing sweeps those per-session directories, so they accumulate until a host reboot clears `/tmp`; delete the ones you are done with by hand.
 
 ### Picking up a new dev image
 

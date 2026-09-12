@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-12
+
 ### Added
 - **A session's scratchpad follows it across the container boundary.** Claude Code keeps
   per-session working files at `/tmp/claude-<uid>/<encoded-repo>/<session-id>/` —
@@ -876,7 +878,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/pacepace/aidc/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/pacepace/aidc/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/pacepace/aidc/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/pacepace/aidc/compare/v1.4.0...v1.4.1

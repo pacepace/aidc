@@ -149,6 +149,24 @@ assert "an unset bridge leaves no literal placeholder either" \
 DIFF_LINES=$(diff "$SCRATCH/without.yaml" "$SCRATCH/with.yaml" | grep -c '^>')
 assert_eq "enabling the bridge adds exactly one line to the compose file" "1" "$DIFF_LINES"
 
+echo "== the toggle reaches subprocesses =="
+
+# load_config exports the other share_* toggles, so anything reading config in
+# a child process sees them. A toggle left off that list still works for the
+# in-shell reader in cmd-create.sh and silently reverts to its default
+# everywhere else -- re-enabling a bridge the user turned off, which is the
+# wrong direction to fail for a mount that writes to the host.
+CFG_HOME="$SCRATCH/home"
+mkdir -p "$CFG_HOME/repo"
+EXPORTED=$(
+    HOME="$CFG_HOME" bash -c '
+        . "$1/scripts/lib/config.sh"
+        load_config "$2" "$2" >/dev/null 2>&1
+        export -p | grep -c "AIDC_SHARE_SCRATCHPAD"
+    ' _ "$AIDC_ROOT" "$CFG_HOME/repo" 2>/dev/null
+)
+assert_eq "load_config exports AIDC_SHARE_SCRATCHPAD" "1" "$EXPORTED"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -97,11 +97,18 @@ fi
 # equally correct unbridged, where the whole tree is container-local.
 #
 # 0700 matches the mode Claude Code creates this root as on a host.
-CLAUDE_TMP_ROOT="/tmp/claude-$(id -u vscode)"
-mkdir -p "$CLAUDE_TMP_ROOT"
-chown vscode:vscode "$CLAUDE_TMP_ROOT"
-chmod 0700 "$CLAUDE_TMP_ROOT"
-log "claude scratchpad root ready at ${CLAUDE_TMP_ROOT}"
+# Non-fatal, like dockerd above: this is a convenience for Claude's working
+# files, and nothing here is worth refusing to start the container over. The
+# chown is deliberately NOT recursive -- a bridged scratchpad below this point
+# is host-owned, and walking into it would rewrite the host's files.
+if CLAUDE_TMP_ROOT="/tmp/claude-$(id -u vscode)" \
+   && mkdir -p "$CLAUDE_TMP_ROOT" \
+   && chown vscode:vscode "$CLAUDE_TMP_ROOT" \
+   && chmod 0700 "$CLAUDE_TMP_ROOT"; then
+    log "claude scratchpad root ready at ${CLAUDE_TMP_ROOT}"
+else
+    log "WARN: could not prepare the claude scratchpad root (continuing)"
+fi
 
 # Drop privileges to vscode and exec the container's CMD (whatever was
 # passed — compose's tmux+tail script, VS Code Dev Containers' keep-alive

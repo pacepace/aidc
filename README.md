@@ -13,6 +13,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 ## What's bridged from your host
 
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
+- Per-project scratchpad (`/tmp/claude-<uid>/<encoded>/`) — the working files that go with those conversations (`scratchpad/` and `tasks/`), read-write at the identical path on both sides, so a session popped out to the host and back still finds them. Only this repo's subdirectory is bridged, never the whole scratchpad root — and it is a live read-write host path by design, since a one-way copy could not carry work back *in*. Skipped when your host uid isn't the container's `vscode` (1000), which currently includes macOS. See [tearing down](#tearing-down) for what stays behind.
 - `settings.json` — env vars, status line, editor mode.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
 - Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
@@ -429,7 +430,7 @@ aidc refresh <name>                        # force a blocklist refresh now
 aidc kill eng-ai-bot
 ```
 
-Removes every container + volume + network for the session. The audit dir on host stays.
+Removes every container + volume + network for the session. Two things on the host stay: the audit dir, and — when `share_scratchpad` is on — the bridged scratchpad at `/tmp/claude-<uid>/<encoded>/`, which is the point of bridging it (a session you pop back in later still finds its files). Nothing sweeps those per-session directories, so they accumulate until a host reboot clears `/tmp`; delete the ones you are done with by hand.
 
 ### Picking up a new dev image
 
@@ -585,6 +586,7 @@ claude_mode: yolo                     # yolo (--dangerously-skip-permissions) | 
                                       # that an orchestrator answers over session_send.
 claude_resume: true                   # pass --continue so claude picks up the prior conversation
 share_memory: true                    # mount ~/.claude/projects/<encoded>/ into the session
+share_scratchpad: true                # bridge /tmp/claude-<uid>/<encoded>/ (scratchpad + tasks) into the session
 share_plugins: true                   # bridge ~/.claude/plugins (read-only) + enable them in-container
 
 state_actor_tlds:                     # additive: appended to defaults (.ru .cn .by .ir .kp)

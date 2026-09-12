@@ -11,7 +11,8 @@
 #   REPO_PATH                absolute path to repo (mounted at the same path inside the container)
 #   AUDIT_DIR                absolute path to per-session audit dir on host
 #   HOST_CLAUDE_PROJECT_DIR  absolute path to host's ~/.claude/projects/<encoded-repo>/
-#   ENCODED_REPO             repo path with "/" replaced by "-" (Claude's memory dir name)
+#   ENCODED_REPO             repo path with "/" replaced by "-" (names both Claude's
+#                            memory dir and, via CLAUDE_SCRATCHPAD_MOUNT, its scratchpad dir)
 #   TAINT_RESPONSE           one of: log | notify | freeze   (product default: freeze)
 #   TLD_TAINTS               "true" | "false"
 #   NOTIFY_WEBHOOK           optional webhook URL (may be empty)
@@ -56,6 +57,11 @@ export DOCKER_SOCK_MOUNT
 # Optional bind-mounts set by aidc create. Defaults are empty so the lines
 # collapse to nothing in the rendered YAML.
 : "${CLAUDE_MEMORY_MOUNT:=}"
+# Scratchpad bridge (share_scratchpad): host /tmp/claude-<uid>/<encoded-repo>
+# bound at the identical path inside, so a session resumed on either side of
+# the container boundary finds its own scratchpad/ and tasks/. Empty when the
+# toggle is off or the host uid is not the container's -- see cmd-create.sh.
+: "${CLAUDE_SCRATCHPAD_MOUNT:=}"
 : "${CLAUDE_SETTINGS_MOUNT:=}"
 # Plugin bridge (share_plugins): host ~/.claude/plugins/ read-only at both the
 # container home path (cache resolves by convention) and its own host-absolute
@@ -67,7 +73,7 @@ export DOCKER_SOCK_MOUNT
 # MCP-readable transcript dir into the dev container so the in-container mirror
 # can copy-forward Claude's JSONL there. Empty -> line collapses (no surfacing).
 : "${TRANSCRIPT_MIRROR_MOUNT:=}"
-export CLAUDE_MEMORY_MOUNT CLAUDE_SETTINGS_MOUNT TRANSCRIPT_MIRROR_MOUNT
+export CLAUDE_MEMORY_MOUNT CLAUDE_SCRATCHPAD_MOUNT CLAUDE_SETTINGS_MOUNT TRANSCRIPT_MIRROR_MOUNT
 : "${AIDC_SHARE_PLUGINS:=}"
 export CLAUDE_PLUGINS_MOUNT CLAUDE_PLUGINS_MOUNT_ABS AIDC_SHARE_PLUGINS
 
@@ -132,4 +138,4 @@ export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
 
 # Restrict envsubst to the known variable set so unrelated `${...}` tokens
 # (e.g. shell-style references inside service commands) survive untouched.
-exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORT_FORWARDER_SERVICES} ${NET_INTERNAL} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'
+exec envsubst '${SESSION} ${PROFILE} ${REPO_PATH} ${WORKSPACE_PATH} ${AUDIT_DIR} ${HOST_CLAUDE_PROJECT_DIR} ${ENCODED_REPO} ${TAINT_RESPONSE} ${TLD_TAINTS} ${NOTIFY_WEBHOOK} ${DOCKER_SOCK_MOUNT} ${CLAUDE_MEMORY_MOUNT} ${CLAUDE_SCRATCHPAD_MOUNT} ${CLAUDE_SETTINGS_MOUNT} ${CLAUDE_PLUGINS_MOUNT} ${CLAUDE_PLUGINS_MOUNT_ABS} ${AIDC_SHARE_PLUGINS} ${TRANSCRIPT_MIRROR_MOUNT} ${CLAUDE_MODE} ${CLAUDE_RESUME} ${GIT_USER_NAME} ${GIT_USER_EMAIL} ${PORT_FORWARDER_SERVICES} ${NET_INTERNAL} ${AIDC_VERSION_TAG} ${OVERLAY_VOLUMES_DECLARATIONS} ${OVERLAY_VOLUMES_MOUNTS} ${AIDC_CLAUDE_TOKEN} ${DNS_SERVERS} ${DNS_BLOCK} ${EXTNET_DECLARATIONS} ${DEV_NETWORKS_BLOCK}'

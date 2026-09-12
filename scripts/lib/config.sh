@@ -46,6 +46,7 @@ aidc_config_defaults() {
     AIDC_CLAUDE_RESUME="true"     # auto-pass --continue to claude on launch
     AIDC_SHARE_MEMORY="true"      # mount host's ~/.claude/projects/<repo>/ into container
     AIDC_SHARE_PLUGINS="true"     # bridge host's ~/.claude/plugins/ (read-only) and enable them in-container
+    AIDC_SHARE_SCRATCHPAD="true"  # mount host's /tmp/claude-<uid>/<repo>/ (scratchpad + tasks) into container
     AIDC_PORTS=""                 # declared host:container forwards (CLI-13); newline-separated
     AIDC_CONTAINER_ONLY_PATHS=""  # paths overlaid by session-scoped volumes (CLI-18); newline-separated
     AIDC_DNS_SERVERS=""           # per-session DNS override; newline-separated IPs; empty = Quad9 default
@@ -76,6 +77,8 @@ claude_mode: yolo           # yolo (--dangerously-skip-permissions) | safe (=def
 claude_resume: true         # auto-pass --continue so claude picks up prior conversation
 share_memory: true          # mount host's ~/.claude/projects/<encoded>/ into session
 share_plugins: true         # bridge host ~/.claude/plugins (read-only) + enable them in-container
+share_scratchpad: true      # bridge host /tmp/claude-<uid>/<encoded>/ so a session's scratchpad
+                            # and tasks survive moving between host and container
 
 state_actor_tlds:
   - .ru
@@ -270,6 +273,7 @@ load_config() {
         val=$(_aidc_yaml_scalar "$f" "claude_resume");   [ -n "$val" ] && AIDC_CLAUDE_RESUME="$val"
         val=$(_aidc_yaml_scalar "$f" "share_memory");    [ -n "$val" ] && AIDC_SHARE_MEMORY="$val"
         val=$(_aidc_yaml_scalar "$f" "share_plugins");   [ -n "$val" ] && AIDC_SHARE_PLUGINS="$val"
+        val=$(_aidc_yaml_scalar "$f" "share_scratchpad"); [ -n "$val" ] && AIDC_SHARE_SCRATCHPAD="$val"
         val=$(_aidc_yaml_scalar "$f" "egress");          [ -n "$val" ] && AIDC_EGRESS="$val"
 
         # Lists: append to running aggregate, dedupe at the end.
@@ -311,7 +315,7 @@ load_config() {
     export AIDC_PROFILE AIDC_TAINT_RESPONSE AIDC_TLD_TAINTS AIDC_AUDIT_DIR \
            AIDC_STATE_ACTOR_TLDS AIDC_BLOCKLIST_ADDITIONS AIDC_NOTIFY_WEBHOOK \
            AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY \
-           AIDC_SHARE_PLUGINS \
+           AIDC_SHARE_PLUGINS AIDC_SHARE_SCRATCHPAD \
            AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS \
            AIDC_EGRESS
 }
@@ -326,6 +330,7 @@ emit_loaded_config_yaml() {
     printf 'claude_resume: %s\n' "$AIDC_CLAUDE_RESUME"
     printf 'share_memory: %s\n' "$AIDC_SHARE_MEMORY"
     printf 'share_plugins: %s\n' "$AIDC_SHARE_PLUGINS"
+    printf 'share_scratchpad: %s\n' "$AIDC_SHARE_SCRATCHPAD"
     printf 'egress: %s\n' "$AIDC_EGRESS"
     printf 'notify_webhook: "%s"\n' "$AIDC_NOTIFY_WEBHOOK"
     printf 'state_actor_tlds:\n'

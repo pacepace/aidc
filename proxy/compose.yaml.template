@@ -184,6 +184,7 @@ ${DNS_BLOCK}
       - pyenv-versions:/usr/local/pyenv/versions:rw
       - ${AUDIT_DIR}:/var/aidc/audit:ro     # transparency: Claude can see logs about it
       ${CLAUDE_MEMORY_MOUNT}                # per-project memory dir (optional; share_memory config)
+      ${CLAUDE_SCRATCHPAD_MOUNT}            # per-project scratchpad + tasks (optional; share_scratchpad config)
       ${CLAUDE_SETTINGS_MOUNT}              # settings.json (theme, output style, env)
       ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
       ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)

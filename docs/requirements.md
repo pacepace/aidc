@@ -181,6 +181,7 @@
 | MCP-32 | Every failed tool result (`{"ok": false, ...}`) MUST carry an `error_code` from a closed, documented set (design 10 D6) that tells a caller what kind of failure it is, so the caller can decide between retrying, fixing its call and telling the person without matching the error sentence. | P1 | conversation-2026-09-17 (metallm) |
 | MCP-33 | A prompt accepted into the send queue that is removed unpasted, because its session no longer exists or was re-created under the same name, MUST be reported to the conversation that sent it, when it came with one: one callback per prompt, `ok: false`, `error_code: "prompt_dropped"`, the content saying it was never seen by the agent and quoting the prompt. The report MUST be retried and dead-lettered like a reply. A re-created session MUST NOT be given the prompts accepted for the one it replaced. | P0 | joint test 2026-09-17 |
 | MCP-34 | A webhook opened by `session_watch` or `session_send` MUST survive an `aidc-mcp` restart until `session_unwatch` or the session is gone. On restart it MUST continue from its saved watermark, so a reply produced while the MCP was down is delivered exactly once, not skipped. | P0 | joint test 2026-09-17 |
+| MCP-35 | When the watcher moves onto a new transcript for a session (Claude restarted into a new file, or the pinned file died), a turn written there after the watcher last saw activity MUST be delivered exactly once; lines from before that point MUST NOT be replayed. | P0 | joint test 2026-09-17 |
 
 ---
 

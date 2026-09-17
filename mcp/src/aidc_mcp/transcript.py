@@ -774,6 +774,41 @@ def _wall_time(obj: dict) -> float | None:
         return None
 
 
+def seen_until(objs: list[dict], fallback_iso: str = "") -> float | None:
+    """When the watcher last saw activity: the newest line timestamp in `objs` (the
+    transcript it is leaving), else `fallback_iso` (the watermark's last save), else
+    None when neither is known."""
+    times = [t for t in (_wall_time(o) for o in objs) if t is not None]
+    if times:
+        return max(times)
+    return _wall_time({"timestamp": fallback_iso}) if fallback_iso else None
+
+
+def resume_anchor_on_new_transcript(objs: list[dict], seen: float | None) -> str:
+    """Where to resume on a transcript the watcher moves onto (Claude restarted, or the
+    pinned file died): after the last line written no later than `seen`, the moment the
+    watcher last saw activity. Lines after it happened while the watcher was still on
+    the old file, and are delivered; lines up to it are history, and are not replayed.
+    With `seen` unknown, it anchors at the end, as a first baseline does.
+
+    Joint test, 2026-09-17: anchoring at the end skipped the reply to a prompt that a
+    restarted Claude answered in its new transcript before the watcher moved over.
+    Returns a line uuid for objs_after_uuid ("" means from the start).
+    """
+    if seen is None:
+        turns = extract_completed_turns(objs)
+        return turns[-1].terminal_uuid if turns else ""
+    anchor = ""
+    for obj in objs:
+        when = _wall_time(obj)
+        if when is not None and when > seen:
+            break
+        uid = obj.get("uuid")
+        if isinstance(uid, str) and uid:
+            anchor = uid
+    return anchor
+
+
 # Clock skew allowed between the MCP host and the dev container when deciding a
 # transcript line was written after a send.
 _ECHO_SKEW_S = 5.0

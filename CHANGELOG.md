@@ -36,6 +36,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   restart silently stopped every one: a prompt resumed from the send queue was answered and the
   answer never came back. Webhooks are now saved and reopened at startup, and a reply written
   while the MCP was down is delivered once.
+- **The first reply after Claude restarts inside a session is no longer lost.** Claude starts a
+  new transcript file when it restarts, and the watcher moved onto it anchored at its end, so a
+  prompt Claude answered before the watcher caught up never came back. The watcher now picks up
+  from when it last saw activity.
 - **A re-created session is no longer handed the old session's waiting prompts.** Each queued
   prompt records which container it was accepted for.
 

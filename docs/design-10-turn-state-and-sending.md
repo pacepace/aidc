@@ -9,13 +9,13 @@ a dev container's tmux `claude` window:
   how it avoids typing over a person's unsent text, and how the per-session queue holds prompts
   until they land.
 
-**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-34 (`docs/requirements.md`). Extends MCP-15..19 and
+**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-35 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
 **Status:** designed and built 2026-09-17 (branch `feature/turn-state`), except D4's `speaker`,
 which waits on MetaLLM. Transcript and screen facts measured in a dev container on Claude Code
-2.1.270 and 2.1.274 the same day. D7 and the dropped-prompt callback in D5 came out of the joint
-test with the metallm session that day.
+2.1.270 and 2.1.274 the same day. D7, D8 and the dropped-prompt callback in D5 came out of the
+joint test with the metallm session that day.
 
 ---
 
@@ -264,6 +264,22 @@ answered, and no callback was sent, because webhooks lived only in memory. Now:
   one does. It continues from the saved watermark, so a reply written while the MCP was down is
   delivered, and the delivery ledger keeps it to once.
 
+### D8. A reply in a new transcript after Claude restarts (MCP-35)
+
+Found in the joint test (scenario 10): Claude exited, a prompt waited in the queue as
+`claude_not_running`, Claude restarted with `--continue` into a **new** transcript file, took
+the prompt within seconds and answered. The watcher moves onto a new file only after the old one
+has sat fully read for a few polls, and it anchored at the new file's end, so the answer was
+already behind the anchor and was never delivered.
+
+When the watcher moves onto a new transcript (the stale-pin follow, the torn-read recovery, or
+the pinned file disappearing), it now resumes **after the last line written no later than when
+it last saw activity**: the newest line timestamp in the file it is leaving, or, when that file is
+gone, the watermark's last save. Lines after that point happened while it was still on the old
+file and are delivered; lines up to it are history (a resumed session may carry some) and are not
+replayed. The delivery ledger still blocks any second delivery. Measured on Claude Code 2.1.274:
+`--continue` starts a new file holding only the new session's lines, not a copy of the old ones.
+
 Combinations are independent. An interrupted turn on a prompt the person typed carries
 `interrupted: true` and (once enabled) `speaker: "human"`, so MetaLLM records it without waking
 the orchestrator and labels it as stopped at the terminal.
@@ -489,7 +505,7 @@ Same trust level as the existing send record and dead-letter files, which alread
 
 ## Cross-references
 
-- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..34 (`docs/requirements.md`).
+- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..35 (`docs/requirements.md`).
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
   `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
 - Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,

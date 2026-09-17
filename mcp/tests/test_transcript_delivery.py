@@ -925,10 +925,12 @@ class TestStalePinRotation:
         assert ts.load_watermark(state, sess, conv).session_id == "active"  # no flap rotation
 
     async def test_rotation_delivers_each_turn_exactly_once(self, tmp_path):
-        """Rotation forward-baselines (anchor at the new session's end), so it must
-        NEVER re-deliver a turn that existed at rotation time — and the turns after
-        rotation must each be delivered exactly once (guard the count, not just
-        membership: a re-delivery would still satisfy `x in delivered`)."""
+        """A turn the new session completed after the old one's last activity, before
+        the watcher moved over (b1), is new work and is delivered; so is each later
+        turn. Each exactly once: guard the count, not just membership, since a
+        re-delivery would still satisfy `x in delivered`. (Until the joint test of
+        2026-09-17 this asserted b1 was never delivered: anchoring at the new file's
+        end lost the reply to the first prompt after a Claude restart.)"""
         from collections import Counter
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "rot1", "c"
@@ -953,9 +955,80 @@ class TestStalePinRotation:
             _mk_transcript(base, sess, "new", new_objs)
             for _ in range(2):
                 await self._drain_rot(base, state, rec, sess, conv)
-        counts = Counter(rec.delivered)
-        assert "b1" not in counts                       # forward-only: never replayed
-        assert counts == Counter(["b2", "b3", "b4"])    # each exactly once, no dupes
+        assert Counter(rec.delivered) == Counter(["b1", "b2", "b3", "b4"])
+        assert "a1" not in rec.delivered
+
+    async def test_new_transcript_history_from_before_the_move_is_not_replayed(self, tmp_path):
+        """A new transcript can carry lines older than the old one's last activity
+        (history a resumed session brings along). Those were seen; only what came
+        after is delivered."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        sess, conv = "hist", "c"
+        _consumed_idle_counts.pop((sess, conv), None)
+        _mk_transcript(base, sess, "old", [
+            _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
+            _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
+        ])
+        rec = Recorder()
+        await self._drain_rot(base, state, rec, sess, conv)
+        _mk_transcript(base, sess, "new", [
+            _ts(_user("h1", "hi"), "2026-07-04T03:59:00.000Z"),
+            _ts(_assistant("h2", "COPIED"), "2026-07-04T04:00:01.000Z"),
+            _ts(_user("u2", "after the restart"), "2026-07-04T18:00:00.000Z"),
+            _ts(_assistant("b1", "NEW"), "2026-07-04T18:00:01.000Z"),
+        ])
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+            await self._drain_rot(base, state, rec, sess, conv)
+        assert rec.delivered == ["b1"]
+
+    async def test_reply_after_a_claude_restart_is_delivered_once(self, tmp_path):
+        """Joint test scenario 10 (2026-09-17): Claude exited, a prompt waited in the
+        queue, Claude restarted into a new transcript, took the prompt and answered
+        before the watcher had moved over. That reply was lost."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        sess, conv = "restart", "c"
+        _consumed_idle_counts.pop((sess, conv), None)
+        _mk_transcript(base, sess, "before", [
+            _ts(_user("u1", "Reply with exactly the word SEVEN-A."), "2026-09-17T05:52:34.000Z"),
+            _ts(_assistant("a1", "SEVEN-A"), "2026-09-17T05:52:37.155Z"),
+        ])
+        rec = Recorder()
+        await self._drain_rot(base, state, rec, sess, conv)
+        attachment = {"type": "attachment", "uuid": "at1", "timestamp": "2026-09-17T05:56:46.527Z"}
+        _mk_transcript(base, sess, "after", [
+            attachment,
+            _ts(_user("u2", "Reply with exactly the word TEN."), "2026-09-17T05:56:51.380Z"),
+            _ts(_assistant("a2", "TEN"), "2026-09-17T05:56:52.306Z"),
+        ])
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 3):
+            await self._drain_rot(base, state, rec, sess, conv)
+        assert rec.delivered == ["a2"]
+
+    async def test_rotation_to_a_replaced_file_resumes_from_the_last_save(self, tmp_path):
+        """The pinned file is gone: the watermark's last save is when the watcher last
+        saw activity. History before it is not replayed; a turn after it is."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        sess, conv = "gone", "c"
+        old = _mk_transcript(base, sess, "old", [
+            _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
+            _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
+        ])
+        rec = Recorder()
+        await self._drain_rot(base, state, rec, sess, conv)
+        state_file = next(state.glob("*.json"))
+        data = json.loads(state_file.read_text())
+        data["updated_at"] = "2026-07-04T12:00:00Z"   # save_watermark stamps "now"
+        state_file.write_text(json.dumps(data))
+        old.unlink()
+        _mk_transcript(base, sess, "new", [
+            _ts(_user("h1", "hi"), "2026-07-04T11:00:00.000Z"),
+            _ts(_assistant("h2", "BEFORE"), "2026-07-04T11:00:01.000Z"),
+            _ts(_user("u2", "go"), "2026-07-04T18:00:00.000Z"),
+            _ts(_assistant("b1", "AFTER"), "2026-07-04T18:00:01.000Z"),
+        ])
+        await self._drain_rot(base, state, rec, sess, conv)   # rotates
+        await self._drain_rot(base, state, rec, sess, conv)
+        assert rec.delivered == ["b1"]
 
 
 class TestDeliveryLedgerNeverReplays:

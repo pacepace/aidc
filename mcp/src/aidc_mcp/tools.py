@@ -1551,11 +1551,11 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     if n < _STALE_PIN_RECOVER_POLLS:
         return False
 
-    all_turns = ts.extract_completed_turns(ts.parse_jsonl(best_data))
     mark = ts.load_watermark(state_dir, session, conversation_id)
     mark.session_id = best_stem
     mark.byte_offset = len(best_data.encode("utf-8"))
-    mark.last_delivered_uuid = all_turns[-1].terminal_uuid if all_turns else ""
+    mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
+        ts.parse_jsonl(best_data), ts.seen_until(pinned_objs, mark.updated_at))
     mark.consecutive_deliveries = 0
     mark.last_delivery_at = 0.0
     ts.save_watermark(state_dir, mark)
@@ -1683,13 +1683,14 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
 
     if mark.session_id != sid and mark.session_id:
         # GENUINE rotation: the file we were pinned to is gone, so resolution fell
-        # back to a different active file. Baseline FORWARD onto it (anchor at its
-        # end, deliver nothing from its history) — never reset last_delivered_uuid
-        # to "" and replay the whole file, which was the replay bug.
-        all_turns = ts.extract_completed_turns(objs)
+        # back to a different active file. Resume on it from when the watcher last
+        # saw activity (its last watermark save): what came after is delivered, its
+        # older history is not — never reset last_delivered_uuid to "" and replay
+        # the whole file, which was the replay bug.
         mark.session_id = sid
         mark.byte_offset = end_offset
-        mark.last_delivered_uuid = all_turns[-1].terminal_uuid if all_turns else ""
+        mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
+            objs, ts.seen_until([], mark.updated_at))
         ts.save_watermark(state_dir, mark)
         _settle_state.pop(key, None)
         log_event("transcript_rotated", session=session, conversation_id=conversation_id,
@@ -1739,12 +1740,10 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                     newest_data = newest.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     return
-                all_turns = ts.extract_completed_turns(ts.parse_jsonl(newest_data))
                 mark.session_id = newest.stem
                 mark.byte_offset = len(newest_data.encode("utf-8"))
-                mark.last_delivered_uuid = (
-                    all_turns[-1].terminal_uuid if all_turns else ""
-                )
+                mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
+                    ts.parse_jsonl(newest_data), ts.seen_until(objs, mark.updated_at))
                 mark.consecutive_deliveries = 0
                 mark.last_delivery_at = 0.0
                 ts.save_watermark(state_dir, mark)

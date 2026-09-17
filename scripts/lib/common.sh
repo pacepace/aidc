@@ -344,6 +344,41 @@ remove_adhoc_forwards() {
     printf '%s\n' "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
 }
 
+# Remove a session's own networks (aidc-<s>-net, aidc-<s>-egress), disconnecting
+# anything still attached first. `docker compose down` leaves a network in place --
+# printing "Resource is still in use" and exiting 0 -- while a container outside the
+# project is connected to it: an `aidc proxy` forwarder, or another session attached
+# with `aidc network`. aidc-mcp identifies a session by the id of aidc-<s>-net, so a
+# leftover network would keep a killed session alive there, and a session created
+# again under the name would inherit its predecessor's queued prompts and webhook.
+# Returns 1, naming them on stderr, when a network cannot be removed.
+remove_session_networks() {
+    local session="$1" net ct left=""
+    for net in "aidc-${session}-net" "aidc-${session}-egress"; do
+        docker network inspect "$net" >/dev/null 2>&1 || continue
+        for ct in $(docker network inspect "$net" \
+                --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null); do
+            # Anything still attached that is not this session's own (another session
+            # joined with `aidc network`, a leftover forwarder) loses that network
+            # here. Say so: silently cutting a live session off a network it was
+            # attached to is the kind of thing someone debugs for an hour.
+            case "$ct" in
+                "aidc-${session}-"*) ;;
+                *) info "detaching ${ct} from ${net} (it is not part of session '${session}')" ;;
+            esac
+            docker network disconnect -f "$net" "$ct" >/dev/null 2>&1 || true
+        done
+        docker network rm "$net" >/dev/null 2>&1 || true
+        if docker network inspect "$net" >/dev/null 2>&1; then
+            left="${left:+${left} }${net}"
+        fi
+    done
+    if [ -n "$left" ]; then
+        err "could not remove network(s) of session '${session}': ${left}"
+        return 1
+    fi
+}
+
 # Wait for the dev container of a session to print its ready marker.
 #   wait_for_dev_ready <session> [max-seconds]
 # Polls `docker logs` (NOT `docker exec` -- exec polling during the dev

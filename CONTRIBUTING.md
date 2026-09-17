@@ -89,9 +89,18 @@ lint, the shell unit tests, and the MCP suite (pytest + ruff + mypy on Python 3.
 
 ## Governance
 
-This repository is governed by **[Prawduct](https://github.com/pacepace/prawduct)** — its
+This repository is governed by **[Prawduct](https://github.com/brookstalley/prawduct)** — its
 build cycle, planning method, and independent Critic/PR review shape how work is scoped and
-merged. Governance artifacts are written locally under `.prawduct/` and are gitignored (not
-committed). If you have the Prawduct plugin installed, its skills (`prawduct:building`,
-`prawduct:planning`, `prawduct:pr`, …) drive the workflow; if not, the practical rules above
-are what matter: branch off `develop`, keep changes verifiable, run the gates, and open a PR.
+merged.
+
+**The plugin, and what the repo commits about it.** `.claude/settings.json` is committed and
+names the marketplace the plugin is installed from:
+`github:brookstalley/prawduct` (`autoUpdate: true`), with `prawduct@prawduct` enabled. Your
+client adds that marketplace on first trusted open; it installs nothing until you run
+`claude plugin install prawduct@prawduct` yourself, and until you do, this checkout runs with no
+hooks and no gates. It is a dev-time dependency that runs hooks in your checkout, so check that
+source before you install it. Without the plugin the practical rules above are what matter:
+branch off `develop`, keep changes verifiable, run the gates, and open a PR.
+
+Governance state lives under `.prawduct/`: the product-owned files (project state, backlog,
+change log, learnings, and the artifacts) are committed; per-session scratch is gitignored.

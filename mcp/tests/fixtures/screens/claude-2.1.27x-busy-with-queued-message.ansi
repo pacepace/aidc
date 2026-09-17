@@ -1,0 +1,45 @@
+
+● Ran [1m2[0m stop hooks
+  [38;5;246m⎿  [39mStop hook error: MEASURE-SLOW-BLOCK: reply ACK-SLOW and stop.
+
+[38;5;231m●[39m ACK-SLOW
+
+[38;5;246m✻[39m [38;5;246mCooked for 10s · done 1:40 AM[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mReply with exactly the word CRASH2.[39m
+
+[38;5;231m[49m●[39m CRASH2
+
+● Ran [1m2[0m stop hooks
+  [38;5;246m⎿  [39mStop hook error: Failed with non-blocking status code: MEASURE-CRASH: hook failed with exit 1
+
+[38;5;246m✻[39m [38;5;246mCrunched for 1s · done 1:42 AM[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mReply with exactly the word SLOW2.[39m
+
+[38;5;231m[49m●[39m SLOW2
+
+● Ran [1m2[0m stop hooks
+  [38;5;246m⎿  [39mStop hook error: MEASURE-SLOW-BLOCK: reply ACK-SLOW and stop.
+
+[38;5;231m●[39m ACK-SLOW
+
+[38;5;246m✻[39m [38;5;246mChurned for 10s · done 1:43 AM[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mFirst write one short sentence saying you are starting, then run this bash command in the foreground with a 60s timeout: python3 -c 'import time; time.sleep(20)' — then reply [39m
+  [38;5;231mwith the word FIRSTDONE.[39m
+
+[38;5;231m[49m●[39m Starting a 20-second Python sleep in the foreground now.
+
+[38;5;246m●[39m Pause for 20 seconds using Python[38;5;246m · 5s[39m
+[38;5;246m  ⎿  $ python3 -c 'import time; time.sleep(20)' (5s)[39m
+     [38;5;246m(ctrl+b ctrl+b (twice) to run in background)[39m
+
+[38;5;174m✽[39m [38;5;216mPouncing…[38;5;174m [38;5;246m(8s · ↓[39m [38;5;246m261 tokens)[39m
+
+  [38;5;239m[48;5;237m❯ [38;5;231mAlso reply with the word QUEUED.[39m                                                                                                                                              [49m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [2m[39mPress up to edit queued messages[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · esc to interrupt · ← for agents[39m

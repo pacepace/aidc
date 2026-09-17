@@ -1,0 +1,567 @@
+# Project State — aidc
+#
+# Single source of truth for all project decisions.
+# Read at session start to understand where things stand.
+#
+# Fields start as null and are filled during discovery.
+# Partially-populated state is normal throughout discovery.
+
+# =============================================================================
+# CLASSIFICATION
+# =============================================================================
+# Populated during discovery. Confirmed with the user before planning.
+
+classification:
+  # Product domain. Values: utility, social, marketplace, productivity, b2b,
+  # content, automation, developer-tool, education, health, finance,
+  # entertainment, communication. May be multiple for hybrid products.
+  domain: null
+
+  # Structural characteristics — architectural facts that determine what KINDS
+  # of artifacts a product needs. These are a small, stable set (6) that drive
+  # artifact generation. null = not applicable.
+  structural:
+    # User-facing interface. modality: screen|terminal|voice|spatial|minimal; platform: mobile|web|desktop|cross-platform
+    has_human_interface: null
+    # Runs without user interaction. trigger: scheduled|event-driven|always-on
+    runs_unattended: null
+    # Exposes or consumes APIs. consumers: internal|external|both
+    # When this exposes an interface, record the versioning + deprecation + error-model
+    # decisions in design_decisions (api_versioning_approach, api_error_model_approach);
+    # the api-versioning advisory nudges until they are recorded.
+    exposes_programmatic_interface: { consumers: internal }
+    # Multiple distinct user types. parties: [list of distinct user types]
+    has_multiple_party_types: null
+    # Handles sensitive information. categories: [PII, financial, health, etc.]; regulatory: [list]
+    handles_sensitive_data: null
+    # Multiple processes or services communicating at runtime. topology: monolith-with-workers|client-server|microservices|pipeline
+    multi_process_distributed: null
+
+  # Domain-specific characteristics — what makes THIS product unique in its domain.
+  # Dynamically identified, not from a predefined list.
+  # Each: { characteristic: string, implications: [string] }
+  domain_characteristics: []
+
+  # Risk and complexity profile.
+  risk_profile:
+    # Overall risk: low, medium, high.
+    # Drives discovery depth (low: 5-8 questions, medium: 8-15, high: 15-25).
+    overall: null
+    # Specific risk factors identified during classification.
+    # Each: { factor, level (low/medium/high), rationale }
+    factors: []
+
+  # Prior art surfaced during discovery (via web search or domain knowledge).
+  # Informational — informs scope decisions, not a gate.
+  # Each: { name, url (optional), relevance, relationship (alternative|complement|reference) }
+  prior_art: []
+
+# =============================================================================
+# PRODUCT DEFINITION
+# =============================================================================
+# Populated during discovery and definition.
+
+product_definition:
+  # One-sentence description of what this product is and why it exists.
+  vision: null
+
+  # Measurable success criteria. What does "this worked" look like?
+  goals: []
+
+  # Who uses this product and what they need.
+  users:
+    # Each persona:
+    #   name: string
+    #   description: string
+    #   technical_level: none | basic | intermediate | advanced
+    #   primary_needs: [string]
+    #   constraints: [string]
+    personas: []
+
+  # Core user flows (UI), operations (API), or pipeline stages (automation).
+  # Each: { name, description, steps (optional), priority (must-have/nice-to-have) }
+  core_flows: []
+
+  # Scope decisions.
+  scope:
+    v1: []                # Must have for initial release
+    accommodate: []       # Design for but don't build yet
+    later: []             # Not needed for v1 to be useful
+    never: []             # Explicitly out of scope. Each: { item, rationale }
+
+  # Product identity.
+  product_identity:
+    name: "aidc"
+    personality: null     # Brand personality, mood (null for internal tools)
+    visual_preferences: null  # Look/feel preferences (null for non-visual products)
+
+  platform: null          # Where this runs (web, mobile, CLI, etc.)
+
+  # Non-functional requirements, calibrated to risk.
+  nonfunctional:
+    performance: null
+    scalability: null
+    uptime: null
+    cost_constraints: null
+
+  regulatory: []          # Each: { regulation, applicability, impact }
+  cost_estimates: []      # Each: { item, estimated_monthly_cost, notes }
+
+# =============================================================================
+# TECHNICAL DECISIONS
+# =============================================================================
+# Every entry includes rationale.
+# Each: { decision, rationale, alternatives_considered, date }
+
+technical_decisions:
+  architecture: []
+  technology: []
+  data_model: []
+  integrations: []
+  operational: []
+
+# =============================================================================
+# DESIGN DECISIONS
+# =============================================================================
+# UX, IA, and design decisions. Some fields (like error_handling_approach) apply
+# to all products; others (like visual_direction) only apply to products with a UI.
+# Each: { decision, rationale, date }
+
+design_decisions:
+  information_architecture: []
+  interaction_patterns: []
+  accessibility_approach: null
+  error_handling_approach: null
+  # API decisions — populate when classification.structural.exposes_programmatic_interface is set.
+  # These record the DECISION (including a deliberate "none — internal-only"), not a mandate to
+  # version. A deferral must be dated and carry a revisit trigger. See the api-contract artifact.
+  # api_versioning_approach: { scheme, deprecation_policy, stability_tiers,
+  #                            status: active|deferred, rationale, revisit_trigger (if deferred), date }
+  api_versioning_approach:
+    scheme: none-internal-only
+    deprecation_policy: >-
+      The MCP tool surface and the callback payload have exactly one consumer (the
+      orchestrator, MetaLLM). A change to either is agreed with that side before it is
+      built and written into the design doc that owns the contract (docs/design-10
+      D5/D6) with the requirement it implements; fields are added, not repurposed, and a
+      consumer that ignores an added field still reads the payload correctly. The aidc
+      release itself is semver-tagged, which is what an operator pins.
+    stability_tiers: null
+    status: active
+    rationale: >-
+      A published version number would suggest independent consumers that do not exist,
+      and the real safeguard has been agreement plus additive fields: the joint test on
+      2026-09-17 changed the payload twice (error_code, speaker, prompt_waiting) by
+      agreeing the shape with the metallm session first.
+    date: 2026-09-17
+  # api_error_model_approach: { envelope (e.g. RFC-7807/problem+json), codes, status, rationale, date }
+  api_error_model_approach:
+    envelope: >-
+      Every tool returns {"ok": true, "data": ...} or {"ok": false, "error": "<sentence a
+      person or model can read>", "error_code": "<kind>"}; isError stays false, so the
+      failure is in the envelope rather than the MCP error flag. Callbacks that are not
+      replies carry the same error_code field (prompt_dropped, prompt_waiting).
+    codes: docs/design-10-turn-state-and-sending.md D6 (tools.ERROR_CODES, MCP-32)
+    status: active
+    rationale: >-
+      The orchestrator has to decide retry vs. tell-the-person without parsing prose; a
+      test fails if any failure path omits a code or uses one outside the set.
+    date: 2026-09-17
+  observability_approach: null    # Signal types, correlation context, sensitive data filtering, operational model
+  infrastructure_dependencies: null  # External services (DB, queue, auth, APIs), mock boundaries, integration test strategy
+  visual_direction: null
+
+# =============================================================================
+# OPEN QUESTIONS
+# =============================================================================
+# Unresolved decisions. Normal during discovery, shrinks toward zero
+# before artifact generation.
+# Each:
+#   question: string
+#   blocking: string (what can't proceed)
+#   waiting_on: "user" | "research"
+#   priority: high | medium | low
+
+open_questions: []
+
+# =============================================================================
+# USER EXPERTISE PROFILE
+# =============================================================================
+# Inferred from conversation signals, never self-assessed.
+# Drives vocabulary, explanation depth, and involvement calibration.
+
+user_expertise:
+  product_thinking: null      # none | basic | intermediate | advanced
+  technical_depth: null
+  design_sensibility: null
+  domain_knowledge: null
+  operational_awareness: null
+  evidence: []                # Each: { dimension, signal, inferred_from }
+
+# =============================================================================
+# BUILD PREFERENCES
+# =============================================================================
+# Developer preferences captured during discovery (testing approach, code style,
+# tooling). Optional — only when the user expresses preferences.
+
+build_preferences:
+  file_path: null             # Path to project-preferences.md (relative to .prawduct/)
+  last_updated: null
+  source: null                # discovery | inferred | iteration
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+# Tracks periodic health check state. Health checks are triggered by
+# accumulating staleness signals, not by a fixed cadence.
+
+health_check:
+  last_full_check: null
+  last_check_findings: null
+
+# =============================================================================
+# ARTIFACT MANIFEST
+# =============================================================================
+# Tracks generated artifacts and their relationships.
+
+artifact_manifest:
+  # Each:
+  #   name: string
+  #   file_path: string (relative to project root)
+  #   version: integer
+  #   depends_on: [artifact names]
+  artifacts: []
+
+# =============================================================================
+# BUILD STATE
+# =============================================================================
+# Runtime tracking during building. Updated after each chunk.
+
+build_state:
+  source_root: null           # Where source code lives (e.g., "src/")
+
+# =============================================================================
+# ACTIVE BUILD PLAN (optional)
+# =============================================================================
+# Names the in-progress build plan when it isn't the conventional
+# `artifacts/build-plan.md` — scope-named plans (`artifacts/build-plan-<scope>.md`)
+# keep release-pending plans distinct under gitflow. The value is a path
+# relative to `.prawduct/` (a repo-relative `.prawduct/...` spelling is
+# tolerated). It is the FALLBACK, not the first answer: a plan that declares
+# `branch:` in its frontmatter claims the branch it names, and this scalar
+# answers for every branch no live plan claims (the build-plan template's
+# `branch:` comment points at the full rule). It also breaks a TIE among several
+# plans claiming one branch — that is its remaining job once branches carry their
+# own plans. Unset → `artifacts/build-plan.md`.
+# A pointer to a file that doesn't exist means governance sees no active plan
+# by this route — the session briefing warns when resolution actually took it.
+#
+# active_build_plan: artifacts/build-plan-my-scope.md
+
+# =============================================================================
+# BASE BRANCH (opt-in, unset by default)
+# =============================================================================
+# The branch this product's feature work integrates onto — the base every gate
+# diffs against: the PR gate, the doc-only gate, the cumulative-Critic span, and
+# the reviewer's own range.
+#
+# **Set it on a gitflow repo.** Unset, base resolution first asks the remote what
+# it integrates onto (`refs/remotes/origin/HEAD`, which a clone records) and
+# prefers that when it names something outside the main family; only if that
+# yields nothing does it fall back to guessing `origin/main`, then `main`, then
+# `HEAD~1`. On a repo whose features cut from `develop`, reaching that guess
+# anchors every gate to `merge-base(main, HEAD)` — a two-commit branch reviewed as
+# the entire `develop..main` promotion delta, silently and plausibly.
+#
+# **This key outranks the remote's answer**, deliberately: a remote default and a
+# product's integration branch are allowed to differ (a repo whose remote default
+# is `main` while feature work integrates onto `develop` is exactly the case
+# `origin/HEAD` cannot see), and this is the one an owner wrote down. `origin/<b>`
+# is preferred over a bare `<b>` for a merge-base that is the same value in every
+# clone and worktree.
+#
+# A configured-but-unresolvable value fails CLOSED — the gate refuses rather than
+# quietly diffing the wrong range — so a typo surfaces instead of shipping.
+# `/prawduct:onboard` and `/prawduct:migrate` write it when the remote's default
+# is non-main; set it by hand otherwise.
+#
+# base_branch: develop
+
+# =============================================================================
+# BUILD-PLAN REF ROOT (opt-in, unset by default)
+# =============================================================================
+# A second root that this repo's build-plan file refs may be written relative
+# to. `verify-chunk-refs` tries the repo root first, then this.
+#
+# Set it when your plans name files the way they read from INSIDE a
+# subdirectory rather than from the repo root — e.g. a repo that ships a
+# plugin, an extension, or a bundled tool, whose plans say `lib/gates.py`
+# meaning `plugin/lib/gates.py`. Without the declaration each such ref reports
+# as a missing deliverable.
+#
+# DECLARED, never inferred: the verifier will not guess this from your layout,
+# because "there is a directory that looks like a plugin root" is an ordinary
+# layout rather than a statement of intent, and guessing would silently resolve
+# a genuinely missing deliverable against an unrelated directory. Unset (the
+# default) means the repo root is the only root. A value that escapes the repo,
+# doesn't exist, or isn't a directory is ignored.
+#
+# build_plan_ref_root: plugin
+
+# =============================================================================
+# RISK SURFACES (opt-in)
+# =============================================================================
+# The paths where a missed defect costs your product the most — auth, payments,
+# migrations, a public API contract, whatever yours are. Two consumers read the
+# list: `prawduct-hook classify-diff-risk` (the review `tier`) and the Critic's
+# roster derivation, which gives a diff touching any of them the deeper
+# three-reviewer review at any size.
+#
+# **Declaring this opts you into the risk-keyed roster.** Leave it unset and you
+# are never reviewed less than before: prawduct's framework-shaped defaults
+# (`skills/`, `lib/gates*`, `bin/*hook*`, plus any contract paths you list in
+# boundary-patterns.md) still escalate, and below those the older file-count rule
+# stands (a coordinator at 5+ changed files). Declaring your own surfaces is what
+# raises the size threshold to 12 judgeable files — prawduct will not review your
+# high-risk changes more cheaply just because they are small.
+#
+# Pattern semantics: a trailing `/` is a directory prefix; anything else is an
+# fnmatch glob (a plain path with no metacharacters is an exact match). An
+# explicit empty list (`risk_surfaces: []`) is a deliberate "this product has
+# no risk surfaces" opt-out and turns the tier check off.
+#
+# risk_surfaces:
+#   - src/auth/
+#   - src/billing/
+#   - migrations/
+#   - src/api/contract.py
+
+# =============================================================================
+# RELEASE VERSION FILES (opt-in)
+# =============================================================================
+# Which of YOUR files carry the release version, read by
+# `prawduct-hook check-released`. One consumer, three questions: which paths,
+# how is each read, and which key holds the value.
+#
+# **Declaring is what lets a mismatch FAIL your release.** Leave it unset and
+# check-released falls back to guessing prawduct's own layout
+# (`plugin/VERSION`, `plugin/.claude-plugin/plugin.json`, `pyproject.toml`) —
+# and because that is a guess about a product that never claimed it, the guess
+# may only report `ok` or `unverifiable`, never `not-released`. That is
+# deliberate: a setuptools-scm project, or one whose `pyproject.toml` is
+# tooling-only, must not be told its release is broken against a layout it
+# never chose. Declare your files and prawduct will hold you to them.
+#
+# **Read from the TAG's tree, not your checkout** — which files carried a
+# release's version is a fact about that release. So a release cut before you
+# added this key keeps grading through the fallback, and reorganising your
+# layout later cannot retroactively fail an old release.
+#
+# `format` names a structural shape, not a language:
+#   bare  — the whole file is the version string (no `key`)
+#   json  — decoded, then `key` descended
+#   toml  — decoded via stdlib `tomllib`, then `key` descended
+# `key` is a dotted path descended literally, which is what keeps the read
+# dumb: you say `project.version` and nothing has to decide which table of a
+# manifest wins. A key name containing a literal dot is not expressible — point
+# at a `bare` or `json` file instead.
+#
+# `toml` needs Python 3.11+ (`tomllib`); on 3.10 such an entry reports
+# `unverifiable` rather than failing, since an interpreter's stdlib is not
+# evidence about your release. Block style only. An empty list is a deliberate
+# "this product ships no version file" and reports that nothing was checked.
+#
+# release_version_files:
+#   - path: VERSION
+#     format: bare
+#   - path: package.json
+#     format: json
+#     key: version
+#   - path: Cargo.toml
+#     format: toml
+#     key: package.version
+
+# =============================================================================
+# COVERAGE EVIDENCE (opt-in, v1.4+)
+# =============================================================================
+# When true, the Critic requires every changed file the verifier can judge to
+# appear in `.test-evidence.json`'s `changes_referenced` list (files it can't
+# judge — non-code, symbol-less, deleted — are declared in `changes_unjudged`
+# and reported, not gated) and scales severity language to the declared
+# `coverage_level` (`referenced` floor vs. `executed` real). The reference
+# verifier at `bin/test-reference-verify` emits the floor; products with
+# non-trivial coverage concerns should plug in a stronger verifier. See
+# `/prawduct:methodology building` "Coverage Evidence".
+# Default off in v1.4 — schema is checked but content is not enforced.
+
+coverage_required: false
+
+# =============================================================================
+# TEST EXECUTION (optional, gate-soundness)
+# =============================================================================
+# `prawduct-hook test-evidence record` defaults to running
+# `sys.executable -m pytest` from the repo root and grepping a single `tests/`
+# dir. When the repo's real shape differs (uv/venv-managed interpreter, no
+# root pytest config, monorepo test trees), declare it — don't wrap it:
+#
+# test_command: uv run pytest --junit-xml={junit_xml} -q
+#   The canonical suite invocation (the exact command CI runs), shlex-split
+#   and run from the repo root. Must contain the `{junit_xml}` literal — the
+#   hook substitutes its report path there. Shell operators (&&, |, FOO=1)
+#   are not supported; point the command at a script for compound runs.
+#   Caveat: the value is read by a YAML-comment-aware scalar reader, so a
+#   literal `#` anywhere in the command truncates it — wrap such invocations
+#   in a script too.
+#
+# test_commands:
+#   - pipenv run pytest --junit-xml={junit_xml} -q
+#   - npm run test:ci -- --junit --outputFile={junit_xml}
+#   The multi-environment form (backend + web + mobile): one canonical
+#   invocation per environment, each run under the same rules as
+#   `test_command:` (shlex-split, mandatory `{junit_xml}`, `#` truncates);
+#   counts aggregate across all reports into ONE evidence record, and any
+#   launch failure or unparseable report fails the whole record. Declare it
+#   ONLY as this block-sequence-of-strings shape (flow style `[a, b]` and
+#   nested mappings are refused, not silently ignored). Mutually exclusive
+#   with `test_command:`. Ingest path: repeat `--from-junit` once per report.
+#
+# tests_dirs: engine/tests server/tests
+#   Whitespace-separated test trees for the coverage verifier (default:
+#   `tests`). One verifier run unions discovery across all of them.
+#
+# sentinel_command: npx vitest run {sentinel}
+#   How this product runs ONE test file, for `prawduct-hook audit-learnings`.
+#   A learning may declare `sentinel=<path>`, meaning "the failure mode this
+#   rule warns about is now enforced by that test" — and the audit retires the
+#   rule when the test passes. Grading it needs a single-file invocation, which
+#   `test_command:` cannot express: that one runs the whole suite, so reusing it
+#   would grade every rule by the suite's verdict.
+#   Must contain the `{sentinel}` literal, where the test path is substituted.
+#   Shlex-split, run from the repo root, same `#`-truncation caveat as above.
+#   UNSET IS SAFE AND MEANS UNGRADED: sentinels are reported `ungraded` with a
+#   reason, never `failed`, and no rule is retired on a verdict that was never
+#   taken. There is deliberately no default — prawduct governs products in every
+#   language and will not guess at one's test runner.
+
+# =============================================================================
+# OPERATOR VERIFICATION (opt-in, v1.4+)
+# =============================================================================
+# When true, `/pr create` BLOCKS if `.prawduct/operator-verification.md`
+# has any entry with `**Status:** pending`. The queue records pre-merge
+# human-verification items for visual / live-integration changes that
+# automated tests can't fully cover. Drain via
+# `prawduct-hook verify-operator-verification <VRF-id>` or
+# override per-PR with `/pr create --accept-pending-verification "rationale"`.
+# Default off in v1.4 — opt-in by setting `operator_verification_required: true`.
+
+operator_verification_required: false
+
+# =============================================================================
+# REVIEW ROUND BUDGET (on by default)
+# =============================================================================
+# The most full review rounds one body of work may buy before `critic-begin`
+# refuses another (exit 4). `verify-resolutions` is never refused and never
+# counted — it is how a BLOCKING finding clears, so a ceiling that ate it would
+# strand findings with no command that resolves them.
+#
+# The unit is the build-plan SCOPE, not the branch: a branch may carry two
+# scopes (one would charge the other), and on a trunk-based repo the
+# merge-base span is zeroed by every push, so a branch-counted rule could
+# never fire. A dispatch that resolves no scope is not budgeted at all.
+#
+# At exhaustion the outstanding NON-blocking findings are auto-accepted with the
+# budget as their recorded reason and a census is rendered. BLOCKING is never
+# swept: the budget can end a review loop, never open a gate.
+#
+# ON by default, at 6 — an off-by-default terminating rule is a mechanism that
+# works and that nobody knows exists. Six because it sits above every measured
+# chain that ever produced a late BLOCKING finding, while still catching the
+# 20-to-34-round chains whose count is indefensible on any reading.
+#
+# Set to `null` to disable it entirely; raise it if this repo genuinely reviews
+# more. A budget that gets `--force`d past every time is a budget set wrong.
+
+review_round_budget: 6
+
+# =============================================================================
+# API VERSIONING DECISION (advisory resolution fact, v2.2+)
+# =============================================================================
+# The committed "answer store" fact the `api-versioning` sync probe consults.
+# When the product exposes a programmatic interface (detected from the code —
+# web framework, OpenAPI/proto), the probe raises a dismissable, auto-resolving
+# session advisory until a versioning decision is recorded. Set this to the
+# decision summary (e.g. "uri-path-v1", "header", "none-internal-only",
+# "deferred:<revisit-trigger>") to resolve it — it mirrors
+# design_decisions.api_versioning_approach. Unset/absent = undecided. Recording
+# "none-internal-only" resolves it; this is NOT a mandate to version.
+#
+# api_versioning_decided:
+
+# =============================================================================
+# BACKLOG (structured backlog resolution conditions, v1.7+)
+# =============================================================================
+# The shared "answer store" (committed) that backlog sync probes consult to
+# know whether a migration nudge is still needed. The per-clone nag log lives
+# in .prawduct/.advisories.json; these committed facts auto-resolve a
+# teammate's advisory on next sync (see post-sync-advisory-spec.md §3.5, §7.1).
+#
+#   backlog_format_version  — set to 2 once `/backlog migrate` has converted
+#                             items to the [PFX-XXXX] structured format. Unset
+#                             (or absent) means legacy/unmigrated; the
+#                             `legacy-backlog-format` probe may nudge.
+#   backlog_prefixes        — OPTIONAL declared prefix vocabulary for /backlog
+#                             validation (e.g. [STH, CRT, SYN]). Emergent by
+#                             default; declare only if you want validation.
+#   backlog_backend         — set to `markdown` to declare that this product is
+#                             staying on the markdown backlog PERMANENTLY: no
+#                             GitHub remote, another forge, air-gapped, or an
+#                             owner who does not want an Issues tracker. It
+#                             resolves `backlog-service-migration-required` and
+#                             NOTHING else — the format, schema and grooming
+#                             nudges keep running, because a product staying on
+#                             the file needs its hygiene more, not less.
+#                             Absent means undecided, which is the default and
+#                             keeps the migration nudge. `markdown` is the only
+#                             defined value. Set it with
+#                             `/prawduct:backlog decline-migration <reason>`,
+#                             which records the reason as a comment directly
+#                             above the field; unset it by deleting the line.
+#                             An actual cutover (the backlog-service repo
+#                             scalar, written by `scrub`) wins outright if both
+#                             are set — having migrated beats declaring you
+#                             never will.
+#
+# Reserved for deferred backlog probes (v1.7 ships only legacy-backlog-format):
+#   backlog_external_imports — list of external backlog files already audited
+#                              via `/backlog import` (resolves external-detected).
+#   backlog_last_groomed_at  — ISO-8601 of the last /backlog list|pick (resolves
+#                              overdue-grooming).
+
+# backlog_format_version:
+# backlog_backend:
+# backlog_prefixes: []
+# backlog_external_imports: []
+# backlog_last_groomed_at:
+
+# =============================================================================
+# CHANGE LOG
+# =============================================================================
+# Change log is in .prawduct/change-log.md (separate file to reduce merge conflicts).
+# See that file for format and instructions.
+
+# Distribution mode — set by /prawduct:migrate (v2.0.0 plugin cutover).
+# `plugin` tells the legacy file-sync hook to stand down (Chunk 8).
+distribution: plugin
+
+# Integration base branch — the branch feature work merges into. Every
+# gate that resolves a diff base (coverage, cumulative Critic, PR) anchors
+# here; without it they guess `main` and a gitflow repo reviews the whole
+# develop..main promotion delta. Written at onboard because origin/HEAD
+# named `develop`. Change it if this repo integrates somewhere else.
+base_branch: develop
+
+# GitHub Issues backlog backend — recorded at onboard for a product adopting
+# the Issues backend from day one (init-product --backlog-repo). The normal
+# path is markdown-first and sets this later, at scrub/cutover.
+# `/prawduct:backlog` routes on this scalar.
+backlog_service_repo: pacepace/aidc

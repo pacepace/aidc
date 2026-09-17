@@ -147,7 +147,14 @@ if [ -z "$REPO_ARG" ]; then
 fi
 REPO_ARG=$(translate_wsl_path "$REPO_ARG")
 REPO_PATH=$(realpath_portable "$REPO_ARG")
-[ -d "$REPO_PATH" ] || die "repo path does not exist: $REPO_PATH"
+if [ ! -d "$REPO_PATH" ]; then
+    # Inside aidc-mcp this process sees its own filesystem, not the host's: say which
+    # it is rather than claiming a host path does not exist.
+    if [ -n "${AIDC_HOST_HOME:-}" ] && ! aidc_resolve_local "$REPO_PATH" >/dev/null 2>&1; then
+        die "repo path is not reachable from aidc-mcp: $REPO_PATH (it only sees $(aidc_host_home))"
+    fi
+    die "repo path does not exist: $REPO_PATH"
+fi
 
 # Workspace: defaults to repo (only that repo is mounted). When set, the
 # whole workspace dir is mounted so sibling repos are visible inside; repo
@@ -282,12 +289,23 @@ export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
 # ---- audit dir + snapshot ----------------------------------------------------
 
 TS=$(aidc_timestamp)
+# AUDIT_DIR is the HOST path (it goes into the session's compose file, which the host's
+# docker daemon resolves). AUDIT_WRITE is where this process writes to land there: the
+# same thing on the host, the mount inside aidc-mcp.
 AUDIT_DIR="${AIDC_AUDIT_DIR}/${NAME}-${TS}"
-mkdir -p "$AUDIT_DIR"
-AUDIT_DIR=$(realpath_portable "$AUDIT_DIR")
+aidc_mkdir_host "$AUDIT_DIR" || \
+    die "cannot write the audit dir ${AUDIT_DIR} from here: aidc-mcp needs it mounted (restart it with 'aidc mcp restart')"
+AUDIT_WRITE="$AIDC_LOCAL_PATH"
+if [ "$AUDIT_WRITE" = "$AUDIT_DIR" ]; then
+    AUDIT_DIR=$(realpath_portable "$AUDIT_DIR")
+    AUDIT_WRITE="$AUDIT_DIR"
+fi
+
+info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
+info "  profile=${AIDC_PROFILE} taint_response=${AIDC_TAINT_RESPONSE} audit_dir=${AIDC_AUDIT_DIR}"
 
 # Config snapshot -- a frozen record of what was active at session start.
-emit_loaded_config_yaml > "${AUDIT_DIR}/config-snapshot.yaml"
+emit_loaded_config_yaml > "${AUDIT_WRITE}/config-snapshot.yaml"
 
 # Initial meta.json. Audit sidecar's finalize.sh stamps killed_at on teardown.
 jq -n \
@@ -297,7 +315,7 @@ jq -n \
     --arg created "$(date -u +%FT%TZ)" \
     --arg taint "$AIDC_TAINT_RESPONSE" \
     '{session:$session, profile:$profile, repo:$repo, created_at:$created, taint_response:$taint}' \
-    > "${AUDIT_DIR}/meta.json"
+    > "${AUDIT_WRITE}/meta.json"
 
 # ---- ensure images exist -----------------------------------------------------
 #
@@ -325,14 +343,19 @@ unset _role
 #      (compose template handles the mount declaration)
 
 ENCODED_REPO=$(printf '%s' "$REPO_PATH" | sed 's|[/.]|-|g')
-HOST_CLAUDE_PROJECT_DIR="${HOME}/.claude/projects/${ENCODED_REPO}"
+HOST_CLAUDE_PROJECT_DIR="$(aidc_host_home)/.claude/projects/${ENCODED_REPO}"
 
 # Memory mount toggleable via config.
 CLAUDE_MEMORY_MOUNT=""
 if [ "${AIDC_SHARE_MEMORY:-true}" = "true" ]; then
-    mkdir -p "$HOST_CLAUDE_PROJECT_DIR"
-    CLAUDE_MEMORY_MOUNT="- ${HOST_CLAUDE_PROJECT_DIR}:/home/vscode/.claude/projects/${ENCODED_REPO}:rw"
-    info "memory: sharing host's per-project Claude memory dir"
+    if aidc_mkdir_host "$HOST_CLAUDE_PROJECT_DIR"; then
+        CLAUDE_MEMORY_MOUNT="- ${HOST_CLAUDE_PROJECT_DIR}:/home/vscode/.claude/projects/${ENCODED_REPO}:rw"
+        info "memory: sharing host's per-project Claude memory dir"
+    else
+        # Only reachable from inside aidc-mcp, which does not mount the host's home.
+        # Sharing memory is a convenience; refusing to create the session is not.
+        info "memory: NOT shared -- ${HOST_CLAUDE_PROJECT_DIR} is not reachable from here"
+    fi
 else
     info "memory: NOT shared (share_memory=false); container will use its own memory"
 fi
@@ -381,7 +404,7 @@ fi
 # artifact an audit reads to reconstruct the session.
 if [ -z "$CLAUDE_SCRATCHPAD_MOUNT" ] && [ "${AIDC_SHARE_SCRATCHPAD:-true}" = "true" ]; then
     AIDC_SHARE_SCRATCHPAD="false"
-    emit_loaded_config_yaml > "${AUDIT_DIR}/config-snapshot.yaml"
+    emit_loaded_config_yaml > "${AUDIT_WRITE}/config-snapshot.yaml"
 fi
 
 # Authentication: the container owns its Claude config directory.
@@ -405,7 +428,7 @@ fi
 #    claude.ai session belongs to the container: it refreshes on the volume,
 #    survives restart and upgrade, supports Remote Control, and may be a
 #    different account from the host's. `aidc kill` discards it.
-AIDC_CLAUDE_TOKEN_FILE="${HOME}/.config/aidc/claude-oauth-token"
+AIDC_CLAUDE_TOKEN_FILE="$(aidc_host_home)/.config/aidc/claude-oauth-token"
 AIDC_CLAUDE_TOKEN=""
 USING_LONG_LIVED_TOKEN=0
 
@@ -429,7 +452,7 @@ export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
 
 # Settings bridge. settings.json holds theme / output style / env.
 CLAUDE_SETTINGS_MOUNT=""
-HOST_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+HOST_CLAUDE_SETTINGS="$(aidc_host_home)/.claude/settings.json"
 if [ -f "$HOST_CLAUDE_SETTINGS" ]; then
     CLAUDE_SETTINGS_MOUNT="- ${HOST_CLAUDE_SETTINGS}:/home/vscode/.claude/settings.json:rw"
     info "settings: bridged from host ~/.claude/settings.json"
@@ -444,8 +467,8 @@ fi
 # account and every other project's state (lib/claude-state.sh); user-main.sh
 # installs it on first start only, so whatever Claude writes there afterwards
 # (the account you log in with, settings you change) is never overwritten.
-CLAUDE_STATE_SEED="${AUDIT_DIR}/claude-state-seed.json"
-HOST_CLAUDE_STATE="${HOME}/.claude.json"
+CLAUDE_STATE_SEED="${AUDIT_WRITE}/claude-state-seed.json"
+HOST_CLAUDE_STATE="$(aidc_host_home)/.claude.json"
 if [ -f "$HOST_CLAUDE_STATE" ]; then
     if ( umask 0077; aidc_claude_state_seed "$HOST_CLAUDE_STATE" "$REPO_PATH" "$WORKSPACE_PATH" > "$CLAUDE_STATE_SEED" ); then
         info "state: seeded from host ~/.claude.json (onboarding + this project's trust; no account)"
@@ -481,7 +504,7 @@ fi
 # onto the host's settings.json.
 CLAUDE_PLUGINS_MOUNT=""
 CLAUDE_PLUGINS_MOUNT_ABS=""
-HOST_CLAUDE_PLUGINS="${HOME}/.claude/plugins"
+HOST_CLAUDE_PLUGINS="$(aidc_host_home)/.claude/plugins"
 if [ "${AIDC_SHARE_PLUGINS:-true}" = "true" ] && [ -d "$HOST_CLAUDE_PLUGINS" ]; then
     CLAUDE_PLUGINS_MOUNT="- ${HOST_CLAUDE_PLUGINS}:/home/vscode/.claude/plugins:ro"
     if [ "$HOST_CLAUDE_PLUGINS" != "/home/vscode/.claude/plugins" ]; then
@@ -503,11 +526,16 @@ fi
 # ~/.claude/projects/<enc>/*.jsonl into it every ~2s, giving MCP direct, scoped,
 # per-session read access with no blanket mount of the host's ~/.claude/projects.
 # See docs/design-09-callback-delivery.md. Must match cmd-mcp.sh's AUDIT_DIR base.
-MCP_AUDIT_BASE="${XDG_STATE_HOME:-$HOME/.local/state}/aidc-mcp"
+MCP_AUDIT_BASE="${AIDC_MCP_STATE_HOST:-${XDG_STATE_HOME:-$(aidc_host_home)/.local/state}/aidc-mcp}"
 MCP_TRANSCRIPTS_DIR="${MCP_AUDIT_BASE}/transcripts/${NAME}"
-mkdir -p "$MCP_TRANSCRIPTS_DIR"
+# Created through the mount when this runs inside aidc-mcp (see aidc_local_path); the
+# mount string below always carries the HOST spelling, which is what docker resolves.
+aidc_mkdir_host "$MCP_TRANSCRIPTS_DIR" || \
+    die "cannot write the transcript mirror dir ${MCP_TRANSCRIPTS_DIR} from here: aidc-mcp needs its state dir mounted (restart it with 'aidc mcp restart')"
+MCP_TRANSCRIPTS_WRITE="$AIDC_LOCAL_PATH"
+MCP_AUDIT_BASE_WRITE=$(aidc_local_path "$MCP_AUDIT_BASE") || MCP_AUDIT_BASE_WRITE="$MCP_TRANSCRIPTS_WRITE"
 # Keep the whole tree private (transcripts hold conversation content).
-chmod 0700 "$MCP_AUDIT_BASE" "$MCP_TRANSCRIPTS_DIR"
+chmod 0700 "$MCP_AUDIT_BASE_WRITE" "$MCP_TRANSCRIPTS_WRITE"
 TRANSCRIPT_MIRROR_MOUNT="- ${MCP_TRANSCRIPTS_DIR}:/var/aidc/transcript-out:rw"
 export TRANSCRIPT_MIRROR_MOUNT
 info "transcript mirror: ${MCP_TRANSCRIPTS_DIR} -> dev:/var/aidc/transcript-out"
@@ -677,6 +705,23 @@ EOFDNS
 fi
 unset _dns_list _ip
 export DNS_SERVERS DNS_BLOCK
+
+# ---- keep the dev container away from aidc-mcp (MCP-12) ---------------------
+#
+# The session's squid allows every destination for local sources, and aidc-mcp
+# listens on a host interface (mcp.bind_address:mcp.port). Without a rule, a dev
+# container can reach it through squid and only the bearer token stops a request.
+# The squid entrypoint turns MCP_DENY into a deny rule ahead of `allow localnet`,
+# and refuses to start on a malformed value; check it here too, so a bad
+# mcp.bind_address / mcp.port says so instead of surfacing as an unhealthy squid.
+MCP_DENY=$(aidc_mcp_deny_target)
+case "${MCP_DENY%:*}" in
+    ''|*[!0-9a-fA-F:.]*) die "mcp.bind_address '${MCP_DENY%:*}' is not an IP address (needed to keep sessions away from aidc-mcp)" ;;
+esac
+case "${MCP_DENY##*:}" in
+    ''|*[!0-9]*) die "mcp.port '${MCP_DENY##*:}' is not a port number (needed to keep sessions away from aidc-mcp)" ;;
+esac
+export MCP_DENY
 
 # ---- container-only-path overlays (CLI-18/19) -------------------------------
 #
@@ -858,6 +903,11 @@ if ! docker volume inspect aidc-pyenv-versions >/dev/null 2>&1; then
     docker volume create aidc-pyenv-versions >/dev/null
 fi
 
+# A network left behind by an earlier session with this name would be reused, id and
+# all, and aidc-mcp would take this new session for that one.
+remove_session_networks "$NAME" || \
+    die "a network from an earlier session named '${NAME}' could not be removed; remove it by hand: docker network rm aidc-${NAME}-net aidc-${NAME}-egress"
+
 info "starting compose project: $PROJECT"
 docker compose -p "$PROJECT" -f "$COMPOSE_OUT" up -d
 
@@ -893,6 +943,11 @@ info "waiting for $DEV_CT setup to finish..."
 if ! wait_for_dev_ready "$NAME"; then
     die "dev container did not become ready in time; check 'docker logs $DEV_CT'"
 fi
+
+# Files written into the audit dir after it was created (the config snapshot, meta.json,
+# the Claude state seed) belong to whoever owns the tree, not to whatever user this
+# process happens to be: see aidc_mkdir_host.
+aidc_fix_host_owner "$AUDIT_WRITE"
 
 # ---- summary -----------------------------------------------------------------
 

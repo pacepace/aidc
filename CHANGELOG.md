@@ -13,6 +13,142 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-17
+
+### Security
+- **A dev container can no longer reach the MCP control plane.** Each session's Squid allowed
+  every destination for local sources, and `aidc mcp` listens on a host interface, so a sandboxed
+  agent could reach the server that drives every session through its own proxy; only the bearer
+  token stood in the way. `aidc create` now passes `mcp.bind_address` / `mcp.port` to the
+  session's Squid, which denies that address and port ahead of its allow rule (and refuses to
+  start if the rule does not land). Sessions created earlier get it on `aidc kill` + `aidc create`.
+
+### Fixed
+- **A Stop hook that pushes back no longer makes the watcher report a reply as finished
+  early.** When a Stop hook blocked Claude's stop (prawduct's gates do this routinely),
+  Claude Code wrote the block into the transcript and Claude kept working, but the watcher
+  read the block's feedback line as a new prompt and delivered the text before it as the
+  finished reply. The rest arrived later as an unprompted second message. The pushback now
+  reopens the turn, and a reply is held while its Stop hooks are still running (up to two
+  minutes), so the orchestrator gets one reply when Claude really stops. A hook that crashes
+  without blocking no longer counts as a pushback.
+- **A reply to a background task's notification is no longer labelled as answering a prompt
+  that was interrupted before Claude wrote anything.**
+- **Replies are no longer lost when `aidc-mcp` restarts.** Webhooks lived only in memory, so a
+  restart silently stopped every one: a prompt resumed from the send queue was answered and the
+  answer never came back. Webhooks are now saved and reopened at startup, and a reply written
+  while the MCP was down is delivered once.
+- **The first reply after Claude restarts inside a session is no longer lost.** Claude starts a
+  new transcript file when it restarts, and the watcher moved onto it anchored at its end, so a
+  prompt Claude answered before the watcher caught up never came back. The watcher now picks up
+  from when it last saw activity.
+- **A reply is no longer lost when Claude's transcript is damaged.** If the file the watcher is
+  reading loses the line it resumes from (a torn write when a session is killed mid-write, or a
+  compaction), it now delivers the replies left in that file before following Claude onto a new
+  one. `session_resend` also looks in a session's earlier transcripts, so a reply from before a
+  restart can still be fetched.
+- **A prompt pasted while Claude was busy gives its send record back.** Claude Code answers such a
+  prompt inside the running turn without recording it as a prompt, so its record used to sit for
+  24 hours, where the same words typed by a person could match it and be delivered as the
+  orchestrator's own.
+- **`session_create` refuses a path outside the directory you exposed.** `repo` and `workspace`
+  become host bind mounts in the new session, but the server checked them against its own
+  filesystem: a caller naming a path that exists in both (`/mnt`, which on WSL2 is every Windows
+  drive, `/srv`, `/tmp`) would have had the host's directory mounted read-write into the session
+  it just created. They must now be inside the home you exposed, and `aidc create` says "not
+  reachable from here" instead of claiming a real host path does not exist.
+- **`aidc mcp status` says whether this server offers `session_create`**, read from the running
+  container rather than the config, since the two differ until a restart.
+- **`session_create` is offered only when you turn it on.** `mcp.session_create: true` mounts your
+  home into the `aidc-mcp` container, which is what lets it read a repo and write Claude's
+  per-project memory for a session it creates. Off (the default) the tool is not registered at all,
+  so an orchestrator plans without it rather than calling something that cannot work.
+- **`session_create` through the MCP works at all.** The `aidc-mcp` image was missing
+  `envsubst` and the docker compose plugin, which `aidc create` needs, so the tool
+  failed at the door in every released image. A test keeps the image's packages in step
+  with what the CLI requires.
+- **Sessions created through the MCP use your host paths, not the MCP container's.**
+  `aidc mcp` runs the CLI inside its own container, where `HOME` is `/root`, so a
+  session it created pointed its audit dir and its transcript mirror at `/root/...` on
+  the host — and its replies, written where nothing was reading, never reached the
+  orchestrator. `aidc mcp start` now passes the host's home and state dir, and every
+  host path is derived from those, and directories it creates through those mounts are
+  given the owner of the tree they were made in — created as root, the session's own
+  mirror (which runs as the container user) could not write into them. Verified end to
+  end: a session created the way `session_create` does it now has a mirror it can write.
+  Restart `aidc mcp` to pick this up. Per-project Claude memory is not shared for such a
+  session (the MCP container cannot reach the host's home) and says so.
+- **`aidc create` says which config files it read**, and the profile, taint response
+  and audit dir they produced, so a session created on the defaults is not silent.
+- **`aidc kill` says when it detaches another session's container** from a network it
+  is removing.
+- **Sessions created through the MCP read your global aidc config.** They used to fall back to the
+  defaults, ignoring the profile, taint response and audit dir the host is configured with.
+- **`aidc kill` no longer leaves a session's networks behind.** With an `aidc proxy` port
+  forward active (or another session attached with `aidc network`), `docker compose down` left
+  the network in place and still exited successfully. Kill now removes forwarders first, makes
+  sure both session networks are gone, and fails loudly if one cannot be removed. `aidc create`
+  clears a network an older kill left behind.
+- **A re-created session is no longer handed the old session's waiting prompts.** Each queued
+  prompt records which session instance (the session's network) it was accepted for, so a
+  session killed and created again under the same name does not get them, while `aidc upgrade`
+  keeps them.
+
+### Changed
+- **Whether a session is busy now comes from Claude's transcript, not from watching the
+  screen.** The MCP used to wait for the tmux pane to stop changing for 1.5 s, which depends on
+  Claude Code animating something while it works. The transcript now decides. The screen is read
+  only for what the transcript cannot show: text a person has typed but not sent (a prompt now
+  waits instead of being pasted on top of it), whether Claude is at its input prompt at all (a
+  startup, login or trust screen holds prompts), and, when the transcript shows a turn in progress
+  that has gone quiet, whether the status bar still says Claude is working. After a paste, the
+  session counts as busy until the transcript shows the prompt arrived. `session_run` reads its
+  replies from the transcript too, and the pane-scraping code is gone.
+
+- **A prompt sent to a session is never dropped.** The send queue used to give up on a prompt
+  after about four hours of waiting, the moment Claude was not running, or after three failed
+  pastes, and lost everything it held when `aidc-mcp` restarted. Now a queued prompt waits as
+  long as its session exists, is held while Claude restarts, retries failed pastes without a
+  limit, and is saved to disk and resumed when the MCP starts. It leaves the queue only by being
+  pasted, or when its session is killed (then it goes to the dead-letter dir). `session_send`
+  queues instead of refusing when Claude is not running or a paste fails, and refuses only a
+  session that does not exist.
+- **A prompt that can never be pasted is reported back.** When a session is removed while
+  prompts wait for it, each prompt's conversation gets a callback with `ok: false`,
+  `error_code: "prompt_dropped"` and the prompt's text, instead of silence.
+- **You can see why a prompt is waiting.** `session_send` returns a `waiting_reason` when it
+  queues, and `session_status` lists every waiting prompt with its reason and paste attempts.
+  While a prompt waits because someone has unsent text in Claude's input box, the session's tmux
+  status line says so, in place of the window title and clock (sessions created on the new
+  image).
+
+### Added
+- **The orchestrator hears when a queued prompt is stuck.** A prompt that has waited in a
+  session's queue for 10 minutes gets one callback to its conversation saying it is still
+  waiting, why, and that the agent has not seen it (`error_code: "prompt_waiting"`). It still goes
+  in when the session is free.
+- **`speaker` on session replies, behind `metallm.send_speaker`.** `"human"` when every prompt a
+  reply answers was typed at the session's terminal, `"agent"` otherwise. Off by default: turn it
+  on only once the orchestrator records human turns instead of dropping them.
+- **Tool failures say what kind of failure they are.** Every `{"ok": false, "error": ...}`
+  envelope now carries an `error_code` (e.g. `no_such_session`, `queue_full`, `out_of_scope`,
+  `cli_failed`), so an orchestrator can tell "tell the person" from "retry once" without matching
+  the sentence. The codes are listed in design 10 D6.
+- **A session-scoped MCP mode.** `AIDC_MCP_ALLOWED_SESSIONS=a,b` limits an `aidc-mcp` server to
+  those sessions: every tool and resource refuses any other, session creation is refused, and
+  listings show only the allowed ones. It is for testing an orchestrator that runs inside a dev
+  container, whose MCP token must not reach the rest of the host.
+- **Interrupts reach the orchestrator.** When someone presses Esc after Claude has started
+  on a task, the watcher delivers what Claude had written so far, opened by a note that the
+  person at the terminal stopped it, and the callback carries `interrupted: true`. It used to
+  be dropped without a word. `ok` stays true: an interrupt is not a failure. An Esc pressed
+  before Claude writes anything, which leaves no trace in the transcript, is recognized from
+  the prompt Claude Code puts back in the input box (or else from the status bar) and reported
+  within seconds with "Claude had not written anything yet".
+- **Replies arrive a few seconds sooner.** When Claude Code writes its end-of-turn record,
+  the watcher delivers at once instead of waiting out `metallm.turn_settle_seconds`. Without
+  the record the wait applies as before.
+
 ## [1.6.0] - 2026-09-12
 
 ### Added
@@ -878,7 +1014,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/pacepace/aidc/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/pacepace/aidc/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/pacepace/aidc/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/pacepace/aidc/compare/v1.4.1...v1.5.0

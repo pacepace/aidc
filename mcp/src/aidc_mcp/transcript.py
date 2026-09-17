@@ -15,9 +15,19 @@ docs/design-09-callback-delivery.md):
     the turn; null is incomplete.
   - Deliverable content = "text" content blocks only (drop "thinking"/"tool_use").
   - Skip lines flagged isSidechain / isCompactSummary / isVisibleInTranscriptOnly.
-  - `--continue` APPENDS to the same file (no re-emission); new files appear only
-    on fresh sessions. So a per-file byte offset + terminal-uuid is a sound
-    exactly-once key.
+  - A Stop hook that blocks writes an isMeta "Stop hook feedback:" user line, when
+    the hook finishes, and Claude then keeps working. A stop that goes through
+    writes a system turn_duration line. Every stop with hooks configured writes a
+    system stop_hook_summary; its hookErrors lists blocks AND hooks that merely
+    failed, so it cannot tell the two apart (measured on Claude Code
+    2.1.270/2.1.274; see docs/design-10-turn-state-and-sending.md).
+  - Esc after Claude has written anything writes a "[Request interrupted by
+    user" line; Esc before that writes nothing at all.
+  - Every Claude run writes its OWN file: `--continue` starts a new one and leaves
+    the old in place (measured on 2.1.274, design-10 D8). A per-file byte offset +
+    terminal-uuid is still a sound exactly-once key WITHIN a file; across files the
+    watcher follows the move (design-10 D8) and the delivery ledger is what keeps
+    delivery to once.
 """
 
 from __future__ import annotations
@@ -28,7 +38,8 @@ import os
 import re
 import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 # Assistant stop_reason values that mark a turn as complete (control returns to user).
@@ -44,9 +55,21 @@ TERMINAL_STOP = frozenset({"end_turn", "stop_sequence"})
 INTERACTIVE_BLOCK_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 
 # Top-level line types that carry conversation messages. Everything else
-# (system, attachment, file-history-snapshot, last-prompt, ai-title, agent-name,
-# mode, permission-mode, queue-operation, ...) is ignored.
+# (attachment, file-history-snapshot, last-prompt, ai-title, agent-name, mode,
+# permission-mode, queue-operation, ...) is ignored, and so is every "system"
+# line except the two subtypes below.
 _MESSAGE_TYPES = frozenset({"user", "assistant"})
+
+# The user line Claude Code writes when a Stop hook blocks the stop. Claude keeps
+# working after it, so the reply before it is not the end of the turn. It is the
+# only reliable block signal: the stop_hook_summary's hookErrors also lists a hook
+# that crashed without blocking, after which Claude does stop.
+STOP_HOOK_FEEDBACK_PREFIX = "Stop hook feedback:"
+# System line subtypes about a stop. `stop_hook_summary` says the Stop hooks have
+# finished; `turn_duration` is written only once the stop went through, so it marks
+# the turn really over.
+_STOP_HOOK_SUMMARY = "stop_hook_summary"
+_TURN_DURATION = "turn_duration"
 
 
 @dataclass
@@ -67,6 +90,28 @@ class Turn:
     # was typed at the terminal (the delivered content then carries it),
     # "orchestrator" when every prompt was one the MCP injected, "" when unknown.
     prompt_origin: str = ""
+    # True when the person pressed Esc and cut the turn off; `text` is then what
+    # Claude had written up to that point, possibly nothing.
+    interrupted: bool = False
+    # How many replies in this group were followed by more assistant work with no
+    # Stop-hook pushback or prompt between them. A block that leaves no trace in
+    # the transcript would look like this, and would be delivered early; the
+    # watcher logs it so that case is visible. Not part of equality: it is a
+    # diagnostic, not what the turn is.
+    superseded: int = field(default=0, compare=False)
+    # True when a Stop-hook pushback arrived with no reply left in this read window
+    # to withdraw: the reply before it was already delivered as finished, because
+    # the hook ran longer than the watcher waited. Diagnostic, like `superseded`.
+    late_pushback: bool = field(default=False, compare=False)
+    # Set only on a callback that is not a reply: "prompt_dropped" when a queued
+    # prompt could not be pasted because its session is gone, "prompt_waiting" when
+    # one has waited long. Everything it says is also in `text`, so a receiver that
+    # ignores the code still reads it right.
+    error_code: str = field(default="", compare=False)
+    # Set by the watcher at delivery time: "human" when every prompt the turn answers
+    # was typed at the terminal, "agent" otherwise. Sent only when the aidc setting
+    # metallm.send_speaker is on (design 10 D4).
+    speaker: str = field(default="", compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -295,7 +340,108 @@ def human_prompt_text(obj: dict) -> str:
     return text
 
 
-def extract_completed_turns(objs: list[dict]) -> list[Turn]:
+# The wrapper tags that open a slash command's own line. The command may be answered
+# by Claude (a skill, a custom command) or run locally (/login, /model); either way the
+# line is the person's request. Any other opening tag is output Claude Code wrote.
+_COMMAND_TAGS = ("<command-name>", "<command-message>")
+
+
+def _is_local_output(obj: dict) -> bool:
+    """A user line carrying output Claude Code produced locally: a local slash
+    command's stdout, `!` bash-mode input and output, and any wrapper a later Claude
+    Code adds. Claude never replies to these, so they end whatever preceded them."""
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    text = _text_of(msg).strip()
+    return bool(_OPENS_WITH_TAG_RE.match(text)) and not text.startswith(_COMMAND_TAGS)
+
+
+def _is_interrupt_marker(obj: dict) -> bool:
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    return _text_of(msg).lstrip().startswith(_INTERRUPT_PREFIX)
+
+
+def _is_stop_hook_feedback(obj: dict) -> bool:
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    return _text_of(msg).lstrip().startswith(STOP_HOOK_FEEDBACK_PREFIX)
+
+
+def _system_subtype(obj: dict) -> str:
+    sub = obj.get("subtype")
+    return sub if isinstance(sub, str) else ""
+
+
+def _is_system_sourced_prompt(obj: dict) -> bool:
+    """A prompt Claude Code raised itself (a background task's notification),
+    as opposed to one a person or the MCP typed."""
+    source = obj.get("promptSource")
+    if isinstance(source, str) and source != "typed":
+        return True
+    origin = obj.get("origin")
+    return isinstance(origin, dict) and origin.get("kind") not in (None, "human")
+
+
+def ends_on_turn_end(objs: list[dict]) -> bool:
+    """True when the last line that can change a turn's state is Claude Code's
+    end-of-turn record (`system` / `turn_duration`).
+
+    The watcher uses this to deliver without waiting out its settle window. It is
+    only a shortcut: the record is undocumented and not always written, so its
+    absence changes nothing.
+    """
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            sub = _system_subtype(obj)
+            if sub == _TURN_DURATION:
+                return True
+            if sub == _STOP_HOOK_SUMMARY:
+                return False
+            continue
+        if otype in _MESSAGE_TYPES:
+            return False
+    return False
+
+
+def awaiting_stop_hooks(tail: list[dict], transcript: list[dict]) -> bool:
+    """True when `tail` ends on a reply whose Stop hooks have not reported yet.
+
+    A Stop hook's pushback is written only when the hook finishes, so until then
+    the reply looks finished. A version of Claude Code that writes stop records
+    (`transcript` shows at least one) writes one after every reply, so a reply with
+    none after it still has hooks running. A transcript with no stop records at
+    all says nothing, and this returns False.
+    """
+    if not any(obj.get("type") == "system"
+               and _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION)
+               for obj in transcript):
+        return False
+    for obj in reversed(tail):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            if _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION):
+                return False
+            continue
+        if otype == "user":
+            return False
+        if otype == "assistant":
+            if obj.get("isApiErrorMessage"):
+                return False  # API failures run no Stop hooks
+            raw_msg = obj.get("message")
+            msg = raw_msg if isinstance(raw_msg, dict) else {}
+            stop = msg.get("stop_reason")
+            return isinstance(stop, str) and stop in TERMINAL_STOP
+    return False
+
+
+def extract_completed_turns(objs: list[dict],
+                            dropped: list[str] | None = None) -> list[Turn]:
     """Return completed assistant turns in file order, COALESCED by user-prompt
     boundary.
 
@@ -316,7 +462,21 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     (``Turn.prompts``). Consecutive real user prompts with no assistant line
     between them (a slash command followed by its hook feedback, an auto-continue
     followed by the person's actual ask) all belong to the turn that follows, so
-    they accumulate until an assistant line starts the reply.
+    they accumulate until an assistant line starts the reply. A prompt Claude Code
+    raised itself (a background task's notification) drops any earlier prompt that
+    never got a reply: that one was interrupted before Claude wrote anything.
+
+    Stop-hook pushback: when a Stop hook blocks, Claude Code writes an isMeta
+    feedback line and Claude keeps working. The feedback line withdraws the group's
+    terminal, so the reply before it is not a completed turn; the group completes at
+    the terminal Claude reaches afterwards, with the text of every segment. isMeta
+    lines never close a group. When a group whose terminal was withdrawn is closed
+    without reaching another (Claude never resumed), the withdrawn terminal's uuid
+    is appended to `dropped` so the caller can log it.
+
+    Interrupts: a "[Request interrupted by user" line closes a group that has not
+    reached a terminal as an interrupted turn anchored on the marker, carrying the
+    text written so far (possibly none).
     """
     turns: list[Turn] = []
     pending: list[str] = []   # text accumulated in the current group (all lines)
@@ -326,10 +486,28 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     committed_ok = True        # False when the committed terminal is an API error
     prompts: list[str] = []   # person-typed prompt lines that opened this group
     saw_assistant = False     # has an assistant line been seen since the prompt(s)?
+    interrupted = False       # was the group closed by an interrupt marker?
+    superseded = 0            # replies followed by more work with no pushback between
+    terminal_had_text = False  # did the terminal line itself carry reply text?
+    withdrawn_uuid = ""       # the last terminal a pushback withdrew in this group
+    late_pushback = False     # a pushback found no terminal to withdraw
 
-    def flush() -> None:
+    def withdraw_terminal() -> None:
+        nonlocal committed, terminal_uuid, has_terminal, committed_ok, terminal_had_text
+        nonlocal withdrawn_uuid
+        # Keep `pending`: the withdrawn reply's text is part of the turn that
+        # eventually completes.
+        withdrawn_uuid = terminal_uuid
+        committed = ""
+        terminal_uuid = ""
+        has_terminal = False
+        committed_ok = True
+        terminal_had_text = False
+
+    def flush(end_of_read: bool = False) -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
-        nonlocal prompts, saw_assistant
+        nonlocal prompts, saw_assistant, interrupted, superseded, terminal_had_text
+        nonlocal withdrawn_uuid, late_pushback
         # Only a group that reached a terminal is a completed (deliverable) turn.
         # Deliver the text COMMITTED at that terminal — never the trailing `pending`
         # text from non-terminal lines after it. Those lines sit past the turn's
@@ -338,7 +516,13 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         # delivered with their own terminal on a later poll.
         if has_terminal:
             turns.append(Turn(terminal_uuid=terminal_uuid, text=committed.strip(),
-                              ok=committed_ok, prompts=tuple(prompts)))
+                              ok=committed_ok, prompts=tuple(prompts),
+                              interrupted=interrupted, superseded=superseded,
+                              late_pushback=late_pushback))
+        elif withdrawn_uuid and dropped is not None and not end_of_read:
+            # Only a group something else closed was dropped. At the end of the read
+            # a pushed-back group is still open: Claude is working on its next reply.
+            dropped.append(withdrawn_uuid)
         pending = []
         committed = ""
         terminal_uuid = ""
@@ -346,15 +530,43 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         committed_ok = True
         prompts = []
         saw_assistant = False
+        interrupted = False
+        superseded = 0
+        terminal_had_text = False
+        withdrawn_uuid = ""
+        late_pushback = False
 
     for obj in objs:
         # `type` is attacker-influenced; an unhashable value would raise on the
         # `not in` membership test. A non-str type is not a message line anyway.
         otype = obj.get("type")
-        if not (isinstance(otype, str) and otype in _MESSAGE_TYPES) or _is_skippable(obj):
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            continue
+        if otype not in _MESSAGE_TYPES:
             continue
         role = _role(obj)
         if role == "user":
+            if obj.get("isMeta"):
+                # Written by Claude Code on the user's behalf (hook feedback, skill
+                # bodies, reminders): never a prompt, never a boundary.
+                if _is_stop_hook_feedback(obj):
+                    if has_terminal:
+                        withdraw_terminal()
+                    elif not saw_assistant:
+                        late_pushback = True
+                continue
+            if _is_interrupt_marker(obj):
+                uid = _uuid_of(obj)
+                if not has_terminal and (saw_assistant or prompts) and uid:
+                    committed = "\n".join(pending)
+                    terminal_uuid = uid
+                    has_terminal = True
+                    committed_ok = True
+                    interrupted = True
+                flush()
+                continue
             if _is_real_user_prompt(obj):
                 # A real prompt closes the previous group — but only once that
                 # group has assistant content. Back-to-back prompts with nothing
@@ -363,12 +575,18 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
                 # typed text accumulates rather than being dropped by a flush.
                 if saw_assistant:
                     flush()
+                elif _is_system_sourced_prompt(obj):
+                    prompts = []
                 typed = human_prompt_text(obj)
                 if typed:
                     prompts.append(typed)
             continue
 
         # assistant line
+        # Only a terminal that carried text is a reply; a thinking-only terminal
+        # followed by the text is how Claude Code writes every reply.
+        if has_terminal and committed_ok and terminal_had_text:
+            superseded += 1
         saw_assistant = True
         raw_message = obj.get("message")
         message = raw_message if isinstance(raw_message, dict) else {}
@@ -442,12 +660,205 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
                 committed = "\n".join(pending)
                 terminal_uuid = uid
                 has_terminal = True
+                terminal_had_text = bool(text)
                 # A real terminal SUPERSEDES a preceding API error in this group
                 # (the retry succeeded): deliver the successful answer, not a failure.
                 committed_ok = True
 
-    flush()  # emit the final open group if it reached a terminal
+    flush(end_of_read=True)  # emit the final open group if it reached a terminal
     return turns
+
+
+def _has_stop_records(objs: list[dict]) -> bool:
+    return any(obj.get("type") == "system"
+               and _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION)
+               for obj in objs)
+
+
+def log_shows_turn_in_progress(objs: list[dict]) -> bool:
+    """True when the transcript's tail shows Claude still working on a turn.
+
+    This is the send path's source of truth for "busy" (design-10 S1). Busy: a
+    prompt with no reply yet, a tool call or tool result, a Stop-hook pushback
+    Claude has not answered, or a reply whose Stop hooks have not reported yet (in a
+    transcript that writes stop records). Not busy: a finished turn, an interrupt, an
+    API error, a turn waiting on an interactive-input tool, a local command's output
+    (/login, `!` bash mode), or nothing at all.
+
+    A transcript cannot show an Esc pressed before Claude wrote anything: it still
+    reads as busy. The caller resolves that case from the screen.
+    """
+    stop_records = None
+    after_summary = False
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            sub = _system_subtype(obj)
+            if sub == _TURN_DURATION:
+                return False
+            if sub == _STOP_HOOK_SUMMARY:
+                after_summary = True   # the line before it says whether it was a block
+            continue
+        raw_msg = obj.get("message")
+        msg = raw_msg if isinstance(raw_msg, dict) else {}
+        if otype == "user":
+            if obj.get("isMeta"):
+                if _is_stop_hook_feedback(obj):
+                    return True
+                continue
+            if after_summary:
+                return False
+            if _is_interrupt_marker(obj) or _is_local_output(obj):
+                return False
+            return True   # a prompt awaiting a reply, or a tool result mid-turn
+        if otype == "assistant":
+            if after_summary or obj.get("isApiErrorMessage"):
+                return False
+            if _blocking_tool_use_block(msg) is not None:
+                return False
+            stop = msg.get("stop_reason")
+            if isinstance(stop, str) and stop in TERMINAL_STOP:
+                if stop_records is None:
+                    stop_records = _has_stop_records(objs)
+                return stop_records   # Stop hooks still running
+            return True
+    return False
+
+
+def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
+    """The prompt(s) at the transcript's tail that Claude never started on, as an
+    interrupted turn anchored on the last of them, or None.
+
+    Claude Code writes nothing when Esc is pressed before Claude has written anything,
+    so this shape alone cannot say whether Claude was interrupted or simply has not
+    started yet. The caller decides that (quiet transcript, and the screen's status
+    row); this only builds the turn to deliver. A tail whose only prompt was raised
+    by Claude Code itself (a background task's notification) returns None: nobody
+    asked, so nobody is waiting to hear it was cut off. Neither does a local command
+    and its output (/login, `!` bash mode), which Claude never replies to. A slash
+    command with no output after it is a request to Claude (a skill), and counts.
+    """
+    collected: list[dict] = []
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype not in _MESSAGE_TYPES:
+            continue
+        if otype == "assistant" or _role(obj) != "user":
+            break
+        if obj.get("isMeta"):
+            continue
+        if _is_interrupt_marker(obj) or not _is_real_user_prompt(obj):
+            break
+        if _is_local_output(obj):
+            # A local command's output (/login, `!` bash mode): Claude never answers
+            # those, so nothing before it is waiting on Claude.
+            break
+        collected.append(obj)
+        if _is_system_sourced_prompt(obj):
+            break
+    if not collected or _is_system_sourced_prompt(collected[0]):
+        return None
+    collected.reverse()
+    anchor = _uuid_of(collected[-1])
+    prompts = tuple(t for t in (human_prompt_text(o) for o in collected
+                                if not _is_system_sourced_prompt(o)) if t)
+    if not anchor or not prompts:
+        return None
+    return Turn(terminal_uuid=anchor, text="", prompts=prompts, interrupted=True)
+
+
+def wall_time(obj: dict) -> float | None:
+    """The epoch seconds of a transcript line's timestamp, or None. Public: tools.py
+    reads the same lines."""
+    raw = obj.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def seen_until(objs: list[dict], mark: Watermark) -> float | None:
+    """When the watcher last saw activity, as the point to resume a new transcript
+    after: the newest line timestamp in `objs` (the transcript it is leaving), else the
+    watermark's last save; never earlier than the watermark's last forward (re)anchor,
+    so history from before a (re)connect is not replayed. None when nothing is known."""
+    times = [t for t in (wall_time(o) for o in objs) if t is not None]
+    seen = max(times) if times else wall_time({"timestamp": mark.updated_at})
+    anchored = wall_time({"timestamp": mark.baselined_at})
+    known = [t for t in (seen, anchored) if t is not None]
+    return max(known) if known else None
+
+
+def resume_anchor_on_new_transcript(objs: list[dict], seen: float | None) -> str:
+    """Where to resume on a transcript the watcher moves onto (Claude restarted, or the
+    pinned file died): after the last line written no later than `seen`, the moment the
+    watcher last saw activity. Lines after it happened while the watcher was still on
+    the old file, and are delivered; lines up to it are history, and are not replayed.
+    With `seen` unknown, it anchors at the end, as a first baseline does.
+
+    Joint test, 2026-09-17: anchoring at the end skipped the reply to a prompt that a
+    restarted Claude answered in its new transcript before the watcher moved over.
+    Returns a line uuid for objs_after_uuid ("" means from the start).
+    """
+    if seen is None:
+        turns = extract_completed_turns(objs)
+        return turns[-1].terminal_uuid if turns else ""
+    anchor = ""
+    for obj in objs:
+        when = wall_time(obj)
+        if when is not None and when > seen:
+            break
+        uid = obj.get("uuid")
+        if isinstance(uid, str) and uid:
+            anchor = uid
+    return anchor
+
+
+# Clock skew allowed between the MCP host and the dev container when deciding a
+# transcript line was written after a send.
+_ECHO_SKEW_S = 5.0
+
+
+def prompt_seen_since(objs: list[dict], text: str, sent_at: float) -> bool:
+    """True when the transcript shows `text` arrived at or after `sent_at` (epoch s)."""
+    return prompt_index_since(objs, text, sent_at) is not None
+
+
+def prompt_index_since(objs: list[dict], text: str, sent_at: float) -> int | None:
+    """Index of the latest line showing `text` arrived at or after `sent_at` (epoch s).
+
+    A prompt reaches the transcript as a `user` line, or, when it was pasted while
+    Claude was working, only as a `queue-operation` enqueue carrying its text (Claude
+    Code then answers it inside the running turn). Matching is whitespace-insensitive.
+    A matching line with no readable timestamp counts: it cannot be shown older.
+    """
+    want = normalize_prompt(text)
+    for index in range(len(objs) - 1, -1, -1):
+        obj = objs[index]
+        otype = obj.get("type")
+        if otype == "queue-operation":
+            content = obj.get("content")
+            seen = isinstance(content, str) and normalize_prompt(content) == want
+        elif otype == "user" and not obj.get("isMeta"):
+            raw_msg = obj.get("message")
+            msg = raw_msg if isinstance(raw_msg, dict) else {}
+            # A pasted slash command is transcribed as wrapper tags; compare its
+            # rendered `/name args` form too.
+            seen = want in (normalize_prompt(_text_of(msg)),
+                            normalize_prompt(human_prompt_text(obj)))
+        else:
+            continue
+        if seen:
+            wall = wall_time(obj)
+            if wall is None or wall >= sent_at - _ECHO_SKEW_S:
+                return index
+    return None
 
 
 def objs_after_uuid(objs: list[dict], last_delivered_uuid: str | None) -> list[dict] | None:
@@ -509,22 +920,33 @@ class Watermark:
     consecutive_deliveries: int = 0
     last_delivery_at: float = 0.0
     updated_at: str = ""
+    # When a watcher last (re)anchored forward on this conversation (connect, restart,
+    # re-watch). Moving onto a new transcript never resumes before it, so nothing
+    # written before the orchestrator (re)connected is replayed (MCP-17).
+    baselined_at: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
+    """UTC timestamp in the form every aidc state file writes. Public: tools.py stamps
+    the same files."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _slug(value: str) -> str:
-    """Filesystem-safe token for a (session|conversation_id) component."""
+def slug(value: str) -> str:
+    """Filesystem-safe token for a (session|conversation_id) component.
+
+    Public because it is a contract between the modules, not an implementation detail:
+    tools.py names the marker files for a session's send-path state with it, and those
+    have to land beside the watermark and queue files this module writes.
+    """
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
 
 
 def watermark_path(base_dir: Path, session: str, conversation_id: str) -> Path:
-    return Path(base_dir) / f"{_slug(session)}__{_slug(conversation_id)}.json"
+    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.json"
 
 
 def watermark_exists(base_dir: Path, session: str, conversation_id: str) -> bool:
@@ -555,6 +977,7 @@ def load_watermark(base_dir: Path, session: str, conversation_id: str) -> Waterm
             ),
             last_delivery_at=float(data.get("last_delivery_at", 0.0)),
             updated_at=str(data.get("updated_at", "")),
+            baselined_at=str(data.get("baselined_at", "")),
         )
     except (OSError, ValueError, TypeError):
         return Watermark(session=session, conversation_id=conversation_id)
@@ -564,7 +987,7 @@ def save_watermark(base_dir: Path, mark: Watermark) -> None:
     """Atomically persist the mark (temp + rename), matching the taint-flag pattern."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
-    mark.updated_at = _now_iso()
+    mark.updated_at = now_iso()
     path = watermark_path(base, mark.session, mark.conversation_id)
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(mark.to_json(), encoding="utf-8")
@@ -608,9 +1031,22 @@ def content_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def delivery_fingerprint(turn: Turn) -> str:
+    """The delivery-ledger key for a turn.
+
+    A reply is keyed on its text (content_fingerprint). An interrupt is keyed on its
+    marker line too: two interrupts often carry the same text (frequently none), and
+    each is a separate event the orchestrator must hear about. The marker's uuid is
+    append-only, so a re-read of the same interrupt still dedups.
+    """
+    if turn.interrupted:
+        return content_fingerprint(f"interrupted\n{turn.terminal_uuid}\n{turn.text}")
+    return content_fingerprint(turn.text)
+
+
 def ledger_path(base_dir: Path, session: str, conversation_id: str) -> Path:
     """Delivery-ledger file, a sibling of the watermark (same state dir/keying)."""
-    return Path(base_dir) / f"{_slug(session)}__{_slug(conversation_id)}.delivered"
+    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.delivered"
 
 
 def load_delivered(base_dir: Path, session: str, conversation_id: str) -> set[str]:
@@ -678,7 +1114,7 @@ def prompt_fingerprint(text: str) -> str:
 def sent_prompts_path(base_dir: Path, session: str) -> Path:
     """Per-session (not per-conversation) record: a session has one tmux pane, and
     whichever conversation watches it needs the same answer."""
-    return Path(base_dir) / f"{_slug(session)}.sent-prompts.json"
+    return Path(base_dir) / f"{slug(session)}.sent-prompts.json"
 
 
 def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
@@ -711,6 +1147,129 @@ def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> Non
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
     os.replace(tmp, path)
+
+
+# --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
+#
+# Prompts accepted for a session and not yet pasted. A persisted format locks in a
+# schema, so it answers only the questions its readers ask: the MCP on restart (which
+# prompts to resume, for which session, in what order), session_status (since when
+# each has waited, why, how many pastes failed), and a person reading
+# watcher-state/ after an incident (the same, in plain JSON).
+
+@dataclass
+class QueuedPrompt:
+    text: str
+    enqueued_at: str
+    paste_attempts: int = 0
+    waiting_reason: str = ""
+    # The conversation that sent it, so a prompt that can never be pasted is reported
+    # back there instead of vanishing ("" when it came with no webhook).
+    conversation_id: str = ""
+    # The session's instance id when it was accepted (see tools._session_instance), so a
+    # session killed and re-created under the same name is not handed the old
+    # session's prompts, while one upgraded in place keeps them.
+    session_instance: str = ""
+    # True once its conversation has been told the prompt is still waiting, so it is
+    # told once, across restarts too.
+    waiting_notified: bool = False
+
+
+def send_queue_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{slug(session)}.send-queue.json"
+
+
+def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt]) -> None:
+    """Atomic write (temp + rename). An empty queue removes the file, so a file on
+    disk always means prompts are waiting."""
+    base = Path(base_dir)
+    path = send_queue_path(base, session)
+    if not prompts:
+        path.unlink(missing_ok=True)
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"session": session, "updated_at": now_iso(),
+                               "prompts": [asdict(q) for q in prompts]}, indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], list[Path]]:
+    """Every persisted queue under `base_dir` as {session: prompts}, plus the files
+    that could not be read (left in place, for a person to look at)."""
+    queues: dict[str, list[QueuedPrompt]] = {}
+    unreadable: list[Path] = []
+    for path in sorted(Path(base_dir).glob("*.send-queue.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            session = data["session"]
+            prompts = [QueuedPrompt(text=str(e["text"]),
+                                    enqueued_at=str(e.get("enqueued_at", "")),
+                                    paste_attempts=int(e.get("paste_attempts", 0)),
+                                    waiting_reason=str(e.get("waiting_reason", "")),
+                                    conversation_id=str(e.get("conversation_id", "")),
+                                    session_instance=str(e.get("session_instance", "")),
+                                    waiting_notified=e.get("waiting_notified") is True)
+                       for e in data["prompts"]]
+            if not isinstance(session, str) or not session:
+                raise ValueError("no session")
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(path)
+            continue
+        if prompts:
+            queues[session] = prompts
+    return queues, unreadable
+
+
+# --- persisted webhooks (MCP-34) ------------------------------------------------
+#
+# Which conversation a session's replies go to. The watcher that delivers them runs in
+# memory, and a prompt that outlives an aidc-mcp restart may never be followed by the
+# session_send that would re-open it, so its reply would be produced and dropped.
+# Readers: the MCP on start (which watchers to resume), and a person inspecting
+# watcher-state/. Written when a watcher opens, removed on session_unwatch.
+
+def watch_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{slug(session)}.watch.json"
+
+
+def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str, *,
+               session_instance: str = "") -> None:
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = watch_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
+                               "callback_base": callback_base, "session_instance": session_instance,
+                               "updated_at": now_iso()},
+                              indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def remove_watch(base_dir: Path, session: str) -> None:
+    watch_path(base_dir, session).unlink(missing_ok=True)
+
+
+def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
+    """Every persisted webhook as {session, conversation_id, callback_base,
+    session_instance}, plus the files that could not be read (left in place).
+    `session_instance` is "" when it could not be read when the watch was saved."""
+    watches: list[dict[str, str]] = []
+    unreadable: list[Path] = []
+    for path in sorted(Path(base_dir).glob("*.watch.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entry = {k: data[k] for k in ("session", "conversation_id", "callback_base")}
+            if not all(isinstance(v, str) and v for v in entry.values()):
+                raise ValueError("incomplete watch")
+            instance = data.get("session_instance", "")
+            entry["session_instance"] = instance if isinstance(instance, str) else ""
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(path)
+            continue
+        watches.append(entry)
+    return watches, unreadable
 
 
 def record_sent_prompt(base_dir: Path, session: str, text: str, *,
@@ -760,13 +1319,24 @@ TERMINAL_PROMPT_NOTE = (
 )
 
 
-def render_delivery(reply: str, terminal_prompts: Sequence[str]) -> str:
-    """The content to POST: the reply alone, or the terminal-typed prompt(s)
-    prepended under TERMINAL_PROMPT_NOTE with a rule between them and the reply."""
+INTERRUPTED_NOTE = (
+    "[Interrupted: the person at the terminal pressed Esc and stopped this task before "
+    "Claude finished. The text below is what Claude had written up to that point, and it "
+    "is incomplete.]"
+)
+NOTHING_WRITTEN = "Claude had not written anything yet."
+
+
+def render_delivery(reply: str, terminal_prompts: Sequence[str], *,
+                    interrupted: bool = False) -> str:
+    """The content to POST: the reply, opened by INTERRUPTED_NOTE when the turn was
+    cut off, and preceded by the terminal-typed prompt(s) under TERMINAL_PROMPT_NOTE
+    with a rule between them and the rest."""
+    body = f"{INTERRUPTED_NOTE}\n\n{reply.strip() or NOTHING_WRITTEN}" if interrupted else reply
     if not terminal_prompts:
-        return reply
+        return body
     quoted = "\n\n".join(p.strip() for p in terminal_prompts if p.strip())
-    return f"{TERMINAL_PROMPT_NOTE}\n{quoted}\n\n---\n\n{reply}"
+    return f"{TERMINAL_PROMPT_NOTE}\n{quoted}\n\n---\n\n{body}"
 
 
 # --- active transcript resolution --------------------------------------------
@@ -789,6 +1359,36 @@ def newest_message_ts(objs: list[dict]) -> str:
             if isinstance(t, str) and t > newest:
                 newest = t
     return newest
+
+
+def session_transcripts(transcript_dir: Path,
+                         prefer_session_id: str | None = None) -> list[Path]:
+    """Every top-level *.jsonl for the session, the pinned one first and the rest by
+    newest message content, newest first.
+
+    A session keeps one file per Claude run: a restart starts a new one and leaves the
+    old in place. The watcher only ever reads the current file, but a reply that never
+    reached the orchestrator can be in an earlier one (a restart at the wrong moment),
+    and session_resend exists to fetch exactly that.
+
+    Regular files only, never symlinks: see resolve_active_transcript.
+    """
+    d = Path(transcript_dir)
+    try:
+        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
+    except OSError:
+        return []
+    pinned = [p for p in candidates if prefer_session_id and p.stem == prefer_session_id]
+    rest = [p for p in candidates if p not in pinned]
+
+    def newest(path: Path) -> str:
+        try:
+            return newest_message_ts(parse_jsonl(path.read_text(encoding="utf-8",
+                                                               errors="replace")))
+        except OSError:
+            return ""
+
+    return pinned + sorted(rest, key=newest, reverse=True)
 
 
 def resolve_active_transcript(transcript_dir: Path,

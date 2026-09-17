@@ -8,8 +8,8 @@ The pieces that are REAL here:
   - _post_turn (the outbound-to-metallm HTTP boundary, exact payload + URL).
 
 The pieces that are STUBBED (the non-deterministic edges):
-  - the tmux/Docker boundary (_is_claude_running / _wait_for_idle / _load_and_paste
-    / _tmux_exec / _capture_pane) — no container.
+  - the tmux/Docker boundary (_is_claude_running / _check_free / _session_instance /
+    _load_and_paste / _tmux_exec / _capture_screen) — no container.
   - the background poll TIMER (_run_transcript_watcher) — replaced with an
     alive-forever no-op so the drain is driven explicitly, deterministically.
   - the outbound httpx client — a FakeMetallm sink records every callback POST.
@@ -41,6 +41,11 @@ def _assistant(uuid, text, stop="end_turn"):
     return {"type": "assistant", "uuid": uuid,
             "message": {"role": "assistant", "content": [{"type": "text", "text": text}],
                         "stop_reason": stop}}
+
+
+def _ts(obj, timestamp):
+    obj["timestamp"] = timestamp
+    return obj
 
 
 def _agent_writes(base, session, sid, objs):
@@ -93,14 +98,21 @@ def harness(tmp_path, monkeypatch):
     explicitly by the test for determinism."""
     base = tmp_path / "transcripts"
     state = tmp_path / "watcher-state"
+
+    class Rig:
+        pass
+
+    rig = Rig()
+    rig.session_state = tools.SESSION_EXISTS
+    rig.instance = "id-1"
     metallm = FakeMetallm()
     paste_calls: list[str] = []
 
     async def is_running(container):
         return True
 
-    async def wait_idle(container, window, timeout):
-        return True
+    async def check_free(container, name):
+        return ""
 
     async def load_paste(container, text, window):
         paste_calls.append(text)
@@ -128,10 +140,15 @@ def harness(tmp_path, monkeypatch):
         await real_baseline(name, conversation_id, transcripts_base=base, state_dir=state)
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
-    monkeypatch.setattr(tools, "_wait_for_idle", wait_idle)
+    monkeypatch.setattr(tools, "_check_free", check_free)
+
+    async def session_instance(name):
+        return rig.session_state, rig.instance
+
+    monkeypatch.setattr(tools, "_session_instance", session_instance)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-    monkeypatch.setattr(tools, "_capture_pane", capture)
+    monkeypatch.setattr(tools, "_capture_screen", capture)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
@@ -164,10 +181,7 @@ def harness(tmp_path, monkeypatch):
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
-    class Rig:
-        pass
-
-    rig = Rig()
+    rig.app = app
     rig.base = base
     rig.state = state
     rig.metallm = metallm
@@ -221,7 +235,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     # prompt_origin: the prompt matched the one session_send injected above.
     assert post["json"] == {"content": "foo() returns the answer.", "ok": True,
                             "source": "agent_watch", "session": "proj",
-                            "prompt_origin": "orchestrator"}
+                            "prompt_origin": "orchestrator", "interrupted": False}
     assert post["headers"]["Authorization"] == "Bearer tok"
 
     # Exactly-once: re-draining (the watcher polls repeatedly) does NOT re-deliver.
@@ -305,6 +319,239 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == "a1"
 
 
+async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_once(harness):
+    """An aidc-mcp restart must not cost a reply. The webhook is saved when it opens and
+    reopened at startup from its saved watermark, not re-anchored to the end of the
+    transcript, so a reply written while the MCP was down is delivered exactly once.
+    (Joint test with MetaLLM, 2026-09-17: a queued prompt pasted after a restart was
+    answered, and the answer never came back.)"""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="reply SEVEN", conversation_id="conv-1")
+    [saved], _ = ts.load_watches(h.state)
+    assert saved["session_instance"] == "id-1"
+
+    # The MCP goes down: every in-memory watcher is gone, the saved files are not.
+    for task in tools._session_watchers.values():
+        task.cancel()
+    tools._session_watchers.clear()
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "reply SEVEN"),
+                                            _assistant("a1", "SEVEN")])
+
+    await tools.resume_on_startup(h.app)
+    assert "proj" in tools._session_watchers
+    assert "proj" in h.app._tool_manager._tools["session_send"].description
+    await h.drain()
+    await h.drain()
+
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["SEVEN"]
+    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+
+
+async def test_unwatch_forgets_the_saved_webhook(harness):
+    h = harness
+    await h.send(name="proj", prompt="q", conversation_id="conv-1")
+    await h.app._tool_manager._tools["session_unwatch"].fn(name="proj")
+    assert not ts.watch_path(h.state, "proj").exists()
+    tools._session_watchers.clear()
+    await tools.resume_watchers(h.app)
+    assert "proj" not in tools._session_watchers
+
+
+async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness, monkeypatch):
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local")
+    ts.save_watch(h.state, "other", "conv-2", "http://metallm.local")
+    monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
+    h.session_state = tools.SESSION_GONE
+
+    await tools.resume_watchers(h.app)
+
+    assert not tools._session_watchers
+    assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
+    assert ts.watch_path(h.state, "other").exists()      # another server's to resume
+
+
+async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
+    """A session killed and created again under the same name was never asked to report
+    to the old conversation."""
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    h.instance = "id-2"
+    await tools.resume_watchers(h.app)
+    assert "proj" not in tools._session_watchers
+    assert not ts.watch_path(h.state, "proj").exists()
+
+
+async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    h.instance = ""
+    await tools.resume_watchers(h.app)
+    assert "proj" in tools._session_watchers
+
+
+# --- speaker (design 10 D4), sent only with metallm.send_speaker on -------------
+
+async def _deliver_turn(h, objs):
+    _agent_writes(h.base, "proj", "sid-A", objs)
+    await h.drain()
+    return h.metallm.posts[-1]["json"]
+
+
+async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
+    objs = [_user("u1", "from the orchestrator"), _assistant("a1", "ONE")]
+    assert (await _deliver_turn(h, objs))["speaker"] == "agent"
+
+    objs += [_user("u2", "typed by a person"), _assistant("a2", "TWO")]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["prompt_origin"]) == ("human", "terminal")
+
+    # Mixed: one prompt from each. The typed one is in the content; the turn is the
+    # agent's.
+    await h.send(name="proj", prompt="orchestrator again", conversation_id="conv-1")
+    objs += [_user("u3", "orchestrator again"), _user("u4", "and a person"),
+             _assistant("a3", "THREE")]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["prompt_origin"]) == ("agent", "terminal")
+    assert len(h.metallm.posts) == 3
+
+
+async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="warm up", conversation_id="conv-1")
+    objs = [_user("u1", "warm up"), _assistant("a1", "OK")]
+    await _deliver_turn(h, objs)
+    interrupt = {"type": "user", "uuid": "i1",
+                 "message": {"role": "user", "content": [
+                     {"type": "text", "text": "[Request interrupted by user]"}]}}
+    objs += [_user("u2", "typed, then stopped"),
+             _assistant("a2", "Starting", stop="tool_use"), interrupt]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["interrupted"]) == ("human", True)
+
+
+async def test_speaker_is_not_sent_when_disabled(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: False)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q", conversation_id="conv-1")
+    await _deliver_turn(h, [_user("u1", "q"), _assistant("a1", "A"),
+                            _user("u2", "typed"), _assistant("a2", "B")])
+    assert all("speaker" not in p["json"] for p in h.metallm.posts)
+
+
+# --- prompt_waiting (design 10 D5, MCP-36) ---------------------------------------
+
+LONG_AGO = "2026-09-17T04:00:00Z"
+
+
+async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("first", LONG_AGO, waiting_reason="input_has_text",
+                        conversation_id="conv-1", session_instance="id-1"),
+        ts.QueuedPrompt("second", LONG_AGO, waiting_reason="queued_behind",
+                        conversation_id="conv-1", session_instance="id-1"),
+        ts.QueuedPrompt("just now", ts.now_iso(), waiting_reason="queued_behind",
+                        conversation_id="conv-1", session_instance="id-1"),
+        ts.QueuedPrompt("no webhook", LONG_AGO, waiting_reason="queued_behind",
+                        session_instance="id-1")]
+
+    tools._notify_long_waits("proj")
+    await _settle_background()
+    tools._notify_long_waits("proj")
+    await _settle_background()
+
+    bodies = [p["json"] for p in h.metallm.posts]
+    assert [b["content"].split("\n\n")[-1] for b in bodies] == ["first", "second"]
+    first = bodies[0]
+    assert {k: v for k, v in first.items() if k != "content"} == {
+        "ok": True, "source": "agent_watch", "session": "proj",
+        "prompt_origin": "orchestrator", "interrupted": False,
+        "error_code": "prompt_waiting"}
+    assert first["content"].startswith(
+        "[Still waiting: this prompt has been queued for the session 'proj' for ")
+    assert ("because someone has unsent text in Claude's input box" in first["content"])
+    assert "(held because someone has unsent text" in bodies[1]["content"]
+    saved = ts.load_send_queues(h.state)[0]["proj"]
+    assert [q.waiting_notified for q in saved] == [True, True, False, True]
+
+
+async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
+    h = harness
+    ts.save_send_queue(h.state, "proj", [
+        ts.QueuedPrompt("first", LONG_AGO, waiting_reason="claude_busy",
+                        conversation_id="conv-1", session_instance="id-1",
+                        waiting_notified=True)])
+    tools._pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
+    tools._notify_long_waits("proj")
+    await _settle_background()
+    assert h.metallm.posts == []
+
+
+async def _settle_background():
+    await asyncio.gather(*list(tools._background_tasks))
+
+
+async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harness):
+    """A queued prompt that can never be pasted is reported back to the conversation
+    that sent it, with its text, and recorded in the send dead-letter directory."""
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
+                        session_instance="id-1"),
+        ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
+    h.session_state = tools.SESSION_GONE
+
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await _settle_background()
+
+    assert "proj" not in tools._pending_sends
+    assert [p["json"] for p in h.metallm.posts] == [{
+        "content": ("[Not delivered: the session 'proj' was removed before this prompt "
+                    "could be pasted. It was never seen by the agent.]\n\nreply EIGHT"),
+        "ok": False, "source": "agent_watch", "session": "proj",
+        "prompt_origin": "orchestrator", "interrupted": False,
+        "error_code": "prompt_dropped"}]
+    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+    assert len(list((h.state / "dead-letter").glob("send__proj__*.json"))) == 2
+
+
+async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harness):
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("for the old one", "2026-09-17T04:00:00Z", conversation_id="conv-1",
+                        session_instance="id-1"),
+        ts.QueuedPrompt("for the new one", "2026-09-17T04:00:05Z", conversation_id="conv-1",
+                        session_instance="id-2")]
+    h.instance = "id-2"   # killed and created again under the same name
+
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await _settle_background()
+
+    assert [q.text for q in tools._pending_sends["proj"]] == ["for the new one"]
+    assert [p["json"]["error_code"] for p in h.metallm.posts] == ["prompt_dropped"]
+    assert "for the old one" in h.metallm.posts[0]["json"]["content"]
+
+
+async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
+    h = harness
+    tools._pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
+                                                    session_instance="id-1")]
+    h.session_state = tools.SESSION_UNKNOWN
+    h.instance = ""
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    assert [q.text for q in tools._pending_sends["proj"]] == ["keep"]
+    assert not h.metallm.posts
+
+
 # --- Deliverable 2: resend a lost/missed reply, WITHOUT a backlog replay -------
 #
 # The governing rule: a resend must NEVER put a second copy of a reply into the
@@ -380,6 +627,68 @@ async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
     assert status == "resent"
     assert turn.terminal_uuid == "a1"
     assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+
+
+async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness):
+    """Joint test scenario 10 (2026-09-17): Claude restarted into a new transcript and
+    the reply in the old one was never delivered. session_resend is the tool for
+    fetching exactly that, so it must look past the file the watcher is on."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()                                  # baseline on the first file
+    _agent_writes(h.base, "proj", "sid-A", [
+        _ts(_user("u1", "q1"), "2026-09-17T05:56:51.380Z"),
+        _ts(_assistant("a1", "TEN"), "2026-09-17T05:56:52.306Z")])
+    # Claude restarts: a newer file, and the watcher moves onto it with nothing in it.
+    _agent_writes(h.base, "proj", "sid-B", [
+        _ts(_user("u2", "q2"), "2026-09-17T06:04:00.000Z")])
+    mark = ts.load_watermark(h.state, "proj", "conv-1")
+    mark.session_id = "sid-B"
+    ts.save_watermark(h.state, mark)
+
+    status, turn = await h.resend()
+
+    assert (status, turn.terminal_uuid) == ("resent", "a1")
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["TEN"]
+
+
+async def test_resend_of_a_named_turn_reaches_an_earlier_transcript(harness):
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()
+    _agent_writes(h.base, "proj", "sid-A", [
+        _ts(_user("u1", "q1"), "2026-09-17T05:56:51.380Z"),
+        _ts(_assistant("a1", "OLD"), "2026-09-17T05:56:52.306Z")])
+    _agent_writes(h.base, "proj", "sid-B", [
+        _ts(_user("u2", "q2"), "2026-09-17T06:04:00.000Z"),
+        _ts(_assistant("b1", "NEW"), "2026-09-17T06:04:01.000Z")])
+
+    status, turn = await h.resend(turn_uuid="a1")
+
+    assert (status, turn.text) == ("resent", "OLD")
+
+
+async def test_resend_of_an_interrupt_keeps_its_note_and_flag(harness):
+    """An interrupt with nothing written has no reply text; resending it bare would
+    post an empty message. It goes out with the interrupt note and the flag."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()
+    interrupt = {"type": "user", "uuid": "i1", "interruptedMessageId": "m",
+                 "message": {"role": "user", "content": [
+                     {"type": "text", "text": "[Request interrupted by user]"}]}}
+    _agent_writes(h.base, "proj", "sid-A", [
+        _user("u1", "q1"), _assistant("a1", "", stop="tool_use"), interrupt])
+
+    status, turn = await h.resend()
+
+    assert status == "resent" and turn.terminal_uuid == "i1"
+    [post] = h.metallm.posts
+    assert post["json"]["content"] == ts.render_delivery("", [], interrupted=True)
+    assert post["json"]["interrupted"] is True
 
 
 async def test_resend_of_a_dead_lettered_reply_still_delivers(harness):
@@ -483,10 +792,10 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "OLD ANSWER")])
     await h.drain()
 
-    async def never_idle(container, window, timeout):
-        return False
+    async def busy(container, name):
+        return tools.SessionState(True, None, tools.TURN_RUNNING, "log_growing")
 
-    monkeypatch.setattr(tools, "_wait_for_idle", never_idle)
+    monkeypatch.setattr(tools, "_session_state", busy)
     res = await h.resend_tool(name="proj", conversation_id="conv-1")
 
     assert res["ok"] is True

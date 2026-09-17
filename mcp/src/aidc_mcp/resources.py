@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from aidc_mcp import scope
+
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
 
 
@@ -48,21 +50,27 @@ def register(app: Any) -> None:
     @app.resource("aidc://sessions")
     def list_all_sessions() -> str:
         """Live list of all aidc sessions on this host."""
-        return json.dumps({"raw": _run(["list"])})
+        return json.dumps({"raw": scope.filter_list(_run(["list"]))})
 
     @app.resource("aidc://config")
     def show_global_config() -> str:
         """Effective global aidc config (merged defaults + ~/.config/aidc/config.yaml)."""
+        if scope.allowed_sessions() is not None:
+            return json.dumps({"error": "not available on an MCP server limited to named sessions"})
         return json.dumps({"raw": _run(["config", "global"])})
 
     @app.resource("aidc://sessions/{name}/status")
     def session_status_resource(name: str) -> str:
         """Live status for one named session."""
+        if (why := scope.refusal(name)) is not None:
+            return json.dumps({"error": why})
         return json.dumps({"raw": _run(["status", name])})
 
     @app.resource("aidc://sessions/{name}/audit")
     def session_audit_listing(name: str) -> str:
         """File listing of the session's audit dir."""
+        if (why := scope.refusal(name)) is not None:
+            return json.dumps({"error": why})
         audit_dir = parse_audit_dir(_run(["status", name]))
         if audit_dir is None or not audit_dir.exists():
             return json.dumps({"error": "audit dir not found"})
@@ -77,6 +85,8 @@ def register(app: Any) -> None:
     @app.resource("aidc://sessions/{name}/audit/{filename}")
     def session_audit_file(name: str, filename: str) -> str:
         """Contents of a specific file in the session's audit dir."""
+        if (why := scope.refusal(name)) is not None:
+            return json.dumps({"error": why})
         audit_dir = parse_audit_dir(_run(["status", name]))
         if audit_dir is None:
             return json.dumps({"error": "audit dir not found"})

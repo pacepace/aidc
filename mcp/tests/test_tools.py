@@ -513,3 +513,30 @@ class TestTurnSettleSeconds:
     def test_falls_back_on_garbage(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path, "metallm:\n  turn_settle_seconds: soon\n")
         assert tools._metallm_turn_settle_seconds(default=4.0) == 4.0
+
+
+# --- _container_state: only docker's "no such container" ends a session's queue ---
+
+async def test_container_state_exists(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(stdout=b"abc123\n", returncode=0))
+    assert await tools._container_state("aidc-proj-dev") == tools.CONTAINER_EXISTS
+
+
+async def test_container_state_gone_on_docker_no_such_object(monkeypatch):
+    # Exact stderr measured from `docker inspect` on a missing container (Docker 29.8).
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Error: no such object: aidc-does-not-exist-dev\n", returncode=1))
+    assert await tools._container_state("aidc-does-not-exist-dev") == tools.CONTAINER_GONE
+
+
+async def test_container_state_gone_on_older_no_such_container_wording(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Error response from daemon: No such container: aidc-x-dev\n", returncode=1))
+    assert await tools._container_state("aidc-x-dev") == tools.CONTAINER_GONE
+
+
+async def test_container_state_unknown_on_any_other_docker_failure(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+               b"Is the docker daemon running?\n", returncode=1))
+    assert await tools._container_state("aidc-proj-dev") == tools.CONTAINER_UNKNOWN

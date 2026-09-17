@@ -624,3 +624,16 @@ async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring
     assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
     restarts = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
     assert restarts[:4] == [2.0, 4.0, 8.0, 16.0]
+
+
+async def test_resume_remembers_the_notice_is_showing_so_it_is_cleared(wiring):
+    """The tmux option outlives an MCP restart. A queue saved while waiting on input
+    must clear it when its prompt is pasted after resuming."""
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj",
+                       [ts.QueuedPrompt("waiting", "2026-09-17T02:00:00Z", 0, "input_has_text")])
+    wiring.idle_ok = True
+    await tools.resume_send_queues()
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["waiting"]
+    options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
+    assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]

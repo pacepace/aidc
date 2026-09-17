@@ -679,7 +679,10 @@ async def _container_state(container: str) -> str:
     _, stderr = await proc.communicate()
     if proc.returncode == 0:
         return CONTAINER_EXISTS
-    if "no such object" in stderr.decode("utf-8", errors="replace").lower():
+    # Measured on Docker 29.8: "Error: no such object: <name>". Older daemons word it
+    # "Error response from daemon: No such container: <name>".
+    err = stderr.decode("utf-8", errors="replace").lower()
+    if "no such object" in err or "no such container" in err:
         return CONTAINER_GONE
     return CONTAINER_UNKNOWN
 
@@ -859,6 +862,10 @@ async def resume_send_queues() -> None:
                       reason="session_killed")
             continue
         _pending_sends[name] = prompts
+        if prompts[0].waiting_reason == "input_has_text":
+            # The tmux option outlives the MCP; remember it is showing, so the drainer
+            # clears it when the prompt goes in.
+            _waiting_notice_shown.add(name)
         _spawn_drainer(container, name)
         log_event("session_send_queue_resumed", session=name, depth=len(prompts))
 

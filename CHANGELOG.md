@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-17
+
 ### Security
 - **A dev container can no longer reach the MCP control plane.** Each session's Squid allowed
   every destination for local sources, and `aidc mcp` listens on a host interface, so a sandboxed
@@ -1012,7 +1014,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/pacepace/aidc/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/pacepace/aidc/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/pacepace/aidc/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/pacepace/aidc/compare/v1.4.1...v1.5.0

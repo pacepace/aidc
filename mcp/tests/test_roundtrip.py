@@ -338,6 +338,7 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
 
     await tools.resume_on_startup(h.app)
     assert "proj" in tools._session_watchers
+    assert "proj" in h.app._tool_manager._tools["session_send"].description
     await h.drain()
     await h.drain()
 

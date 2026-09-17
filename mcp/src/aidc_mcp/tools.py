@@ -1019,7 +1019,9 @@ async def resume_watchers(app: Any) -> None:
         log_event("session_watch_resumed", session=name, conversation_id=w["conversation_id"])
         resumed = True
     if resumed:
-        await _announce_watchers(app)
+        # No client is connected this early, so there is nobody to notify: each one
+        # reads the refreshed descriptions when it lists tools.
+        _refresh_session_tool_descriptions(app)
 
 
 async def resume_send_queues() -> None:

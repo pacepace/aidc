@@ -484,7 +484,7 @@ class TestDrain:
         torn final line from a session killed mid-write, a compaction). Replies it
         produced after the last delivery must still go out: skipping straight to the
         newer session lost them, and nothing else would ever send them."""
-        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        monkeypatch.setattr(ts, "now_iso", lambda: "2026-09-17T04:00:00Z")
         base = tmp_path / "t"; state = tmp_path / "s"
         _mk_transcript(base, "sess", "A", [
             _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
@@ -526,7 +526,7 @@ class TestDrain:
         """A compaction can lose the resume line with no new session at all. Gating the
         recovery on a newer file (as first built) wedged the watcher for good in that
         case: replies on disk, watermark frozen, nothing said."""
-        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        monkeypatch.setattr(ts, "now_iso", lambda: "2026-09-17T04:00:00Z")
         base = tmp_path / "t"; state = tmp_path / "s"
         _mk_transcript(base, "sess", "A", [
             _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
@@ -548,7 +548,7 @@ class TestDrain:
             self, tmp_path, monkeypatch):
         """The loop guard resets only on a genuinely idle gap: a runaway that restarts
         Claude must not clear its own backstop by rotating the transcript."""
-        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-07-04T04:00:02Z")
+        monkeypatch.setattr(ts, "now_iso", lambda: "2026-07-04T04:00:02Z")
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "guard", "c"
         _consumed_idle_counts.pop((sess, conv), None)
@@ -577,7 +577,7 @@ class TestDrain:
             self, tmp_path, monkeypatch):
         """The same recovery must not re-deliver what already went out: the turn is in
         the ledger, so the watcher moves on to the newer session instead."""
-        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        monkeypatch.setattr(ts, "now_iso", lambda: "2026-09-17T04:00:00Z")
         base = tmp_path / "t"; state = tmp_path / "s"
         _mk_transcript(base, "sess", "A", [
             _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
@@ -973,7 +973,7 @@ class TestStalePinRotation:
         """The watermark stamps its saves and baselines with the wall clock; these
         stories are set in the past, so the clock reads just after their first lines."""
         now = {"iso": "2026-07-04T04:00:02Z"}
-        monkeypatch.setattr(ts, "_now_iso", lambda: now["iso"])
+        monkeypatch.setattr(ts, "now_iso", lambda: now["iso"])
         return now
 
     async def _drain_rot(self, base, state, rec, sess, conv):

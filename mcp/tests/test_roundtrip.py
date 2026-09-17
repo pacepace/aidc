@@ -459,7 +459,7 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
                         conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("second", LONG_AGO, waiting_reason="queued_behind",
                         conversation_id="conv-1", session_instance="id-1"),
-        ts.QueuedPrompt("just now", ts._now_iso(), waiting_reason="queued_behind",
+        ts.QueuedPrompt("just now", ts.now_iso(), waiting_reason="queued_behind",
                         conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("no webhook", LONG_AGO, waiting_reason="queued_behind",
                         session_instance="id-1")]

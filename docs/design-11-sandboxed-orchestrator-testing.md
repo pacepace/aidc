@@ -87,13 +87,21 @@ at create time.
 what mounts their home into the container: creating a session reads a repo and writes Claude's
 per-project memory, both host paths the container otherwise cannot see. Off (the default) the tool
 is not registered, so an orchestrator plans without it instead of calling one that cannot work; a
-scoped server refuses it either way. `aidc mcp start` gives the container the host's home and its state and audit dirs
-(`AIDC_HOST_HOME`, `AIDC_MCP_STATE_HOST`, `AIDC_AUDIT_HOST`, with the audit dir mounted at
-`/var/aidc-audit`). `aidc create` run in there derives every path it hands docker from the host's
-home, creates it through the matching mount, and gives it the owner of that tree — created as
-root it would be unwritable by the session's own mirror, which runs as the container user, and no
-reply would ever be delivered. A host path with no mount (the per-project Claude memory dir) is
-reported as not shared rather than silently written into the container. The image also needs
+scoped server refuses it either way. `aidc mcp start` gives the container the host's home (`AIDC_HOST_HOME`) and the directories it may
+write, as one list: `aidc_mcp_mount_pairs` produces both the `docker run -v` flags and
+`AIDC_MCP_MOUNTS`, which is the only thing `aidc_resolve_local` reads, so a mount cannot be granted
+without becoming reachable (they were written twice once, and the home mount was granted without
+it). `aidc create` run in there derives every path it hands docker from the host's home, creates it
+through the matching mount, and gives it the owner of that tree — created as root it would be
+unwritable by the session's own mirror, which runs as the container user, and no reply would ever
+be delivered. A host path with no mount is reported as not shared rather than silently written into
+the container; with `mcp.session_create` on, the home is mounted, so Claude's per-project memory is
+shared as it is on the host.
+
+A caller's `repo` and `workspace` are the only tool arguments that become host bind mounts, and the
+server checks them against its own filesystem, so they must resolve inside `AIDC_HOST_HOME`
+(MCP-38): without that, a path present in both namespaces (`/mnt`, `/srv`, `/tmp`) mounted the
+HOST's directory into the session the caller had just created. The image also needs
 `envsubst` and the compose plugin, which `aidc create` requires (`tests/unit/test-mcp-image-deps.sh`).
 
 `load_config` reads the same two places (2026-09-17): the host's `~/.config/aidc/config.yaml`, or

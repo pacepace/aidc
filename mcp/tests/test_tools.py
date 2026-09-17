@@ -149,6 +149,11 @@ class TestSessionCreate:
         home = tmp_path / "home"
         (home / "repo").mkdir(parents=True)
         monkeypatch.setenv("AIDC_HOST_HOME", str(home))
+
+        def boom(*a, **k):
+            raise AssertionError("the CLI must not run for a refused path")
+
+        monkeypatch.setattr(tools, "_run_cli", boom)
         res = await _create_tool(monkeypatch)(
             name="proj", repo=str(home / "repo"), workspace="/srv", ctx=None)
         assert res["ok"] is False and res["error_code"] == "path_not_allowed"
@@ -281,7 +286,7 @@ class TestSessionInvokeAsync:
             fired.append(coro)
             coro.close()  # don't actually run the background job
 
-        monkeypatch.setattr(tools, "_fire", fake_fire)
+        monkeypatch.setattr(tools, "fire", fake_fire)
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is True
         assert res["data"] == {"status": "running", "session": "proj", "conversation_id": "c1"}
@@ -682,3 +687,14 @@ def test_every_error_envelope_carries_a_known_code():
             used.add(kw["code"].value)
     assert used <= tools.ERROR_CODES, used - tools.ERROR_CODES
     assert {"no_such_session", "queue_full", "out_of_scope", "cli_failed"} <= used
+
+
+def test_every_error_code_is_in_the_documented_table():
+    """design 10 D6 is the table an orchestrator reads to decide what to do with a
+    failure (project-state.yaml names it as the record for MCP-32), so a code that
+    exists in the code and not in the table is a contract nobody can act on."""
+    from pathlib import Path
+    design = (Path(__file__).resolve().parents[2]
+              / "docs" / "design-10-turn-state-and-sending.md").read_text(encoding="utf-8")
+    missing = sorted(code for code in tools.ERROR_CODES if f"`{code}`" not in design)
+    assert not missing, f"error codes missing from design 10 D6: {missing}"

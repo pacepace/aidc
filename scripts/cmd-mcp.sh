@@ -91,7 +91,7 @@ mcp_start() {
     mcp_validate_bind_address "$AIDC_MCP_BIND_ADDRESS" || die "bad bind_address"
     # session_create runs the CLI inside this container, and every path it hands docker
     # is a HOST path. It needs the audit dir mounted to write a session's snapshot and
-    # meta.json there, and AIDC_AUDIT_HOST to know which host path that mount is.
+    # meta.json there; AIDC_MCP_MOUNTS (below) tells it which host path that mount is.
     load_config
     mkdir -p "$AIDC_AUDIT_DIR"
 
@@ -100,7 +100,12 @@ mcp_start() {
     mkdir -p "$AUDIT_DIR"
     chmod 0700 "$AUDIT_DIR"   # private: transcripts/audit are not world-readable
     info "starting $CONTAINER on ${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}"
-    # mcp.session_create: the home mount and the env that makes the tool exist.
+    # Every host dir this server is given, as -v flags, from the one list that also
+    # becomes AIDC_MCP_MOUNTS — so a mount cannot be granted without being reachable.
+    MOUNT_ARGS=()
+    while IFS= read -r line; do [ -n "$line" ] && MOUNT_ARGS+=("$line"); done \
+        <<<"$(AIDC_MCP_STATE_DIR="$AUDIT_DIR" mcp_mount_args)"
+    # mcp.session_create: the env that makes the tool exist (its mount is in the list).
     CREATE_ARGS=()
     while IFS= read -r line; do [ -n "$line" ] && CREATE_ARGS+=("$line"); done <<<"$(mcp_session_create_args)"
     if [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ]; then
@@ -114,12 +119,11 @@ mcp_start() {
         -v "/var/run/docker.sock:/var/run/docker.sock:rw" \
         -v "${AIDC_ROOT}:/aidc:ro" \
         -v "${CONFIG_DIR}:/aidc-config:ro" \
-        -v "${AUDIT_DIR}:/var/log/aidc-mcp:rw" \
+        ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
         -e "AIDC_MCP_PORT=${AIDC_MCP_PORT}" \
         -e "AIDC_HOST_HOME=${HOME}" \
         -e "AIDC_MCP_STATE_HOST=${AUDIT_DIR}" \
         -e "AIDC_MCP_MOUNTS=$(AIDC_MCP_STATE_DIR="$AUDIT_DIR" mcp_mounts_env)" \
-        -v "${AIDC_AUDIT_DIR}:/var/aidc-audit:rw" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
         ${CREATE_ARGS[@]+"${CREATE_ARGS[@]}"} \
         "$IMAGE" >/dev/null

@@ -34,7 +34,7 @@ class ResumeOnStartup:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") == "lifespan" and not self.started:
             self.started = True
-            tools._fire(tools.resume_on_startup(self.mcp_app))
+            tools.fire(tools.resume_on_startup(self.mcp_app))
         await self.app(scope, receive, send)
 
 

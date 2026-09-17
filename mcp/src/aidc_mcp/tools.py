@@ -158,7 +158,9 @@ def _metallm_turn_settle_seconds(default: float = 4.0) -> float:
 _background_tasks: set[asyncio.Task[None]] = set()
 
 
-def _fire(coro: Any) -> None:
+def fire(coro: Any) -> None:
+    """Run a coroutine in the background, keeping a reference so it is not collected.
+    Public: server.py starts the resume task with it."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -803,7 +805,7 @@ async def _inject(container: str, text: str, window: str, *, session: str) -> bo
     # and in that gap it still shows the previous, finished turn.
     sent_at = time.time()
     _sent_awaiting_echo[session] = (text, sent_at)
-    _fire(_watch_for_echo(session, text, sent_at))
+    fire(_watch_for_echo(session, text, sent_at))
     return True
 
 
@@ -1036,7 +1038,7 @@ async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
     queue = _pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
-    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts._now_iso(),
+    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts.now_iso(),
                                  paste_attempts=paste_attempts,
                                  conversation_id=conversation_id,
                                  session_instance=instance))
@@ -1056,7 +1058,7 @@ def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
     send-path state."""
     for q in prompts:
         _write_send_dead_letter(name, q, "session_killed")
-    _fire(_notify_prompts(name, [(q, _DROPPED_NOTE.format(session=name)) for q in prompts],
+    fire(_notify_prompts(name, [(q, _DROPPED_NOTE.format(session=name)) for q in prompts],
                           "prompt_dropped"))
     _forget_session_send_state(name)
     log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
@@ -1121,7 +1123,7 @@ def _notify_long_waits(name: str) -> None:
     for q in queue:
         if q.waiting_notified:
             continue
-        accepted = ts._wall_time({"timestamp": q.enqueued_at})
+        accepted = ts.wall_time({"timestamp": q.enqueued_at})
         if accepted is None or now - accepted < _PROMPT_WAITING_S:
             continue
         q.waiting_notified = True
@@ -1141,7 +1143,7 @@ def _notify_long_waits(name: str) -> None:
             else f"{waited} seconds")))
         log_event("session_send_prompt_waiting", session=name, waited_s=waited,
                   reason=q.waiting_reason or "queued_behind")
-    _fire(_notify_prompts(name, notices, "prompt_waiting"))
+    fire(_notify_prompts(name, notices, "prompt_waiting"))
 
 
 def _watched_conversation(name: str) -> str:
@@ -1566,7 +1568,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
         if ts.watermark_exists(state_dir, session, conversation_id)
         else ts.Watermark(session=session, conversation_id=conversation_id)
     )
-    mark.baselined_at = ts._now_iso()
+    mark.baselined_at = ts.now_iso()
     # Resolve the active transcript PREFERRING the pinned session_id (as the drain
     # does) — on reconnect a frozen sibling transcript can carry a NEWER mtime (the
     # copy-forward mirror re-touches it), and a prefer-less resolve would mis-pin to
@@ -2754,7 +2756,7 @@ def register(app: Any) -> None:
                     error=repr(exc),
                 )
 
-        _fire(_run_and_notify())
+        fire(_run_and_notify())
         return _envelope_ok(
             {"status": "running", "session": name, "conversation_id": conversation_id}
         )

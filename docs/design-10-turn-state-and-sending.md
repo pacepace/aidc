@@ -271,6 +271,7 @@ missing a code or uses one outside the set:
 | `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste) | tell the person |
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
+| `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |
 
 `session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every other condition, a failed paste included, queues the prompt. The
 metallm side never retries a `session_send`, even after a transport failure (a retry could paste

@@ -33,8 +33,9 @@ that ships separately.
 - **Contract**: `AIDC_HOST_HOME`, `AIDC_MCP_MOUNTS` (the `<host>|<mount>` list the `-v` flags are
   built from) and `AIDC_MCP_SESSION_CREATE`. Every host path the CLI hands docker is a HOST path;
   every path it writes goes through the matching mount (`aidc_resolve_local`).
-- **Rule**: a mount and its reachability entry come from one list (`aidc_mcp_mount_pairs`) — they
-  were written twice once and drifted.
+- **Rule**: a mount and its reachability entry come from one list (`aidc_mcp_mount_pairs`), which
+  produces both the `docker run -v` flags (`mcp_mount_args`) and `AIDC_MCP_MOUNTS` — they were
+  written twice once, and a mount was granted that the CLI then called unreachable.
 
 ### The dev container ↔ the watcher
 - **Producer**: the in-container transcript mirror (`.devcontainer/transcript-mirror.sh`), running

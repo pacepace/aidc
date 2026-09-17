@@ -771,7 +771,9 @@ def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
     return Turn(terminal_uuid=anchor, text="", prompts=prompts, interrupted=True)
 
 
-def _wall_time(obj: dict) -> float | None:
+def wall_time(obj: dict) -> float | None:
+    """The epoch seconds of a transcript line's timestamp, or None. Public: tools.py
+    reads the same lines."""
     raw = obj.get("timestamp")
     if not isinstance(raw, str):
         return None
@@ -786,9 +788,9 @@ def seen_until(objs: list[dict], mark: Watermark) -> float | None:
     after: the newest line timestamp in `objs` (the transcript it is leaving), else the
     watermark's last save; never earlier than the watermark's last forward (re)anchor,
     so history from before a (re)connect is not replayed. None when nothing is known."""
-    times = [t for t in (_wall_time(o) for o in objs) if t is not None]
-    seen = max(times) if times else _wall_time({"timestamp": mark.updated_at})
-    anchored = _wall_time({"timestamp": mark.baselined_at})
+    times = [t for t in (wall_time(o) for o in objs) if t is not None]
+    seen = max(times) if times else wall_time({"timestamp": mark.updated_at})
+    anchored = wall_time({"timestamp": mark.baselined_at})
     known = [t for t in (seen, anchored) if t is not None]
     return max(known) if known else None
 
@@ -809,7 +811,7 @@ def resume_anchor_on_new_transcript(objs: list[dict], seen: float | None) -> str
         return turns[-1].terminal_uuid if turns else ""
     anchor = ""
     for obj in objs:
-        when = _wall_time(obj)
+        when = wall_time(obj)
         if when is not None and when > seen:
             break
         uid = obj.get("uuid")
@@ -853,7 +855,7 @@ def prompt_index_since(objs: list[dict], text: str, sent_at: float) -> int | Non
         else:
             continue
         if seen:
-            wall = _wall_time(obj)
+            wall = wall_time(obj)
             if wall is None or wall >= sent_at - _ECHO_SKEW_S:
                 return index
     return None
@@ -927,7 +929,9 @@ class Watermark:
         return json.dumps(asdict(self), separators=(",", ":"))
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
+    """UTC timestamp in the form every aidc state file writes. Public: tools.py stamps
+    the same files."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
@@ -941,11 +945,8 @@ def slug(value: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
 
 
-_slug = slug   # the old private name, still used inside this module
-
-
 def watermark_path(base_dir: Path, session: str, conversation_id: str) -> Path:
-    return Path(base_dir) / f"{_slug(session)}__{_slug(conversation_id)}.json"
+    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.json"
 
 
 def watermark_exists(base_dir: Path, session: str, conversation_id: str) -> bool:
@@ -986,7 +987,7 @@ def save_watermark(base_dir: Path, mark: Watermark) -> None:
     """Atomically persist the mark (temp + rename), matching the taint-flag pattern."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
-    mark.updated_at = _now_iso()
+    mark.updated_at = now_iso()
     path = watermark_path(base, mark.session, mark.conversation_id)
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(mark.to_json(), encoding="utf-8")
@@ -1045,7 +1046,7 @@ def delivery_fingerprint(turn: Turn) -> str:
 
 def ledger_path(base_dir: Path, session: str, conversation_id: str) -> Path:
     """Delivery-ledger file, a sibling of the watermark (same state dir/keying)."""
-    return Path(base_dir) / f"{_slug(session)}__{_slug(conversation_id)}.delivered"
+    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.delivered"
 
 
 def load_delivered(base_dir: Path, session: str, conversation_id: str) -> set[str]:
@@ -1113,7 +1114,7 @@ def prompt_fingerprint(text: str) -> str:
 def sent_prompts_path(base_dir: Path, session: str) -> Path:
     """Per-session (not per-conversation) record: a session has one tmux pane, and
     whichever conversation watches it needs the same answer."""
-    return Path(base_dir) / f"{_slug(session)}.sent-prompts.json"
+    return Path(base_dir) / f"{slug(session)}.sent-prompts.json"
 
 
 def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
@@ -1175,7 +1176,7 @@ class QueuedPrompt:
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{_slug(session)}.send-queue.json"
+    return Path(base_dir) / f"{slug(session)}.send-queue.json"
 
 
 def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt]) -> None:
@@ -1188,7 +1189,7 @@ def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt
         return
     base.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps({"session": session, "updated_at": _now_iso(),
+    tmp.write_text(json.dumps({"session": session, "updated_at": now_iso(),
                                "prompts": [asdict(q) for q in prompts]}, indent=1),
                    encoding="utf-8")
     os.replace(tmp, path)
@@ -1230,7 +1231,7 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
 # watcher-state/. Written when a watcher opens, removed on session_unwatch.
 
 def watch_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{_slug(session)}.watch.json"
+    return Path(base_dir) / f"{slug(session)}.watch.json"
 
 
 def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str, *,
@@ -1241,7 +1242,7 @@ def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
                                "callback_base": callback_base, "session_instance": session_instance,
-                               "updated_at": _now_iso()},
+                               "updated_at": now_iso()},
                               indent=1), encoding="utf-8")
     os.replace(tmp, path)
 

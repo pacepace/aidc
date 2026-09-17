@@ -136,14 +136,38 @@ eq "off when it is false" "false|" \
     "$(create_args 'mcp:
   session_create: false
 ')"
-eq "on it mounts the host home and sets the env" \
-    "true|-v $SCRATCH/host:$SCRATCH/host:rw -e AIDC_MCP_SESSION_CREATE=true " \
+eq "on it sets the env that makes the tool exist" \
+    "true|-e AIDC_MCP_SESSION_CREATE=true " \
     "$(create_args 'mcp:
   session_create: true
 ')"
 
-# The mount list `aidc mcp start` passes as AIDC_MCP_MOUNTS: the same source as the -v
-# flags, so a mount can never be granted without becoming reachable.
+# The mount itself comes from the same list as every other one, so the -v flags and the
+# reachability table cannot disagree.
+mount_args() {
+    printf '%s' "$1" > "$SCRATCH/host/.config/aidc/config.yaml"
+    # shellcheck disable=SC2016  # $AIDC_ROOT expands in the inner shell, on purpose
+    env -i PATH="/usr/bin:/bin" HOME="$SCRATCH/host" AIDC_ROOT="$AIDC_ROOT" bash -c '
+        . "$AIDC_ROOT/scripts/lib/config.sh"
+        load_config >/dev/null 2>&1
+        mcp_load_settings
+        mcp_mount_args | tr "\n" " "'
+}
+case "$(mount_args 'mcp:
+  session_create: true
+')" in
+    *"-v $SCRATCH/host:$SCRATCH/host:rw"*) echo "  PASS: the -v flags carry the home when enabled"; PASS=$((PASS + 1)) ;;
+    *) echo "  FAIL: the -v flags carry the home when enabled"; FAIL=$((FAIL + 1)) ;;
+esac
+case "$(mount_args 'mcp:
+  session_create: false
+')" in
+    *"-v $SCRATCH/host:$SCRATCH/host:rw"*) echo "  FAIL: and not when it is off"; FAIL=$((FAIL + 1)) ;;
+    *) echo "  PASS: and not when it is off (-v)"; PASS=$((PASS + 1)) ;;
+esac
+
+# The mount list `aidc mcp start` passes as AIDC_MCP_MOUNTS: mcp_mount_args builds the
+# -v flags from this same function, so a mount cannot be granted without being reachable.
 mounts_env() {
     printf '%s' "$1" > "$SCRATCH/host/.config/aidc/config.yaml"
     # shellcheck disable=SC2016  # $AIDC_ROOT expands in the inner shell, on purpose

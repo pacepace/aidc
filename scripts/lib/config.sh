@@ -242,8 +242,17 @@ aidc_host_home() {
 # through, "" on the host). Returns 1 when this process cannot reach the path.
 # aidc_local_path is the same lookup for callers that just want the path.
 aidc_resolve_local() {
-    local p="${1:-}" pair host mount
-    for pair in $(printf '%s' "${AIDC_MCP_MOUNTS:-}" | tr ',' ' '); do
+    local p="${1:-}" pair host mount mounts
+    mounts="${AIDC_MCP_MOUNTS:-}"
+    if [ -z "$mounts" ] && [ -n "${AIDC_MCP_STATE_HOST:-}" ]; then
+        # A container started before this list existed: /aidc is a read-only mount, so a
+        # CLI update lands inside a RUNNING aidc-mcp whose env predates it. Fall back to
+        # the two mounts that server was given, rather than declaring every host path
+        # unreachable and failing a create with a message naming the wrong cause.
+        mounts="${AIDC_MCP_STATE_HOST}|/var/log/aidc-mcp"
+        [ -n "${AIDC_AUDIT_HOST:-}" ] && mounts="${mounts},${AIDC_AUDIT_HOST}|/var/aidc-audit"
+    fi
+    for pair in $(printf '%s' "$mounts" | tr ',' ' '); do
         host="${pair%%|*}"
         mount="${pair##*|}"
         if [ -z "$host" ] || [ -z "$mount" ]; then
@@ -603,6 +612,16 @@ aidc_mcp_mount_pairs() {
     fi
 }
 
+# The `-v host:mount:rw` flags for the pairs above, one per line — the same list
+# aidc_resolve_local is given, so a mount cannot be granted without being reachable.
+mcp_mount_args() {
+    local pair
+    aidc_mcp_mount_pairs | while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        printf -- '-v\n%s:%s:rw\n' "${pair%%|*}" "${pair##*|}"
+    done
+}
+
 # The extra `docker run` arguments `aidc mcp start` needs when mcp.session_create is on.
 #
 # Creating a session means reading a repo and writing Claude's per-project memory on the
@@ -612,10 +631,11 @@ aidc_mcp_mount_pairs() {
 # than offering one that cannot work. (The container already has the docker socket,
 # which is root-equivalent on the host, so this grants no power it lacked; it makes the
 # paths line up.) Prints nothing when the setting is off.
+# The home mount itself comes from mcp_mount_args, like every other; this adds only the
+# env that makes the tool exist.
 mcp_session_create_args() {
     [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ] || return 0
-    printf -- '-v\n%s:%s:rw\n-e\nAIDC_MCP_SESSION_CREATE=true\n' \
-        "$(aidc_host_home)" "$(aidc_host_home)"
+    printf -- '-e\nAIDC_MCP_SESSION_CREATE=true\n'
 }
 
 # AIDC_MCP_MOUNTS for the container: the same pairs, comma-separated.

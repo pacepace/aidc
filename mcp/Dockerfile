@@ -6,11 +6,17 @@
 FROM python:3.14-alpine
 
 # Runtime deps: aidc CLI is bash; we shell out to docker as well.
+# gettext is for envsubst, which `aidc create` requires to render a session's compose
+# file: session_create runs the CLI in here, and without it the tool failed at the door
+# with "required commands missing: envsubst". tests/unit/test-mcp-image-deps.sh keeps
+# this list in step with what the CLI requires.
 RUN apk add --no-cache \
         bash \
         coreutils \
         curl \
         docker-cli \
+        docker-cli-compose \
+        gettext \
         jq \
         ca-certificates
 

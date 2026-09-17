@@ -83,6 +83,30 @@ case "$run_cmd" in
     *) echo "  FAIL: and the host state dir"; FAIL=$((FAIL + 1)) ;;
 esac
 
+# Inside aidc-mcp a host path is reachable only through its mount: writing the host
+# spelling there makes a container-local directory the host never sees, and the session
+# then binds a path nothing created.
+local_path() {
+    # $1 = host path, rest = env assignments
+    # shellcheck disable=SC2016  # $1/$AIDC_ROOT expand in the inner shell, on purpose
+    env -i PATH="/usr/bin:/bin" AIDC_ROOT="$AIDC_ROOT" HOME="$SCRATCH/container" \
+        AIDC_HOST_HOME="${2:-}" AIDC_MCP_STATE_HOST="${3:-}" AIDC_MCP_STATE_MOUNT="${4:-}" \
+        bash -c '
+            . "$AIDC_ROOT/scripts/lib/config.sh"
+            [ -z "$AIDC_HOST_HOME" ] && unset AIDC_HOST_HOME
+            [ -z "$AIDC_MCP_STATE_HOST" ] && unset AIDC_MCP_STATE_HOST
+            if aidc_resolve_local "$1"; then printf "%s" "$AIDC_LOCAL_PATH"; else printf "unreachable"; fi' _ "$1"
+}
+
+eq "on the host a path is itself" "/home/pace/.local/state/aidc-mcp/transcripts/x" \
+    "$(local_path /home/pace/.local/state/aidc-mcp/transcripts/x)"
+eq "inside aidc-mcp it maps onto the mount" "/var/log/aidc-mcp/transcripts/x" \
+    "$(local_path /home/pace/.local/state/aidc-mcp/transcripts/x /home/pace \
+        /home/pace/.local/state/aidc-mcp /var/log/aidc-mcp)"
+eq "a host path with no mount is unreachable there" "unreachable" \
+    "$(local_path /home/pace/.claude/projects/x /home/pace \
+        /home/pace/.local/state/aidc-mcp /var/log/aidc-mcp)"
+
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

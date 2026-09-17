@@ -222,6 +222,92 @@ aidc_host_home() {
     printf '%s' "${AIDC_HOST_HOME:-$HOME}"
 }
 
+# Where THIS process must write to land in a host directory.
+#
+# On the host the two are the same. Inside aidc-mcp, which runs this CLI for
+# session_create, a host path like /home/you/.local/state/aidc-mcp is reachable only
+# through the mount it was given (/var/log/aidc-mcp), and creating the host spelling
+# there just makes a container-local directory the host never sees: the session's
+# compose file then binds a host path nothing created, docker makes it root-owned, and
+# the mirror that must write into it (running as vscode) silently writes nothing, so no
+# reply from that session is ever delivered. Prints the path to use, or nothing when
+# this process cannot reach it at all — which the caller must treat as fatal.
+# Sets AIDC_LOCAL_PATH (where to write) and AIDC_LOCAL_MOUNT (the mount it came
+# through, "" on the host). Returns 1 when this process cannot reach the path.
+# aidc_local_path is the same lookup for callers that just want the path.
+aidc_resolve_local() {
+    local p="${1:-}" pair host mount
+    for pair in "${AIDC_MCP_STATE_HOST:-}|${AIDC_MCP_STATE_MOUNT:-/var/log/aidc-mcp}" \
+                "${AIDC_AUDIT_HOST:-}|${AIDC_AUDIT_MOUNT:-/var/aidc-audit}"; do
+        host="${pair%%|*}"
+        mount="${pair##*|}"
+        [ -n "$host" ] || continue
+        case "$p" in
+            "$host"|"$host"/*)
+                # The mount root is who this tree belongs to on the host: see
+                # aidc_mkdir_host.
+                AIDC_LOCAL_MOUNT="$mount"
+                AIDC_LOCAL_PATH="${mount}${p#"$host"}"
+                export AIDC_LOCAL_MOUNT AIDC_LOCAL_PATH
+                return 0 ;;
+        esac
+    done
+    # No mapping needed on the host. Inside aidc-mcp (AIDC_HOST_HOME set) an unmapped
+    # host path is unreachable: say so rather than writing where nobody looks.
+    AIDC_LOCAL_MOUNT=""
+    AIDC_LOCAL_PATH="$p"
+    export AIDC_LOCAL_MOUNT AIDC_LOCAL_PATH
+    [ -n "${AIDC_HOST_HOME:-}" ] && return 1
+    return 0
+}
+
+aidc_local_path() {
+    aidc_resolve_local "${1:-}" || return 1
+    printf '%s' "$AIDC_LOCAL_PATH"
+}
+
+# Create a HOST directory and set AIDC_LOCAL_PATH to the path THIS process writes to (see
+# aidc_local_path). Inside aidc-mcp the process is root, so a directory it makes
+# through a mount lands root-owned on the host — and the session's own processes, which
+# run as the container user, then cannot write into it: the transcript mirror fails
+# silently and no reply is ever delivered. So it is given the owner of the tree it was
+# made in, which is what creating it on the host would have done. Sets
+# AIDC_HOST_OWNER (uid:gid) when it applied one, for files written afterwards. It sets
+# rather than prints both, because a command substitution would run it in a subshell
+# and lose them. Returns 1 when this process cannot reach the path at all.
+aidc_mkdir_host() {
+    local host="${1:-}" write owner
+    # Resolve in THIS shell: a command substitution would lose AIDC_LOCAL_MOUNT.
+    aidc_resolve_local "$host" || return 1
+    write="$AIDC_LOCAL_PATH"
+    # The topmost directory this call creates: everything from there down is ours to
+    # hand to the host owner, not just the leaf.
+    local top="$write"
+    while [ ! -e "$top" ] && [ "$(dirname "$top")" != "$top" ] \
+            && [ ! -e "$(dirname "$top")" ]; do
+        top=$(dirname "$top")
+    done
+    mkdir -p "$write" || return 1
+    AIDC_HOST_OWNER=""
+    if [ -n "${AIDC_HOST_HOME:-}" ] && [ -n "${AIDC_LOCAL_MOUNT:-}" ]; then
+        # The mount root carries the host owner of this whole tree — not the deepest
+        # existing directory, which may itself be a root-owned leftover from a create
+        # that ran before this fix.
+        owner=$(stat -c '%u:%g' "$AIDC_LOCAL_MOUNT" 2>/dev/null || true)
+        if [ -n "$owner" ] && [ "$owner" != "$(id -u):$(id -g)" ]; then
+            chown -R "$owner" "$top" 2>/dev/null || true
+            AIDC_HOST_OWNER="$owner"
+        fi
+    fi
+    export AIDC_HOST_OWNER
+}
+
+# Give files written into a host dir the same owner aidc_mkdir_host gave the dir.
+aidc_fix_host_owner() {
+    [ -n "${AIDC_HOST_OWNER:-}" ] || return 0
+    chown -R "$AIDC_HOST_OWNER" "$1" 2>/dev/null || true
+}
+
 # Expand a leading ~ or $HOME so audit_dir/foo and ~/foo both resolve.
 
 _aidc_expand_path() {

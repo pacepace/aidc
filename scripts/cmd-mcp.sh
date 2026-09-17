@@ -89,6 +89,11 @@ mcp_start() {
     mcp_ensure_token
     mcp_load_settings
     mcp_validate_bind_address "$AIDC_MCP_BIND_ADDRESS" || die "bad bind_address"
+    # session_create runs the CLI inside this container, and every path it hands docker
+    # is a HOST path. It needs the audit dir mounted to write a session's snapshot and
+    # meta.json there, and AIDC_AUDIT_HOST to know which host path that mount is.
+    load_config
+    mkdir -p "$AIDC_AUDIT_DIR"
 
     ensure_image mcp   # inventory-driven build-if-missing (lib/common.sh)
 
@@ -105,6 +110,8 @@ mcp_start() {
         -e "AIDC_MCP_PORT=${AIDC_MCP_PORT}" \
         -e "AIDC_HOST_HOME=${HOME}" \
         -e "AIDC_MCP_STATE_HOST=${AUDIT_DIR}" \
+        -e "AIDC_AUDIT_HOST=${AIDC_AUDIT_DIR}" \
+        -v "${AIDC_AUDIT_DIR}:/var/aidc-audit:rw" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
         "$IMAGE" >/dev/null
     sleep 1

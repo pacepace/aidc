@@ -79,6 +79,15 @@ container's published binding wins, because that is what is listening. Otherwise
 `aidc create` for `session_create`, with `HOME=/root`), from the `/aidc-config` mount. A
 malformed address or port stops `aidc create` with a message naming the key.
 
+`aidc mcp start` gives the container the host's home and its state and audit dirs
+(`AIDC_HOST_HOME`, `AIDC_MCP_STATE_HOST`, `AIDC_AUDIT_HOST`, with the audit dir mounted at
+`/var/aidc-audit`). `aidc create` run in there derives every path it hands docker from the host's
+home, creates it through the matching mount, and gives it the owner of that tree — created as
+root it would be unwritable by the session's own mirror, which runs as the container user, and no
+reply would ever be delivered. A host path with no mount (the per-project Claude memory dir) is
+reported as not shared rather than silently written into the container. The image also needs
+`envsubst` and the compose plugin, which `aidc create` requires (`tests/unit/test-mcp-image-deps.sh`).
+
 `load_config` reads the same two places (2026-09-17): the host's `~/.config/aidc/config.yaml`, or
 the `/aidc-config` mount when there is no host copy, so a session the MCP creates gets the host's
 profile, taint response and audit dir instead of the defaults. Paths in that config are host paths,

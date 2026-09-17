@@ -371,6 +371,28 @@ class TestWatchForEcho:
         assert "proj" not in tools._sent_awaiting_echo
         assert "session_send_not_seen_in_transcript" not in logged
 
+    async def test_a_prompt_claude_queued_gives_its_send_record_back(self, session):
+        """Claude Code records a prompt pasted while it is working only as a queued
+        message and answers it inside the running turn, so no turn ever claims it. Its
+        send record must not sit there for 24 h, where the same words typed by a person
+        would match it and be delivered as the orchestrator's own prompt."""
+        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
+                                   "timestamp": ISO_NOW, "content": "next task"}])
+        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        await tools._watch_for_echo("proj", "next task", NOW - 1)
+        assert "proj" not in tools._sent_awaiting_echo
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+
+    async def test_a_prompt_claude_answered_normally_keeps_its_send_record(self, session):
+        """A prompt that reaches the transcript as a prompt line IS claimed by the turn
+        it opens, which is where its record is consumed (with the reply's attribution)."""
+        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        session.write([*FINISHED, _typed("u1", "next task", when=ISO_NOW)])
+        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        await tools._watch_for_echo("proj", "next task", NOW - 1)
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 1
+
     async def test_a_later_paste_is_not_cleared_by_an_earlier_watch(self, session):
         session.write(FINISHED)
         tools._sent_awaiting_echo["proj"] = ("second", NOW)

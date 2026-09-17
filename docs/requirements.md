@@ -183,6 +183,7 @@
 | MCP-34 | A webhook opened by `session_watch` or `session_send` MUST survive an `aidc-mcp` restart until `session_unwatch` or the session is gone. On restart it MUST continue from its saved watermark, so a reply produced while the MCP was down is delivered exactly once, not skipped. | P0 | joint test 2026-09-17 |
 | MCP-35 | When the watcher moves onto a new transcript for a session (Claude restarted into a new file, or the pinned file died), a turn written there after the watcher last saw activity MUST be delivered exactly once; lines from before that point MUST NOT be replayed. | P0 | joint test 2026-09-17 |
 | MCP-36 | A prompt accepted into a session's send queue with a conversation that has waited longer than a bound (10 minutes by default) MUST be reported to that conversation once, across restarts: a callback with `ok: true`, `error_code: "prompt_waiting"`, content saying the prompt is still waiting, why, and that the agent has not seen it, followed by the prompt. The prompt stays queued. | P1 | joint test 2026-09-17 (metallm) |
+| MCP-37 | A completed turn a session produced after the watcher connected MUST be delivered even when the transcript it is in loses the line the watcher resumes from (a torn write, a compaction): the watcher MUST look for turns it has not delivered in the file it is leaving before following a newer one. `session_resend` MUST be able to reach a reply in the session's earlier transcripts, not only the one the watcher is reading. | P1 | joint test 2026-09-17 |
 
 ---
 

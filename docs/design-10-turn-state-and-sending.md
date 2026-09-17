@@ -9,7 +9,7 @@ a dev container's tmux `claude` window:
   how it avoids typing over a person's unsent text, and how the per-session queue holds prompts
   until they land.
 
-**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-36 (`docs/requirements.md`). Extends MCP-15..19 and
+**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-37 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
 **Status:** designed and built 2026-09-17 (branch `feature/turn-state`). D4's `speaker` is built
@@ -312,7 +312,17 @@ replayed. That point is never earlier than the conversation's last forward (re)a
 file while nobody watched is not caught up with the work done in between (MCP-17). The log events
 for a move (`transcript_stale_pin_recovered`, `transcript_rotated`) record the anchor line, the
 point it resumed after, and whether nothing was known so it anchored at the end. The delivery
-ledger still blocks any second delivery. Measured on Claude Code 2.1.274:
+ledger still blocks any second delivery.
+
+**A transcript the watcher can no longer resume in** (MCP-37). The pinned file can lose the line
+the watermark resumes from for good: a torn final line from a session killed mid-write, or a
+compaction. Before following a newer session, the watcher looks in the file it is leaving for
+completed turns after its resume point (as above, never earlier than the last (re)anchor) whose
+content is not in the delivery ledger. If it finds any, it re-anchors there and the ordinary pass
+delivers them; the stale-pin follow moves on once the file holds nothing new. Skipping straight to
+the newer file, as the first build did, lost every reply left in the damaged one, and nothing else
+would have sent them. `session_resend` reads the session's other transcript files too, newest
+first, so a reply from before a restart can still be fetched by hand. Measured on Claude Code 2.1.274:
 `--continue` starts a new file holding only the new session's lines, not a copy of the old ones.
 
 Combinations are independent. An interrupted turn on a prompt the person typed carries
@@ -555,7 +565,7 @@ Same trust level as the existing send record and dead-letter files, which alread
 
 ## Cross-references
 
-- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..36 (`docs/requirements.md`).
+- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..37 (`docs/requirements.md`).
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
   `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
 - Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,

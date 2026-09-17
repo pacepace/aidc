@@ -78,9 +78,10 @@ container's published binding wins, because that is what is listening. Otherwise
 `aidc create` for `session_create`, with `HOME=/root`), from the `/aidc-config` mount. A
 malformed address or port stops `aidc create` with a message naming the key.
 
-Known gap, not in this change: the general `load_config` still reads only `~/.config/aidc`, so a
-session the MCP creates through `session_create` does not see the rest of the global config.
-It needs its own look, because paths in that config (e.g. `audit_dir`) are host paths. The squid entrypoint derives the config (the same writable copy the DNS
+`load_config` reads the same two places (2026-09-17): the host's `~/.config/aidc/config.yaml`, or
+the `/aidc-config` mount when there is no host copy, so a session the MCP creates gets the host's
+profile, taint response and audit dir instead of the defaults. Paths in that config are host paths,
+which is what they must be: the container drives the host's docker. The squid entrypoint derives the config (the same writable copy the DNS
 override uses) and inserts, immediately before `http_access allow localnet`:
 
 ```

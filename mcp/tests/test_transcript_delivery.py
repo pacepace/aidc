@@ -477,6 +477,85 @@ class TestDrain:
         await _drain(base, state, rec)
         assert rec.delivered == ["a1", "b1"]
 
+    async def test_a_reply_left_in_a_damaged_transcript_is_still_delivered(
+            self, tmp_path, monkeypatch):
+        """A pinned transcript can lose the line the watcher resumes from for good (a
+        torn final line from a session killed mid-write, a compaction). Replies it
+        produced after the last delivery must still go out: skipping straight to the
+        newer session lost them, and nothing else would ever send them."""
+        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_assistant("a0", "SEED"), "2026-09-17T03:59:01.000Z"),
+        ], mtime=1000)
+        rec = Recorder()
+        await _drain(base, state, rec)                 # baseline on A at 04:00:00
+        assert rec.delivered == []
+
+        # A answers, loses its anchor line to a torn write, and Claude moves to B.
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_user("u1", "q"), "2026-09-17T04:01:00.000Z"),
+            _ts(_assistant("a1", "STRANDED"), "2026-09-17T04:01:02.000Z"),
+        ], mtime=1100)
+        _mk_transcript(base, "sess", "B", [
+            _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
+        ], mtime=2000)
+        for _ in range(_TORN_READ_RECOVER_POLLS):
+            await _drain(base, state, rec)
+        await _drain(base, state, rec)
+
+        assert rec.delivered == ["a1"]
+        assert ts.load_watermark(state, "sess", "conv").session_id == "A"
+
+        # Once A holds nothing new, the pin follows B (B has the newer content).
+        _mk_transcript(base, "sess", "B", [
+            _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
+            _ts(_assistant("b1", "NEW"), "2026-09-17T04:05:01.000Z"),
+        ], mtime=2100)
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+            await _drain(base, state, rec)
+        assert ts.load_watermark(state, "sess", "conv").session_id == "B"
+        # B's own reply, written after this conversation connected, follows (MCP-35).
+        assert rec.delivered == ["a1", "b1"]
+
+    async def test_a_damaged_transcript_with_nothing_left_is_not_replayed(
+            self, tmp_path, monkeypatch):
+        """The same recovery must not re-deliver what already went out: the turn is in
+        the ledger, so the watcher moves on to the newer session instead."""
+        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_assistant("a0", "SEED"), "2026-09-17T03:59:01.000Z"),
+        ], mtime=1000)
+        rec = Recorder()
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_assistant("a0", "SEED"), "2026-09-17T03:59:01.000Z"),
+            _ts(_user("u1", "q"), "2026-09-17T04:01:00.000Z"),
+            _ts(_assistant("a1", "DELIVERED"), "2026-09-17T04:01:02.000Z"),
+        ], mtime=1100)
+        await _drain(base, state, rec)
+        assert rec.delivered == ["a1"]
+
+        # Now A loses its anchor, with nothing undelivered left in it.
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_user("u1", "q"), "2026-09-17T04:01:00.000Z"),
+            _ts(_assistant("a1", "DELIVERED"), "2026-09-17T04:01:02.000Z"),
+        ], mtime=1200)
+        _mk_transcript(base, "sess", "B", [
+            _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
+        ], mtime=2000)
+        for _ in range(_TORN_READ_RECOVER_POLLS + 1):
+            await _drain(base, state, rec)
+
+        assert rec.delivered == ["a1"]                 # not sent twice
+        assert ts.load_watermark(state, "sess", "conv").session_id == "B"
+
     async def test_absorbed_terminal_recovers_no_wedge_no_replay(self, tmp_path):
         """If settle fires early and we deliver a partial group, a later append
         absorbs that end_turn into a bigger coalesced group. Line-anchored resume

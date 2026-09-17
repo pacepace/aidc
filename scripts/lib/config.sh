@@ -239,7 +239,13 @@ _aidc_expand_path() {
 load_config() {
     local project_dir="${1:-}"
     local workspace_dir="${2:-}"
-    local global_cfg="${HOME}/.config/aidc/config.yaml"
+    # The host's ~/.config/aidc/config.yaml, or the copy mounted into the aidc-mcp
+    # container, which runs this same CLI for session_create. Without the mount the
+    # MCP created every session on the defaults, ignoring the profile, taint
+    # response and audit dir the host is configured with. Paths in that config are
+    # host paths, which is what they must be: the container drives the host's docker.
+    local global_cfg
+    global_cfg=$(_aidc_global_config_file)
     local workspace_cfg=""
     local project_cfg=""
     if [ -n "$workspace_dir" ] && [ -f "${workspace_dir}/.aidc/config.yaml" ]; then

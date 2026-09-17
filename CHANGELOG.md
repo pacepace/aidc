@@ -40,6 +40,17 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   new transcript file when it restarts, and the watcher moved onto it anchored at its end, so a
   prompt Claude answered before the watcher caught up never came back. The watcher now picks up
   from when it last saw activity.
+- **A reply is no longer lost when Claude's transcript is damaged.** If the file the watcher is
+  reading loses the line it resumes from (a torn write when a session is killed mid-write, or a
+  compaction), it now delivers the replies left in that file before following Claude onto a new
+  one. `session_resend` also looks in a session's earlier transcripts, so a reply from before a
+  restart can still be fetched.
+- **A prompt pasted while Claude was busy gives its send record back.** Claude Code answers such a
+  prompt inside the running turn without recording it as a prompt, so its record used to sit for
+  24 hours, where the same words typed by a person could match it and be delivered as the
+  orchestrator's own.
+- **Sessions created through the MCP read your global aidc config.** They used to fall back to the
+  defaults, ignoring the profile, taint response and audit dir the host is configured with.
 - **`aidc kill` no longer leaves a session's networks behind.** With an `aidc proxy` port
   forward active (or another session attached with `aidc network`), `docker compose down` left
   the network in place and still exited successfully. Kill now removes forwarders first, makes

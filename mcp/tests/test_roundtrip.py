@@ -43,6 +43,11 @@ def _assistant(uuid, text, stop="end_turn"):
                         "stop_reason": stop}}
 
 
+def _ts(obj, timestamp):
+    obj["timestamp"] = timestamp
+    return obj
+
+
 def _agent_writes(base, session, sid, objs):
     """The 'agent' (deterministic, no AI) writes/appends the session transcript."""
     d = base / session
@@ -622,6 +627,47 @@ async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
     assert status == "resent"
     assert turn.terminal_uuid == "a1"
     assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+
+
+async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness):
+    """Joint test scenario 10 (2026-09-17): Claude restarted into a new transcript and
+    the reply in the old one was never delivered. session_resend is the tool for
+    fetching exactly that, so it must look past the file the watcher is on."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()                                  # baseline on the first file
+    _agent_writes(h.base, "proj", "sid-A", [
+        _ts(_user("u1", "q1"), "2026-09-17T05:56:51.380Z"),
+        _ts(_assistant("a1", "TEN"), "2026-09-17T05:56:52.306Z")])
+    # Claude restarts: a newer file, and the watcher moves onto it with nothing in it.
+    _agent_writes(h.base, "proj", "sid-B", [
+        _ts(_user("u2", "q2"), "2026-09-17T06:04:00.000Z")])
+    mark = ts.load_watermark(h.state, "proj", "conv-1")
+    mark.session_id = "sid-B"
+    ts.save_watermark(h.state, mark)
+
+    status, turn = await h.resend()
+
+    assert (status, turn.terminal_uuid) == ("resent", "a1")
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["TEN"]
+
+
+async def test_resend_of_a_named_turn_reaches_an_earlier_transcript(harness):
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()
+    _agent_writes(h.base, "proj", "sid-A", [
+        _ts(_user("u1", "q1"), "2026-09-17T05:56:51.380Z"),
+        _ts(_assistant("a1", "OLD"), "2026-09-17T05:56:52.306Z")])
+    _agent_writes(h.base, "proj", "sid-B", [
+        _ts(_user("u2", "q2"), "2026-09-17T06:04:00.000Z"),
+        _ts(_assistant("b1", "NEW"), "2026-09-17T06:04:01.000Z")])
+
+    status, turn = await h.resend(turn_uuid="a1")
+
+    assert (status, turn.text) == ("resent", "OLD")
 
 
 async def test_resend_of_an_interrupt_keeps_its_note_and_flag(harness):

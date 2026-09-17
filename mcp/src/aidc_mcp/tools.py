@@ -657,7 +657,18 @@ async def _watch_for_echo(session: str, text: str, sent_at: float) -> None:
         if _sent_awaiting_echo.get(session) != entry:
             return   # seen by a free check, or superseded by a later paste
         objs, _, _ = _session_transcript(session)
-        if ts.prompt_seen_since(objs, text, sent_at):
+        index = ts.prompt_index_since(objs, text, sent_at)
+        if index is not None:
+            if objs[index].get("type") == "queue-operation":
+                # Claude was working, so Claude Code recorded the prompt only as a
+                # queued message and answers it inside the running turn: it never
+                # becomes a prompt line, so no turn can claim it and consume its send
+                # record. Consume it here, or the entry waits out its 24 h and can
+                # match the same words typed by a person in the meantime — which would
+                # deliver that person's turn as the orchestrator's own.
+                ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
+                log_event("session_send_queued_by_claude", session=session,
+                          prompt_len=len(text))
             if _sent_awaiting_echo.get(session) == entry:
                 _sent_awaiting_echo.pop(session, None)
             return
@@ -1854,15 +1865,42 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         if torn >= _TORN_READ_RECOVER_POLLS:
             newest = ts.resolve_active_transcript(Path(transcripts_base) / session)
             if newest is not None and newest.stem != sid:
+                # The pinned file has lost the line this conversation resumes from, for
+                # good: a torn final line from a session killed mid-write, or a
+                # compaction. Before moving on, look for replies in it that were never
+                # delivered: anchored at the point this conversation last connected or
+                # last delivered, and checked against the ledger, so neither history
+                # from before the connect nor anything already delivered counts. If any
+                # are left, re-anchor INSIDE this file and let the ordinary pass deliver
+                # them; the stale-pin follow moves on once it is consumed. Going
+                # straight to the newer file, as this did when it was written, lost them
+                # silently.
+                seen = ts.seen_until([], mark)
+                anchor = ts.resume_anchor_on_new_transcript(objs, seen)
+                left = ts.objs_after_uuid(objs, anchor or None) or []
+                delivered_before = ts.load_delivered(state_dir, session, conversation_id)
+                undelivered = [t for t in ts.extract_completed_turns(left)
+                               if (t.interrupted or not t.is_empty)
+                               and ts.delivery_fingerprint(t) not in delivered_before]
+                if undelivered:
+                    mark.last_delivered_uuid = anchor
+                    ts.save_watermark(state_dir, mark)
+                    _settle_state.pop(key, None)
+                    _torn_read_counts.pop(key, None)
+                    log_event("transcript_torn_read_reanchored", session=session,
+                              conversation_id=conversation_id, session_id=sid,
+                              newer_session_id=newest.stem, torn_read_polls=torn,
+                              undelivered_turns=len(undelivered),
+                              **_resume_fields(mark, seen))
+                    return
                 try:
                     newest_data = newest.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     return
-                seen = ts.seen_until(objs, mark)
                 mark.session_id = newest.stem
                 mark.byte_offset = len(newest_data.encode("utf-8"))
                 mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-                    ts.parse_jsonl(newest_data), seen)
+                    ts.parse_jsonl(newest_data), ts.seen_until(objs, mark))
                 mark.consecutive_deliveries = 0
                 mark.last_delivery_at = 0.0
                 ts.save_watermark(state_dir, mark)
@@ -1871,7 +1909,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 log_event("transcript_stale_pin_recovered", session=session,
                           conversation_id=conversation_id, dead_session_id=sid,
                           new_session_id=newest.stem, torn_read_polls=torn,
-                          **_resume_fields(mark, seen))
+                          **_resume_fields(mark, ts.seen_until(objs, mark)))
                 return
         log_event("transcript_torn_read_skip", session=session,
                   conversation_id=conversation_id,
@@ -2102,25 +2140,29 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         else None
     )
     prefer = mark.session_id if (mark and mark.session_id) else None
-    active = ts.resolve_active_transcript(
-        Path(transcripts_base) / session, prefer_session_id=prefer
-    )
-    if active is None:
-        return ("no_reply", None)
-    try:
-        data = active.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ("no_reply", None)
-    # Only non-empty (deliverable) turns can be resent — an empty tool-only turn was
-    # never a reply to the orchestrator in the first place.
-    deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data))
-                   if t.interrupted or not t.is_empty]
-    if not deliverable:
-        return ("no_reply", None)
-    if turn_uuid:
-        target = next((t for t in deliverable if t.terminal_uuid == turn_uuid), None)
-    else:
-        target = deliverable[-1]
+    # The file the watcher tracks first, then the session's earlier files (newest
+    # first): Claude starts a new transcript on every restart, and the reply this tool
+    # is being asked for may be in the one before — which is exactly the case where a
+    # reply went missing (joint test scenario 10, 2026-09-17).
+    target = None
+    for path in ts.session_transcripts(Path(transcripts_base) / session,
+                                       prefer_session_id=prefer):
+        try:
+            data = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Only non-empty (deliverable) turns can be resent — an empty tool-only turn
+        # was never a reply to the orchestrator in the first place.
+        deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data))
+                       if t.interrupted or not t.is_empty]
+        if not deliverable:
+            continue
+        if turn_uuid:
+            target = next((t for t in deliverable if t.terminal_uuid == turn_uuid), None)
+        else:
+            target = deliverable[-1]
+        if target is not None:
+            break
     if target is None:
         return ("no_reply", None)
 

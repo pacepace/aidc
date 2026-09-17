@@ -1350,6 +1350,36 @@ def newest_message_ts(objs: list[dict]) -> str:
     return newest
 
 
+def session_transcripts(transcript_dir: Path,
+                         prefer_session_id: str | None = None) -> list[Path]:
+    """Every top-level *.jsonl for the session, the pinned one first and the rest by
+    newest message content, newest first.
+
+    A session keeps one file per Claude run: a restart starts a new one and leaves the
+    old in place. The watcher only ever reads the current file, but a reply that never
+    reached the orchestrator can be in an earlier one (a restart at the wrong moment),
+    and session_resend exists to fetch exactly that.
+
+    Regular files only, never symlinks: see resolve_active_transcript.
+    """
+    d = Path(transcript_dir)
+    try:
+        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
+    except OSError:
+        return []
+    pinned = [p for p in candidates if prefer_session_id and p.stem == prefer_session_id]
+    rest = [p for p in candidates if p not in pinned]
+
+    def newest(path: Path) -> str:
+        try:
+            return newest_message_ts(parse_jsonl(path.read_text(encoding="utf-8",
+                                                               errors="replace")))
+        except OSError:
+            return ""
+
+    return pinned + sorted(rest, key=newest, reverse=True)
+
+
 def resolve_active_transcript(transcript_dir: Path,
                               prefer_session_id: str | None = None) -> Path | None:
     """Newest top-level *.jsonl in the dir (excludes the subagents/ subdir).

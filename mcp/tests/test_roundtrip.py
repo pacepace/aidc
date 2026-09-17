@@ -8,8 +8,8 @@ The pieces that are REAL here:
   - _post_turn (the outbound-to-metallm HTTP boundary, exact payload + URL).
 
 The pieces that are STUBBED (the non-deterministic edges):
-  - the tmux/Docker boundary (_is_claude_running / _check_free / _load_and_paste
-    / _tmux_exec / _capture_screen) — no container.
+  - the tmux/Docker boundary (_is_claude_running / _check_free / _container_state /
+    _load_and_paste / _tmux_exec / _capture_screen) — no container.
   - the background poll TIMER (_run_transcript_watcher) — replaced with an
     alive-forever no-op so the drain is driven explicitly, deterministically.
   - the outbound httpx client — a FakeMetallm sink records every callback POST.
@@ -129,6 +129,11 @@ def harness(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
+
+    async def container_state(container):
+        return tools.CONTAINER_EXISTS
+
+    monkeypatch.setattr(tools, "_container_state", container_state)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)

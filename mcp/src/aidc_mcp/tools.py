@@ -183,54 +183,48 @@ TURN_IDLE = "idle"
 # Per-session asyncio locks: serialize concurrent session_send calls.
 _session_send_locks: dict[str, asyncio.Lock] = {}
 
-# Per-session FIFO of prompts accepted while the session was mid-turn, as
-# [(prompt, paste_attempts)]. A dev-agent turn routinely outlives any sane
-# inline wait — prod 2026-08-22 conv 01a01cf6 ran ONE turn for 22 minutes after
-# an auto-compaction — and the old behaviour was to wait 30s and then return an
-# error, DISCARDING the prompt. Nothing on either side retried it: the orchestrator's
-# busy marker (services/agent_session_busy) deliberately does not arm on an
-# `ok: false` envelope, so the message simply evaporated and the orchestrator
-# sat waiting for a reply to a prompt the agent never received.
+# Per-session FIFO of prompts accepted but not yet pasted (design-10 S4, MCP-30). A
+# dev-agent turn routinely outlives any sane inline wait — prod 2026-08-22 conv
+# 01a01cf6 ran ONE turn for 22 minutes after an auto-compaction — and the old
+# behaviour was to wait 30s and then return an error, DISCARDING the prompt. Nothing
+# on either side retried it: the orchestrator's busy marker
+# (services/agent_session_busy) deliberately does not arm on an `ok: false` envelope,
+# so the message simply evaporated.
 #
-# Queueing instead makes the send lossless: the prompt is held here and injected
-# the moment the session is free, and session_send returns ok=True/"queued" — which
-# the orchestrator's marker DOES arm on, so the session correctly reads busy meanwhile.
-_pending_sends: dict[str, list[tuple[str, int]]] = {}
+# A prompt accepted here is never dropped: it waits with no deadline, is held while
+# Claude is not running, survives an aidc-mcp restart (persisted beside the other
+# watcher state), and leaves only by being pasted or by its session being killed
+# (then it is written to the send dead-letter dir). session_send returns
+# ok=True/"queued", which the orchestrator's busy marker arms on.
+_pending_sends: dict[str, list[ts.QueuedPrompt]] = {}
 
 # Per-session drainer tasks: one long-lived injector per session with a non-empty
 # queue. Keyed by session name (like the send lock) rather than per conversation.
 _pending_drainers: dict[str, asyncio.Task[None]] = {}
 
-# Inline free-check wait inside session_send. Short on purpose: it only has to
-# catch a session that is about to be free, because anything longer is the
-# drainer's job now. Keeping the old 30s here would stall every busy send for
-# half a minute before returning "queued".
-_SEND_IDLE_TIMEOUT = 5.0
+# How long session_send itself waits for the session to be free before queueing.
+# Short on purpose: anything longer is the drainer's job, and a busy send should
+# return "queued" promptly.
+_SEND_FREE_WAIT_S = 5.0
 
-# How long the drainer waits for the session to be free before re-checking that Claude is still
-# alive. Not a deadline — it loops — so a 22-minute turn is simply 22 one-minute
-# waits.
-_PENDING_IDLE_POLL = 60.0
+# How long each drainer free-wait runs before the drainer re-checks that the session
+# still exists and records the latest waiting reason. Not a deadline: it loops.
+_QUEUE_POLL_S = 60.0
 
-# Paste retries per queued prompt before it is dropped to the dead-letter dir. A
-# paste can fail transiently (tmux buffer contention); a prompt that fails this
-# many times is not going to land.
-_PENDING_MAX_PASTE_ATTEMPTS = 3
+# Backoff between failed pastes of the same prompt: 2, 4, 8 … seconds, capped. There
+# is no attempt limit; each failure is logged and shown as the waiting reason.
+_PASTE_RETRY_MAX_S = 60.0
 
 # Hard cap on queue depth per session. A runaway orchestrator that keeps sending
-# into a wedged session must not grow this without bound; past the cap the send
-# is refused (audibly) rather than queued.
+# into a wedged session must not grow this without bound; past the cap a NEW prompt
+# is refused (audibly). A prompt already accepted is never dropped by it.
 _PENDING_MAX_DEPTH = 25
 
-# Consecutive failed free-check waits before the drainer gives up on a session. At
-# _PENDING_IDLE_POLL each this is ~4 hours — deliberately generous, because a
-# legitimate turn CAN run that long (the incident that motivated the queue ran 22
-# minutes; a critic pass runs for hours), and dead-lettering a prompt the agent
-# would still have answered is the failure this whole change exists to prevent.
-# Finite so a pane wedged forever eventually stops holding prompts nobody will
-# see. Counted in polls rather than wall-clock so the loop terminates
-# deterministically under a patched clock.
-_PENDING_MAX_IDLE_POLLS = 240
+# What a person attached to the session sees on the tmux status line while a queued
+# prompt waits on their unsent text. tmux-start.sh shows the @aidc_waiting option.
+_WAITING_ON_INPUT_TEXT = (
+    "aidc: orchestrator message waiting — press Enter or clear your input to let it through"
+)
 
 # Per-session background watcher tasks. The KEYS are the sessions with an open
 # webhook (responses stream back to the orchestrator). We surface that set in the
@@ -591,19 +585,18 @@ async def _load_and_paste(container: str, text: str, window: str) -> bool:
     return rc == 0
 
 
-def _write_send_dead_letter(session: str, prompt: str, reason: str) -> None:
-    """Persist a prompt that could never be injected, so it is recorded not lost.
-
-    Sibling of _write_dead_letter (which records an undelivered REPLY); this is the
-    outbound direction. A queued prompt reaches here only after the session died or
-    the paste failed _PENDING_MAX_PASTE_ATTEMPTS times — both cases where silently
-    dropping it reproduces the very bug the queue exists to fix."""
+def _write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -> None:
+    """Persist a prompt that will never be pasted because its session is gone, so it
+    is recorded, not lost. Sibling of _write_dead_letter (an undelivered REPLY)."""
     dl = Path(_WATCHER_STATE_DIR) / "dead-letter"
     try:
         dl.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(
+            f"{queued.enqueued_at}\n{queued.text}".encode()).hexdigest()[:16]
         (dl / f"send__{ts._slug(session)}__{digest}.json").write_text(
-            json.dumps({"session": session, "prompt": prompt, "reason": reason,
+            json.dumps({"session": session, "prompt": queued.text, "reason": reason,
+                        "enqueued_at": queued.enqueued_at,
+                        "paste_attempts": queued.paste_attempts,
                         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
             encoding="utf-8",
         )
@@ -663,73 +656,140 @@ async def _inject(container: str, text: str, window: str, *, session: str) -> bo
     return True
 
 
+CONTAINER_EXISTS = "exists"
+CONTAINER_GONE = "gone"
+CONTAINER_UNKNOWN = "unknown"
+
+# Consecutive unexpected drainer failures per session, for the restart backoff.
+_drainer_failures: dict[str, int] = {}
+# Sessions whose tmux status line currently shows the waiting-on-input notice.
+_waiting_notice_shown: set[str] = set()
+
+
+async def _container_state(container: str) -> str:
+    """Whether the session's dev container exists (running or not). `aidc kill`
+    removes it, and that is the only thing that ends a session's queue, so only a
+    definite "no such container" answer counts as gone. Any other docker failure (a
+    daemon restart, a socket error) is CONTAINER_UNKNOWN, and queues keep holding."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "--format", "{{.Id}}", container,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode == 0:
+        return CONTAINER_EXISTS
+    if "no such object" in stderr.decode("utf-8", errors="replace").lower():
+        return CONTAINER_GONE
+    return CONTAINER_UNKNOWN
+
+
+def _persist_queue(name: str) -> None:
+    try:
+        ts.save_send_queue(_WATCHER_STATE_DIR, name, _pending_sends.get(name, []))
+    except OSError as exc:
+        log_event("session_send_queue_persist_failed", session=name,
+                  error_type=type(exc).__name__, error=repr(exc))
+
+
+async def _set_waiting_reason(container: str, name: str, reason: str) -> None:
+    """Record why the queue's head is waiting (the rest wait behind it), persist on a
+    change, and show or clear the tmux status-line notice for unsent input."""
+    queue = _pending_sends.get(name)
+    if not queue:
+        return
+    await _show_waiting_on_input(container, name, reason == "input_has_text")
+    wanted = [reason] + ["queued_behind"] * (len(queue) - 1)
+    if [q.waiting_reason for q in queue] == wanted:
+        return
+    for q, r in zip(queue, wanted, strict=True):
+        q.waiting_reason = r
+    _persist_queue(name)
+    log_event("session_send_queue_waiting", session=name, reason=reason, depth=len(queue))
+
+
+async def _show_waiting_on_input(container: str, name: str, show: bool) -> None:
+    """Set or clear the status-line notice, tracking whether it is showing on its own
+    (not from a prompt's reason, which other paths overwrite)."""
+    if show == (name in _waiting_notice_shown):
+        return
+    args = (["set-option", "-t", "main", "@aidc_waiting", _WAITING_ON_INPUT_TEXT] if show
+            else ["set-option", "-t", "main", "-u", "@aidc_waiting"])
+    await _tmux_exec(container, args)
+    if show:
+        _waiting_notice_shown.add(name)
+    else:
+        _waiting_notice_shown.discard(name)
+
+
 async def _drain_pending_sends(container: str, name: str) -> None:
-    """Inject queued prompts into `name`'s pane, one at a time, as it becomes free.
+    """Paste queued prompts into `name`'s pane, one at a time, as it becomes free.
 
-    Runs until the queue empties (then deregisters itself) or the session dies.
-    The long idle wait happens WITHOUT the send lock held — holding it across a
-    22-minute turn would block every concurrent session_send for the duration, and
-    an MCP tool call that never returns is worse than the drop this replaces. The
+    Runs until the queue empties or the session's container is gone, and never gives
+    up on a prompt otherwise: a busy Claude, unsent text in the input box, a stopped
+    Claude or a failing paste all just keep it waiting, with the reason recorded.
+
+    The long free-wait happens WITHOUT the send lock held — holding it across a
+    22-minute turn would block every concurrent session_send for the duration. The
     lock is taken only around the paste itself, which is what actually needs
-    serializing against a direct send.
-
-    Order is preserved because session_send enqueues rather than pasting whenever
-    the queue is non-empty: no direct send can overtake a waiting one."""
+    serializing against a direct send. Order is preserved because session_send
+    enqueues rather than pasting whenever the queue is non-empty."""
     lock = _session_send_locks.setdefault(name, asyncio.Lock())
-    waited = 0
+    failed = False
     try:
         while _pending_sends.get(name):
-            reason = ""
-            if not await _is_claude_running(container):
-                reason = "claude_not_running"
-            elif waited >= _PENDING_MAX_IDLE_POLLS:
-                reason = "never_went_idle"
-            if reason:
+            state = await _container_state(container)
+            if state == CONTAINER_GONE:
                 queued = _pending_sends.pop(name, [])
-                for text, _ in queued:
-                    _write_send_dead_letter(name, text, reason)
+                for q in queued:
+                    _write_send_dead_letter(name, q, "session_killed")
+                _persist_queue(name)
+                _waiting_notice_shown.discard(name)
                 log_event("session_send_queue_abandoned", session=name,
-                          dropped=len(queued), reason=reason, idle_polls=waited)
+                          dropped=len(queued), reason="session_killed")
                 return
-            # Not a deadline — a busy pane just loops. A 22-minute turn is 22
-            # of these waits, and each one re-checks that Claude is still alive.
-            if await _wait_until_free(container, name, timeout=_PENDING_IDLE_POLL):
-                waited += 1
+            if state == CONTAINER_UNKNOWN:
+                log_event("session_send_queue_container_unknown", session=name)
+            reason = await _wait_until_free(container, name, timeout=_QUEUE_POLL_S)
+            if reason:
+                await _set_waiting_reason(container, name, reason)
                 continue
-            waited = 0
+            retry_in = 0.0
             async with lock:
                 queue = _pending_sends.get(name)
                 if not queue:
                     return
                 # Re-verify under the lock: the session may have picked up work
                 # between the wait above and acquiring it.
-                if await _check_free(container, name):
-                    waited += 1
+                reason = await _check_free(container, name)
+                if reason:
+                    await _set_waiting_reason(container, name, reason)
                     continue
-                text, attempts = queue[0]
-                if await _inject(container, text, _SESSION_WINDOW, session=name):
+                head = queue[0]
+                if await _inject(container, head.text, _SESSION_WINDOW, session=name):
                     queue.pop(0)
+                    _drainer_failures.pop(name, None)
+                    await _show_waiting_on_input(container, name, False)
+                    if not queue:
+                        _pending_sends.pop(name, None)
+                    else:
+                        queue[0].waiting_reason = ""
+                    _persist_queue(name)
                     log_event("session_send_queued_injected", session=name,
-                              prompt_len=len(text), remaining=len(queue))
-                    if not queue:
-                        _pending_sends.pop(name, None)
+                              prompt_len=len(head.text), remaining=len(queue),
+                              paste_attempts=head.paste_attempts)
                     continue
-                attempts += 1
-                if attempts >= _PENDING_MAX_PASTE_ATTEMPTS:
-                    queue.pop(0)
-                    _write_send_dead_letter(name, text, "paste_failed")
-                    log_event("session_send_queued_dropped", session=name,
-                              prompt_len=len(text), attempts=attempts,
-                              reason="paste_failed")
-                    if not queue:
-                        _pending_sends.pop(name, None)
-                else:
-                    queue[0] = (text, attempts)
-                    log_event("session_send_queued_paste_retry", session=name,
-                              attempts=attempts)
+                head.paste_attempts += 1
+                _persist_queue(name)
+                await _set_waiting_reason(container, name, "paste_failing")
+                retry_in = min(_PASTE_RETRY_MAX_S, 2.0 ** min(head.paste_attempts, 6))
+                log_event("session_send_queued_paste_retry", session=name,
+                          attempts=head.paste_attempts, retry_in_s=retry_in)
+            await asyncio.sleep(retry_in)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- drainer must survive
+        failed = True
         log_event("session_send_queue_error", session=name,
                   error_type=type(exc).__name__, error=repr(exc))
     finally:
@@ -737,36 +797,82 @@ async def _drain_pending_sends(container: str, name: str) -> None:
             _pending_drainers.pop(name, None)
             # A send that queued while this drainer was winding down would
             # otherwise be orphaned: _enqueue_send saw a live (not-yet-done)
-            # drainer and declined to start one, and then that drainer exited.
-            # Today no yield point sits between the loop test and here, so the
-            # window is not reachable — but that is a property of where the awaits
-            # happen to be, not a guarantee. Re-check and hand off explicitly.
+            # drainer and declined to start one, and then that drainer exited. The
+            # same applies when the drainer stopped on an unexpected error: the
+            # prompts are still accepted, so hand them to a fresh drainer, after a
+            # backoff so an error that recurs every cycle does not spin.
             if _pending_sends.get(name):
-                _spawn_drainer(container, name)
+                delay = 0.0
+                if failed:
+                    n = _drainer_failures.get(name, 0) + 1
+                    _drainer_failures[name] = n
+                    delay = min(_PASTE_RETRY_MAX_S, 2.0 ** min(n, 6))
+                _spawn_drainer(container, name, delay=delay)
 
 
-def _spawn_drainer(container: str, name: str) -> None:
+def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
     """Start the per-session drainer unless a live one is already registered."""
     drainer = _pending_drainers.get(name)
     if drainer is not None and not drainer.done():
         return
-    task = asyncio.create_task(_drain_pending_sends(container, name))
+
+    async def run() -> None:
+        if delay:
+            await asyncio.sleep(delay)
+        await _drain_pending_sends(container, name)
+
+    task = asyncio.create_task(run())
     _pending_drainers[name] = task
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
 
-def _enqueue_send(name: str, container: str, prompt: str) -> int:
-    """Queue a prompt for injection when the session frees up; returns queue depth.
+async def _enqueue_send(name: str, container: str, prompt: str, reason: str) -> int:
+    """Queue a prompt for pasting when the session frees up; returns queue depth.
 
     Returns 0 when the queue is at _PENDING_MAX_DEPTH and the prompt was refused.
-    Starts the per-session drainer if one is not already running."""
+    Records why it waits (showing the status-line notice if that is unsent input),
+    persists the queue, and starts the per-session drainer if one is not running."""
     queue = _pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
-    queue.append((prompt, 0))
+    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts._now_iso()))
+    await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
     _spawn_drainer(container, name)
     return len(queue)
+
+
+async def resume_send_queues() -> None:
+    """Pick up every persisted queue after an aidc-mcp start: prompts for a session
+    whose container still exists get a drainer; prompts for a session that is gone are
+    dead-lettered. Unreadable queue files are logged and left for a person."""
+    queues, unreadable = ts.load_send_queues(_WATCHER_STATE_DIR)
+    for path in unreadable:
+        log_event("session_send_queue_unreadable", path=str(path))
+    for name, prompts in queues.items():
+        container = f"aidc-{name}-dev"
+        if await _container_state(container) == CONTAINER_GONE:
+            for q in prompts:
+                _write_send_dead_letter(name, q, "session_killed")
+            ts.save_send_queue(_WATCHER_STATE_DIR, name, [])
+            log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
+                      reason="session_killed")
+            continue
+        _pending_sends[name] = prompts
+        _spawn_drainer(container, name)
+        log_event("session_send_queue_resumed", session=name, depth=len(prompts))
+
+
+_WAITING_EXPLAINED = {
+    "claude_busy": "Claude is working on a turn",
+    "input_has_text": "someone has unsent text in Claude's input box in the session "
+                      "(the session's status line tells them)",
+    "claude_not_running": "Claude is not running in the session",
+    "claude_not_at_prompt": "Claude is showing a dialog (e.g. login) instead of its prompt",
+    "screen_unrecognized": "aidc does not recognize Claude's screen",
+    "paste_failing": "pasting into the session is failing and being retried",
+    "queued_behind": "an earlier prompt is still waiting",
+}
 
 
 # ---- transcript-sourced delivery (design-09, MCP-15..19) --------------------
@@ -1842,12 +1948,20 @@ def register(app: Any) -> None:
         """Status for one session: health, taint, audit dir.
 
         Call before resuming a paused or idle session. Confirms alive and untainted.
+        `send_queue` lists prompts sent with session_send that are still waiting to be
+        pasted, and why each one waits.
         """
         log_event("tool_call", tool="session_status", session=name)
         result = _run_cli(["status", name])
         if result["exit"] != 0:
             return _envelope_err(result["stderr"] or "status failed", result)
-        return _envelope_ok({"raw": result["stdout"]})
+        # Prompts sent to the session and not pasted yet, each with why it waits.
+        queue = [{"prompt_preview": q.text[:120], "enqueued_at": q.enqueued_at,
+                  "waiting_reason": q.waiting_reason,
+                  "waiting_because": _WAITING_EXPLAINED.get(q.waiting_reason, ""),
+                  "paste_attempts": q.paste_attempts}
+                 for q in _pending_sends.get(name, [])]
+        return _envelope_ok({"raw": result["stdout"], "send_queue": queue})
 
     # --- session_kill (intentionally NOT advertised as an MCP tool) -----
     #
@@ -2108,10 +2222,12 @@ def register(app: Any) -> None:
         conversation that first opened the watcher.
 
         SENDING WHILE THE AGENT IS BUSY IS SAFE. A dev-agent turn can run for many
-        minutes; if one is in flight the prompt is QUEUED and injected automatically
-        when that turn ends, and the return says status "queued". A queued prompt is
-        never lost and never needs re-sending — its reply comes over the webhook like
-        any other. Never re-send a prompt to "make sure it arrived", and never reach
+        minutes; if one is in flight (or someone is typing in the session, or Claude is
+        restarting) the prompt is QUEUED and pasted automatically as soon as the session
+        is free, and the return says status "queued" with a `waiting_reason`. A queued
+        prompt is never lost, survives an aidc-mcp restart, and never needs re-sending —
+        its reply comes over the webhook like any other. session_status shows what is
+        still waiting and why. Never re-send a prompt to "make sure it arrived", and never reach
         for session_resend because a reply is slow: that delivers an OLDER reply and
         is how a conversation ends up answering the wrong question.
 
@@ -2155,17 +2271,18 @@ def register(app: Any) -> None:
 
         queued_depth = 0
         sanitized = prompt.replace("\n", " ").strip()
+        wait_reason = ""
         async with lock:
-            if not await _is_claude_running(container):
+            if await _container_state(container) == CONTAINER_GONE:
                 # Audit every refusal. These paths used to return silently, so the
                 # ONLY trace of a dropped send was the ABSENCE of the
                 # session_send_sent line below — which is how prod 2026-08-22 conv
                 # 01a01cf6 lost a prompt with nothing in the log naming the gate.
                 log_event("tool_call", tool="session_send_failed", session=name,
-                          prompt_len=len(prompt), reason="claude_not_running")
+                          prompt_len=len(prompt), reason="no_such_session")
                 return _envelope_err(
-                    "Claude is not running in the session. "
-                    "The user needs to start it (run 'aidc-claude' in the tmux claude window)."
+                    f"There is no session named '{name}' (its container does not exist). "
+                    "Check session_list."
                 )
 
             # Inject only when free so we never paste into a turn already in flight
@@ -2176,9 +2293,9 @@ def register(app: Any) -> None:
             # overtake an earlier one that is still waiting.
             wait_reason = ("queued_behind" if _pending_sends.get(name)
                            else await _wait_until_free(container, name,
-                                                       timeout=_SEND_IDLE_TIMEOUT))
+                                                       timeout=_SEND_FREE_WAIT_S))
             if wait_reason:
-                queued_depth = _enqueue_send(name, container, sanitized)
+                queued_depth = await _enqueue_send(name, container, sanitized, wait_reason)
                 if queued_depth == 0:
                     log_event("tool_call", tool="session_send_failed", session=name,
                               prompt_len=len(prompt), reason="queue_full",
@@ -2201,10 +2318,11 @@ def register(app: Any) -> None:
         watching = name in _session_watchers
         log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
                   no_watch_reason=no_watch_reason, queued_depth=queued_depth)
+        waiting_why = _WAITING_EXPLAINED.get(wait_reason, wait_reason)
         if watching and queued_depth:
             delivery = (
-                f"Queued — the session is mid-turn, so this prompt is held and will be "
-                f"injected automatically the moment that turn ends ({queued_depth} "
+                f"Queued — held because {waiting_why}. It will be pasted automatically "
+                f"as soon as the session is free ({queued_depth} "
                 "waiting, this one last). Nothing is lost and there is nothing to "
                 "retry: do NOT re-send it, and do NOT call session_resend — the reply "
                 "to THIS prompt arrives over the webhook like any other. Keep talking "
@@ -2221,7 +2339,7 @@ def register(app: Any) -> None:
             # invite the caller to retry, putting a second copy of the prompt into
             # the same tmux window.
             delivery = (
-                ("Queued for injection when the current turn ends, but " if queued_depth
+                (f"Queued (held because {waiting_why}), but " if queued_depth
                  else "Sent, but ")
                 + "no webhook is open for this session, so the reply will NOT "
                 "be auto-delivered"
@@ -2233,6 +2351,7 @@ def register(app: Any) -> None:
         return _envelope_ok(
             {"status": "queued" if queued_depth else "sent", "session": name,
              "queued_behind": max(0, queued_depth - 1),
+             **({"waiting_reason": wait_reason} if queued_depth else {}),
              "window": _SESSION_WINDOW, "delivery": delivery}
         )
 

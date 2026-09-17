@@ -309,9 +309,12 @@ status line of the session shows:
 aidc: orchestrator message waiting — press Enter or clear your input to let it through
 ```
 
-The line is set when a prompt starts waiting on input-box text and cleared as soon as that prompt
-is injected or the queue empties. It is written through a tmux user option referenced from
-`status-right`, so it does not overwrite anything else on the status line.
+The line is set when the queue's first prompt starts waiting on input-box text, and cleared as
+soon as that prompt is pasted or waits for a different reason. The MCP sets and unsets the tmux
+user option `@aidc_waiting`; `tmux-start.sh` puts it at the front of `status-right` (shown in
+reverse video, and only while set), so nothing else on the status line changes. A session created
+before this change has no such `status-right` and shows nothing until it is recreated on the new
+image.
 
 The check runs again immediately before the paste, under the send lock, so the window in which a
 person can start typing between check and paste is milliseconds. It cannot be closed entirely.
@@ -321,21 +324,25 @@ person can start typing between check and paste is milliseconds. It cannot be cl
 The per-session queue keeps FIFO order and the existing lock discipline, and changes in five
 ways:
 
-1. **No wait deadline.** `_PENDING_MAX_IDLE_POLLS` goes. A prompt waits as long as its session
-   exists.
+1. **No wait deadline.** A prompt waits as long as its session exists. The drainer waits for the
+   session to be free in 60 s rounds, recording the latest reason after each.
 2. **Held while Claude is not running.** A stopped Claude (restart, crash, the person exited it)
-   holds the queue instead of dead-lettering it. Delivery resumes when Claude is back at its
-   prompt.
-3. **Paste failures retry.** A failed paste backs off (bounded interval, unbounded attempts) and
-   is reported as the waiting reason, instead of being dropped after 3 attempts.
+   holds the queue. `session_send` itself queues instead of refusing; it refuses only a session
+   whose container does not exist. Pasting resumes when Claude is back at its prompt.
+3. **Paste failures retry** with backoff (2, 4, 8 … s, capped at 60 s) and no attempt limit;
+   each is logged and shown as `paste_failing`.
 4. **Persisted.** The queue is written to the watcher-state dir (atomic temp+rename, like the
-   watermark) on every change. On `aidc-mcp` start, sessions with a non-empty persisted queue get
-   a drainer. A queue file whose session no longer exists is dead-lettered on start.
-5. **The only exits** are "injected" and "session killed". On kill, every waiting prompt is
-   written to the send dead-letter dir, so there is still a record.
+   watermark) on every change; an emptied queue removes its file. When `aidc-mcp` starts
+   (`server.ResumeQueuesOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
+   persisted queue a drainer, and dead-letters the queue of a session whose container is gone. An
+   unreadable queue file is logged and left in place.
+5. **The only exits** are "pasted" and "session killed" (its container is gone). On kill, every
+   waiting prompt is written to the send dead-letter dir with reason `session_killed`.
 
 **Why a prompt is waiting** is always one of a closed set, reported in the `session_send` result
-when it queues and in `session_status` for every waiting prompt:
+when it queues (`waiting_reason`, plus a sentence in `delivery`) and in `session_status`'s
+`send_queue` for every waiting prompt (a 120-character preview, `enqueued_at`, `waiting_reason`,
+a plain-language `waiting_because`, and `paste_attempts`):
 
 | Reason | Meaning |
 |---|---|
@@ -352,7 +359,7 @@ accepted one.
 
 **Persisted format.** A persisted queue locks in a schema, so its questions come first. What reads
 it: the MCP on restart (to resume draining), `session_status` (to report), and a person
-inspecting `~/aidc-mcp-audit/watcher-state/` after an incident. The questions it answers: which
+inspecting the MCP's `watcher-state/` dir after an incident. The questions it answers: which
 prompts are waiting for which session, in what order, since when, how many paste attempts each
 has had, and the last recorded waiting reason. File:
 `watcher-state/<session>.send-queue.json`, one object per session:

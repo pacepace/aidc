@@ -34,6 +34,8 @@ async def clean_session_watchers():
         tools._reported_interrupts.clear()
         tools._last_free_verdict.clear()
         tools._last_screen_raw.clear()
+        tools._waiting_notice_shown.clear()
+        tools._drainer_failures.clear()
 
     _reset()
     yield

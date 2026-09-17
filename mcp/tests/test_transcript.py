@@ -11,6 +11,7 @@ from aidc_mcp.transcript import (
     INTERRUPTED_NOTE,
     NOTHING_WRITTEN,
     TERMINAL_PROMPT_NOTE,
+    QueuedPrompt,
     Turn,
     Watermark,
     awaiting_stop_hooks,
@@ -20,6 +21,7 @@ from aidc_mcp.transcript import (
     ends_on_turn_end,
     extract_completed_turns,
     human_prompt_text,
+    load_send_queues,
     load_watermark,
     log_shows_turn_in_progress,
     objs_after_uuid,
@@ -28,7 +30,9 @@ from aidc_mcp.transcript import (
     record_sent_prompt,
     render_delivery,
     resolve_active_transcript,
+    save_send_queue,
     save_watermark,
+    send_queue_path,
     sent_prompts_path,
     unanswered_prompt_turn,
     watermark_path,
@@ -1319,3 +1323,36 @@ class TestLocalCommandsAcrossReaders:
     def test_a_pasted_slash_command_is_found_by_its_rendered_form(self):
         objs = [*self.DONE, _cmd("c1", "/review", "src")]
         assert prompt_seen_since(objs, "/review src", TestPromptSeenSince.SENT) is True
+
+
+class TestPersistedSendQueue:
+    def test_roundtrip_keeps_order_and_fields(self, tmp_path):
+        prompts = [QueuedPrompt("first", "2026-09-17T02:00:00Z", 0, "claude_busy"),
+                   QueuedPrompt("second", "2026-09-17T02:00:05Z", 2, "queued_behind")]
+        save_send_queue(tmp_path, "proj", prompts)
+        queues, unreadable = load_send_queues(tmp_path)
+        assert queues == {"proj": prompts} and unreadable == []
+
+    def test_empty_queue_removes_the_file(self, tmp_path):
+        save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])
+        save_send_queue(tmp_path, "proj", [])
+        assert not send_queue_path(tmp_path, "proj").exists()
+        save_send_queue(tmp_path, "never-had-one", [])   # no error
+
+    def test_session_name_comes_from_the_file_not_the_slug(self, tmp_path):
+        save_send_queue(tmp_path, "a/b", [QueuedPrompt("x", "t")])
+        assert list(load_send_queues(tmp_path)[0]) == ["a/b"]
+
+    def test_corrupt_file_is_reported_and_left_alone(self, tmp_path):
+        bad = send_queue_path(tmp_path, "bad")
+        bad.write_text("{not json")
+        save_send_queue(tmp_path, "good", [QueuedPrompt("x", "t")])
+        queues, unreadable = load_send_queues(tmp_path)
+        assert list(queues) == ["good"] and unreadable == [bad] and bad.exists()
+
+    def test_write_is_atomic_no_leftover_temp(self, tmp_path):
+        save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])
+        assert not list(tmp_path.glob("*.new"))
+
+    def test_missing_dir_loads_nothing(self, tmp_path):
+        assert load_send_queues(tmp_path / "absent") == ({}, [])

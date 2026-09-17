@@ -18,6 +18,24 @@ from mcp.server.transport_security import TransportSecuritySettings
 from aidc_mcp import audit, resources, tools
 
 
+class ResumeQueuesOnStartup:
+    """ASGI wrapper that resumes persisted send queues when the server starts.
+
+    A prompt queued before an aidc-mcp restart must be pasted without waiting for some
+    later tool call: the orchestrator is waiting for its reply and will not make one.
+    The lifespan scope is the first thing uvicorn runs inside the event loop."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.started = False
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "lifespan" and not self.started:
+            self.started = True
+            tools._fire(tools.resume_send_queues())
+        await self.app(scope, receive, send)
+
+
 def main() -> int:
     port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
 
@@ -61,7 +79,7 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
-    wrapped = BearerAuthMiddleware(starlette_app)
+    wrapped = ResumeQueuesOnStartup(BearerAuthMiddleware(starlette_app))
 
     import uvicorn
 

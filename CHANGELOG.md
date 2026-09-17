@@ -36,6 +36,19 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   session counts as busy until the transcript shows the prompt arrived. `session_run` reads its
   replies from the transcript too, and the pane-scraping code is gone.
 
+- **A prompt sent to a session is never dropped.** The send queue used to give up on a prompt
+  after about four hours of waiting, the moment Claude was not running, or after three failed
+  pastes, and lost everything it held when `aidc-mcp` restarted. Now a queued prompt waits as
+  long as its session exists, is held while Claude restarts, retries failed pastes without a
+  limit, and is saved to disk and resumed when the MCP starts. It leaves the queue only by being
+  pasted, or when its session is killed (then it goes to the dead-letter dir). `session_send`
+  queues instead of refusing when Claude is not running, and refuses only a session that does
+  not exist.
+- **You can see why a prompt is waiting.** `session_send` returns a `waiting_reason` when it
+  queues, and `session_status` lists every waiting prompt with its reason and paste attempts.
+  While a prompt waits because someone has unsent text in Claude's input box, the session's tmux
+  status line says so (sessions created on the new image).
+
 ### Added
 - **Interrupts reach the orchestrator.** When someone presses Esc after Claude has started
   on a task, the watcher delivers what Claude had written so far, opened by a note that the

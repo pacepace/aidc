@@ -1087,6 +1087,66 @@ def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> Non
     os.replace(tmp, path)
 
 
+# --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
+#
+# Prompts accepted for a session and not yet pasted. A persisted format locks in a
+# schema, so it answers only the questions its readers ask: the MCP on restart (which
+# prompts to resume, for which session, in what order), session_status (since when
+# each has waited, why, how many pastes failed), and a person reading
+# watcher-state/ after an incident (the same, in plain JSON).
+
+@dataclass
+class QueuedPrompt:
+    text: str
+    enqueued_at: str
+    paste_attempts: int = 0
+    waiting_reason: str = ""
+
+
+def send_queue_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{_slug(session)}.send-queue.json"
+
+
+def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt]) -> None:
+    """Atomic write (temp + rename). An empty queue removes the file, so a file on
+    disk always means prompts are waiting."""
+    base = Path(base_dir)
+    path = send_queue_path(base, session)
+    if not prompts:
+        path.unlink(missing_ok=True)
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"session": session, "updated_at": _now_iso(),
+                               "prompts": [asdict(q) for q in prompts]}, indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], list[Path]]:
+    """Every persisted queue under `base_dir` as {session: prompts}, plus the files
+    that could not be read (left in place, for a person to look at)."""
+    queues: dict[str, list[QueuedPrompt]] = {}
+    unreadable: list[Path] = []
+    for path in sorted(Path(base_dir).glob("*.send-queue.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            session = data["session"]
+            prompts = [QueuedPrompt(text=str(e["text"]),
+                                    enqueued_at=str(e.get("enqueued_at", "")),
+                                    paste_attempts=int(e.get("paste_attempts", 0)),
+                                    waiting_reason=str(e.get("waiting_reason", "")))
+                       for e in data["prompts"]]
+            if not isinstance(session, str) or not session:
+                raise ValueError("no session")
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(path)
+            continue
+        if prompts:
+            queues[session] = prompts
+    return queues, unreadable
+
+
 def record_sent_prompt(base_dir: Path, session: str, text: str, *,
                        now_fn=time.time) -> None:
     """Remember that the MCP injected ``text`` into ``session``'s pane. Call only

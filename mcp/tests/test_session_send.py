@@ -48,6 +48,7 @@ class Wiring:
 
     def __init__(self):
         self.claude_running = True
+        self.container = tools.CONTAINER_EXISTS
         self.idle_ok = True
         self.paste_ok = True
         self.paste_calls = []
@@ -68,7 +69,12 @@ def wiring(monkeypatch):
         w.free_checks += 1
         if not w.claude_running:
             return "claude_not_running"
-        return "" if w.idle_ok else "claude_busy"
+        if w.idle_ok is True:
+            return ""
+        return w.idle_ok or "claude_busy"   # a reason string, or False for busy
+
+    async def container_state(container):
+        return w.container
 
     async def load_paste(container, text, window):
         w.paste_calls.append((container, text, window))
@@ -85,11 +91,14 @@ def wiring(monkeypatch):
         return ""
 
     async def fake_sleep(seconds):
-        # Record poll sleeps without actually waiting (keeps tests fast).
+        # Record poll sleeps without actually waiting, but yield: a drainer that never
+        # gives up would otherwise spin without letting the test run.
         w.sleeps.append(seconds)
+        await _REAL_SLEEP(0)
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
+    monkeypatch.setattr(tools, "_container_state", container_state)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)
@@ -196,15 +205,34 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     assert "proj" in tools._session_watchers
 
 
-async def test_errors_when_claude_not_running(wiring):
+async def test_errors_when_the_session_does_not_exist(wiring):
     app, send = _make_send()
-    wiring.claude_running = False
+    wiring.container = tools.CONTAINER_GONE
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
     assert res["ok"] is False
-    assert "not running" in res["error"]
-    assert not wiring.paste_calls  # nothing injected
+    assert "no session named" in res["error"]
+    assert not wiring.paste_calls
+    assert "proj" not in tools._pending_sends
+
+
+async def test_claude_not_running_holds_the_prompt_instead_of_refusing(wiring):
+    """A restarting Claude is not a reason to lose the prompt."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.claude_running = False
+
+    res = await send(name="proj", prompt="hello", conversation_id="c1")
+
+    assert res["ok"] is True
+    assert res["data"]["status"] == "queued"
+    assert res["data"]["waiting_reason"] == "claude_not_running"
+    assert "not running" in res["data"]["delivery"]
+
+    wiring.claude_running = True
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
 
 
 async def test_queues_instead_of_dropping_when_session_busy(wiring):
@@ -224,7 +252,8 @@ async def test_queues_instead_of_dropping_when_session_busy(wiring):
     # Held, not injected into the running turn.
     assert not wiring.paste_calls
     assert not _sent_enter(wiring.tmux_calls)
-    assert [text for text, _ in tools._pending_sends["proj"]] == ["hello"]
+    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert res["data"]["waiting_reason"] == "claude_busy"
     # The caller is told plainly not to retry — re-sending is what produced the
     # duplicate-prompt shape this replaces.
     assert "do NOT re-send" in res["data"]["delivery"]
@@ -256,20 +285,22 @@ async def test_send_queues_behind_a_waiting_prompt_even_when_idle(wiring):
     NOT jump the line by pasting just because the pane looks idle right now."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
-    tools._pending_sends["proj"] = [("earlier", 0)]
+    tools._pending_sends["proj"] = [ts.QueuedPrompt("earlier", "t", 0, "claude_busy")]
 
     res = await send(name="proj", prompt="later", conversation_id="c1")
 
     assert res["data"]["status"] == "queued"
     assert not wiring.paste_calls
-    assert [text for text, _ in tools._pending_sends["proj"]] == ["earlier", "later"]
+    assert [q.text for q in tools._pending_sends["proj"]] == ["earlier", "later"]
+    assert res["data"]["waiting_reason"] == "queued_behind"
 
 
 async def test_refuses_once_the_queue_is_full(wiring):
     """A wedged session must not accumulate prompts without bound."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
-    tools._pending_sends["proj"] = [(f"q{i}", 0) for i in range(tools._PENDING_MAX_DEPTH)]
+    tools._pending_sends["proj"] = [ts.QueuedPrompt(f"q{i}", "t")
+                                    for i in range(tools._PENDING_MAX_DEPTH)]
 
     res = await send(name="proj", prompt="one too many", conversation_id="c1")
 
@@ -278,21 +309,20 @@ async def test_refuses_once_the_queue_is_full(wiring):
     assert len(tools._pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
 
 
-async def test_abandons_the_queue_when_the_pane_never_goes_idle(wiring):
-    """A pane that is wedged rather than working must not hold prompts forever.
-    The bound is deliberately generous (hours) so a long-but-real turn still lands;
-    past it the queue is dead-lettered so the state is recorded, not silently lost."""
+async def test_a_long_busy_turn_never_costs_the_prompt(wiring):
+    """No deadline: a turn that runs for hours keeps the prompt waiting, then it lands."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
-    wiring.idle_ok = False  # never idle, but Claude is alive throughout
+    wiring.idle_ok = False
 
     await send(name="proj", prompt="hello", conversation_id="c1")
-    await _let_drainer_run("proj", ticks=tools._PENDING_MAX_IDLE_POLLS + 20)
+    await _let_drainer_run("proj", ticks=500)
+    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
-    assert "proj" not in tools._pending_sends
-    assert not wiring.paste_calls
-    dead = list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
-    assert json.loads(dead[0].read_text())["reason"] == "never_went_idle"
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
 
 
 async def test_spawn_drainer_does_not_start_a_second_one(wiring):
@@ -309,20 +339,147 @@ async def test_spawn_drainer_does_not_start_a_second_one(wiring):
     assert tools._pending_drainers["proj"] is first
 
 
-async def test_abandons_the_queue_when_claude_dies(wiring, tmp_path):
-    """A queued prompt that can never be injected is dead-lettered, not vanished."""
+async def test_claude_stopping_holds_the_queue(wiring):
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
     wiring.claude_running = False
+    await _let_drainer_run("proj", ticks=200)
+    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert tools._pending_sends["proj"][0].waiting_reason == "claude_not_running"
+
+    wiring.claude_running = True
+    wiring.idle_ok = True
     await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+
+
+async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
+    """The only way a prompt leaves the queue unpasted, and it is still recorded."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="one", conversation_id="c1")
+    await send(name="proj", prompt="two", conversation_id="c1")
+
+    wiring.container = tools.CONTAINER_GONE
+    await _let_drainer_run("proj", ticks=200)
 
     assert "proj" not in tools._pending_sends
-    dead = list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
-    assert len(dead) == 1
-    assert json.loads(dead[0].read_text())["prompt"] == "hello"
+    dead = sorted(json.loads(p.read_text())["prompt"] for p in
+                  (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
+    assert dead == ["one", "two"]
+    assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
+
+
+async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="hello", conversation_id="c1")
+
+    fails = {"left": 5}
+
+    async def flaky_paste(container, text, window):
+        wiring.paste_calls.append((container, text, window))
+        fails["left"] -= 1
+        return fails["left"] < 0
+
+    tools._load_and_paste = flaky_paste   # restored by monkeypatch at teardown
+    wiring.idle_ok = True
+    await _let_drainer_run("proj", ticks=300)
+
+    assert len(wiring.paste_calls) == 6
+    assert "proj" not in tools._pending_sends
+    # Backoff between failed pastes: 2, 4, 8 … s, capped.
+    retries = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
+    assert retries == [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+
+
+async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "input_has_text"
+    await send(name="proj", prompt="first", conversation_id="c1")
+    await send(name="proj", prompt="second", conversation_id="c1")
+    await _let_drainer_run("proj", ticks=20)
+
+    saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
+    assert [(q.text, q.waiting_reason) for q in saved["proj"]] == [
+        ("first", "input_has_text"), ("second", "queued_behind")]
+
+    # The MCP restarts: in-memory state is gone, the file is not.
+    for task in tools._pending_drainers.values():
+        task.cancel()
+    await _REAL_SLEEP(0)
+    tools._pending_sends.clear()
+    tools._pending_drainers.clear()
+
+    wiring.idle_ok = True
+    await tools.resume_send_queues()
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["first", "second"]
+    assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
+
+
+async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "gone",
+                       [ts.QueuedPrompt("orphan", "2026-09-17T02:00:00Z")])
+    wiring.container = tools.CONTAINER_GONE
+    await tools.resume_send_queues()
+    assert "gone" not in tools._pending_sends
+    [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
+    assert json.loads(dead.read_text())["reason"] == "session_killed"
+
+
+async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_paste(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "input_has_text"
+    await send(name="proj", prompt="hello", conversation_id="c1")
+    await _let_drainer_run("proj", ticks=20)
+
+    options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
+    assert options[-1] == ["set-option", "-t", "main", "@aidc_waiting",
+                           tools._WAITING_ON_INPUT_TEXT]
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
+    assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]
+
+
+async def test_status_line_clears_when_the_wait_changes_to_another_reason(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "input_has_text"
+    await send(name="proj", prompt="hello", conversation_id="c1")
+    await _let_drainer_run("proj", ticks=20)
+    wiring.idle_ok = "claude_busy"
+    await _let_drainer_run("proj", ticks=20)
+    options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
+    assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]
+
+
+async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeypatch):
+    app = FastMCP("t")
+    tools.register(app)
+    status = app._tool_manager._tools["session_status"].fn
+    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+        "exit": 0, "stdout": "ok", "stderr": ""})
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("x" * 300, "2026-09-17T02:00:00Z", 2, "paste_failing")]
+
+    res = status(name="proj")
+
+    [entry] = res["data"]["send_queue"]
+    assert entry["prompt_preview"] == "x" * 120
+    assert entry["waiting_reason"] == "paste_failing"
+    assert "failing" in entry["waiting_because"]
+    assert entry["paste_attempts"] == 2
 
 
 async def test_errors_when_paste_fails(wiring):
@@ -396,3 +553,74 @@ async def test_record_write_failure_does_not_fail_the_send(wiring, monkeypatch):
 
     assert res["ok"] is True
     assert res["data"]["status"] == "sent"
+
+
+async def test_a_docker_error_is_not_a_killed_session(wiring):
+    """Only a definite 'no such container' ends a queue. A daemon hiccup must not
+    dead-letter prompts the orchestrator is waiting on."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="hello", conversation_id="c1")
+
+    wiring.container = tools.CONTAINER_UNKNOWN
+    await _let_drainer_run("proj", ticks=200)
+    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+
+    wiring.container = tools.CONTAINER_EXISTS
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+
+
+async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj",
+                       [ts.QueuedPrompt("kept", "2026-09-17T02:00:00Z")])
+    wiring.container = tools.CONTAINER_UNKNOWN
+    wiring.idle_ok = False
+    await tools.resume_send_queues()
+    assert [q.text for q in tools._pending_sends["proj"]] == ["kept"]
+
+
+async def test_status_line_clears_after_a_failed_paste_then_a_successful_one(wiring):
+    """Waiting on typed text, the person clears it, one paste fails, the retry lands:
+    the notice must not stay up."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "input_has_text"
+    await send(name="proj", prompt="hello", conversation_id="c1")
+    await _let_drainer_run("proj", ticks=20)
+
+    fails = {"left": 1}
+
+    async def flaky_paste(container, text, window):
+        wiring.paste_calls.append((container, text, window))
+        fails["left"] -= 1
+        return fails["left"] < 0
+
+    tools._load_and_paste = flaky_paste
+    wiring.idle_ok = True
+    await _let_drainer_run("proj", ticks=100)
+
+    assert "proj" not in tools._pending_sends
+    options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
+    assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]
+    assert "proj" not in tools._waiting_notice_shown
+
+
+async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring, monkeypatch):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="hello", conversation_id="c1")
+
+    async def broken(container, name, timeout):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tools, "_wait_until_free", broken)
+    await _let_drainer_run("proj", ticks=60)
+
+    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    restarts = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
+    assert restarts[:4] == [2.0, 4.0, 8.0, 16.0]

@@ -195,6 +195,38 @@ the metallm session and written here before either side builds it.
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
 | `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. **Not sent until MetaLLM's record-without-wake change is deployed.** | MCP-27 |
 
+### D6. The tool result envelope
+
+Every MCP tool returns one envelope. An MCP client sees it twice: as a JSON string in
+`content[0].text`, and as an object in `structuredContent`. `isError` stays false. A failure is
+reported inside the envelope, not through the MCP error flag.
+
+- Success: `{"ok": true, "data": {...}}`.
+- Failure: `{"ok": false, "error": "<a sentence for a model or person to read>", "error_code": "<kind>"}`,
+  sometimes with `data` for context.
+
+`error_code` lets a caller decide what to do without matching prose (agreed with the metallm
+session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
+missing a code or uses one outside the set:
+
+| Code | Meaning | Caller |
+|---|---|---|
+| `no_such_session` | the session's container does not exist | tell the person, no retry |
+| `queue_full` | 25 prompts already waiting: the session is wedged | tell the person, no retry |
+| `out_of_scope` | a scoped server refusing another session (MCP-31) | tell the person, no retry |
+| `create_not_allowed` | `session_create` on a scoped server | tell the person, no retry |
+| `invalid_argument` | a required argument is missing or invalid | fix the call |
+| `not_configured` | the aidc config lacks what the call needs (`metallm.callback_url`) | tell the person |
+| `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
+| `command_failed` | a command inside the session failed | tell the person |
+| `timeout` | a command inside the session ran out of time | tell the person |
+| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` paths | tell the person |
+| `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
+| `not_found` | a file or directory the call reads is missing | tell the person |
+
+`session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every
+other condition queues the prompt.
+
 Combinations are independent. An interrupted turn on a prompt the person typed carries
 `interrupted: true` and (once enabled) `speaker: "human"`, so MetaLLM records it without waking
 the orchestrator and labels it as stopped at the terminal.

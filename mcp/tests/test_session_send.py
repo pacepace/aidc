@@ -213,6 +213,7 @@ async def test_errors_when_the_session_does_not_exist(wiring):
 
     assert res["ok"] is False
     assert "no session named" in res["error"]
+    assert res["error_code"] == "no_such_session"
     assert not wiring.paste_calls
     assert "proj" not in tools._pending_sends
 
@@ -306,6 +307,7 @@ async def test_refuses_once_the_queue_is_full(wiring):
 
     assert res["ok"] is False
     assert "queued" in res["error"]
+    assert res["error_code"] == "queue_full"
     assert len(tools._pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
 
 

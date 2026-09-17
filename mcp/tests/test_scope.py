@@ -100,6 +100,7 @@ async def test_every_tool_that_takes_a_session_name_refuses_out_of_scope(
             result = await result
         assert result["ok"] is False, tool_name
         assert "outside this MCP server's scope" in result["error"], tool_name
+        assert result["error_code"] == "out_of_scope", tool_name
         checked += 1
     assert checked >= len(NAMED_TOOLS)
 
@@ -118,6 +119,7 @@ async def test_session_create_is_refused_when_scoped(app, monkeypatch, forbid_si
     result = await app._tool_manager._tools["session_create"].fn(
         name="jointtest", repo="/tmp")
     assert result["ok"] is False and "cannot create sessions" in result["error"]
+    assert result["error_code"] == "create_not_allowed"
 
 
 def test_session_list_shows_only_allowed_sessions(app, monkeypatch):

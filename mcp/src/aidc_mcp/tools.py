@@ -1888,8 +1888,31 @@ def _envelope_ok(data: Any = None) -> dict[str, Any]:
     return out
 
 
-def _envelope_err(error: str, data: Any = None) -> dict[str, Any]:
-    out: dict[str, Any] = {"ok": False, "error": error}
+# Machine-readable failure kinds, so a caller can decide "tell the person, no retry"
+# from "try once more" without matching the prose in `error`. Every failure envelope
+# carries one; adding a code is a contract change agreed with the orchestrator side.
+ERROR_CODES = frozenset({
+    "no_such_session",     # the session's container does not exist
+    "queue_full",          # too many prompts already waiting; the session is wedged
+    "out_of_scope",        # a scoped server refusing another session
+    "create_not_allowed",  # session_create on a scoped server
+    "invalid_argument",    # a required argument is missing or invalid
+    "not_configured",      # the aidc config lacks what the call needs (callback_url)
+    "cli_failed",          # an aidc CLI call exited non-zero
+    "command_failed",      # a command inside the session failed (file_get, claude, ...)
+    "timeout",             # a command inside the session ran out of time
+    "claude_not_running",  # a synchronous path that needs Claude running
+    "session_not_ready",   # session_run: the session did not become free in time
+    "paste_failed",        # a paste into the session did not land
+    "turn_not_finished",   # session_run: a turn did not finish in time
+    "no_reply",            # session_resend: nothing completed to resend
+    "callback_failed",     # session_resend: the POST to the orchestrator failed
+    "not_found",           # a file or directory the call reads is missing
+})
+
+
+def _envelope_err(error: str, data: Any = None, *, code: str) -> dict[str, Any]:
+    out: dict[str, Any] = {"ok": False, "error": error, "error_code": code}
     if data is not None:
         out["data"] = data
     return out
@@ -1906,7 +1929,7 @@ def _scoped(fn: Any) -> Any:
         if why is None:
             return None
         log_event("tool_call", tool=fn.__name__, session=name, refused="out_of_scope")
-        return _envelope_err(why)
+        return _envelope_err(why, code="out_of_scope")
 
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
@@ -1948,9 +1971,10 @@ def register(app: Any) -> None:
         """
         if (why := scope.create_refusal()) is not None:
             log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
-            return _envelope_err(why)
+            return _envelope_err(why, code="create_not_allowed")
         if not repo:
-            return _envelope_err("repo argument is required (absolute host path)")
+            return _envelope_err("repo argument is required (absolute host path)",
+                                 code="invalid_argument")
         args = ["create", name, "--profile", profile, "--repo", repo]
         if workspace:
             args += ["--workspace", workspace]
@@ -1968,7 +1992,8 @@ def register(app: Any) -> None:
             result = _run_cli(args, timeout=300.0)
         if result["exit"] == 0:
             return _envelope_ok({"name": name, "log": result["stdout"]})
-        return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result)
+        return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
+                             code="cli_failed")
 
     # --- session_list ---------------------------------------------------
 
@@ -1978,7 +2003,7 @@ def register(app: Any) -> None:
         log_event("tool_call", tool="session_list")
         result = _run_cli(["list"])
         if result["exit"] != 0:
-            return _envelope_err(result["stderr"] or "list failed", result)
+            return _envelope_err(result["stderr"] or "list failed", result, code="cli_failed")
         return _envelope_ok({"raw": scope.filter_list(result["stdout"])})
 
     # --- session_status -------------------------------------------------
@@ -1995,7 +2020,7 @@ def register(app: Any) -> None:
         log_event("tool_call", tool="session_status", session=name)
         result = _run_cli(["status", name])
         if result["exit"] != 0:
-            return _envelope_err(result["stderr"] or "status failed", result)
+            return _envelope_err(result["stderr"] or "status failed", result, code="cli_failed")
         # Prompts sent to the session and not pasted yet, each with why it waits.
         queue = [{"prompt_preview": q.text[:120], "enqueued_at": q.enqueued_at,
                   "waiting_reason": q.waiting_reason,
@@ -2023,7 +2048,7 @@ def register(app: Any) -> None:
         log_event("tool_call", tool="session_kill", session=name)
         result = _run_cli(["kill", name], timeout=120.0)
         if result["exit"] != 0:
-            return _envelope_err(result["stderr"] or "kill failed", result)
+            return _envelope_err(result["stderr"] or "kill failed", result, code="cli_failed")
         return _envelope_ok({"name": name})
 
     # --- session_exec ---------------------------------------------------
@@ -2043,7 +2068,8 @@ def register(app: Any) -> None:
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            return _envelope_err(f"timeout after {timeout_seconds}s", {"stdout": exc.stdout or ""})
+            return _envelope_err(f"timeout after {timeout_seconds}s", {"stdout": exc.stdout or ""},
+                                 code="timeout")
         return _envelope_ok({"stdout": proc.stdout, "stderr": proc.stderr, "exit": proc.returncode})
 
     # --- session_invoke --------------------------------------------------
@@ -2110,7 +2136,7 @@ def register(app: Any) -> None:
         stderr_data = b"".join(stderr_buf)
         if proc.returncode != 0:
             return _envelope_err(stderr_data.decode("utf-8", errors="replace") or "claude failed",
-                                 {"stdout": "".join(chunks)})
+                                 {"stdout": "".join(chunks)}, code="command_failed")
         return _envelope_ok({"response": "".join(chunks)})
 
     # --- session_invoke_async --------------------------------------------
@@ -2142,7 +2168,7 @@ def register(app: Any) -> None:
         base_url = _metallm_callback_url()
         if not base_url:
             return _envelope_err(
-                "metallm.callback_url not set in ~/.config/aidc/config.yaml"
+                "metallm.callback_url not set in ~/.config/aidc/config.yaml", code="not_configured"
             )
 
         callback_url = f"{base_url}/api/v1/internal/callback/{conversation_id}"
@@ -2328,7 +2354,7 @@ def register(app: Any) -> None:
                           prompt_len=len(prompt), reason="no_such_session")
                 return _envelope_err(
                     f"There is no session named '{name}' (its container does not exist). "
-                    "Check session_list."
+                    "Check session_list.", code="no_such_session"
                 )
 
             # Inject only when free so we never paste into a turn already in flight
@@ -2350,14 +2376,15 @@ def register(app: Any) -> None:
                         f"{_PENDING_MAX_DEPTH} prompts are already queued for this "
                         "session and none has been injected yet — the session is "
                         "wedged or the agent is not consuming them. Stop sending and "
-                        "tell the user to check the session."
+                        "tell the user to check the session.", code="queue_full"
                     )
                 log_event("tool_call", tool="session_send_queued", session=name,
                           prompt_len=len(prompt), depth=queued_depth, reason=wait_reason)
             elif not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                 log_event("tool_call", tool="session_send_failed", session=name,
                           prompt_len=len(prompt), reason="paste_failed")
-                return _envelope_err("failed to inject prompt into session window")
+                return _envelope_err("failed to inject prompt into session window",
+                                     code="paste_failed")
 
         # Non-blocking: the reply is delivered by the transcript watcher, not returned
         # here. If no watcher is open, the reply has nowhere to go — say so plainly.
@@ -2448,7 +2475,8 @@ def register(app: Any) -> None:
         Newlines in each prompt are replaced with spaces.
         """
         if not turns:
-            return _envelope_err("turns must be a non-empty list of prompt strings")
+            return _envelope_err("turns must be a non-empty list of prompt strings",
+                                 code="invalid_argument")
 
         log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
 
@@ -2471,25 +2499,28 @@ def register(app: Any) -> None:
             if not await _is_claude_running(container):
                 return _envelope_err(
                     "Claude is not running in the session. "
-                    "The user needs to start it (run 'aidc-claude' in the tmux claude window)."
+                    "The user needs to start it (run 'aidc-claude' in the tmux claude window).",
+                        code="claude_not_running"
                 )
 
             for i, turn_prompt in enumerate(turns):
                 reason = await _wait_until_free(container, name, timeout=_PRE_IDLE_TIMEOUT_S)
                 if reason:
                     err = f"session not ready before turn {i + 1} ({reason})"
-                    return _envelope_err(err, {"completed_turns": transcript})
+                    return _envelope_err(err, {"completed_turns": transcript},
+                                         code="session_not_ready")
 
                 sanitized = turn_prompt.replace("\n", " ").strip()
                 sent_at = time.time()
                 if not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
                     err = f"failed to inject turn {i + 1}"
-                    return _envelope_err(err, {"completed_turns": transcript})
+                    return _envelope_err(err, {"completed_turns": transcript}, code="paste_failed")
 
                 ended = await _wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)
                 if ended:
                     err = f"turn {i + 1} did not finish ({ended})"
-                    return _envelope_err(err, {"completed_turns": transcript})
+                    return _envelope_err(err, {"completed_turns": transcript},
+                                         code="turn_not_finished")
 
                 response = _reply_from_transcript(name, sanitized, sent_at)
 
@@ -2520,10 +2551,12 @@ def register(app: Any) -> None:
         """
         base_url = _metallm_callback_url()
         if not base_url:
-            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml")
+            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml",
+                                 code="not_configured")
         if not conversation_id:
             return _envelope_err(
-                "conversation_id is required (the orchestrator injects it automatically)"
+                "conversation_id is required (the orchestrator injects it automatically)",
+                    code="invalid_argument"
             )
         # _start_watcher atomically cancels any existing watcher and installs the
         # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
@@ -2579,11 +2612,13 @@ def register(app: Any) -> None:
         """
         if not conversation_id:
             return _envelope_err(
-                "conversation_id is required (the orchestrator injects it automatically)"
+                "conversation_id is required (the orchestrator injects it automatically)",
+                    code="invalid_argument"
             )
         base_url = _metallm_callback_url()
         if not base_url:
-            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml")
+            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml",
+                                 code="not_configured")
         log_event("tool_call", tool="session_resend", session=name,
                   conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)
         # Is the agent mid-turn right now? If so, the newest COMPLETED turn cannot
@@ -2598,12 +2633,12 @@ def register(app: Any) -> None:
         if turn is None:
             return _envelope_err(
                 "no completed reply found to resend for this session "
-                "(the session may not have produced a reply yet)"
+                "(the session may not have produced a reply yet)", code="no_reply"
             )
         if status == "failed":
             return _envelope_err(
                 "resend reached the transcript but the callback to the orchestrator failed "
-                "(see logs); the reply was not delivered"
+                "(see logs); the reply was not delivered", code="callback_failed"
             )
 
         notes: list[str] = []
@@ -2679,7 +2714,8 @@ def register(app: Any) -> None:
             capture_output=True, timeout=30,
         )
         if proc.returncode != 0:
-            return _envelope_err(proc.stderr.decode("utf-8", errors="replace") or "file not found")
+            return _envelope_err(proc.stderr.decode("utf-8", errors="replace") or "file not found",
+                                 code="command_failed")
         raw = proc.stdout
         try:
             return _envelope_ok({"path": path, "encoding": "utf-8", "content": raw.decode("utf-8")})
@@ -2707,7 +2743,8 @@ def register(app: Any) -> None:
             input=content.encode("utf-8"), capture_output=True, timeout=30,
         )
         if proc.returncode != 0:
-            return _envelope_err(proc.stderr.decode("utf-8", errors="replace") or "write failed")
+            return _envelope_err(proc.stderr.decode("utf-8", errors="replace") or "write failed",
+                                 code="command_failed")
         return _envelope_ok({"path": path, "bytes": len(content)})
 
     # --- audit_get ------------------------------------------------------
@@ -2724,10 +2761,11 @@ def register(app: Any) -> None:
         # Find the session's audit dir via aidc status (it prints the path).
         result = _run_cli(["status", name])
         if result["exit"] != 0:
-            return _envelope_err("session not found")
+            return _envelope_err("session not found", code="cli_failed")
         audit_dir = parse_audit_dir(result["stdout"])
         if audit_dir is None or not audit_dir.exists():
-            return _envelope_err("audit dir not found", {"status": result["stdout"]})
+            return _envelope_err("audit dir not found", {"status": result["stdout"]},
+                                 code="not_found")
         events: list[Any] = []
         # policy-events.log is one JSON object per line.
         events_file = audit_dir / "policy-events.log"
@@ -2768,7 +2806,7 @@ def register(app: Any) -> None:
             capture_output=True, text=True, timeout=10,
         )
         if proc.returncode != 0:
-            return _envelope_err(proc.stderr or "taint write failed")
+            return _envelope_err(proc.stderr or "taint write failed", code="command_failed")
         return _envelope_ok({"name": name, "reason": reason})
 
     # Seed the live "open webhooks" tail into the session-aware tool descriptions

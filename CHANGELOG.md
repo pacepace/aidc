@@ -58,6 +58,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   status line says so (sessions created on the new image).
 
 ### Added
+- **Tool failures say what kind of failure they are.** Every `{"ok": false, "error": ...}`
+  envelope now carries an `error_code` (e.g. `no_such_session`, `queue_full`, `out_of_scope`,
+  `cli_failed`), so an orchestrator can tell "tell the person" from "retry once" without matching
+  the sentence. The codes are listed in design 10 D6.
 - **A session-scoped MCP mode.** `AIDC_MCP_ALLOWED_SESSIONS=a,b` limits an `aidc-mcp` server to
   those sessions: every tool and resource refuses any other, session creation is refused, and
   listings show only the allowed ones. It is for testing an orchestrator that runs inside a dev

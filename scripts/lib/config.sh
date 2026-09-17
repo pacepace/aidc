@@ -443,7 +443,7 @@ aidc_mcp_deny_target() {
     local bound
     bound=$(docker inspect aidc-mcp \
         --format '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{.HostIp}}:{{.HostPort}}{{"\n"}}{{end}}{{end}}' \
-        2>/dev/null | awk 'NF { print; exit }')
+        2>/dev/null | awk 'NF { print; exit }') || bound=""
     case "$bound" in
         :*) bound="0.0.0.0${bound}" ;;   # empty HostIp: published on every interface
     esac

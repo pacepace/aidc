@@ -45,7 +45,11 @@ STUB
 chmod +x "$SCRATCH/bin/docker"
 
 target() {   # env assignments..., runs aidc_mcp_deny_target in a clean shell
+    # Under the same shell options cmd-create.sh runs with, so a failing docker
+    # lookup cannot abort the resolution.
     env -i PATH="$SCRATCH/bin:/usr/bin:/bin" "$@" bash -c '
+        set -euo pipefail
+        shopt -s inherit_errexit
         die() { echo "die: $*" >&2; exit 1; }
         . "'"$AIDC_ROOT"'/scripts/lib/config.sh"
         aidc_mcp_deny_target'
@@ -90,6 +94,20 @@ assert_eq "AIDC_MCP_DENY set on the squid service" "1" \
 assert_eq "no literal placeholder left" "0" "$(grep -c 'MCP_DENY}' "$SCRATCH/rendered.yaml")"
 assert_eq "cmd-create derives MCP_DENY from aidc_mcp_deny_target" "1" \
     "$(grep -c '^MCP_DENY=\$(aidc_mcp_deny_target)$' "$AIDC_ROOT/scripts/cmd-create.sh")"
+
+echo "== aidc create refuses a malformed address or port with a message naming the key"
+validate() {   # MCP_DENY value -> runs cmd-create.sh's validation block
+    env -i PATH="/usr/bin:/bin" MCP_DENY="$1" bash -c '
+        set -euo pipefail
+        die() { echo "die: $*"; exit 1; }
+        eval "$(awk "/^MCP_DENY=\\\$\\(aidc_mcp_deny_target\\)\$/{f=1; next} f && /^export MCP_DENY\$/{exit} f" "'"$AIDC_ROOT"'/scripts/cmd-create.sh")"
+        echo ok'
+}
+assert_eq "valid address:port passes" "ok" "$(validate 10.23.68.16:7878)"
+assert_eq "hostname rejected" "die: mcp.bind_address 'mcp.example.org' is not an IP address (needed to keep sessions away from aidc-mcp)" \
+    "$(validate mcp.example.org:7878)"
+assert_eq "non-numeric port rejected" "die: mcp.port '78x8' is not a port number (needed to keep sessions away from aidc-mcp)" \
+    "$(validate 10.23.68.16:78x8)"
 
 echo
 echo "mcp deny target: ${PASS} passed, ${FAIL} failed"

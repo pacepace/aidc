@@ -540,3 +540,25 @@ async def test_container_state_unknown_on_any_other_docker_failure(monkeypatch):
         stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
                b"Is the docker daemon running?\n", returncode=1))
     assert await tools._container_state("aidc-proj-dev") == tools.CONTAINER_UNKNOWN
+
+
+# --- error_code: every failure envelope says what kind of failure it is ----------
+
+def test_every_error_envelope_carries_a_known_code():
+    """A caller decides 'tell the person' from 'retry once' by the code, not the prose.
+    `code` is a required keyword, so this pins the set and the envelope shape."""
+    env = tools._envelope_err("There is no session named 'x'", code="no_such_session")
+    assert env == {"ok": False, "error": "There is no session named 'x'",
+                   "error_code": "no_such_session"}
+    import ast
+    import inspect as _inspect
+    tree = ast.parse(_inspect.getsource(tools))
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_envelope_err":
+            kw = {k.arg: k.value for k in node.keywords}
+            assert "code" in kw, f"_envelope_err without code at line {node.lineno}"
+            assert isinstance(kw["code"], ast.Constant), f"non-literal code at {node.lineno}"
+            used.add(kw["code"].value)
+    assert used <= tools.ERROR_CODES, used - tools.ERROR_CODES
+    assert {"no_such_session", "queue_full", "out_of_scope", "cli_failed"} <= used

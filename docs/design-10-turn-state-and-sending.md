@@ -489,9 +489,12 @@ ways:
    one's prompts). A session is identified by its network, `aidc-<session>-net`: `aidc create`
    makes it, `aidc kill` removes it, and `aidc upgrade` and `aidc restart` keep it while they
    replace or restart the dev container. So an upgrade keeps its queue, and a dev container
-   briefly missing in the middle of one is not a gone session. (The first build used the dev
-   container's id, which made every upgrade look like a kill: found by review
-   rev-20260917T062841Z-0930096f.) The drainer checks this at the start of each round and again under the send lock
+   briefly missing in the middle of one is not a gone session. `aidc kill` removes port
+   forwarders before `docker compose down` and then makes sure both session networks are gone
+   (`remove_session_networks`): compose leaves a network that an outside container is still
+   attached to, exiting 0, and a leftover network would keep a killed session alive here and hand
+   a session created again under the name its predecessor's prompts. `aidc create` removes such a
+   leftover from an older kill before it starts. The drainer checks this at the start of each round and again under the send lock
    right before pasting, since its wait for a free session can outlast a kill and re-create. A
    gone prompt is written to the send dead-letter dir with reason `session_killed`
    and reported to its conversation (D5, `prompt_dropped`). Docker failing to answer is neither.

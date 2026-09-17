@@ -6,9 +6,13 @@
 # Order matters:
 #   1. Pause the dev container -- freeze further outbound activity.
 #   2. Best-effort finalize the audit sidecar so meta.json gets killed_at.
-#   3. `docker compose down -v` to remove containers, networks, anonymous
+#   3. Remove adhoc port-forwarders: they are attached to the session's networks,
+#      and compose cannot remove a network something outside it still uses.
+#   4. `docker compose down -v` to remove containers, networks, anonymous
 #      volumes. Named volumes labelled aidc-* go too.
-#   4. Force-remove the dev container if it lingered (rare; defensive).
+#   5. Force-remove the dev container if it lingered (rare; defensive).
+#   6. Make sure the session's networks are gone. aidc-mcp tells sessions apart by
+#      the network's id, so a leftover one would outlive the session there.
 
 set -euo pipefail
 
@@ -56,6 +60,11 @@ info "finalizing audit (best-effort)"
 docker exec "$AUDIT_CT" /usr/local/bin/finalize.sh >/dev/null 2>&1 || \
     info "audit finalize failed or audit container not running (continuing)"
 
+# Adhoc port-forward sidecars (aidc-${NAME}-fwd-*) run outside the compose
+# project, so compose-down doesn't touch them, and they are attached to the
+# session's networks, so they must go first or those networks survive the down.
+remove_adhoc_forwards "$NAME" "cleaning up adhoc port-forwards"
+
 # `docker compose down` needs the file we rendered at create time. If it's
 # gone (e.g. /tmp cleared), `-p $PROJECT` with no file still works for
 # stop+rm of named containers but won't catch volumes; try both.
@@ -72,10 +81,6 @@ for role in dev squid refresher policy audit; do
     docker rm -f "$ct" >/dev/null 2>&1 || true
 done
 
-# Adhoc port-forward sidecars (aidc-${NAME}-fwd-*) run outside the compose
-# project, so compose-down doesn't touch them. Sweep here.
-remove_adhoc_forwards "$NAME" "cleaning up adhoc port-forwards"
-
 # Container-only-path overlay volumes (aidc-sovl-${NAME}-*) are normally
 # declared in the rendered compose, so `docker compose down -v` removes
 # them. Defensive sweep here for the case where a session died mid-create
@@ -88,6 +93,11 @@ fi
 
 # Drop the rendered compose file.
 rm -f "$COMPOSE_FILE"
+
+# Anything else still attached (another session joined with `aidc network`) keeps a
+# network alive past the down; detach it and remove the network, or say so loudly.
+remove_session_networks "$NAME" || \
+    die "session '${NAME}' is down but its network remains, so aidc-mcp still treats it as a live session. Remove it by hand: docker network rm aidc-${NAME}-net aidc-${NAME}-egress"
 
 if [ -n "$AUDIT_HOST" ]; then
     printf "Session '%s' killed. Audit preserved at %s\n" "$NAME" "$AUDIT_HOST"

@@ -551,9 +551,16 @@ async def test_session_instance_gone_when_the_network_is_not_found(monkeypatch):
 
 
 async def test_session_instance_gone_on_other_not_found_wordings(monkeypatch):
-    for stderr in (b"Error: No such network: aidc-x-net\n", b"Error: no such object: aidc-x-net\n"):
+    for stderr in (b"Error: No such network: aidc-x-net\n",
+                   b"Error: no such object: aidc-x-net\n"):
         _patch_async_proc(monkeypatch, FakeProc(stderr=stderr, returncode=1))
         assert await tools._session_instance("x") == (tools.SESSION_GONE, "")
+
+
+async def test_a_not_found_about_something_else_is_not_a_gone_session(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"context \"remote\" not found\n", returncode=1))
+    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
 
 
 async def test_session_instance_unknown_on_any_other_docker_failure(monkeypatch):

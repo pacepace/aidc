@@ -787,11 +787,11 @@ async def _session_instance(name: str) -> tuple[str, str]:
     `aidc kill` removes it, and `aidc upgrade` / `aidc restart` keep it while they
     replace or restart the dev container. So the id tells a session killed and created
     again under the same name from the same session upgraded, and a dev container
-    briefly missing in the middle of an upgrade is not a gone session. (Deciding this
-    by the dev container's id, as first built, treated every upgrade as a kill and
-    dropped its queued prompts and webhook.) Only a definite "not found" is gone; any
-    other docker failure (a daemon restart, a socket error) is unknown, and queues
-    keep holding.
+    briefly missing in the middle of an upgrade is not a gone session. `aidc kill`
+    makes sure the network is removed even when something outside the session is
+    attached to it. Only docker saying that network does not exist is gone; any other
+    failure (a daemon restart, a socket error, a missing docker context) is unknown,
+    and queues keep holding.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -806,9 +806,11 @@ async def _session_instance(name: str) -> tuple[str, str]:
     if proc.returncode == 0:
         return SESSION_EXISTS, stdout.decode("utf-8", errors="replace").strip()
     # Measured on Docker 29.8: "Error response from daemon: network <name> not found".
-    # Other versions say "No such network" or "no such object".
+    # Other versions say "No such network: <name>" or "no such object: <name>".
     err = stderr.decode("utf-8", errors="replace").lower()
-    if "not found" in err or "no such network" in err or "no such object" in err:
+    net = f"aidc-{name}-net"
+    if (f"network {net} not found" in err or f"no such network: {net}" in err
+            or f"no such object: {net}" in err):
         return SESSION_GONE, ""
     return SESSION_UNKNOWN, ""
 

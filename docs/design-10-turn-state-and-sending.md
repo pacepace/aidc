@@ -211,20 +211,25 @@ injecting, the session counts as busy until a user line matching the injected pr
 normalized fingerprint MCP-23 already records) appears. If it has not appeared after a bounded
 wait (the paste did not land), the prompt is treated as not sent and stays queued (S3).
 
-**A turn that can never close.** If Claude crashes mid-turn, the transcript stays open forever.
-Liveness is checked by process, not transcript: `pane_current_command` not a shell means Claude
-is running. When Claude is running, the transcript has not grown for a long quiet period
-(**to measure**; minutes, not seconds), and the screen shows Claude at its input prompt (S2),
-the session counts as free. This fallback only ever unblocks a stuck queue; it never overrides a
-transcript that is still growing.
+**An open turn that has gone quiet.** The transcript can show a turn as open when Claude is not
+working: an Esc before Claude wrote anything leaves no marker (measured), and a crash mid-turn
+leaves the last line open. Only then, when the transcript shows an open turn and has not grown for
+a few seconds, the screen's status row decides: if it does not show `esc to interrupt`, Claude has
+stopped. For a prompt with no assistant line after it, that is reported as an interrupt (D3, with
+"Claude had not written anything yet"), and the session counts as free. While the transcript is
+growing, or the status row still shows `esc to interrupt`, the session stays busy. If a future
+Claude Code drops that wording, the check never finds it, so this path falls back to a long quiet
+period (minutes) with Claude running and at its input prompt. It never types into a busy session.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 
-Only two things, both invisible to the transcript:
+Only three things, each invisible to the transcript:
 
 1. **Unsent text in Claude's input box.** The transcript records a prompt only after it is sent.
 2. **Whether Claude is at its input prompt at all.** After a start or restart, Claude can be on a
    login, trust, or startup screen while the transcript's last turn reads closed.
+3. **Whether `esc to interrupt` is on the status row**, and only when the transcript shows an open
+   turn that has gone quiet (S1). Never used while the transcript can answer.
 
 Both are read from one `capture-pane -e` of the `claude` window (with escape sequences, so text
 attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:

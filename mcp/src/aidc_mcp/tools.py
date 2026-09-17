@@ -607,6 +607,18 @@ _WATCHER_STATE_DIR = Path(
 )
 _DELIVERY_BUDGET_S = 1800.0
 
+# How long a reply whose Stop hooks have not reported yet is held back. A blocking
+# hook's pushback is written only when the hook finishes, so a reply delivered
+# before then can be the first half of a turn the hook is about to reopen. Claude
+# Code writes a stop record after every reply once hooks finish, so this only
+# lapses when a hook runs longer than this, or a record goes missing; either way
+# the reply is then delivered rather than held forever.
+_STOP_HOOK_WAIT_S = 120.0
+
+# (session, conversation_id, withdrawn terminal uuid) already logged as dropped, so
+# a transcript re-read every poll logs each drop once per process.
+_logged_withdrawn_drops: set[tuple[str, str, str]] = set()
+
 # Per-(session, conversation) transcript settle tracking: maps the key to the
 # (last-seen file size in bytes, monotonic time that size was first observed).
 # A turn is delivered only once the size has held steady for turn_settle_seconds,
@@ -667,6 +679,8 @@ def _evict_session_state(name: str) -> None:
     create a fresh lock and paste into the same tmux window simultaneously."""
     for key in [k for k in _settle_state if k[0] == name]:
         _settle_state.pop(key, None)
+    for drop in [d for d in _logged_withdrawn_drops if d[0] == name]:
+        _logged_withdrawn_drops.discard(drop)
     for key in [k for k in _torn_read_counts if k[0] == name]:
         _torn_read_counts.pop(key, None)
     for key in [k for k in _consumed_idle_counts if k[0] == name]:
@@ -727,8 +741,14 @@ async def _post_turn(
                 # with that prompt), "orchestrator" (a prompt this MCP injected),
                 # or "" (unknown: a continuation, or a prompt Claude Code
                 # synthesized). Informational; the content already reads right.
+                # ``interrupted`` is true when the person pressed Esc and cut the turn
+                # off. It is not a failure, so ``ok`` stays true; the content opens
+                # with a note saying so, which is all a receiver that ignores the
+                # field needs. The whole body is pinned in design-10 D5 and agreed
+                # with the orchestrator's side before any field changes.
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
-                      "session": session, "prompt_origin": turn.prompt_origin},
+                      "session": session, "prompt_origin": turn.prompt_origin,
+                      "interrupted": turn.interrupted},
                 headers={"Authorization": f"Bearer {bearer}"},
             )
         elapsed_s = round(time.monotonic() - start, 3)
@@ -786,7 +806,8 @@ def _write_dead_letter(state_dir: Path, session: str, conversation_id: str, turn
     name = f"{ts._slug(session)}__{ts._slug(conversation_id)}__{ts._slug(turn.terminal_uuid)}.json"
     (dl / name).write_text(
         json.dumps({"session": session, "conversation_id": conversation_id,
-                    "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok}),
+                    "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok,
+                    "interrupted": turn.interrupted}),
         encoding="utf-8",
     )
 
@@ -1116,16 +1137,35 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     # burst into one delivery instead of signalling "ready" mid-stream. If the wait
     # fires early anyway, the line-anchored resume still recovers: the continuation
     # is delivered as a follow-up turn rather than wedging or replaying.
-    if settle_seconds > 0:
+    # Claude Code's end-of-turn record says the same thing directly (every Stop hook
+    # allowed the stop), so when the transcript ends on it there is nothing to wait
+    # for. Its absence falls back to the window: the record is not guaranteed.
+    # A reply whose Stop hooks have not reported yet waits longer (see
+    # _STOP_HOOK_WAIT_S): a slow blocking hook would otherwise reopen a turn that
+    # was already delivered as finished.
+    if settle_seconds > 0 and ts.ends_on_turn_end(suffix):
+        _settle_state.pop(key, None)
+    elif settle_seconds > 0:
+        quiet_needed = (max(settle_seconds, _STOP_HOOK_WAIT_S)
+                        if ts.awaiting_stop_hooks(suffix, objs) else settle_seconds)
         now = now_fn()
         last = _settle_state.get(key)
         if last is None or last[0] != end_offset:
             _settle_state[key] = (end_offset, now)
             return  # grew (or first observation this cycle) — wait for quiet
-        if now - last[1] < settle_seconds:
+        if now - last[1] < quiet_needed:
             return  # not quiet long enough yet
 
-    new = ts.extract_completed_turns(suffix)
+    dropped: list[str] = []
+    new = ts.extract_completed_turns(suffix, dropped)
+    for uid in dropped:
+        # A Stop hook pushed Claude back and Claude never produced another reply
+        # before the next prompt: nothing is left to deliver for that request.
+        drop_key = (session, conversation_id, uid)
+        if drop_key not in _logged_withdrawn_drops:
+            _logged_withdrawn_drops.add(drop_key)
+            log_event("transcript_withdrawn_reply_dropped", session=session,
+                      conversation_id=conversation_id, turn_uuid=uid)
     if not new:
         # No deliverable turns remain in the pinned session (its tail may hold
         # trailing non-turn objects — a bare user/system line that never became a
@@ -1166,14 +1206,17 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # though its record entry is gone by then and its framing would differ —
         # and a re-surfaced turn is NOT attributed at all, or its (already consumed)
         # prompt would eat a fresh record entry meant for the next identical send.
-        fingerprint = "" if turn.is_empty else ts.content_fingerprint(turn.text)
+        # An interrupt is delivered even with no text: the orchestrator must hear
+        # that its task was cut off.
+        deliverable = turn.interrupted or not turn.is_empty
+        fingerprint = ts.delivery_fingerprint(turn) if deliverable else ""
         already_delivered = bool(fingerprint) and fingerprint in delivered_fps
         terminal_prompts = (
             [] if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
         )
         outgoing = dataclasses.replace(
             turn,
-            text=ts.render_delivery(turn.text, terminal_prompts),
+            text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
             prompt_origin=("terminal" if terminal_prompts
                            else "orchestrator" if turn.prompts else ""),
         )
@@ -1186,7 +1229,19 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                       prompts=len(terminal_prompts),
                       prompt_len=sum(len(p) for p in terminal_prompts),
                       record_remaining=ts.sent_prompts_remaining(state_dir, session))
-        if turn.is_empty:
+        if turn.superseded and not already_delivered:
+            # A reply followed by more assistant work with no Stop-hook pushback or
+            # prompt between them. A block that leaves no trace looks like this,
+            # and its first half may have been delivered as the finished reply.
+            log_event("transcript_terminal_superseded", session=session,
+                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
+                      superseded=turn.superseded)
+        if turn.late_pushback and not already_delivered:
+            # The reply before this pushback already went out as finished: its Stop
+            # hook ran longer than the watcher held it. This delivery is the rest.
+            log_event("transcript_late_pushback", session=session,
+                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
+        if not deliverable:
             log_event("transcript_empty_turn", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         else:
@@ -1297,7 +1352,8 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         return ("no_reply", None)
     # Only non-empty (deliverable) turns can be resent — an empty tool-only turn was
     # never a reply to the orchestrator in the first place.
-    deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data)) if not t.is_empty]
+    deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data))
+                   if t.interrupted or not t.is_empty]
     if not deliverable:
         return ("no_reply", None)
     if turn_uuid:
@@ -1310,7 +1366,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     # The ledger holds fingerprints CONFIRMED delivered (2xx). A hit means the orchestrator
     # already has this exact content, so re-POSTing can only duplicate it. Refuse
     # by default and let the caller read the content from the tool result instead.
-    fingerprint = ts.content_fingerprint(target.text)
+    fingerprint = ts.delivery_fingerprint(target)
     if not force and fingerprint in ts.load_delivered(state_dir, session, conversation_id):
         log_event("transcript_resend_suppressed", session=session,
                   conversation_id=conversation_id, turn_uuid=target.terminal_uuid,
@@ -1321,7 +1377,11 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         async def post_fn(turn, attempt):  # noqa: E306
             return await _post_turn(callback_base, conversation_id, turn,
                                     attempt=attempt, session=session)
-    ok = await _deliver_with_retry(target, post_fn=post_fn, sleep_fn=sleep_fn)
+    # The bare reply, as the resend contract says -- except that an interrupt keeps
+    # its note: without it an interrupt with nothing written would post as empty.
+    outgoing = dataclasses.replace(
+        target, text=ts.render_delivery(target.text, [], interrupted=target.interrupted))
+    ok = await _deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn)
     if ok:
         # Record the resent turn in the delivery ledger so the watcher never ALSO
         # delivers it (a double-send). Once it lands, the exactly-once invariant

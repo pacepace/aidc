@@ -8,11 +8,16 @@ isSidechain/isCompactSummary/isVisibleInTranscriptOnly skip flags.
 from pathlib import Path
 
 from aidc_mcp.transcript import (
+    INTERRUPTED_NOTE,
+    NOTHING_WRITTEN,
     TERMINAL_PROMPT_NOTE,
     Turn,
     Watermark,
+    awaiting_stop_hooks,
     consume_sent_prompt,
     delay_for_attempt,
+    delivery_fingerprint,
+    ends_on_turn_end,
     extract_completed_turns,
     human_prompt_text,
     load_watermark,
@@ -831,3 +836,291 @@ class TestRenderDelivery:
     def test_multiple_prompts_joined(self):
         out = render_delivery("r", ["/login", " please continue "])
         assert "/login\n\nplease continue\n\n---" in out
+
+
+    def test_interrupted_reply_opens_with_the_interrupt_note(self):
+        assert render_delivery("half an ans", [], interrupted=True) == (
+            INTERRUPTED_NOTE + "\n\nhalf an ans")
+
+    def test_interrupted_with_nothing_written_says_so(self):
+        assert render_delivery("", [], interrupted=True) == (
+            INTERRUPTED_NOTE + "\n\n" + NOTHING_WRITTEN)
+
+    def test_typed_prompt_comes_before_the_interrupt_note(self):
+        out = render_delivery("partial", ["go"], interrupted=True)
+        assert out == (TERMINAL_PROMPT_NOTE + "\ngo\n\n---\n\n"
+                       + INTERRUPTED_NOTE + "\n\npartial")
+
+
+# --- Stop-hook pushback, end-of-turn record, interrupts (design-10 D1-D3) -------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _feedback(uuid, reason="BLOCKED: run the review first"):
+    """The isMeta line Claude Code writes when a Stop hook blocks (measured shape)."""
+    return {"type": "user", "uuid": uuid, "isMeta": True,
+            "message": {"role": "user", "content": f"Stop hook feedback:\n{reason}"}}
+
+
+def _summary(errors=()):
+    return {"type": "system", "subtype": "stop_hook_summary", "uuid": "sum",
+            "hookErrors": list(errors), "preventedContinuation": False, "hookCount": 2}
+
+
+def _turn_duration():
+    return {"type": "system", "subtype": "turn_duration", "uuid": "td", "durationMs": 3601}
+
+
+def _interrupt(uuid, text="[Request interrupted by user]"):
+    return {"type": "user", "uuid": uuid, "interruptedMessageId": "msg_1",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+
+
+class TestStopHookPushback:
+    def test_pushback_reopens_the_turn_and_it_completes_once(self):
+        objs = [_typed("u1", "fix it"), _assistant("a1", [_text("Done.")], "end_turn"),
+                _feedback("f1"), _summary(["BLOCKED: run the review first"]),
+                _assistant("a2", [_text("Review clean.")], "end_turn"),
+                _summary(), _turn_duration()]
+        assert extract_completed_turns(objs) == [
+            Turn("a2", "Done.\nReview clean.", prompts=("fix it",)),
+        ]
+
+    def test_pushback_with_claude_not_yet_resumed_is_not_a_completed_turn(self):
+        """The block lands within a second; Claude resumes many seconds later. In
+        between, the pre-pushback reply must not read as finished."""
+        objs = [_typed("u1", "fix it"), _assistant("a1", [_text("Done.")], "end_turn"),
+                _feedback("f1"), _summary(["BLOCKED"])]
+        assert extract_completed_turns(objs) == []
+
+    def test_feedback_line_alone_reopens(self):
+        """The feedback line is written before the summary; a read between them
+        must already see the turn reopened."""
+        objs = [_typed("u1", "fix it"), _assistant("a1", [_text("Done.")], "end_turn"),
+                _feedback("f1")]
+        assert extract_completed_turns(objs) == []
+
+    def test_hook_that_failed_without_blocking_does_not_reopen(self):
+        """Measured: a Stop hook that exits 1 is listed in hookErrors too, but Claude
+        stops and turn_duration follows. Only the feedback line means a block."""
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("CRASHTEST")], "end_turn"),
+                _summary(["Failed with non-blocking status code: hook failed with exit 1"]),
+                _turn_duration()]
+        assert extract_completed_turns(objs) == [Turn("a1", "CRASHTEST", prompts=("q",))]
+
+    def test_allowed_summary_does_not_reopen(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), _summary()]
+        assert extract_completed_turns(objs) == [Turn("a1", "A.", prompts=("q",))]
+
+    def test_meta_line_is_never_a_turn_boundary(self):
+        """Other isMeta lines (skill bodies, reminders) arriving after a reply must
+        not split or close the group either."""
+        meta = {"type": "user", "uuid": "m1", "isMeta": True,
+                "message": {"role": "user", "content": "<system-reminder>x</system-reminder>"}}
+        objs = [_typed("u1", "q"), _assistant("a1", [_tool()], "tool_use"), _tool_result(),
+                meta, _assistant("a2", [_text("A.")], "end_turn")]
+        assert extract_completed_turns(objs) == [Turn("a2", "A.", prompts=("q",))]
+
+    def test_two_pushbacks_then_finish(self):
+        objs = [_typed("u1", "go"), _assistant("a1", [_text("one")], "end_turn"),
+                _feedback("f1"), _summary(["x"]),
+                _assistant("a2", [_text("two")], "end_turn"),
+                _feedback("f2"), _summary(["y"]),
+                _assistant("a3", [_text("three")], "end_turn"), _summary(), _turn_duration()]
+        assert extract_completed_turns(objs) == [
+            Turn("a3", "one\ntwo\nthree", prompts=("go",))]
+
+    def test_resume_after_a_delivered_terminal_then_pushback_delivers_continuation(self):
+        """A read window that starts after an already-delivered terminal: the
+        pushback has nothing to withdraw, and the continuation is its own turn,
+        flagged so the watcher can log that the first half went out early."""
+        objs = [_feedback("f1"), _summary(["x"]), _assistant("a2", [_text("more")], "end_turn")]
+        turns = extract_completed_turns(objs)
+        assert turns == [Turn("a2", "more")]
+        assert turns[0].late_pushback is True
+
+    def test_ordinary_turn_is_not_a_late_pushback(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _feedback("f1"), _assistant("a2", [_text("B.")], "end_turn")]
+        assert extract_completed_turns(objs)[0].late_pushback is False
+
+    def test_withdrawn_reply_never_resumed_is_reported_as_dropped(self):
+        """Claude is pushed back and never produces another reply before the next
+        prompt (it crashed, or was killed). Nothing can be delivered for that group,
+        but the caller is told so it can log it."""
+        dropped: list[str] = []
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _feedback("f1"), _typed("u2", "next"),
+                _assistant("a2", [_text("B.")], "end_turn")]
+        assert extract_completed_turns(objs, dropped) == [Turn("a2", "B.", prompts=("next",))]
+        assert dropped == ["a1"]
+
+    def test_unexplained_continuation_after_a_reply_is_counted(self):
+        """A reply followed by more assistant work with no pushback or prompt between
+        is what a block that leaves no trace would look like; it is counted so the
+        watcher can log it."""
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _assistant("a2", [_text("B.")], "end_turn")]
+        turns = extract_completed_turns(objs)
+        assert turns == [Turn("a2", "A.\nB.", prompts=("q",))]
+        assert turns[0].superseded == 1
+
+    def test_thinking_then_text_is_not_counted(self):
+        """Claude Code writes thinking and text as separate end_turn lines; an empty
+        terminal followed by the text is ordinary, not unexplained."""
+        objs = [_typed("u1", "q"), _assistant("a1", [_thinking()], "end_turn"),
+                _assistant("a2", [_text("A.")], "end_turn")]
+        assert extract_completed_turns(objs)[0].superseded == 0
+
+    def test_non_str_hook_errors_does_not_crash(self):
+        weird = {"type": "system", "subtype": "stop_hook_summary", "hookErrors": {"a": 1}}
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), weird,
+                {"type": "system", "subtype": ["x"]}]
+        assert extract_completed_turns(objs) == [Turn("a1", "A.", prompts=("q",))]
+
+
+class TestAwaitingStopHooks:
+    def test_reply_with_no_stop_record_yet_is_awaiting(self):
+        full = [_assistant("a0", [_text("old")], "end_turn"), _summary(), _turn_duration(),
+                _typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn")]
+        assert awaiting_stop_hooks(full[3:], full) is True
+
+    def test_summary_after_the_reply_ends_the_wait(self):
+        full = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), _summary()]
+        assert awaiting_stop_hooks(full, full) is False
+
+    def test_transcript_without_any_stop_records_is_not_awaiting(self):
+        """An older Claude Code that writes no stop records must not make every reply
+        wait for hooks that will never report."""
+        full = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn")]
+        assert awaiting_stop_hooks(full, full) is False
+
+    def test_mid_turn_and_api_error_are_not_awaiting(self):
+        seen = [_summary()]
+        assert awaiting_stop_hooks([_assistant("a1", [_tool()], "tool_use")], seen) is False
+        err = _assistant("e1", [_text("overloaded")], "end_turn", isApiErrorMessage=True)
+        assert awaiting_stop_hooks([err], seen) is False
+        assert awaiting_stop_hooks([_typed("u1", "q")], seen) is False
+
+
+class TestEndsOnTurnEnd:
+    def test_true_after_turn_duration(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _summary(), _turn_duration()]
+        assert ends_on_turn_end(objs) is True
+
+    def test_noise_after_turn_duration_is_ignored(self):
+        objs = [_assistant("a1", [_text("A.")], "end_turn"), _summary(), _turn_duration(),
+                {"type": "queue-operation", "operation": "enqueue"},
+                {"type": "attachment", "uuid": "x"}]
+        assert ends_on_turn_end(objs) is True
+
+    def test_false_without_turn_duration(self):
+        assert ends_on_turn_end([_assistant("a1", [_text("A.")], "end_turn"), _summary()]) is False
+
+    def test_false_when_a_new_prompt_follows(self):
+        objs = [_assistant("a1", [_text("A.")], "end_turn"), _summary(), _turn_duration(),
+                _typed("u2", "next")]
+        assert ends_on_turn_end(objs) is False
+
+    def test_false_on_empty(self):
+        assert ends_on_turn_end([]) is False
+
+
+class TestInterrupt:
+    def test_interrupt_after_work_closes_the_turn_as_interrupted(self):
+        objs = [_typed("u1", "long task"), _assistant("a1", [_text("Starting.")], "tool_use"),
+                _tool_result(), _interrupt("i1")]
+        assert extract_completed_turns(objs) == [
+            Turn("i1", "Starting.", prompts=("long task",), interrupted=True)]
+
+    def test_interrupt_with_no_text_is_still_a_turn(self):
+        objs = [_typed("u1", "long task"), _assistant("a1", [_thinking()], "tool_use"),
+                _assistant("a2", [_tool()], "tool_use"), _tool_result(), _interrupt("i1")]
+        assert extract_completed_turns(objs) == [
+            Turn("i1", "", prompts=("long task",), interrupted=True)]
+
+    def test_tool_use_variant_marker(self):
+        objs = [_typed("u1", "go"), _assistant("a1", [_tool()], "tool_use"),
+                _interrupt("i1", "[Request interrupted by user for tool use]")]
+        assert extract_completed_turns(objs)[0].interrupted is True
+
+    def test_interrupt_after_a_pushback_carries_the_earlier_text(self):
+        objs = [_typed("u1", "go"), _assistant("a1", [_text("Done.")], "end_turn"),
+                _feedback("f1"), _summary(["x"]),
+                _assistant("a2", [_tool()], "tool_use"), _interrupt("i1")]
+        assert extract_completed_turns(objs) == [
+            Turn("i1", "Done.", prompts=("go",), interrupted=True)]
+
+    def test_marker_after_a_completed_turn_does_not_add_a_second_turn(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _interrupt("i1")]
+        assert extract_completed_turns(objs) == [Turn("a1", "A.", prompts=("q",))]
+
+    def test_marker_right_after_a_prompt_is_an_interrupt_with_nothing_written(self):
+        """Not produced by 2.1.27x (an Esc that early writes nothing), but a marker in
+        that position still means the prompt was cut off, and says so."""
+        objs = [_typed("u1", "go"), _interrupt("i1")]
+        assert extract_completed_turns(objs) == [
+            Turn("i1", "", prompts=("go",), interrupted=True)]
+
+    def test_uuidless_marker_is_not_an_anchor(self):
+        marker = _interrupt("i1"); del marker["uuid"]
+        objs = [_typed("u1", "go"), _assistant("a1", [_tool()], "tool_use"), marker]
+        assert extract_completed_turns(objs) == []
+
+    def test_next_prompt_after_interrupt_opens_a_fresh_turn(self):
+        objs = [_typed("u1", "go"), _assistant("a1", [_tool()], "tool_use"), _interrupt("i1"),
+                _typed("u2", "try again"), _assistant("a2", [_text("ok")], "end_turn")]
+        assert extract_completed_turns(objs) == [
+            Turn("i1", "", prompts=("go",), interrupted=True),
+            Turn("a2", "ok", prompts=("try again",))]
+
+    def test_fingerprint_of_interrupts_is_per_marker(self):
+        """Two separate interrupts with no text must not dedup against each other in
+        the delivery ledger, and neither may collide with a plain empty reply."""
+        a = Turn("i1", "", interrupted=True)
+        b = Turn("i2", "", interrupted=True)
+        assert delivery_fingerprint(a) != delivery_fingerprint(b)
+        assert delivery_fingerprint(Turn("a1", "x")) == delivery_fingerprint(Turn("a9", "x"))
+
+
+class TestUnansweredPromptAttribution:
+    def test_system_sourced_prompt_drops_an_earlier_unanswered_prompt(self):
+        """An Esc before Claude writes anything leaves the prompt with no reply and
+        no marker. A background task's notification that runs next must not be
+        labelled as answering it."""
+        note = {"type": "user", "uuid": "n1", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        objs = [_typed("u1", "write an essay"), note, _assistant("a1", [_text("DONE")], "end_turn")]
+        assert extract_completed_turns(objs) == [Turn("a1", "DONE")]
+
+
+class TestRealTranscript:
+    """Lines captured from Claude Code 2.1.274 in an aidc dev container: a reply a
+    Stop hook pushed back twice (JSON decision, then exit 2), an Esc during a tool
+    call, a prompt interrupted before Claude wrote anything, a background task's
+    notification turn, and a plain thinking + text reply."""
+
+    def _objs(self):
+        return parse_jsonl(
+            (FIXTURES / "claude-2.1.274-pushback-interrupt-task.jsonl").read_text())
+
+    def test_turns(self):
+        turns = extract_completed_turns(self._objs())
+        assert [(t.text, t.prompts, t.interrupted) for t in turns] == [
+            ("FIRST\nACK-ONE\nACK-TWO",
+             ("Reply with exactly the word FIRST and nothing else.",), False),
+            ("", ("Run the bash command: sleep 30 — then reply with exactly the word DONE.",),
+             True),
+            ("DONE", (), False),
+            ("303", ("Without using any tools, think carefully and verify your reasoning, "
+                     "then reply with only a number: how many prime numbers are there "
+                     "below 2000?",), False),
+        ]
+        assert all(t.superseded == 0 for t in turns)
+
+    def test_ends_on_turn_end(self):
+        assert ends_on_turn_end(self._objs()) is True

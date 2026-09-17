@@ -67,7 +67,8 @@ below fails safe when a line is missing or unrecognized.
 | Fact | Evidence |
 |---|---|
 | A Stop-hook block writes a `user` line with `isMeta: true` and string content starting `Stop hook feedback:`, whether the hook blocks by JSON `decision: "block"` or by exit 2 | container: both kinds; host: 14 lines in the metallm project |
-| The feedback line is followed ~150 ms later by `system` / `stop_hook_summary` with non-empty `hookErrors` (both block kinds). No `turn_duration` follows a blocked stop | container: both kinds |
+| The feedback line is written when the blocking hook **finishes** (8 s after the reply for a hook that runs 8 s), and is followed ~150 ms later by `system` / `stop_hook_summary` with non-empty `hookErrors`. No `turn_duration` follows a blocked stop | container: both kinds, and an 8 s hook |
+| A Stop hook that **fails without blocking** (exit 1) is also listed in `hookErrors` (`Failed with non-blocking status code: …`), but there is no feedback line, Claude stops, and `turn_duration` follows. So non-empty `hookErrors` does not mean a block | container |
 | An allowed stop writes `stop_hook_summary` with `hookErrors: []`, then `system` / `turn_duration` within a few ms. One `turn_duration` covers the whole exchange, pushbacks included | container: 5 of 5 allowed stops; host: 7 of 7; tangle's scan ~9.9k |
 | `turn_duration` is sometimes absent after an allowed stop (155 of ~10k in tangle's scan, cause unknown) | reported by a peer session; not reproduced; treat as not guaranteed |
 | A reply's thinking and text are written as separate `assistant` lines, each with `stop_reason: end_turn` | container |
@@ -88,18 +89,26 @@ Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md` (not c
 - **A pushback is not a prompt.** A `user` line with `isMeta: true` never closes the current
   group. (Today any user line carrying text does.) This also applies to other `isMeta` lines
   Claude Code writes on the user's behalf, which MCP-23 already refuses to attribute to a person.
-- **A pushback cancels the preceding terminal.** When the group has reached a terminal and the
-  next relevant line is a Stop-hook feedback line or a `stop_hook_summary` with non-empty
-  `hookErrors`, the group's terminal is withdrawn: `has_terminal` goes false, the committed text
-  stays pending, and the group completes only at a later terminal.
+- **A pushback cancels the preceding terminal.** When the group has reached a terminal and a
+  Stop-hook feedback line follows, the group's terminal is withdrawn: the committed text stays
+  pending, and the group completes only at a later terminal. The feedback line is the only block
+  signal: `stop_hook_summary`'s `hookErrors` also lists hooks that failed without blocking, after
+  which Claude does stop (measured), so treating it as a block would lose that reply.
 
-The parser currently skips every `system` line (`_MESSAGE_TYPES`). It starts reading exactly two
-subtypes, `stop_hook_summary` and `turn_duration`, and keeps ignoring the rest.
+**Hooks still running.** The feedback line is written when the blocking hook finishes, which can
+be well after the reply. While the transcript's tail is a reply with no `stop_hook_summary` or
+`turn_duration` after it, the watcher holds delivery for up to `_STOP_HOOK_WAIT_S` (120 s) of
+quiet instead of the 4 s settle window. This applies only to a transcript that has shown at least
+one stop record, so a Claude Code that writes none never makes replies wait. A hook that runs
+longer than the hold still splits the reply; that is logged (below).
 
-**Observability.** When a group that already had a terminal receives more assistant content with
-no pushback or real prompt between them, log `transcript_terminal_superseded`. That is the case
-tangle could not explain (a block that leaves no trace) and would still deliver early; the log
-tells us whether it happens in aidc sessions.
+**Observability.** Three events, each for a case that would otherwise be invisible:
+- `transcript_terminal_superseded`: a reply followed by more assistant work with no pushback or
+  prompt between them (a block that leaves no trace).
+- `transcript_late_pushback`: a pushback arrived after the reply before it was already delivered
+  (a hook slower than the hold).
+- `transcript_withdrawn_reply_dropped`: a reply was pushed back and Claude produced nothing more
+  before the next prompt, so nothing could be delivered for it. Logged once per reply.
 
 **Exactly-once is unchanged.** The watermark still anchors on the delivered terminal's uuid, and
 the delivery ledger (MCP-17) still guards the POST.
@@ -132,6 +141,12 @@ When a group with no terminal is followed by an interrupt line, the interrupt cl
 [Interrupted: the person at the terminal pressed Esc and stopped this task before Claude
 finished. The text below is what Claude had written up to that point, and it is incomplete.]
 ```
+
+**A prompt interrupted before Claude wrote anything** leaves no marker (see the facts table).
+Until the send side detects it (S1), the transcript shows it as a prompt with no reply. When a
+prompt Claude Code raised itself (a background task's notification) arrives next, the unanswered
+prompt is dropped from the turn's prompts, so the notification's reply is not labelled as
+answering it.
 
 The interrupt line is delivered without waiting for the next prompt. It still goes through the
 settle gate, because Claude Code can write more lines right after an interrupt.
@@ -175,7 +190,7 @@ the metallm session and written here before either side builds it.
 | `ok` | bool | `false` only when the turn ended on an API error Claude Code did not recover from. An interrupt is `true`. | design 09 |
 | `source` | string | Always `"agent_watch"` for this path. | design 09 |
 | `session` | string | The aidc session that produced the turn. | design 09 |
-| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. | MCP-23 |
+| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. MetaLLM does not read it (confirmed 2026-09-17); `speaker` carries what it needs. | MCP-23 |
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
 | `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. **Not sent until MetaLLM's record-without-wake change is deployed.** | MCP-27 |
 

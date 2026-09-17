@@ -221,7 +221,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     # prompt_origin: the prompt matched the one session_send injected above.
     assert post["json"] == {"content": "foo() returns the answer.", "ok": True,
                             "source": "agent_watch", "session": "proj",
-                            "prompt_origin": "orchestrator"}
+                            "prompt_origin": "orchestrator", "interrupted": False}
     assert post["headers"]["Authorization"] == "Bearer tok"
 
     # Exactly-once: re-draining (the watcher polls repeatedly) does NOT re-deliver.
@@ -380,6 +380,27 @@ async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
     assert status == "resent"
     assert turn.terminal_uuid == "a1"
     assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+
+
+async def test_resend_of_an_interrupt_keeps_its_note_and_flag(harness):
+    """An interrupt with nothing written has no reply text; resending it bare would
+    post an empty message. It goes out with the interrupt note and the flag."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    await h.drain()
+    interrupt = {"type": "user", "uuid": "i1", "interruptedMessageId": "m",
+                 "message": {"role": "user", "content": [
+                     {"type": "text", "text": "[Request interrupted by user]"}]}}
+    _agent_writes(h.base, "proj", "sid-A", [
+        _user("u1", "q1"), _assistant("a1", "", stop="tool_use"), interrupt])
+
+    status, turn = await h.resend()
+
+    assert status == "resent" and turn.terminal_uuid == "i1"
+    [post] = h.metallm.posts
+    assert post["json"]["content"] == ts.render_delivery("", [], interrupted=True)
+    assert post["json"]["interrupted"] is True
 
 
 async def test_resend_of_a_dead_lettered_reply_still_delivers(harness):

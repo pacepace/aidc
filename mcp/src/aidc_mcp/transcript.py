@@ -15,6 +15,14 @@ docs/design-09-callback-delivery.md):
     the turn; null is incomplete.
   - Deliverable content = "text" content blocks only (drop "thinking"/"tool_use").
   - Skip lines flagged isSidechain / isCompactSummary / isVisibleInTranscriptOnly.
+  - A Stop hook that blocks writes an isMeta "Stop hook feedback:" user line, when
+    the hook finishes, and Claude then keeps working. A stop that goes through
+    writes a system turn_duration line. Every stop with hooks configured writes a
+    system stop_hook_summary; its hookErrors lists blocks AND hooks that merely
+    failed, so it cannot tell the two apart (measured on Claude Code
+    2.1.270/2.1.274; see docs/design-10-turn-state-and-sending.md).
+  - Esc after Claude has written anything writes a "[Request interrupted by
+    user" line; Esc before that writes nothing at all.
   - `--continue` APPENDS to the same file (no re-emission); new files appear only
     on fresh sessions. So a per-file byte offset + terminal-uuid is a sound
     exactly-once key.
@@ -28,7 +36,7 @@ import os
 import re
 import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # Assistant stop_reason values that mark a turn as complete (control returns to user).
@@ -44,9 +52,21 @@ TERMINAL_STOP = frozenset({"end_turn", "stop_sequence"})
 INTERACTIVE_BLOCK_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 
 # Top-level line types that carry conversation messages. Everything else
-# (system, attachment, file-history-snapshot, last-prompt, ai-title, agent-name,
-# mode, permission-mode, queue-operation, ...) is ignored.
+# (attachment, file-history-snapshot, last-prompt, ai-title, agent-name, mode,
+# permission-mode, queue-operation, ...) is ignored, and so is every "system"
+# line except the two subtypes below.
 _MESSAGE_TYPES = frozenset({"user", "assistant"})
+
+# The user line Claude Code writes when a Stop hook blocks the stop. Claude keeps
+# working after it, so the reply before it is not the end of the turn. It is the
+# only reliable block signal: the stop_hook_summary's hookErrors also lists a hook
+# that crashed without blocking, after which Claude does stop.
+STOP_HOOK_FEEDBACK_PREFIX = "Stop hook feedback:"
+# System line subtypes about a stop. `stop_hook_summary` says the Stop hooks have
+# finished; `turn_duration` is written only once the stop went through, so it marks
+# the turn really over.
+_STOP_HOOK_SUMMARY = "stop_hook_summary"
+_TURN_DURATION = "turn_duration"
 
 
 @dataclass
@@ -67,6 +87,19 @@ class Turn:
     # was typed at the terminal (the delivered content then carries it),
     # "orchestrator" when every prompt was one the MCP injected, "" when unknown.
     prompt_origin: str = ""
+    # True when the person pressed Esc and cut the turn off; `text` is then what
+    # Claude had written up to that point, possibly nothing.
+    interrupted: bool = False
+    # How many replies in this group were followed by more assistant work with no
+    # Stop-hook pushback or prompt between them. A block that leaves no trace in
+    # the transcript would look like this, and would be delivered early; the
+    # watcher logs it so that case is visible. Not part of equality: it is a
+    # diagnostic, not what the turn is.
+    superseded: int = field(default=0, compare=False)
+    # True when a Stop-hook pushback arrived with no reply left in this read window
+    # to withdraw: the reply before it was already delivered as finished, because
+    # the hook ran longer than the watcher waited. Diagnostic, like `superseded`.
+    late_pushback: bool = field(default=False, compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -295,7 +328,92 @@ def human_prompt_text(obj: dict) -> str:
     return text
 
 
-def extract_completed_turns(objs: list[dict]) -> list[Turn]:
+def _is_interrupt_marker(obj: dict) -> bool:
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    return _text_of(msg).lstrip().startswith(_INTERRUPT_PREFIX)
+
+
+def _is_stop_hook_feedback(obj: dict) -> bool:
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    return _text_of(msg).lstrip().startswith(STOP_HOOK_FEEDBACK_PREFIX)
+
+
+def _system_subtype(obj: dict) -> str:
+    sub = obj.get("subtype")
+    return sub if isinstance(sub, str) else ""
+
+
+def _is_system_sourced_prompt(obj: dict) -> bool:
+    """A prompt Claude Code raised itself (a background task's notification),
+    as opposed to one a person or the MCP typed."""
+    source = obj.get("promptSource")
+    if isinstance(source, str) and source != "typed":
+        return True
+    origin = obj.get("origin")
+    return isinstance(origin, dict) and origin.get("kind") not in (None, "human")
+
+
+def ends_on_turn_end(objs: list[dict]) -> bool:
+    """True when the last line that can change a turn's state is Claude Code's
+    end-of-turn record (`system` / `turn_duration`).
+
+    The watcher uses this to deliver without waiting out its settle window. It is
+    only a shortcut: the record is undocumented and not always written, so its
+    absence changes nothing.
+    """
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            sub = _system_subtype(obj)
+            if sub == _TURN_DURATION:
+                return True
+            if sub == _STOP_HOOK_SUMMARY:
+                return False
+            continue
+        if otype in _MESSAGE_TYPES:
+            return False
+    return False
+
+
+def awaiting_stop_hooks(tail: list[dict], transcript: list[dict]) -> bool:
+    """True when `tail` ends on a reply whose Stop hooks have not reported yet.
+
+    A Stop hook's pushback is written only when the hook finishes, so until then
+    the reply looks finished. A version of Claude Code that writes stop records
+    (`transcript` shows at least one) writes one after every reply, so a reply with
+    none after it still has hooks running. A transcript with no stop records at
+    all says nothing, and this returns False.
+    """
+    if not any(obj.get("type") == "system"
+               and _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION)
+               for obj in transcript):
+        return False
+    for obj in reversed(tail):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            if _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION):
+                return False
+            continue
+        if otype == "user":
+            return False
+        if otype == "assistant":
+            if obj.get("isApiErrorMessage"):
+                return False  # API failures run no Stop hooks
+            raw_msg = obj.get("message")
+            msg = raw_msg if isinstance(raw_msg, dict) else {}
+            stop = msg.get("stop_reason")
+            return isinstance(stop, str) and stop in TERMINAL_STOP
+    return False
+
+
+def extract_completed_turns(objs: list[dict],
+                            dropped: list[str] | None = None) -> list[Turn]:
     """Return completed assistant turns in file order, COALESCED by user-prompt
     boundary.
 
@@ -316,7 +434,21 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     (``Turn.prompts``). Consecutive real user prompts with no assistant line
     between them (a slash command followed by its hook feedback, an auto-continue
     followed by the person's actual ask) all belong to the turn that follows, so
-    they accumulate until an assistant line starts the reply.
+    they accumulate until an assistant line starts the reply. A prompt Claude Code
+    raised itself (a background task's notification) drops any earlier prompt that
+    never got a reply: that one was interrupted before Claude wrote anything.
+
+    Stop-hook pushback: when a Stop hook blocks, Claude Code writes an isMeta
+    feedback line and Claude keeps working. The feedback line withdraws the group's
+    terminal, so the reply before it is not a completed turn; the group completes at
+    the terminal Claude reaches afterwards, with the text of every segment. isMeta
+    lines never close a group. When a group whose terminal was withdrawn is closed
+    without reaching another (Claude never resumed), the withdrawn terminal's uuid
+    is appended to `dropped` so the caller can log it.
+
+    Interrupts: a "[Request interrupted by user" line closes a group that has not
+    reached a terminal as an interrupted turn anchored on the marker, carrying the
+    text written so far (possibly none).
     """
     turns: list[Turn] = []
     pending: list[str] = []   # text accumulated in the current group (all lines)
@@ -326,10 +458,28 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
     committed_ok = True        # False when the committed terminal is an API error
     prompts: list[str] = []   # person-typed prompt lines that opened this group
     saw_assistant = False     # has an assistant line been seen since the prompt(s)?
+    interrupted = False       # was the group closed by an interrupt marker?
+    superseded = 0            # replies followed by more work with no pushback between
+    terminal_had_text = False  # did the terminal line itself carry reply text?
+    withdrawn_uuid = ""       # the last terminal a pushback withdrew in this group
+    late_pushback = False     # a pushback found no terminal to withdraw
+
+    def withdraw_terminal() -> None:
+        nonlocal committed, terminal_uuid, has_terminal, committed_ok, terminal_had_text
+        nonlocal withdrawn_uuid
+        # Keep `pending`: the withdrawn reply's text is part of the turn that
+        # eventually completes.
+        withdrawn_uuid = terminal_uuid
+        committed = ""
+        terminal_uuid = ""
+        has_terminal = False
+        committed_ok = True
+        terminal_had_text = False
 
     def flush() -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
-        nonlocal prompts, saw_assistant
+        nonlocal prompts, saw_assistant, interrupted, superseded, terminal_had_text
+        nonlocal withdrawn_uuid, late_pushback
         # Only a group that reached a terminal is a completed (deliverable) turn.
         # Deliver the text COMMITTED at that terminal — never the trailing `pending`
         # text from non-terminal lines after it. Those lines sit past the turn's
@@ -338,7 +488,11 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         # delivered with their own terminal on a later poll.
         if has_terminal:
             turns.append(Turn(terminal_uuid=terminal_uuid, text=committed.strip(),
-                              ok=committed_ok, prompts=tuple(prompts)))
+                              ok=committed_ok, prompts=tuple(prompts),
+                              interrupted=interrupted, superseded=superseded,
+                              late_pushback=late_pushback))
+        elif withdrawn_uuid and dropped is not None:
+            dropped.append(withdrawn_uuid)
         pending = []
         committed = ""
         terminal_uuid = ""
@@ -346,15 +500,43 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
         committed_ok = True
         prompts = []
         saw_assistant = False
+        interrupted = False
+        superseded = 0
+        terminal_had_text = False
+        withdrawn_uuid = ""
+        late_pushback = False
 
     for obj in objs:
         # `type` is attacker-influenced; an unhashable value would raise on the
         # `not in` membership test. A non-str type is not a message line anyway.
         otype = obj.get("type")
-        if not (isinstance(otype, str) and otype in _MESSAGE_TYPES) or _is_skippable(obj):
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            continue
+        if otype not in _MESSAGE_TYPES:
             continue
         role = _role(obj)
         if role == "user":
+            if obj.get("isMeta"):
+                # Written by Claude Code on the user's behalf (hook feedback, skill
+                # bodies, reminders): never a prompt, never a boundary.
+                if _is_stop_hook_feedback(obj):
+                    if has_terminal:
+                        withdraw_terminal()
+                    elif not saw_assistant:
+                        late_pushback = True
+                continue
+            if _is_interrupt_marker(obj):
+                uid = _uuid_of(obj)
+                if not has_terminal and (saw_assistant or prompts) and uid:
+                    committed = "\n".join(pending)
+                    terminal_uuid = uid
+                    has_terminal = True
+                    committed_ok = True
+                    interrupted = True
+                flush()
+                continue
             if _is_real_user_prompt(obj):
                 # A real prompt closes the previous group — but only once that
                 # group has assistant content. Back-to-back prompts with nothing
@@ -363,12 +545,18 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
                 # typed text accumulates rather than being dropped by a flush.
                 if saw_assistant:
                     flush()
+                elif _is_system_sourced_prompt(obj):
+                    prompts = []
                 typed = human_prompt_text(obj)
                 if typed:
                     prompts.append(typed)
             continue
 
         # assistant line
+        # Only a terminal that carried text is a reply; a thinking-only terminal
+        # followed by the text is how Claude Code writes every reply.
+        if has_terminal and committed_ok and terminal_had_text:
+            superseded += 1
         saw_assistant = True
         raw_message = obj.get("message")
         message = raw_message if isinstance(raw_message, dict) else {}
@@ -442,6 +630,7 @@ def extract_completed_turns(objs: list[dict]) -> list[Turn]:
                 committed = "\n".join(pending)
                 terminal_uuid = uid
                 has_terminal = True
+                terminal_had_text = bool(text)
                 # A real terminal SUPERSEDES a preceding API error in this group
                 # (the retry succeeded): deliver the successful answer, not a failure.
                 committed_ok = True
@@ -608,6 +797,19 @@ def content_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def delivery_fingerprint(turn: Turn) -> str:
+    """The delivery-ledger key for a turn.
+
+    A reply is keyed on its text (content_fingerprint). An interrupt is keyed on its
+    marker line too: two interrupts often carry the same text (frequently none), and
+    each is a separate event the orchestrator must hear about. The marker's uuid is
+    append-only, so a re-read of the same interrupt still dedups.
+    """
+    if turn.interrupted:
+        return content_fingerprint(f"interrupted\n{turn.terminal_uuid}\n{turn.text}")
+    return content_fingerprint(turn.text)
+
+
 def ledger_path(base_dir: Path, session: str, conversation_id: str) -> Path:
     """Delivery-ledger file, a sibling of the watermark (same state dir/keying)."""
     return Path(base_dir) / f"{_slug(session)}__{_slug(conversation_id)}.delivered"
@@ -760,13 +962,24 @@ TERMINAL_PROMPT_NOTE = (
 )
 
 
-def render_delivery(reply: str, terminal_prompts: Sequence[str]) -> str:
-    """The content to POST: the reply alone, or the terminal-typed prompt(s)
-    prepended under TERMINAL_PROMPT_NOTE with a rule between them and the reply."""
+INTERRUPTED_NOTE = (
+    "[Interrupted: the person at the terminal pressed Esc and stopped this task before "
+    "Claude finished. The text below is what Claude had written up to that point, and it "
+    "is incomplete.]"
+)
+NOTHING_WRITTEN = "Claude had not written anything yet."
+
+
+def render_delivery(reply: str, terminal_prompts: Sequence[str], *,
+                    interrupted: bool = False) -> str:
+    """The content to POST: the reply, opened by INTERRUPTED_NOTE when the turn was
+    cut off, and preceded by the terminal-typed prompt(s) under TERMINAL_PROMPT_NOTE
+    with a rule between them and the rest."""
+    body = f"{INTERRUPTED_NOTE}\n\n{reply.strip() or NOTHING_WRITTEN}" if interrupted else reply
     if not terminal_prompts:
-        return reply
+        return body
     quoted = "\n\n".join(p.strip() for p in terminal_prompts if p.strip())
-    return f"{TERMINAL_PROMPT_NOTE}\n{quoted}\n\n---\n\n{reply}"
+    return f"{TERMINAL_PROMPT_NOTE}\n{quoted}\n\n---\n\n{body}"
 
 
 # --- active transcript resolution --------------------------------------------

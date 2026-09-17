@@ -1317,3 +1317,237 @@ class TestTerminalPromptAttribution:
             await _drain(base, state, rec)
         assert rec.turns[0].text == "R"
         assert rec.turns[0].prompt_origin == "orchestrator"
+
+
+# --- Stop-hook pushback, end-of-turn record, interrupts (design-10 D1-D3) -------
+
+def _feedback(uuid, reason="BLOCKED: run the review first"):
+    return {"type": "user", "uuid": uuid, "isMeta": True,
+            "message": {"role": "user", "content": f"Stop hook feedback:\n{reason}"}}
+
+
+def _summary(errors=()):
+    return {"type": "system", "subtype": "stop_hook_summary", "hookErrors": list(errors)}
+
+
+_TURN_DURATION = {"type": "system", "subtype": "turn_duration", "durationMs": 1200}
+
+
+def _interrupt(uuid):
+    return {"type": "user", "uuid": uuid, "interruptedMessageId": "msg_1",
+            "message": {"role": "user",
+                        "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
+
+
+class _SettleHarness:
+    """Drives _drain_transcript_once with a settle window and a controllable clock."""
+
+    def __init__(self, tmp_path, seed):
+        self.base = tmp_path / "t"; self.state = tmp_path / "s"
+        self.seed = list(seed)
+        self.clock = [100.0]
+        self.rec = ContentRecorder()
+        _mk_transcript(self.base, "sess", "sid1", self.seed)
+
+    async def baseline(self):
+        await _baseline_watermark("sess", "conv", transcripts_base=self.base, state_dir=self.state)
+
+    def write(self, extra):
+        _mk_transcript(self.base, "sess", "sid1", self.seed + list(extra))
+
+    async def drain(self, at):
+        self.clock[0] = at
+        await _drain_transcript_once("sess", "conv", "http://cb", transcripts_base=self.base,
+                                     state_dir=self.state, post_fn=self.rec, sleep_fn=_nosleep,
+                                     settle_seconds=4.0, now_fn=lambda: self.clock[0])
+
+
+class TestPushbackDelivery:
+    async def test_pushback_waits_past_the_settle_window_and_delivers_once(self, tmp_path):
+        """The production failure: a Stop hook blocks the reply, Claude resumes ~13s
+        later, and the 4s settle window used to deliver the pre-pushback text as the
+        finished reply. Now nothing goes out until the real finish, and then one
+        delivery carries the whole exchange."""
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED")])
+        await h.baseline()
+        h.write([_user("u1", "fix it"), _assistant("a1", "Done."),
+                 _feedback("f1"), _summary(["BLOCKED"])])
+        await h.drain(100.0)
+        await h.drain(106.0)          # quiet for 6s > settle window
+        await h.drain(113.0)          # still quiet, Claude has not resumed
+        assert h.rec.turns == []
+        h.write([_user("u1", "fix it"), _assistant("a1", "Done."),
+                 _feedback("f1"), _summary(["BLOCKED"]),
+                 _assistant("a2", "Review clean."), _summary(), _TURN_DURATION])
+        await h.drain(114.0)
+        assert [(t.terminal_uuid, t.text) for t in h.rec.turns] == [
+            ("a2", ts.render_delivery("Done.\nReview clean.", ["fix it"]))]
+        await h.drain(130.0)          # exactly once
+        assert len(h.rec.turns) == 1
+
+    async def test_slow_hook_holds_the_reply_until_its_pushback(self, tmp_path):
+        """Measured: a blocking hook that runs 8s writes its pushback 8s after the
+        reply, past the 4s settle window. The reply must not go out while Claude Code
+        has written no stop record for it yet."""
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED"),
+                                      _summary(), _TURN_DURATION])
+        await h.baseline()
+        h.write([_user("u1", "q"), _assistant("a1", "SLOWTEST")])
+        await h.drain(100.0)
+        await h.drain(108.0)          # 8s quiet, hook still running
+        assert h.rec.turns == []
+        h.write([_user("u1", "q"), _assistant("a1", "SLOWTEST"), _feedback("f1"),
+                  _summary(["BLOCK"]), _assistant("a2", "ACK-SLOW"), _summary(),
+                  _TURN_DURATION])
+        await h.drain(110.0)
+        assert [t.text for t in h.rec.turns] == [
+            ts.render_delivery("SLOWTEST\nACK-SLOW", ["q"])]
+
+    async def test_reply_with_no_stop_record_is_delivered_after_the_hook_wait(self, tmp_path):
+        """If the stop record never comes, the reply still goes out once the hook
+        wait has passed: a missing record costs time, never the reply."""
+        from aidc_mcp.tools import _STOP_HOOK_WAIT_S
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED"),
+                                      _summary(), _TURN_DURATION])
+        await h.baseline()
+        h.write([_user("u1", "q"), _assistant("a1", "A.")])
+        await h.drain(100.0)
+        await h.drain(100.0 + _STOP_HOOK_WAIT_S - 1)
+        assert h.rec.turns == []
+        await h.drain(100.0 + _STOP_HOOK_WAIT_S)
+        assert [t.terminal_uuid for t in h.rec.turns] == ["a1"]
+
+    async def test_hook_that_failed_without_blocking_still_delivers(self, tmp_path):
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED")])
+        await h.baseline()
+        h.write([_user("u1", "q"), _assistant("a1", "CRASHTEST"),
+                 _summary(["Failed with non-blocking status code: exit 1"]), _TURN_DURATION])
+        await h.drain(100.0)
+        assert [t.terminal_uuid for t in h.rec.turns] == ["a1"]
+
+    async def test_late_pushback_and_dropped_reply_are_logged(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        # Late pushback: the read window starts after an already-delivered reply.
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _feedback("f0"), _assistant("a1", "more")])
+        with patch("aidc_mcp.tools.log_event") as log:
+            await _drain(base, state, rec)
+        assert "transcript_late_pushback" in [c.args[0] for c in log.call_args_list]
+        # Dropped: pushed back, then a new prompt with no reply in between.
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _feedback("f0"), _assistant("a1", "more"),
+            _user("u2", "q"), _assistant("a2", "A."), _feedback("f1"),
+            _user("u3", "next"), _assistant("a3", "B.")])
+        with patch("aidc_mcp.tools.log_event") as log:
+            await _drain(base, state, rec)
+        dropped = [c.kwargs for c in log.call_args_list
+                   if c.args[0] == "transcript_withdrawn_reply_dropped"]
+        assert [d["turn_uuid"] for d in dropped] == ["a2"]
+
+    async def test_unexplained_continuation_is_logged(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _user("u1", "q"), _assistant("a1", "A."), _assistant("a2", "B.")])
+        with patch("aidc_mcp.tools.log_event") as log:
+            await _drain(base, state, rec)
+        events = [c.args[0] for c in log.call_args_list]
+        assert "transcript_terminal_superseded" in events
+
+
+class TestTurnDurationShortcut:
+    async def test_turn_duration_delivers_without_waiting_for_quiet(self, tmp_path):
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED")])
+        await h.baseline()
+        h.write([_user("u1", "q"), _assistant("a1", "A."), _summary(), _TURN_DURATION])
+        await h.drain(100.0)          # first sight of the growth, no quiet at all
+        assert [t.terminal_uuid for t in h.rec.turns] == ["a1"]
+        await h.drain(101.0)
+        await h.drain(110.0)
+        assert [t.terminal_uuid for t in h.rec.turns] == ["a1"]   # exactly once
+
+    async def test_without_turn_duration_the_settle_window_still_applies(self, tmp_path):
+        h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED")])
+        await h.baseline()
+        h.write([_user("u1", "q"), _assistant("a1", "A."), _summary()])
+        await h.drain(100.0)
+        await h.drain(102.0)
+        assert h.rec.turns == []
+        await h.drain(105.0)
+        assert [t.terminal_uuid for t in h.rec.turns] == ["a1"]
+
+
+class TestInterruptDelivery:
+    async def test_interrupt_is_delivered_with_the_note_and_flag(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        ts.record_sent_prompt(state, "sess", "refactor the parser")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "refactor the parser"), _assistant("a1", "Reading it now.", stop="tool_use"),
+            _assistant("a2", None, stop="tool_use"), _interrupt("i1")])
+        await _drain(base, state, rec)
+        assert len(rec.turns) == 1
+        out = rec.turns[0]
+        assert out.interrupted is True and out.ok is True
+        assert out.prompt_origin == "orchestrator"
+        assert out.text == ts.INTERRUPTED_NOTE + "\n\nReading it now."
+
+    async def test_interrupt_with_nothing_written_is_delivered(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "go"), _assistant("a1", None, stop="tool_use"), _interrupt("i1")])
+        await _drain(base, state, rec)
+        assert [t.text for t in rec.turns] == [ts.render_delivery(
+            "", ["go"], interrupted=True)]
+        assert ts.NOTHING_WRITTEN in rec.turns[0].text
+
+    async def test_two_empty_interrupts_are_both_delivered_then_never_again(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        body = seed + [
+            _user("u1", "one"), _assistant("a1", None, stop="tool_use"), _interrupt("i1"),
+            _user("u2", "two"), _assistant("a2", None, stop="tool_use"), _interrupt("i2")]
+        _mk_transcript(base, "sess", "sid1", body)
+        await _drain(base, state, rec)
+        assert [t.terminal_uuid for t in rec.turns] == ["i1", "i2"]
+        # A watermark rewind must not replay either: the ledger holds both.
+        mark = ts.load_watermark(state, "sess", "conv")
+        mark.last_delivered_uuid = "a0"
+        ts.save_watermark(state, mark)
+        await _drain(base, state, rec)
+        assert [t.terminal_uuid for t in rec.turns] == ["i1", "i2"]
+
+    async def test_payload_always_carries_interrupted(self):
+        captured = []
+
+        async def ok_post(url, **kw):
+            captured.append(kw.get("json") or {})
+            return MagicMock(is_success=True, status_code=202, text="")
+
+        with (
+            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("aidc_mcp.tools.log_event"),
+        ):
+            await _post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="s")
+            await _post_turn("http://cb", "conv", ts.Turn("i1", "x", interrupted=True),
+                             attempt=0, session="s")
+        assert [c["interrupted"] for c in captured] == [False, True]
+        assert [c["ok"] for c in captured] == [True, True]

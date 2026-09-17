@@ -13,6 +13,27 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **A Stop hook that pushes back no longer makes the watcher report a reply as finished
+  early.** When a Stop hook blocked Claude's stop (prawduct's gates do this routinely),
+  Claude Code wrote the block into the transcript and Claude kept working, but the watcher
+  read the block's feedback line as a new prompt and delivered the text before it as the
+  finished reply. The rest arrived later as an unprompted second message. The pushback now
+  reopens the turn, and a reply is held while its Stop hooks are still running (up to two
+  minutes), so the orchestrator gets one reply when Claude really stops. A hook that crashes
+  without blocking no longer counts as a pushback.
+- **A reply to a background task's notification is no longer labelled as answering a prompt
+  that was interrupted before Claude wrote anything.**
+
+### Added
+- **Interrupts reach the orchestrator.** When someone presses Esc after Claude has started
+  on a task, the watcher delivers what Claude had written so far, opened by a note that the
+  person at the terminal stopped it, and the callback carries `interrupted: true`. It used to
+  be dropped without a word. `ok` stays true: an interrupt is not a failure.
+- **Replies arrive a few seconds sooner.** When Claude Code writes its end-of-turn record,
+  the watcher delivers at once instead of waiting out `metallm.turn_settle_seconds`. Without
+  the record the wait applies as before.
+
 ## [1.6.0] - 2026-09-12
 
 ### Added

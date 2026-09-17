@@ -381,7 +381,9 @@ the safer default for a conversation.)
 **Payload** is backward compatible with the original contract, so the MetaLLM side needs no
 change: `POST {callback_url}/api/v1/internal/callback/{conversation_id}` with
 `{"content": <text>, "ok": <bool>, "source": "agent_watch", "session": <name>,
-"prompt_origin": "terminal" | "orchestrator" | ""}` and `Authorization: Bearer <mcp-token>`.
+"prompt_origin": "terminal" | "orchestrator" | "", "interrupted": <bool>}` and
+`Authorization: Bearer <mcp-token>`. The body is now pinned, field by field, in
+`docs/design-10-turn-state-and-sending.md` D5; that table is authoritative.
 `session` names which aidc session finished the turn; `prompt_origin` says whose prompt it
 answers (next section).
 

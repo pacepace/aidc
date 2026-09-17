@@ -357,10 +357,14 @@ _sent_awaiting_echo: dict[str, tuple[str, float]] = {}
 # can be trusted (see _LOG_STALL_S). Mirrored by a marker file per session in the
 # watcher-state dir; read it through _working_indicator_known.
 _working_indicator_seen: set[str] = set()
-# (session, prompt uuid) the watcher has reported as interrupted before Claude wrote
-# anything. The send path waits for that report before treating such a session as
-# free, so the orchestrator hears about the interrupt before its next prompt lands.
-_reported_interrupts: set[tuple[str, str]] = set()
+# session -> uuid of the latest prompt the watcher reported as interrupted before Claude
+# wrote anything. The send path waits for that report before treating such a session
+# as free, so the orchestrator hears about the interrupt before its next prompt lands,
+# and afterwards treats that prompt's turn as over. Mirrored on disk, because the
+# watcher's watermark is past the prompt once it is reported: after a restart nothing
+# would report it again, and the session would read busy for good. Use
+# _interrupt_reported / _record_reported_interrupt.
+_reported_interrupts: dict[str, str] = {}
 # Last (reason, why) the free check logged per session: it logs on change only.
 _last_free_verdict: dict[str, tuple[str, str]] = {}
 # Last raw screen capture per session, kept for the unrecognized-screen excerpt.
@@ -395,6 +399,32 @@ def _working_indicator_known(name: str) -> bool:
         _working_indicator_seen.add(name)
         return True
     return False
+
+
+def _reported_interrupt_path(name: str) -> Path:
+    return Path(_WATCHER_STATE_DIR) / f"{ts._slug(name)}.interrupt-reported"
+
+
+def _interrupt_reported(name: str, prompt_uuid: str) -> bool:
+    if name not in _reported_interrupts:
+        try:
+            _reported_interrupts[name] = _reported_interrupt_path(name).read_text().strip()
+        except OSError:
+            return False
+    return _reported_interrupts[name] == prompt_uuid
+
+
+def _record_reported_interrupt(name: str, prompt_uuid: str) -> None:
+    # Only the latest unanswered prompt can be waiting on this report, so one per
+    # session is all that is kept.
+    _reported_interrupts[name] = prompt_uuid
+    try:
+        path = _reported_interrupt_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(prompt_uuid)
+    except OSError as exc:
+        log_event("interrupt_reported_persist_failed", session=name,
+                  error_type=type(exc).__name__)
 
 
 async def _read_screen(container: str, name: str) -> scr.ScreenState:
@@ -476,12 +506,16 @@ async def _session_state(container: str, name: str) -> SessionState:
             return SessionState(True, screen, TURN_RUNNING, "sent_prompt_not_in_log")
     if status != "ok":
         return SessionState(True, screen, TURN_IDLE, f"transcript_{status}")
+    cut_off = ts.unanswered_prompt_turn(objs)
+    if cut_off is not None and _interrupt_reported(name, cut_off.terminal_uuid):
+        # Already reported to the orchestrator as stopped before Claude wrote anything:
+        # that turn is over. Anything Claude does next writes to the transcript, and a
+        # new prompt changes the tail, so neither is mistaken for this.
+        return SessionState(True, screen, TURN_IDLE, "interrupt_reported")
     turn, why = _turn_verdict(name, objs, time.time() - mtime, screen)
-    if turn == TURN_IDLE and why in _STOPPED_BY_SCREEN:
-        cut_off = ts.unanswered_prompt_turn(objs)
-        if (cut_off is not None and name in _session_watchers
-                and (name, cut_off.terminal_uuid) not in _reported_interrupts):
-            return SessionState(True, screen, TURN_RUNNING, "interrupt_not_reported_yet")
+    if (turn == TURN_IDLE and why in _STOPPED_BY_SCREEN and cut_off is not None
+            and name in _session_watchers):
+        return SessionState(True, screen, TURN_RUNNING, "interrupt_not_reported_yet")
     return SessionState(True, screen, turn, why)
 
 
@@ -997,13 +1031,13 @@ def _forget_session_send_state(name: str) -> None:
     _last_free_verdict.pop(name, None)
     _last_screen_raw.pop(name, None)
     _waiting_notice_shown.discard(name)
-    for reported in [r for r in _reported_interrupts if r[0] == name]:
-        _reported_interrupts.discard(reported)
-    try:
-        _working_seen_path(name).unlink(missing_ok=True)
-    except OSError as exc:
-        log_event("working_text_seen_forget_failed", session=name,
-                  error_type=type(exc).__name__)
+    _reported_interrupts.pop(name, None)
+    for path in (_working_seen_path(name), _reported_interrupt_path(name)):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log_event("session_state_forget_failed", session=name, path=str(path),
+                      error_type=type(exc).__name__)
 
 
 # Sessions whose persisted queue file has been read into _pending_sends by this
@@ -1570,11 +1604,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
         _unanswered_polls[key] = polls
         return None
     _unanswered_polls.pop(key, None)
-    # Only the latest unanswered prompt can be waiting on this report, so one entry per
-    # session is all that is kept.
-    for older in [r for r in _reported_interrupts if r[0] == session]:
-        _reported_interrupts.discard(older)
-    _reported_interrupts.add((session, turn.terminal_uuid))
+    _record_reported_interrupt(session, turn.terminal_uuid)
     log_event("transcript_interrupted_before_output", session=session,
               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
               quiet_s=round(quiet, 1), why=why)

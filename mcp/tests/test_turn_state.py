@@ -253,9 +253,27 @@ class TestSessionStateSeparatesTurnFromInputBox:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             state = await tools._session_state("aidc-proj-dev", "proj")
             assert (state.turn, state.why) == (tools.TURN_RUNNING, "interrupt_not_reported_yet")
-            tools._reported_interrupts.add(("proj", "u2"))
+            tools._record_reported_interrupt("proj", "u2")
             state = await tools._session_state("aidc-proj-dev", "proj")
-            assert (state.turn, state.why) == (tools.TURN_IDLE, "status_row_idle")
+            assert (state.turn, state.why) == (tools.TURN_IDLE, "interrupt_reported")
+        finally:
+            tools._session_watchers.pop("proj", None)
+
+    async def test_a_reported_interrupt_still_frees_the_session_after_a_restart(self, session):
+        """Joint test, 2026-09-17: the watcher's watermark is past a prompt it reported,
+        so after a restart nothing reports it again. Remembered only in memory, the
+        session read busy with the working text unknown, and a queued prompt waited for
+        good. The report is on disk, and the turn counts as over whatever the screen
+        shows, even with the prompt cleared from the box."""
+        tools._session_watchers["proj"] = object()
+        try:
+            session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+            tools._record_reported_interrupt("proj", "u2")
+            tools._reported_interrupts.clear()          # the MCP restarts
+            assert await session.check() == ""
+            assert tools._last_free_verdict["proj"][1] == "interrupt_reported"
+            session.write([*FINISHED, _typed("u2", "essay"), _typed("u3", "next")], age=30.0)
+            assert await session.check() == "claude_busy"   # a new prompt is a new turn
         finally:
             tools._session_watchers.pop("proj", None)
 
@@ -301,7 +319,7 @@ class TestEviction:
     def _fill(self):
         tools._working_indicator_seen.add("proj")
         tools._sent_awaiting_echo["proj"] = ("x", NOW)
-        tools._reported_interrupts.add(("proj", "u1"))
+        tools._record_reported_interrupt("proj", "u1")
         tools._last_free_verdict["proj"] = ("", "log_finished")
 
     def test_unwatching_keeps_the_send_paths_state(self):
@@ -318,7 +336,7 @@ class TestEviction:
         tools._forget_session_send_state("proj")
         assert "proj" not in tools._working_indicator_seen
         assert "proj" not in tools._sent_awaiting_echo
-        assert ("proj", "u1") not in tools._reported_interrupts
+        assert not tools._interrupt_reported("proj", "u1")
         assert "proj" not in tools._last_free_verdict
 
 
@@ -469,7 +487,7 @@ class TestInterruptedBeforeOutputDelivery:
         await self.drain()
         await self.drain()
         assert [t.terminal_uuid for t in self.posted] == ["u1", "u2"]
-        assert {r for r in tools._reported_interrupts if r[0] == "sess"} == {("sess", "u2")}
+        assert tools._reported_interrupts["sess"] == "u2"
 
     async def test_a_prompt_whose_turn_ended_with_no_reply_is_not_called_interrupted(
             self, tmp_path):
@@ -537,4 +555,4 @@ class TestInterruptedBeforeOutputDelivery:
         assert turn.prompt_origin == "orchestrator"
         assert turn.text == ts.render_delivery("", [], interrupted=True)
         assert ts.consume_sent_prompt(self.state, "sess", "refactor the parser") is False
-        assert ("sess", "u1") in tools._reported_interrupts
+        assert tools._interrupt_reported("sess", "u1")

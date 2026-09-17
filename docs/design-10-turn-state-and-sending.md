@@ -341,7 +341,11 @@ consecutive polls with Claude running at its input box: an interrupted turn anch
 prompt's line, with "Claude had not written anything yet", delivered once and consuming the
 sent-record entry. Until it has reported that prompt, the send path holds a session with an open
 watcher as `interrupt_not_reported_yet`, so the orchestrator hears about the interrupt before its
-next prompt lands. A tail made of a local command's output or a background task's notification is
+next prompt lands. Once reported, that prompt's turn is over (`interrupt_reported`) whatever the
+screen shows, and the report is kept in `watcher-state/<session>.interrupt-reported`: the
+watcher's watermark is past the prompt by then, so after a restart nothing would report it again,
+and a session remembered only in memory read busy for good (found in the joint test, when a
+queued prompt waited behind an interrupt reported before a restart). A tail made of a local command's output or a background task's notification is
 never reported; a slash command with no output (a skill Claude was about to run) is.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)

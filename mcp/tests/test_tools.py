@@ -126,7 +126,51 @@ class TestSessionCreate:
         res = await _create_tool(monkeypatch)(name="proj")
         assert res["ok"] is False and "repo" in res["error"]
 
+    async def test_a_path_outside_the_exposed_home_is_refused(self, monkeypatch, tmp_path):
+        """repo and workspace become HOST bind mounts in the new session, but this server
+        checks them against its own filesystem. Inside aidc-mcp those differ: /mnt, /srv
+        and /tmp exist in the image, so naming one would mount the HOST's directory into
+        the session (on WSL2, /mnt is every Windows drive)."""
+        monkeypatch.setenv("AIDC_HOST_HOME", str(tmp_path / "home"))
+        (tmp_path / "home").mkdir()
+
+        def boom(*a, **k):
+            raise AssertionError("the CLI must not run for a refused path")
+
+        monkeypatch.setattr(tools, "_run_cli", boom)
+        create = _create_tool(monkeypatch)
+        for repo in ("/mnt", "/srv/x", str(tmp_path / "elsewhere")):
+            res = await create(name="proj", repo=repo, ctx=None)
+            assert res["ok"] is False, repo
+            assert res["error_code"] == "path_not_allowed", repo
+            assert str(tmp_path / "home") in res["error"]
+
+    async def test_a_workspace_outside_it_is_refused_too(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / "repo").mkdir(parents=True)
+        monkeypatch.setenv("AIDC_HOST_HOME", str(home))
+        res = await _create_tool(monkeypatch)(
+            name="proj", repo=str(home / "repo"), workspace="/srv", ctx=None)
+        assert res["ok"] is False and res["error_code"] == "path_not_allowed"
+
+    async def test_a_path_inside_the_exposed_home_is_allowed(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / "repo").mkdir(parents=True)
+        monkeypatch.setenv("AIDC_HOST_HOME", str(home))
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        res = await _create_tool(monkeypatch)(name="proj", repo=str(home / "repo"), ctx=None)
+        assert res["ok"] is True
+
+    async def test_no_host_home_means_no_extra_restriction(self, monkeypatch, tmp_path):
+        """On the host (not inside aidc-mcp) the CLI sees the same filesystem the mounts
+        are resolved against, so the path check there is the CLI's own."""
+        monkeypatch.delenv("AIDC_HOST_HOME", raising=False)
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        res = await _create_tool(monkeypatch)(name="proj", repo="/srv/anything", ctx=None)
+        assert res["ok"] is True
+
     async def test_happy_path(self, monkeypatch):
+        monkeypatch.delenv("AIDC_HOST_HOME", raising=False)
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
         res = await _create_tool(monkeypatch)(name="proj", repo="/host/repo", ctx=None)
         assert res["ok"] is True

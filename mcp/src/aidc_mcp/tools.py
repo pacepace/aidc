@@ -92,6 +92,17 @@ def _yaml_scalar(raw: str) -> str:
     return value[:cut].strip()
 
 
+def _under(parent: str, path: str) -> bool:
+    """Whether `path` is `parent` or inside it, with no `..` left in either. Used to
+    keep a caller's paths inside the one tree the operator exposed to this server."""
+    try:
+        root = Path(parent).resolve()
+        candidate = Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return candidate == root or root in candidate.parents
+
+
 def _metallm_setting(key: str) -> str | None:
     """The scalar `metallm.<key>` from the aidc config file, or None when unset.
 
@@ -394,11 +405,11 @@ _session_instances: dict[str, str] = {}
 
 
 def _working_seen_path(name: str) -> Path:
-    return Path(_WATCHER_STATE_DIR) / f"{ts._slug(name)}.working-text-seen"
+    return Path(_WATCHER_STATE_DIR) / f"{ts.slug(name)}.working-text-seen"
 
 
 def _reported_interrupt_path(name: str) -> Path:
-    return Path(_WATCHER_STATE_DIR) / f"{ts._slug(name)}.interrupt-reported"
+    return Path(_WATCHER_STATE_DIR) / f"{ts.slug(name)}.interrupt-reported"
 
 
 def _working_indicator_known(name: str) -> bool:
@@ -591,7 +602,7 @@ def _save_unrecognized_screen(name: str) -> None:
     try:
         d = Path(_WATCHER_STATE_DIR) / "screens"
         d.mkdir(parents=True, exist_ok=True)
-        (d / f"{ts._slug(name)}-unrecognized.ansi").write_text(raw, encoding="utf-8")
+        (d / f"{ts.slug(name)}-unrecognized.ansi").write_text(raw, encoding="utf-8")
     except OSError as exc:
         log_event("session_screen_save_failed", session=name, error_type=type(exc).__name__)
 
@@ -733,7 +744,7 @@ def _write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) 
         dl.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(
             f"{queued.enqueued_at}\n{queued.text}".encode()).hexdigest()[:16]
-        (dl / f"send__{ts._slug(session)}__{digest}.json").write_text(
+        (dl / f"send__{ts.slug(session)}__{digest}.json").write_text(
             json.dumps({"session": session, "prompt": queued.text, "reason": reason,
                         "enqueued_at": queued.enqueued_at,
                         "paste_attempts": queued.paste_attempts,
@@ -1510,7 +1521,7 @@ def _write_dead_letter(state_dir: Path, session: str, conversation_id: str, turn
     """Persist an undelivered turn so it is recorded, not silently lost (MCP-18)."""
     dl = Path(state_dir) / "dead-letter"
     dl.mkdir(parents=True, exist_ok=True)
-    name = f"{ts._slug(session)}__{ts._slug(conversation_id)}__{ts._slug(turn.terminal_uuid)}.json"
+    name = f"{ts.slug(session)}__{ts.slug(conversation_id)}__{ts.slug(turn.terminal_uuid)}.json"
     (dl / name).write_text(
         json.dumps({"session": session, "conversation_id": conversation_id,
                     "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok,
@@ -2371,6 +2382,7 @@ ERROR_CODES = frozenset({
     "no_reply",            # session_resend: nothing completed to resend
     "callback_failed",     # session_resend: the POST to the orchestrator failed
     "not_found",           # a file or directory the call reads is missing
+    "path_not_allowed",    # session_create: a path outside what the operator exposed
 })
 
 
@@ -2441,6 +2453,21 @@ def register(app: Any) -> None:
         if not repo:
             return _envelope_err("repo argument is required (absolute host path)",
                                  code="invalid_argument")
+        # `repo` and `workspace` become HOST bind mounts in the new session, but this
+        # server checks them against its own filesystem. Inside aidc-mcp those
+        # namespaces differ: /mnt, /srv, /opt and /tmp exist in the image, so a caller
+        # naming one would have had the HOST's directory mounted read-write into the
+        # session it just created (on WSL2 /mnt is every Windows drive). The operator
+        # exposed one tree — their home — so that is the only tree a caller may name.
+        exposed = os.environ.get("AIDC_HOST_HOME", "")
+        if exposed:
+            for label, value in (("repo", repo), ("workspace", workspace or "")):
+                if value and not _under(exposed, value):
+                    log_event("tool_call", tool="session_create", session=name,
+                              refused="path_not_allowed", path=value)
+                    return _envelope_err(
+                        f"{label} must be inside {exposed} (the directory this server was "
+                        f"given); '{value}' is outside it", code="path_not_allowed")
         args = ["create", name, "--profile", profile, "--repo", repo]
         if workspace:
             args += ["--workspace", workspace]

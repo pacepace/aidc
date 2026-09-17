@@ -931,9 +931,17 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _slug(value: str) -> str:
-    """Filesystem-safe token for a (session|conversation_id) component."""
+def slug(value: str) -> str:
+    """Filesystem-safe token for a (session|conversation_id) component.
+
+    Public because it is a contract between the modules, not an implementation detail:
+    tools.py names the marker files for a session's send-path state with it, and those
+    have to land beside the watermark and queue files this module writes.
+    """
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
+
+
+_slug = slug   # the old private name, still used inside this module
 
 
 def watermark_path(base_dir: Path, session: str, conversation_id: str) -> Path:

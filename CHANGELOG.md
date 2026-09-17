@@ -49,6 +49,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   prompt inside the running turn without recording it as a prompt, so its record used to sit for
   24 hours, where the same words typed by a person could match it and be delivered as the
   orchestrator's own.
+- **`session_create` refuses a path outside the directory you exposed.** `repo` and `workspace`
+  become host bind mounts in the new session, but the server checked them against its own
+  filesystem: a caller naming a path that exists in both (`/mnt`, which on WSL2 is every Windows
+  drive, `/srv`, `/tmp`) would have had the host's directory mounted read-write into the session
+  it just created. They must now be inside the home you exposed, and `aidc create` says "not
+  reachable from here" instead of claiming a real host path does not exist.
+- **`aidc mcp status` says whether this server offers `session_create`**, read from the running
+  container rather than the config, since the two differ until a restart.
 - **`session_create` is offered only when you turn it on.** `mcp.session_create: true` mounts your
   home into the `aidc-mcp` container, which is what lets it read a repo and write Claude's
   per-project memory for a session it creates. Off (the default) the tool is not registered at all,

@@ -17,7 +17,6 @@ __pycache__/
 .venv/
 venv/
 
-# Prawduct plugin artifacts (governance files written locally, not committed)
 # Prawduct's own state: the session files below are ignored individually (see the
 # "Prawduct session files" block); the product-owned ones — project-state.yaml,
 # backlog.md, change-log.md, learnings.md and artifacts/ — are committed.

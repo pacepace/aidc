@@ -118,7 +118,7 @@ mcp_start() {
         -e "AIDC_MCP_PORT=${AIDC_MCP_PORT}" \
         -e "AIDC_HOST_HOME=${HOME}" \
         -e "AIDC_MCP_STATE_HOST=${AUDIT_DIR}" \
-        -e "AIDC_AUDIT_HOST=${AIDC_AUDIT_DIR}" \
+        -e "AIDC_MCP_MOUNTS=$(AIDC_MCP_STATE_DIR="$AUDIT_DIR" mcp_mounts_env)" \
         -v "${AIDC_AUDIT_DIR}:/var/aidc-audit:rw" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
         ${CREATE_ARGS[@]+"${CREATE_ARGS[@]}"} \
@@ -149,6 +149,15 @@ mcp_status() {
     printf '  bind:        %s:%s\n' "$AIDC_MCP_BIND_ADDRESS" "$AIDC_MCP_PORT"
     printf '  token file:  %s\n' "$TOKEN_FILE"
     printf '  audit dir:   %s\n' "$AUDIT_DIR"
+    # From the RUNNING container, not the config: the two differ until a restart.
+    if docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | grep -qx 'AIDC_MCP_SESSION_CREATE=true'; then
+        printf '  session_create: offered (this server can create sessions; %s is mounted)\n' \
+            "$(docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                2>/dev/null | sed -n 's/^AIDC_HOST_HOME=//p' | head -1)"
+    else
+        printf '  session_create: not offered (mcp.session_create is off for this container)\n'
+    fi
     if [ -f "${AUDIT_DIR}/access.log" ]; then
         last_access=$(tail -1 "${AUDIT_DIR}/access.log" 2>/dev/null | head -c 200)
         [ -n "$last_access" ] && printf '  last event:  %s\n' "$last_access"

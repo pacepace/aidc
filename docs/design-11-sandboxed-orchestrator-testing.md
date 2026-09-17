@@ -79,6 +79,10 @@ container's published binding wins, because that is what is listening. Otherwise
 `aidc create` for `session_create`, with `HOME=/root`), from the `/aidc-config` mount. A
 malformed address or port stops `aidc create` with a message naming the key.
 
+MCP-12's deny rule is a Squid rule, so it protects a session whose egress goes through that
+Squid: `--egress direct` and `--network` attachments route around it by design, and both say so
+at create time.
+
 `session_create` is offered only when the operator sets `mcp.session_create: true`, which is also
 what mounts their home into the container: creating a session reads a repo and writes Claude's
 per-project memory, both host paths the container otherwise cannot see. Off (the default) the tool

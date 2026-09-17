@@ -106,11 +106,17 @@ notify_webhook: ""
 mcp:
   bind_address: 127.0.0.1   # change to your ZeroTier / Tailscale interface IP for remote access
   port: 7878
+  session_create: false     # offer the session_create tool. Creating a session reads a repo and
+                            # writes Claude's per-project memory on the HOST, so turning this on
+                            # mounts your home into the aidc-mcp container. Off, the tool is not
+                            # offered at all.
 
 # Only relevant if an orchestrator drives sessions over MCP (the key keeps its
 # historical name): where session_invoke_async / session_send POST results back.
 metallm:
   callback_url: ""           # base URL of the orchestrator's callback endpoint, e.g. https://orchestrator.example.com
+  send_speaker: false        # add "speaker": "human"|"agent" to session_send replies. Leave off until
+                             # the orchestrator records human turns instead of dropping them.
 EOF
 }
 
@@ -237,11 +243,12 @@ aidc_host_home() {
 # aidc_local_path is the same lookup for callers that just want the path.
 aidc_resolve_local() {
     local p="${1:-}" pair host mount
-    for pair in "${AIDC_MCP_STATE_HOST:-}|${AIDC_MCP_STATE_MOUNT:-/var/log/aidc-mcp}" \
-                "${AIDC_AUDIT_HOST:-}|${AIDC_AUDIT_MOUNT:-/var/aidc-audit}"; do
+    for pair in $(printf '%s' "${AIDC_MCP_MOUNTS:-}" | tr ',' ' '); do
         host="${pair%%|*}"
         mount="${pair##*|}"
-        [ -n "$host" ] || continue
+        if [ -z "$host" ] || [ -z "$mount" ]; then
+            continue
+        fi
         case "$p" in
             "$host"|"$host"/*)
                 # The mount root is who this tree belongs to on the host: see
@@ -287,6 +294,17 @@ aidc_mkdir_host() {
             && [ ! -e "$(dirname "$top")" ]; do
         top=$(dirname "$top")
     done
+    # Never step outside the mount this path resolved into: an operator config with a
+    # `..` in it (audit_dir: ~/aidc-audit/../..) would otherwise hand the chown below a
+    # tree nobody meant to touch.
+    case "$(cd "$(dirname "$write")" 2>/dev/null && pwd -P || printf '%s' "$(dirname "$write")")" in
+        "$AIDC_LOCAL_MOUNT"|"$AIDC_LOCAL_MOUNT"/*|"") ;;
+        *) if [ -n "${AIDC_LOCAL_MOUNT:-}" ]; then
+               printf '[aidc] error: refusing to create %s: it resolves outside %s\n' \
+                   "$write" "$AIDC_LOCAL_MOUNT" >&2
+               return 1
+           fi ;;
+    esac
     mkdir -p "$write" || return 1
     AIDC_HOST_OWNER=""
     if [ -n "${AIDC_HOST_HOME:-}" ] && [ -n "${AIDC_LOCAL_MOUNT:-}" ]; then
@@ -295,17 +313,38 @@ aidc_mkdir_host() {
         # that ran before this fix.
         owner=$(stat -c '%u:%g' "$AIDC_LOCAL_MOUNT" 2>/dev/null || true)
         if [ -n "$owner" ] && [ "$owner" != "$(id -u):$(id -g)" ]; then
-            chown -R "$owner" "$top" 2>/dev/null || true
+            # Loud on failure: a directory left owned by this process is one the
+            # session's own mirror cannot write, and nothing downstream would say so.
+            # printf, not die/err: this library is sourced on its own by tests and by
+            # callers that have not sourced common.sh, where `die` would be a
+            # command-not-found that the || swallowed — exactly the silent pass this
+            # check exists to prevent.
+            if ! chown -R "$owner" "$top" 2>/dev/null; then
+                printf '[aidc] error: could not give %s to %s: a session created here could not write its transcripts\n' \
+                    "$top" "$owner" >&2
+                return 1
+            fi
             AIDC_HOST_OWNER="$owner"
         fi
     fi
     export AIDC_HOST_OWNER
 }
 
-# Give files written into a host dir the same owner aidc_mkdir_host gave the dir.
+# Give files written into a host dir the owner of the tree that dir belongs to. The
+# owner is read for THIS path, not carried from whatever aidc_mkdir_host was called last:
+# the audit dir and the state dir are different mounts and can have different owners.
 aidc_fix_host_owner() {
-    [ -n "${AIDC_HOST_OWNER:-}" ] || return 0
-    chown -R "$AIDC_HOST_OWNER" "$1" 2>/dev/null || true
+    local path="${1:-}" owner
+    [ -n "${AIDC_HOST_HOME:-}" ] || return 0
+    aidc_resolve_local "$path" >/dev/null 2>&1 || return 0
+    [ -n "${AIDC_LOCAL_MOUNT:-}" ] || return 0
+    owner=$(stat -c '%u:%g' "$AIDC_LOCAL_MOUNT" 2>/dev/null || true)
+    [ -n "$owner" ] && [ "$owner" != "$(id -u):$(id -g)" ] || return 0
+    if ! chown -R "$owner" "$path" 2>/dev/null; then
+        printf '[aidc] error: could not give %s to %s; files there may be unreadable to you\n' \
+            "$path" "$owner" >&2
+        return 1
+    fi
 }
 
 # Expand a leading ~ or $HOME so audit_dir/foo and ~/foo both resolve.
@@ -546,6 +585,24 @@ mcp_load_settings() {
     export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT AIDC_MCP_SESSION_CREATE
 }
 
+# The host directories aidc-mcp is given, as `<host>|<mount>` pairs, one per line.
+#
+# ONE list with two consumers, because they were written twice and drifted: the
+# `docker run -v` flags in `aidc mcp start`, and the table aidc_resolve_local uses to
+# decide which host paths the CLI can reach from inside that container. When the home
+# mount arrived in the first and not the second, the operator opted into sharing Claude's
+# per-project memory and got "memory: NOT shared" anyway. `aidc mcp start` passes this
+# list to the container as AIDC_MCP_MOUNTS, and aidc_resolve_local reads only that.
+aidc_mcp_mount_pairs() {
+    printf '%s|/var/log/aidc-mcp\n' "${AIDC_MCP_STATE_DIR:-$(aidc_host_home)/.local/state/aidc-mcp}"
+    printf '%s|/var/aidc-audit\n' "${AIDC_AUDIT_DIR:-$(aidc_host_home)/aidc-audit}"
+    # The operator's home, at the same path it has on the host, so a repo and Claude's
+    # per-project memory are reachable. Only with mcp.session_create (see below).
+    if [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ]; then
+        printf '%s|%s\n' "$(aidc_host_home)" "$(aidc_host_home)"
+    fi
+}
+
 # The extra `docker run` arguments `aidc mcp start` needs when mcp.session_create is on.
 #
 # Creating a session means reading a repo and writing Claude's per-project memory on the
@@ -559,6 +616,11 @@ mcp_session_create_args() {
     [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ] || return 0
     printf -- '-v\n%s:%s:rw\n-e\nAIDC_MCP_SESSION_CREATE=true\n' \
         "$(aidc_host_home)" "$(aidc_host_home)"
+}
+
+# AIDC_MCP_MOUNTS for the container: the same pairs, comma-separated.
+mcp_mounts_env() {
+    aidc_mcp_mount_pairs | paste -sd, -
 }
 
 # aidc_mcp_deny_target: "addr:port" of the aidc-mcp server that sessions must not

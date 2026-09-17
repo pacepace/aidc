@@ -79,7 +79,7 @@ below fails safe when a line is missing or unrecognized.
 | A background task finishing writes a `user` line `<task-notification>…` with `promptSource: "system"` and `origin.kind: "task-notification"`, and Claude runs a new turn on it | container |
 | A prompt submitted while Claude is working is not written as a `user` line. Claude Code writes a `queue-operation` enqueue carrying its text, removes it at the next tool boundary, and answers it inside the running turn | container |
 
-Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md` (not committed).
+Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md`.
 
 ---
 

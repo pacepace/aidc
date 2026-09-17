@@ -147,7 +147,14 @@ if [ -z "$REPO_ARG" ]; then
 fi
 REPO_ARG=$(translate_wsl_path "$REPO_ARG")
 REPO_PATH=$(realpath_portable "$REPO_ARG")
-[ -d "$REPO_PATH" ] || die "repo path does not exist: $REPO_PATH"
+if [ ! -d "$REPO_PATH" ]; then
+    # Inside aidc-mcp this process sees its own filesystem, not the host's: say which
+    # it is rather than claiming a host path does not exist.
+    if [ -n "${AIDC_HOST_HOME:-}" ] && ! aidc_resolve_local "$REPO_PATH" >/dev/null 2>&1; then
+        die "repo path is not reachable from aidc-mcp: $REPO_PATH (it only sees $(aidc_host_home))"
+    fi
+    die "repo path does not exist: $REPO_PATH"
+fi
 
 # Workspace: defaults to repo (only that repo is mounted). When set, the
 # whole workspace dir is mounted so sibling repos are visible inside; repo

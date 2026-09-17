@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import functools
 import hashlib
+import inspect
 import json
 import os
 import shlex
@@ -26,6 +28,7 @@ import httpx
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
+from aidc_mcp import scope
 from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
 from aidc_mcp.audit import log_event
@@ -853,6 +856,8 @@ async def resume_send_queues() -> None:
     for path in unreadable:
         log_event("session_send_queue_unreadable", path=str(path))
     for name, prompts in queues.items():
+        if scope.refusal(name) is not None:
+            continue   # another server's session: leave its queue file alone
         container = f"aidc-{name}-dev"
         if await _container_state(container) == CONTAINER_GONE:
             for q in prompts:
@@ -1892,6 +1897,31 @@ def _envelope_err(error: str, data: Any = None) -> dict[str, Any]:
 
 # ---- tool registration ------------------------------------------------------
 
+def _scoped(fn: Any) -> Any:
+    """Refuse a call whose `name` is outside this server's session scope (scope.py),
+    before the tool does anything. Keeps the wrapped signature and docstring, which
+    FastMCP reads for the tool schema."""
+    def refused(name: str) -> dict[str, Any] | None:
+        why = scope.refusal(name)
+        if why is None:
+            return None
+        log_event("tool_call", tool=fn.__name__, session=name, refused="out_of_scope")
+        return _envelope_err(why)
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            err = refused(kwargs.get("name", args[0] if args else ""))
+            return err if err is not None else await fn(*args, **kwargs)
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        err = refused(kwargs.get("name", args[0] if args else ""))
+        return err if err is not None else fn(*args, **kwargs)
+    return wrapper
+
+
 def register(app: Any) -> None:
     """Attach every tool to the given FastMCP app."""
 
@@ -1916,6 +1946,9 @@ def register(app: Any) -> None:
             repo: absolute host path to mount (required)
             workspace: optional parent dir for sibling-repo access
         """
+        if (why := scope.create_refusal()) is not None:
+            log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
+            return _envelope_err(why)
         if not repo:
             return _envelope_err("repo argument is required (absolute host path)")
         args = ["create", name, "--profile", profile, "--repo", repo]
@@ -1946,11 +1979,12 @@ def register(app: Any) -> None:
         result = _run_cli(["list"])
         if result["exit"] != 0:
             return _envelope_err(result["stderr"] or "list failed", result)
-        return _envelope_ok({"raw": result["stdout"]})
+        return _envelope_ok({"raw": scope.filter_list(result["stdout"])})
 
     # --- session_status -------------------------------------------------
 
     @app.tool()
+    @_scoped
     def session_status(name: str) -> dict[str, Any]:
         """Status for one session: health, taint, audit dir.
 
@@ -1979,6 +2013,7 @@ def register(app: Any) -> None:
     # session (prod audit 2026-07-04 17:53). Tearing a session down is an
     # operator action via the CLI, not something an MCP client should drive.
     # Re-advertise by restoring the ``@app.tool()`` decorator below.
+    @_scoped
     def session_kill(name: str) -> dict[str, Any]:
         """Tear down the session. Audit dir is preserved on host.
 
@@ -1994,6 +2029,7 @@ def register(app: Any) -> None:
     # --- session_exec ---------------------------------------------------
 
     @app.tool()
+    @_scoped
     def session_exec(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, Any]:
         """Run a shell command in the session container YOURSELF. Returns stdout, stderr, exit code.
 
@@ -2013,6 +2049,7 @@ def register(app: Any) -> None:
     # --- session_invoke --------------------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_invoke(
         name: Annotated[str, Field(description=_NAME_DESC)],
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
@@ -2079,6 +2116,7 @@ def register(app: Any) -> None:
     # --- session_invoke_async --------------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_invoke_async(
         name: Annotated[str, Field(description=_NAME_DESC)],
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
@@ -2202,6 +2240,7 @@ def register(app: Any) -> None:
     # --- session_send --------------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_send(
         name: Annotated[str, Field(description=_NAME_DESC)],
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
@@ -2377,6 +2416,7 @@ def register(app: Any) -> None:
     # queued paste — only precede one that was waiting first. Route it through
     # _enqueue_send before exposing it.
     # Re-advertise by restoring the ``@app.tool()`` decorator below.
+    @_scoped
     async def session_run(
         name: Annotated[str, Field(description=_NAME_DESC)],
         turns: Annotated[
@@ -2461,6 +2501,7 @@ def register(app: Any) -> None:
     # --- session_watch -------------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_watch(
         name: Annotated[str, Field(description=_NAME_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
@@ -2495,6 +2536,7 @@ def register(app: Any) -> None:
     # --- session_resend ------------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_resend(
         name: Annotated[str, Field(description=_NAME_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
@@ -2599,6 +2641,7 @@ def register(app: Any) -> None:
     # --- session_unwatch -----------------------------------------
 
     @app.tool()
+    @_scoped
     async def session_unwatch(name: str) -> dict[str, Any]:
         """Stop watching the agent window for the named session.
 
@@ -2622,6 +2665,7 @@ def register(app: Any) -> None:
     # --- file_get -------------------------------------------------------
 
     @app.tool()
+    @_scoped
     def file_get(name: str, path: str) -> dict[str, Any]:
         """Read a raw file from the session's mounted repo YOURSELF. Path must be
         absolute and inside the session's REPO_PATH (enforced by the in-container
@@ -2648,6 +2692,7 @@ def register(app: Any) -> None:
     # --- file_put -------------------------------------------------------
 
     @app.tool()
+    @_scoped
     def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str, Any]:
         """Write content to a file inside the session. Subject to the
         session's git-push prohibition + proxy filtering downstream.
@@ -2668,6 +2713,7 @@ def register(app: Any) -> None:
     # --- audit_get ------------------------------------------------------
 
     @app.tool()
+    @_scoped
     def audit_get(name: str, since: str | None = None, kind: str | None = None) -> dict[str, Any]:
         """Read audit events for a session. since: ISO8601 lower bound;
         kind: optional filter (e.g., 'taint', 'auth_reject').
@@ -2701,6 +2747,7 @@ def register(app: Any) -> None:
     # --- taint_mark -----------------------------------------------------
 
     @app.tool()
+    @_scoped
     def taint_mark(name: str, reason: str) -> dict[str, Any]:
         """Policy signal — do not call this. Set by the system when a container
         visits an unsafe site, indicating possible infection. kill+recreate only.

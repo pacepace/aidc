@@ -8,7 +8,7 @@ The pieces that are REAL here:
   - _post_turn (the outbound-to-metallm HTTP boundary, exact payload + URL).
 
 The pieces that are STUBBED (the non-deterministic edges):
-  - the tmux/Docker boundary (_is_claude_running / _check_free / _container_state /
+  - the tmux/Docker boundary (_is_claude_running / _check_free / _session_instance /
     _load_and_paste / _tmux_exec / _capture_screen) — no container.
   - the background poll TIMER (_run_transcript_watcher) — replaced with an
     alive-forever no-op so the drain is driven explicitly, deterministically.
@@ -98,8 +98,8 @@ def harness(tmp_path, monkeypatch):
         pass
 
     rig = Rig()
-    rig.container = tools.CONTAINER_EXISTS
-    rig.container_id = "id-1"
+    rig.session_state = tools.SESSION_EXISTS
+    rig.instance = "id-1"
     metallm = FakeMetallm()
     paste_calls: list[str] = []
 
@@ -137,14 +137,10 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
 
-    async def container_state(container):
-        return rig.container
+    async def session_instance(name):
+        return rig.session_state, rig.instance
 
-    async def container_id(container):
-        return rig.container_id
-
-    monkeypatch.setattr(tools, "_container_state", container_state)
-    monkeypatch.setattr(tools, "_container_id", container_id)
+    monkeypatch.setattr(tools, "_session_instance", session_instance)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)
@@ -328,7 +324,7 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="reply SEVEN", conversation_id="conv-1")
     [saved], _ = ts.load_watches(h.state)
-    assert saved["container_id"] == "id-1"
+    assert saved["session_instance"] == "id-1"
 
     # The MCP goes down: every in-memory watcher is gone, the saved files are not.
     for task in tools._session_watchers.values():
@@ -362,7 +358,7 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
     ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local")
     ts.save_watch(h.state, "other", "conv-2", "http://metallm.local")
     monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
-    h.container = tools.CONTAINER_GONE
+    h.session_state = tools.SESSION_GONE
 
     await tools.resume_watchers(h.app)
 
@@ -375,8 +371,8 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
     """A session killed and created again under the same name was never asked to report
     to the old conversation."""
     h = harness
-    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", container_id="id-1")
-    h.container_id = "id-2"
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    h.instance = "id-2"
     await tools.resume_watchers(h.app)
     assert "proj" not in tools._session_watchers
     assert not ts.watch_path(h.state, "proj").exists()
@@ -384,8 +380,8 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
 
 async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
     h = harness
-    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", container_id="id-1")
-    h.container_id = ""
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    h.instance = ""
     await tools.resume_watchers(h.app)
     assert "proj" in tools._session_watchers
 
@@ -455,13 +451,13 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
     h = harness
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("first", LONG_AGO, waiting_reason="input_has_text",
-                        conversation_id="conv-1", container_id="id-1"),
+                        conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("second", LONG_AGO, waiting_reason="queued_behind",
-                        conversation_id="conv-1", container_id="id-1"),
+                        conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("just now", ts._now_iso(), waiting_reason="queued_behind",
-                        conversation_id="conv-1", container_id="id-1"),
+                        conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("no webhook", LONG_AGO, waiting_reason="queued_behind",
-                        container_id="id-1")]
+                        session_instance="id-1")]
 
     tools._notify_long_waits("proj")
     await _settle_background()
@@ -487,7 +483,7 @@ async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
     h = harness
     ts.save_send_queue(h.state, "proj", [
         ts.QueuedPrompt("first", LONG_AGO, waiting_reason="claude_busy",
-                        conversation_id="conv-1", container_id="id-1",
+                        conversation_id="conv-1", session_instance="id-1",
                         waiting_notified=True)])
     tools._pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
     tools._notify_long_waits("proj")
@@ -505,9 +501,9 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
     h = harness
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
-                        container_id="id-1"),
-        ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", container_id="id-1")]
-    h.container = tools.CONTAINER_GONE
+                        session_instance="id-1"),
+        ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
+    h.session_state = tools.SESSION_GONE
 
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
@@ -527,10 +523,10 @@ async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harnes
     h = harness
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("for the old one", "2026-09-17T04:00:00Z", conversation_id="conv-1",
-                        container_id="id-1"),
+                        session_instance="id-1"),
         ts.QueuedPrompt("for the new one", "2026-09-17T04:00:05Z", conversation_id="conv-1",
-                        container_id="id-2")]
-    h.container_id = "id-2"   # killed and created again under the same name
+                        session_instance="id-2")]
+    h.instance = "id-2"   # killed and created again under the same name
 
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
@@ -543,9 +539,9 @@ async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harnes
 async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
     h = harness
     tools._pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
-                                                    container_id="id-1")]
-    h.container = tools.CONTAINER_UNKNOWN
-    h.container_id = ""
+                                                    session_instance="id-1")]
+    h.session_state = tools.SESSION_UNKNOWN
+    h.instance = ""
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     assert [q.text for q in tools._pending_sends["proj"]] == ["keep"]
     assert not h.metallm.posts

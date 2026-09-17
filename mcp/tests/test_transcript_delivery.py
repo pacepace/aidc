@@ -8,6 +8,8 @@ import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from aidc_mcp import transcript as ts
 from aidc_mcp.tools import (
     _LOOP_GUARD_IDLE_RESET_S,
@@ -834,6 +836,14 @@ class TestStalePinRotation:
     a genuine rotation forward, WITHOUT false-firing on the copy-forward mirror's
     mtime churn."""
 
+    @pytest.fixture(autouse=True)
+    def clock(self, monkeypatch):
+        """The watermark stamps its saves and baselines with the wall clock; these
+        stories are set in the past, so the clock reads just after their first lines."""
+        now = {"iso": "2026-07-04T04:00:02Z"}
+        monkeypatch.setattr(ts, "_now_iso", lambda: now["iso"])
+        return now
+
     async def _drain_rot(self, base, state, rec, sess, conv):
         await _drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
                                      state_dir=state, post_fn=rec, sleep_fn=_nosleep)
@@ -981,12 +991,48 @@ class TestStalePinRotation:
             await self._drain_rot(base, state, rec, sess, conv)
         assert rec.delivered == ["b1"]
 
-    async def test_reply_after_a_claude_restart_is_delivered_once(self, tmp_path):
+    async def test_a_rewatch_is_never_caught_up_with_history_from_before_it(
+            self, tmp_path, clock, monkeypatch):
+        """Review rev-20260917T062841Z-0930096f: with no watcher open, Claude restarts
+        into a new transcript and works there; the conversation then watches again,
+        re-anchoring on the old file. Moving onto the new file must not deliver the work
+        done before the re-watch (MCP-17), only what comes after."""
+        from aidc_mcp import tools
+        logged = []
+        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append((kind, f)))
+        base = tmp_path / "t"; state = tmp_path / "s"
+        sess, conv = "rewatch", "c"
+        _consumed_idle_counts.pop((sess, conv), None)
+        _mk_transcript(base, sess, "old", [
+            _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
+            _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
+        ])
+        rec = Recorder()
+        await self._drain_rot(base, state, rec, sess, conv)
+        new_objs = [_ts(_user("u2", "while nobody watched"), "2026-07-04T05:00:00.000Z"),
+                    _ts(_assistant("b1", "UNWATCHED"), "2026-07-04T05:00:01.000Z")]
+        _mk_transcript(base, sess, "new", new_objs)
+        clock["iso"] = "2026-07-04T06:00:00Z"
+        await _baseline_watermark(sess, conv, transcripts_base=base, state_dir=state)
+        new_objs += [_ts(_user("u3", "after the re-watch"), "2026-07-04T07:00:00.000Z"),
+                     _ts(_assistant("b2", "WATCHED"), "2026-07-04T07:00:01.000Z")]
+        _mk_transcript(base, sess, "new", new_objs)
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+            await self._drain_rot(base, state, rec, sess, conv)
+        assert rec.delivered == ["b2"]
+        [(_, fields)] = [e for e in logged if e[0] == "transcript_stale_pin_recovered"]
+        assert fields["anchor_uuid"] == "b1"
+        assert fields["seen_until"] == "2026-07-04T06:00:00Z"
+        assert fields["anchored_at_end"] is False
+        assert "forward_baselined" not in fields
+
+    async def test_reply_after_a_claude_restart_is_delivered_once(self, tmp_path, clock):
         """Joint test scenario 10 (2026-09-17): Claude exited, a prompt waited in the
         queue, Claude restarted into a new transcript, took the prompt and answered
         before the watcher had moved over. That reply was lost."""
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "restart", "c"
+        clock["iso"] = "2026-09-17T05:52:38Z"
         _consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "before", [
             _ts(_user("u1", "Reply with exactly the word SEVEN-A."), "2026-09-17T05:52:34.000Z"),

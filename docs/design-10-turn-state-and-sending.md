@@ -208,8 +208,8 @@ the metallm session and written here before either side builds it.
 | `error_code` | string | Present only on a callback that is not a reply, naming what it is: `"prompt_dropped"` (a failure, `ok: false`) or `"prompt_waiting"` (a status, `ok: true`), both below. It never says anything `content` does not. | MCP-33, MCP-36 |
 
 **A prompt that will never be pasted** (MCP-33). A queued prompt leaves the queue unpasted only
-when its session is gone: the container no longer exists, or a container of the same name has a
-different id because the session was killed and created again. Each such prompt that came with a
+when its session is gone: it no longer exists, or a session of the same name is a different
+instance because it was killed and created again (S4 item 5). Each such prompt that came with a
 `conversation_id` gets one callback to that conversation (agreed with the metallm session
 2026-09-17):
 
@@ -259,7 +259,7 @@ missing a code or uses one outside the set:
 
 | Code | Meaning | Caller |
 |---|---|---|
-| `no_such_session` | the session's container does not exist | tell the person, no retry |
+| `no_such_session` | the session does not exist (its network is gone) | tell the person, no retry |
 | `queue_full` | 25 prompts already waiting: the session is wedged | tell the person, no retry |
 | `out_of_scope` | a scoped server refusing another session (MCP-31) | tell the person, no retry |
 | `create_not_allowed` | `session_create` on a scoped server | tell the person, no retry |
@@ -283,11 +283,12 @@ answered, and no callback was sent, because webhooks lived only in memory. Now:
 
 - Opening a webhook (`session_watch`, or `session_send` with a `conversation_id`) saves
   `watcher-state/<session>.watch.json` (`session`, `conversation_id`, `callback_base`,
-  `container_id`, `updated_at`; atomic write). `session_unwatch` removes it.
+  `session_instance`, `updated_at`; atomic write). `session_unwatch` removes it.
 - At startup (`server.ResumeOnStartup`), after the send queues, `resume_watchers` reopens every
-  saved webhook in scope whose session still exists, and removes the file of one whose container
-  is gone or has a different id (killed and created again: the new session was never asked to
-  report to that conversation). An id that cannot be read keeps the webhook. An unreadable file
+  saved webhook in scope whose session still exists, and removes the file of one whose session
+  is gone or is a different instance (killed and created again: the new session was never asked
+  to report to that conversation; an upgraded session is the same instance and keeps it). An
+  instance that cannot be read keeps the webhook. An unreadable file
   is logged and left in place. A failure resuming the queues does not stop the webhooks resuming.
 - A resumed webhook does **not** re-anchor the watermark to the end of the transcript, as a new
   one does. It continues from the saved watermark, so a reply written while the MCP was down is
@@ -306,7 +307,12 @@ the pinned file disappearing), it now resumes **after the last line written no l
 it last saw activity**: the newest line timestamp in the file it is leaving, or, when that file is
 gone, the watermark's last save. Lines after that point happened while it was still on the old
 file and are delivered; lines up to it are history (a resumed session may carry some) and are not
-replayed. The delivery ledger still blocks any second delivery. Measured on Claude Code 2.1.274:
+replayed. That point is never earlier than the conversation's last forward (re)anchor
+(`baselined_at` on the watermark): a conversation that watches again after Claude moved to a new
+file while nobody watched is not caught up with the work done in between (MCP-17). The log events
+for a move (`transcript_stale_pin_recovered`, `transcript_rotated`) record the anchor line, the
+point it resumed after, and whether nothing was known so it anchored at the end. The delivery
+ledger still blocks any second delivery. Measured on Claude Code 2.1.274:
 `--continue` starts a new file holding only the new session's lines, not a copy of the old ones.
 
 Combinations are independent. An interrupted turn on a prompt the person typed carries
@@ -353,8 +359,12 @@ Two questions are kept apart, because they have different callers:
    Claude Code that renames the text costs a slow queue, never a paste into a running turn. The
    send path learns the text on its own screen reads; the watcher reads the screen while a turn
    is in progress until it has seen it once. Having seen it is remembered in
-   `watcher-state/<session>.working-text-seen`, so a restart does not forget it, and forgotten
-   when the session is gone.
+   `watcher-state/<session>.working-text-seen`, so a restart does not forget it. The marker
+   records the session instance it was seen on (S4 item 5), and one from another instance is
+   ignored and removed, so a session killed and created again under the same name, perhaps on a
+   Claude Code whose working text reads differently, never inherits it; when the instance changes
+   while the MCP runs, everything the send path knew about the old one is forgotten
+   (`_sync_session_markers`).
 
    The joint test showed why both matter: an MCP restarted a minute before an Esc pressed 1 s
    into a turn had never seen the working text, and reported the interrupt only after the
@@ -386,8 +396,9 @@ consecutive polls with Claude running at its input box: an interrupted turn anch
 prompt's line, with "Claude had not written anything yet", delivered once and consuming the
 sent-record entry. Until it has reported that prompt, the send path holds a session with an open
 watcher as `interrupt_not_reported_yet`, so the orchestrator hears about the interrupt before its
-next prompt lands. Once reported, that prompt's turn is over (`interrupt_reported`) whatever the
-screen shows, and the report is kept in `watcher-state/<session>.interrupt-reported`: the
+next prompt lands. Once reported, that prompt's turn is over (`interrupt_reported`) unless the
+status row shows Claude working, and the report is kept, with its session instance, in
+`watcher-state/<session>.interrupt-reported`: the
 watcher's watermark is past the prompt by then, so after a restart nothing would report it again,
 and a session remembered only in memory read busy for good (found in the joint test, when a
 queued prompt waited behind an interrupt reported before a restart). A tail made of a local command's output or a background task's notification is
@@ -459,23 +470,28 @@ ways:
    session to be free in 60 s rounds, recording the latest reason after each.
 2. **Held while Claude is not running.** A stopped Claude (restart, crash, the person exited it)
    holds the queue. `session_send` itself queues instead of refusing; it refuses only a session
-   whose container does not exist. Pasting resumes when Claude is back at its prompt.
+   that does not exist. Pasting resumes when Claude is back at its prompt.
 3. **Paste failures retry** with backoff (2, 4, 8 … s, capped at 60 s) and no attempt limit;
    each is logged and shown as `paste_failing`. A failed paste in `session_send` itself queues
    the prompt the same way.
 4. **Persisted.** The queue is written to the watcher-state dir (atomic temp+rename, like the
    watermark) on every change; an emptied queue removes its file. When `aidc-mcp` starts
    (`server.ResumeOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
-   persisted queue a drainer, and dead-letters the queue of a session whose container is gone. An
+   persisted queue a drainer, and dead-letters the queue of a session that is gone. An
    unreadable queue file is logged and left in place at startup (its session's name is inside
    it); the first send to that session renames it to `<file>.unreadable-<time>` before saving,
    so it is kept for a person rather than overwritten. Loading a saved queue happens once per
    process, under the session's send lock, from whichever comes first: startup resume or a
    `session_send` to that session. Saved prompts always go ahead of new ones.
-5. **The only exits** are "pasted" and "session gone": its container no longer exists, or a
-   container of the same name has a different id than when the prompt was accepted (killed and
-   re-created; each prompt records the id, so the new session is never handed the old one's
-   prompts). The drainer checks this at the start of each round and again under the send lock
+5. **The only exits** are "pasted" and "session gone": the session no longer exists, or a
+   session of the same name is a different instance than when the prompt was accepted (killed
+   and re-created; each prompt records the instance, so the new session is never handed the old
+   one's prompts). A session is identified by its network, `aidc-<session>-net`: `aidc create`
+   makes it, `aidc kill` removes it, and `aidc upgrade` and `aidc restart` keep it while they
+   replace or restart the dev container. So an upgrade keeps its queue, and a dev container
+   briefly missing in the middle of one is not a gone session. (The first build used the dev
+   container's id, which made every upgrade look like a kill: found by review
+   rev-20260917T062841Z-0930096f.) The drainer checks this at the start of each round and again under the send lock
    right before pasting, since its wait for a free session can outlast a kill and re-create. A
    gone prompt is written to the send dead-letter dir with reason `session_killed`
    and reported to its conversation (D5, `prompt_dropped`). Docker failing to answer is neither.
@@ -511,11 +527,12 @@ has had, and the last recorded waiting reason. File:
   "prompts": [
     { "text": "...", "enqueued_at": "2026-09-17T11:58:02Z",
       "paste_attempts": 0, "waiting_reason": "input_has_text",
-      "conversation_id": "...", "container_id": "..." } ] }
+      "conversation_id": "...", "session_instance": "...", "waiting_notified": false } ] }
 ```
 
 `conversation_id` is where to report the prompt if it is dropped (`""` without a webhook);
-`container_id` is the session's docker id when the prompt was accepted.
+`session_instance` is the session's network id when the prompt was accepted; `waiting_notified`
+is true once its conversation has been told it is still waiting (D5).
 
 Prompt text is stored as the queue receives it (already newline-flattened by `session_send`).
 Same trust level as the existing send record and dead-letter files, which already store prompts.

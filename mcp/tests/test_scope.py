@@ -161,10 +161,10 @@ async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
     monkeypatch.setenv(scope.ENV, "jointtest")
     ts.save_send_queue(tools._WATCHER_STATE_DIR, "metallm", [ts.QueuedPrompt("x", "t")])
 
-    async def never(container):
+    async def never(name):
         raise AssertionError("checked a session outside the scope")
 
-    monkeypatch.setattr(tools, "_container_state", never)
+    monkeypatch.setattr(tools, "_session_instance", never)
     await tools.resume_send_queues()
     assert "metallm" not in tools._pending_sends
     assert ts.send_queue_path(tools._WATCHER_STATE_DIR, "metallm").exists()

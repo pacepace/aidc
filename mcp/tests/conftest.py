@@ -37,6 +37,7 @@ async def clean_session_watchers():
         tools._waiting_notice_shown.clear()
         tools._drainer_failures.clear()
         tools._queue_loaded.clear()
+        tools._session_instances.clear()
 
     _reset()
     yield

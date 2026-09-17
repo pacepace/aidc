@@ -50,7 +50,13 @@ class Session:
         self.running = True
         self.screen = _screen("idle-empty")
         self.clock = NOW
+        self.instance = "net-1"
         monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", self.base)
+
+        async def session_instance(name):
+            return tools.SESSION_EXISTS, self.instance
+
+        monkeypatch.setattr(tools, "_session_instance", session_instance)
         monkeypatch.setattr(tools.time, "time", lambda: self.clock)
 
         async def is_running(container):
@@ -141,10 +147,65 @@ class TestCheckFree:
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         assert await session.check() == "claude_busy"          # seen working
         tools._working_indicator_seen.clear()                  # the MCP restarts
+        tools._session_instances.clear()
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == ""
         assert tools._last_free_verdict["proj"][1] == "status_row_idle"
+
+    async def test_a_session_created_again_does_not_inherit_the_working_text(self, session):
+        """Review rev-20260917T062841Z-0930096f: a marker keyed by name alone vouched
+        for a new session under the same name (say on a newer Claude Code whose working
+        text reads differently), so a quiet running turn could read as stopped."""
+        session.screen = _screen("busy-tool-empty-box")
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+        assert await session.check() == "claude_busy"          # seen working
+        tools._working_indicator_seen.clear()                  # the MCP restarts...
+        tools._session_instances.clear()
+        session.instance = "net-2"                             # ...on a new session
+        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+        session.screen = _screen("idle-empty")
+        assert await session.check() == "claude_busy"
+        assert tools._last_free_verdict["proj"][1] == "status_row_unproven"
+        assert not tools._working_seen_path("proj").exists()   # the stale marker is gone
+
+    async def test_a_session_created_again_while_the_mcp_runs_is_forgotten(self, session):
+        session.screen = _screen("busy-tool-empty-box")
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+        await session.check()
+        tools._sent_awaiting_echo["proj"] = ("old", NOW)
+        session.instance = "net-2"
+        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+        session.screen = _screen("idle-empty")
+        assert await session.check() == "claude_busy"
+        assert not tools._working_indicator_known("proj")
+        assert "proj" not in tools._sent_awaiting_echo
+
+    async def test_the_working_text_wins_over_an_earlier_interrupt_report(self, session):
+        """A reported prompt's turn is over unless the screen positively shows Claude
+        working (a person resubmitted it, and the transcript has not caught up)."""
+        tools._session_watchers["proj"] = object()
+        try:
+            session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+            await session.check()
+            tools._record_reported_interrupt("proj", "u2")
+            session.screen = _screen("busy-tool-empty-box")
+            assert await session.check() == "claude_busy"
+            assert tools._last_free_verdict["proj"][1] == "status_row_working"
+        finally:
+            tools._session_watchers.pop("proj", None)
+
+    async def test_the_markers_hold_while_docker_cannot_answer(self, session, monkeypatch):
+        session.screen = _screen("busy-tool-empty-box")
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+        await session.check()
+
+        async def unknown(name):
+            return tools.SESSION_UNKNOWN, ""
+
+        monkeypatch.setattr(tools, "_session_instance", unknown)
+        await session.check()
+        assert tools._working_indicator_known("proj")
 
     async def test_a_removed_session_forgets_the_working_text_on_disk(self, session):
         session.screen = _screen("busy-tool-empty-box")
@@ -268,8 +329,10 @@ class TestSessionStateSeparatesTurnFromInputBox:
         tools._session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+            await session.check()                        # learns the session instance
             tools._record_reported_interrupt("proj", "u2")
             tools._reported_interrupts.clear()          # the MCP restarts
+            tools._session_instances.clear()
             assert await session.check() == ""
             assert tools._last_free_verdict["proj"][1] == "interrupt_reported"
             session.write([*FINISHED, _typed("u2", "essay"), _typed("u3", "next")], age=30.0)

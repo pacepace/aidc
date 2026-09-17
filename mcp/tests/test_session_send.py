@@ -48,8 +48,8 @@ class Wiring:
 
     def __init__(self):
         self.claude_running = True
-        self.container = tools.CONTAINER_EXISTS
-        self.container_id = "id-1"
+        self.session_state = tools.SESSION_EXISTS
+        self.instance = "id-1"
         self.idle_ok = True
         self.paste_ok = True
         self.paste_calls = []
@@ -74,11 +74,8 @@ def wiring(monkeypatch):
             return ""
         return w.idle_ok or "claude_busy"   # a reason string, or False for busy
 
-    async def container_state(container):
-        return w.container
-
-    async def container_id(container):
-        return "" if w.container == tools.CONTAINER_GONE else w.container_id
+    async def session_instance(name):
+        return w.session_state, (w.instance if w.session_state == tools.SESSION_EXISTS else "")
 
     async def load_paste(container, text, window):
         w.paste_calls.append((container, text, window))
@@ -102,8 +99,7 @@ def wiring(monkeypatch):
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
-    monkeypatch.setattr(tools, "_container_state", container_state)
-    monkeypatch.setattr(tools, "_container_id", container_id)
+    monkeypatch.setattr(tools, "_session_instance", session_instance)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)
@@ -212,7 +208,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
 
 async def test_errors_when_the_session_does_not_exist(wiring):
     app, send = _make_send()
-    wiring.container = tools.CONTAINER_GONE
+    wiring.session_state = tools.SESSION_GONE
     tools._sent_awaiting_echo["proj"] = ("from before it was killed", 0.0)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -376,7 +372,7 @@ async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
     await send(name="proj", prompt="one", conversation_id="c1")
     await send(name="proj", prompt="two", conversation_id="c1")
 
-    wiring.container = tools.CONTAINER_GONE
+    wiring.session_state = tools.SESSION_GONE
     await _let_drainer_run("proj", ticks=200)
 
     assert "proj" not in tools._pending_sends
@@ -441,7 +437,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
 async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
     ts.save_send_queue(tools._WATCHER_STATE_DIR, "gone",
                        [ts.QueuedPrompt("orphan", "2026-09-17T02:00:00Z")])
-    wiring.container = tools.CONTAINER_GONE
+    wiring.session_state = tools.SESSION_GONE
     await tools.resume_send_queues()
     assert "gone" not in tools._pending_sends
     [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
@@ -454,7 +450,7 @@ async def test_queued_prompts_record_the_session_they_were_accepted_for(wiring):
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="hello", conversation_id="c1")
     [q] = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
-    assert (q.conversation_id, q.container_id) == ("c1", "id-1")
+    assert (q.conversation_id, q.session_instance) == ("c1", "id-1")
 
 
 async def test_a_prompt_sent_without_a_conversation_records_the_open_webhooks(wiring):
@@ -476,7 +472,7 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
     await send(name="proj", prompt="for the old session", conversation_id="c1")
 
     async def recreated_while_waiting(container, name):
-        wiring.container_id = "id-2"
+        wiring.instance = "id-2"
         return ""
 
     wiring.idle_ok = True
@@ -491,15 +487,15 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
 
 async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enqueue(
         wiring, monkeypatch):
-    """_enqueue_send awaits the container id; the drainer can replace the session's
+    """_enqueue_send awaits the session's instance id; the drainer can replace the session's
     queue list meanwhile. The prompt must land in the list that is kept."""
-    replacement = [ts.QueuedPrompt("kept", "2026-09-17T04:00:00Z", container_id="id-1")]
+    replacement = [ts.QueuedPrompt("kept", "2026-09-17T04:00:00Z", session_instance="id-1")]
 
-    async def container_id(container):
+    async def session_instance(name):
         tools._pending_sends["proj"] = replacement
-        return "id-1"
+        return tools.SESSION_EXISTS, "id-1"
 
-    monkeypatch.setattr(tools, "_container_id", container_id)
+    monkeypatch.setattr(tools, "_session_instance", session_instance)
     await tools._enqueue_send("proj", "aidc-proj-dev", "new", "claude_busy")
     assert [q.text for q in tools._pending_sends["proj"]] == ["kept", "new"]
 
@@ -538,12 +534,36 @@ async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeyp
     assert notices == [("proj", ["stuck"], "prompt_waiting")]
 
 
+async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch):
+    """A saved queue whose load failed (docker could not be run at startup) must still be
+    read by the next send, not overwritten by it."""
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj", [
+        ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
+                        conversation_id="c1", session_instance="id-1")])
+    working = tools._session_instance
+
+    async def broken(name):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(tools, "_session_instance", broken)
+    await tools.resume_on_startup(FastMCP("t"))
+    assert "proj" not in tools._queue_loaded
+    monkeypatch.setattr(tools, "_session_instance", working)
+
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="new", conversation_id="c1")
+    assert [q.text for q in ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]] == [
+        "saved", "new"]
+
+
 async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring):
     """After a restart, a session_send can arrive before startup has resumed the saved
     queue. The saved prompts still go first, and resume does not load them twice."""
     ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj", [
         ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
-                        conversation_id="c1", container_id="id-1")])
+                        conversation_id="c1", session_instance="id-1")])
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
 
@@ -687,19 +707,19 @@ async def test_record_write_failure_does_not_fail_the_send(wiring, monkeypatch):
 
 
 async def test_a_docker_error_is_not_a_killed_session(wiring):
-    """Only a definite 'no such container' ends a queue. A daemon hiccup must not
+    """Only a definite 'no such network' ends a queue. A daemon hiccup must not
     dead-letter prompts the orchestrator is waiting on."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
-    wiring.container = tools.CONTAINER_UNKNOWN
+    wiring.session_state = tools.SESSION_UNKNOWN
     await _let_drainer_run("proj", ticks=200)
     assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
     assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
-    wiring.container = tools.CONTAINER_EXISTS
+    wiring.session_state = tools.SESSION_EXISTS
     wiring.idle_ok = True
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
@@ -708,7 +728,7 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
 async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
     ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj",
                        [ts.QueuedPrompt("kept", "2026-09-17T02:00:00Z")])
-    wiring.container = tools.CONTAINER_UNKNOWN
+    wiring.session_state = tools.SESSION_UNKNOWN
     wiring.idle_ok = False
     await tools.resume_send_queues()
     assert [q.text for q in tools._pending_sends["proj"]] == ["kept"]

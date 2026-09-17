@@ -41,7 +41,9 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   prompt Claude answered before the watcher caught up never came back. The watcher now picks up
   from when it last saw activity.
 - **A re-created session is no longer handed the old session's waiting prompts.** Each queued
-  prompt records which container it was accepted for.
+  prompt records which session instance (the session's network) it was accepted for, so a
+  session killed and created again under the same name does not get them, while `aidc upgrade`
+  keeps them.
 
 ### Changed
 - **Whether a session is busy now comes from Claude's transcript, not from watching the

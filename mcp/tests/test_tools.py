@@ -535,31 +535,45 @@ class TestTurnSettleSeconds:
         assert tools._metallm_turn_settle_seconds(default=4.0) == 4.0
 
 
-# --- _container_state: only docker's "no such container" ends a session's queue ---
+# --- _session_instance: a session is its network; only "not found" ends it ------
 
-async def test_container_state_exists(monkeypatch):
-    _patch_async_proc(monkeypatch, FakeProc(stdout=b"abc123\n", returncode=0))
-    assert await tools._container_state("aidc-proj-dev") == tools.CONTAINER_EXISTS
+async def test_session_instance_exists_with_the_network_id(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(stdout=b"572d0316d0a7\n", returncode=0))
+    assert await tools._session_instance("proj") == (tools.SESSION_EXISTS, "572d0316d0a7")
 
 
-async def test_container_state_gone_on_docker_no_such_object(monkeypatch):
-    # Exact stderr measured from `docker inspect` on a missing container (Docker 29.8).
+async def test_session_instance_gone_when_the_network_is_not_found(monkeypatch):
+    # Exact stderr measured from `docker inspect --type network` on Docker 29.8.
     _patch_async_proc(monkeypatch, FakeProc(
-        stderr=b"Error: no such object: aidc-does-not-exist-dev\n", returncode=1))
-    assert await tools._container_state("aidc-does-not-exist-dev") == tools.CONTAINER_GONE
+        stderr=b"Error response from daemon: network aidc-nosuch-net not found\n",
+        returncode=1))
+    assert await tools._session_instance("nosuch") == (tools.SESSION_GONE, "")
 
 
-async def test_container_state_gone_on_older_no_such_container_wording(monkeypatch):
-    _patch_async_proc(monkeypatch, FakeProc(
-        stderr=b"Error response from daemon: No such container: aidc-x-dev\n", returncode=1))
-    assert await tools._container_state("aidc-x-dev") == tools.CONTAINER_GONE
+async def test_session_instance_gone_on_other_not_found_wordings(monkeypatch):
+    for stderr in (b"Error: No such network: aidc-x-net\n", b"Error: no such object: aidc-x-net\n"):
+        _patch_async_proc(monkeypatch, FakeProc(stderr=stderr, returncode=1))
+        assert await tools._session_instance("x") == (tools.SESSION_GONE, "")
 
 
-async def test_container_state_unknown_on_any_other_docker_failure(monkeypatch):
+async def test_session_instance_unknown_on_any_other_docker_failure(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
                b"Is the docker daemon running?\n", returncode=1))
-    assert await tools._container_state("aidc-proj-dev") == tools.CONTAINER_UNKNOWN
+    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
+
+
+async def test_session_instance_reads_the_session_network(monkeypatch):
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        return FakeProc(stdout=b"id\n", returncode=0)
+
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", fake_exec)
+    await tools._session_instance("proj")
+    assert calls == [("docker", "inspect", "--type", "network", "--format", "{{.Id}}",
+                      "aidc-proj-net")]
 
 
 # --- error_code: every failure envelope says what kind of failure it is ----------

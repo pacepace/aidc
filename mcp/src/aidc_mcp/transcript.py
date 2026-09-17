@@ -779,14 +779,16 @@ def _wall_time(obj: dict) -> float | None:
         return None
 
 
-def seen_until(objs: list[dict], fallback_iso: str = "") -> float | None:
-    """When the watcher last saw activity: the newest line timestamp in `objs` (the
-    transcript it is leaving), else `fallback_iso` (the watermark's last save), else
-    None when neither is known."""
+def seen_until(objs: list[dict], mark: Watermark) -> float | None:
+    """When the watcher last saw activity, as the point to resume a new transcript
+    after: the newest line timestamp in `objs` (the transcript it is leaving), else the
+    watermark's last save; never earlier than the watermark's last forward (re)anchor,
+    so history from before a (re)connect is not replayed. None when nothing is known."""
     times = [t for t in (_wall_time(o) for o in objs) if t is not None]
-    if times:
-        return max(times)
-    return _wall_time({"timestamp": fallback_iso}) if fallback_iso else None
+    seen = max(times) if times else _wall_time({"timestamp": mark.updated_at})
+    anchored = _wall_time({"timestamp": mark.baselined_at})
+    known = [t for t in (seen, anchored) if t is not None]
+    return max(known) if known else None
 
 
 def resume_anchor_on_new_transcript(objs: list[dict], seen: float | None) -> str:
@@ -914,6 +916,10 @@ class Watermark:
     consecutive_deliveries: int = 0
     last_delivery_at: float = 0.0
     updated_at: str = ""
+    # When a watcher last (re)anchored forward on this conversation (connect, restart,
+    # re-watch). Moving onto a new transcript never resumes before it, so nothing
+    # written before the orchestrator (re)connected is replayed (MCP-17).
+    baselined_at: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -960,6 +966,7 @@ def load_watermark(base_dir: Path, session: str, conversation_id: str) -> Waterm
             ),
             last_delivery_at=float(data.get("last_delivery_at", 0.0)),
             updated_at=str(data.get("updated_at", "")),
+            baselined_at=str(data.get("baselined_at", "")),
         )
     except (OSError, ValueError, TypeError):
         return Watermark(session=session, conversation_id=conversation_id)
@@ -1148,9 +1155,10 @@ class QueuedPrompt:
     # The conversation that sent it, so a prompt that can never be pasted is reported
     # back there instead of vanishing ("" when it came with no webhook).
     conversation_id: str = ""
-    # The session's docker container id when it was accepted, so a session killed and
-    # re-created under the same name is not handed the old session's prompts.
-    container_id: str = ""
+    # The session's instance id when it was accepted (see tools._session_instance), so a
+    # session killed and re-created under the same name is not handed the old
+    # session's prompts, while one upgraded in place keeps them.
+    session_instance: str = ""
     # True once its conversation has been told the prompt is still waiting, so it is
     # told once, across restarts too.
     waiting_notified: bool = False
@@ -1190,7 +1198,7 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     paste_attempts=int(e.get("paste_attempts", 0)),
                                     waiting_reason=str(e.get("waiting_reason", "")),
                                     conversation_id=str(e.get("conversation_id", "")),
-                                    container_id=str(e.get("container_id", "")),
+                                    session_instance=str(e.get("session_instance", "")),
                                     waiting_notified=e.get("waiting_notified") is True)
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
@@ -1216,13 +1224,13 @@ def watch_path(base_dir: Path, session: str) -> Path:
 
 
 def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str, *,
-               container_id: str = "") -> None:
+               session_instance: str = "") -> None:
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     path = watch_path(base, session)
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
-                               "callback_base": callback_base, "container_id": container_id,
+                               "callback_base": callback_base, "session_instance": session_instance,
                                "updated_at": _now_iso()},
                               indent=1), encoding="utf-8")
     os.replace(tmp, path)
@@ -1234,8 +1242,8 @@ def remove_watch(base_dir: Path, session: str) -> None:
 
 def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
     """Every persisted webhook as {session, conversation_id, callback_base,
-    container_id}, plus the files that could not be read (left in place).
-    `container_id` is "" when the session's id could not be read when it was saved."""
+    session_instance}, plus the files that could not be read (left in place).
+    `session_instance` is "" when it could not be read when the watch was saved."""
     watches: list[dict[str, str]] = []
     unreadable: list[Path] = []
     for path in sorted(Path(base_dir).glob("*.watch.json")):
@@ -1244,8 +1252,8 @@ def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
             entry = {k: data[k] for k in ("session", "conversation_id", "callback_base")}
             if not all(isinstance(v, str) and v for v in entry.values()):
                 raise ValueError("incomplete watch")
-            container_id = data.get("container_id", "")
-            entry["container_id"] = container_id if isinstance(container_id, str) else ""
+            instance = data.get("session_instance", "")
+            entry["session_instance"] = instance if isinstance(instance, str) else ""
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
             unreadable.append(path)
             continue

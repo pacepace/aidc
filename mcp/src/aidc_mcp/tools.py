@@ -166,11 +166,10 @@ _SHELL_COMMANDS = frozenset({"bash", "sh", "zsh", "fish", "dash", ""})
 # longer than that copy lag.
 _LOG_QUIET_S = 6.0
 # An Esc pressed before Claude writes anything leaves the transcript showing a turn in
-# progress forever. Claude Code puts the prompt back in the input box, and that settles
-# it at once. Failing that, the status row's `esc to interrupt` does: its wording is
-# trusted once the MCP has seen it on the session's screen (remembered on disk, so a
-# restart does not forget). Until then, a transcript quiet for this long with no
-# working text on screen counts as stopped.
+# progress forever. The screen settles it (design 10 S1 step 4): the prompt put back in
+# the input box, or the status row's `esc to interrupt`, whose absence is trusted once
+# the MCP has seen that text on the session. Until then, a transcript quiet for this
+# long with no working text on screen counts as stopped.
 _LOG_STALL_S = 600.0
 # After a paste, the session counts as busy until the transcript shows the prompt
 # arrived, for at most this long. A prompt that never shows is logged, not re-sent:
@@ -386,60 +385,99 @@ class SessionState:
     why: str
 
 
+# The session instance (see _session_instance) the in-memory markers above belong to.
+# A marker on disk records its instance too, and one from another instance (a session
+# killed and created again under the same name) is ignored and removed, so it cannot
+# vouch for a session the MCP has never watched. _sync_session_markers is the one place
+# markers are loaded and checked.
+_session_instances: dict[str, str] = {}
+
+
 def _working_seen_path(name: str) -> Path:
     return Path(_WATCHER_STATE_DIR) / f"{ts._slug(name)}.working-text-seen"
-
-
-def _working_indicator_known(name: str) -> bool:
-    """Whether the MCP has ever seen `name`'s status row say Claude is working, in
-    this process or, through the marker file, before a restart."""
-    if name in _working_indicator_seen:
-        return True
-    if _working_seen_path(name).exists():
-        _working_indicator_seen.add(name)
-        return True
-    return False
 
 
 def _reported_interrupt_path(name: str) -> Path:
     return Path(_WATCHER_STATE_DIR) / f"{ts._slug(name)}.interrupt-reported"
 
 
+def _working_indicator_known(name: str) -> bool:
+    """Whether the MCP has seen this session instance's status row say Claude is
+    working, in this process or before a restart (loaded by _sync_session_markers)."""
+    return name in _working_indicator_seen
+
+
 def _interrupt_reported(name: str, prompt_uuid: str) -> bool:
-    if name not in _reported_interrupts:
-        try:
-            _reported_interrupts[name] = _reported_interrupt_path(name).read_text().strip()
-        except OSError:
-            return False
-    return _reported_interrupts[name] == prompt_uuid
+    return _reported_interrupts.get(name) == prompt_uuid
+
+
+def _write_marker(name: str, path: Path, **fields: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"session_instance": _session_instances.get(name, ""),
+                                    **fields}), encoding="utf-8")
+    except OSError as exc:
+        log_event("session_marker_persist_failed", session=name, path=str(path),
+                  error_type=type(exc).__name__)
+
+
+def _read_marker(path: Path, instance: str) -> dict[str, Any] | None:
+    """The marker's fields when it belongs to `instance`; otherwise None, and a marker
+    that exists but belongs to another instance (or cannot be read) is removed."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get("session_instance") == instance:
+        return data
+    path.unlink(missing_ok=True)
+    return None
 
 
 def _record_reported_interrupt(name: str, prompt_uuid: str) -> None:
     # Only the latest unanswered prompt can be waiting on this report, so one per
     # session is all that is kept.
     _reported_interrupts[name] = prompt_uuid
-    try:
-        path = _reported_interrupt_path(name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(prompt_uuid)
-    except OSError as exc:
-        log_event("interrupt_reported_persist_failed", session=name,
-                  error_type=type(exc).__name__)
+    _write_marker(name, _reported_interrupt_path(name), prompt_uuid=prompt_uuid)
+
+
+async def _sync_session_markers(name: str) -> None:
+    """Tie the session's markers to the session instance that exists now. The first
+    time in this process, load the ones on disk that belong to it. When the instance has
+    changed since (killed and created again), forget everything about the old one. When
+    docker cannot say, change nothing and try again next time."""
+    state, current = await _session_instance(name)
+    if state != SESSION_EXISTS or not current:
+        return
+    known = _session_instances.get(name)
+    if known == current:
+        return
+    if known is not None:
+        _forget_session_send_state(name)
+    _session_instances[name] = current
+    if known is None:
+        try:
+            if _read_marker(_working_seen_path(name), current) is not None:
+                _working_indicator_seen.add(name)
+            reported = _read_marker(_reported_interrupt_path(name), current)
+        except OSError as exc:
+            log_event("session_marker_read_failed", session=name,
+                      error_type=type(exc).__name__)
+            return
+        if reported is not None and isinstance(reported.get("prompt_uuid"), str):
+            _reported_interrupts[name] = reported["prompt_uuid"]
 
 
 async def _read_screen(container: str, name: str) -> scr.ScreenState:
+    await _sync_session_markers(name)
     raw = await _capture_screen(container, _SESSION_WINDOW)
     _last_screen_raw[name] = raw
     state = scr.classify(raw)
     if state.working and not _working_indicator_known(name):
         _working_indicator_seen.add(name)
-        try:
-            path = _working_seen_path(name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
-        except OSError as exc:
-            log_event("working_text_seen_persist_failed", session=name,
-                      error_type=type(exc).__name__)
+        _write_marker(name, _working_seen_path(name))
     return state
 
 
@@ -467,9 +505,10 @@ def _turn_verdict(name: str, objs: list[dict], quiet: float,
     reply still waiting on its Stop hooks is held for _STOP_HOOK_WAIT_S whatever the
     screen shows. Past that hold, and for every other quiet open turn, the status row's
     working text settles it: shown means working; absent means stopped, trusted once
-    the MCP has seen the text on the session, else only after _LOG_STALL_S. Before any
-    of that, an input box holding exactly the prompt the transcript shows unanswered is
-    an Esc pressed before Claude wrote anything: Claude Code puts the prompt back.
+    the MCP has seen the text on the session, else only after _LOG_STALL_S. An input box
+    holding exactly the prompt the transcript shows unanswered also means stopped: Claude
+    Code puts the prompt back after an Esc pressed before it wrote anything. Design 10
+    S1 step 4 gives the order of these checks.
     """
     if not ts.log_shows_turn_in_progress(objs):
         return TURN_IDLE, "log_finished"
@@ -507,7 +546,8 @@ async def _session_state(container: str, name: str) -> SessionState:
     if status != "ok":
         return SessionState(True, screen, TURN_IDLE, f"transcript_{status}")
     cut_off = ts.unanswered_prompt_turn(objs)
-    if cut_off is not None and _interrupt_reported(name, cut_off.terminal_uuid):
+    if (cut_off is not None and not (screen is not None and screen.working)
+            and _interrupt_reported(name, cut_off.terminal_uuid)):
         # Already reported to the orchestrator as stopped before Claude wrote anything:
         # that turn is over. Anything Claude does next writes to the transcript, and a
         # new prompt changes the tail, so neither is mistaken for this.
@@ -729,9 +769,9 @@ async def _inject(container: str, text: str, window: str, *, session: str) -> bo
     return True
 
 
-CONTAINER_EXISTS = "exists"
-CONTAINER_GONE = "gone"
-CONTAINER_UNKNOWN = "unknown"
+SESSION_EXISTS = "exists"
+SESSION_GONE = "gone"
+SESSION_UNKNOWN = "unknown"
 
 # Consecutive unexpected drainer failures per session, for the restart backoff.
 _drainer_failures: dict[str, int] = {}
@@ -739,39 +779,57 @@ _drainer_failures: dict[str, int] = {}
 _waiting_notice_shown: set[str] = set()
 
 
-async def _container_id(container: str) -> str:
-    """The container's docker id, or "" when it cannot be read (gone, or docker
-    failing). Recorded with each queued prompt; see
-    _drop_prompts_of_removed_session."""
+async def _session_instance(name: str) -> tuple[str, str]:
+    """Whether session `name` exists (SESSION_EXISTS, SESSION_GONE or SESSION_UNKNOWN),
+    and its instance id ("" unless it exists).
+
+    A session is identified by its network, aidc-<name>-net: `aidc create` makes it,
+    `aidc kill` removes it, and `aidc upgrade` / `aidc restart` keep it while they
+    replace or restart the dev container. So the id tells a session killed and created
+    again under the same name from the same session upgraded, and a dev container
+    briefly missing in the middle of an upgrade is not a gone session. (Deciding this
+    by the dev container's id, as first built, treated every upgrade as a kill and
+    dropped its queued prompts and webhook.) Only a definite "not found" is gone; any
+    other docker failure (a daemon restart, a socket error) is unknown, and queues
+    keep holding.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--format", "{{.Id}}", container,
+            "docker", "inspect", "--type", "network", "--format", "{{.Id}}",
+            f"aidc-{name}-net",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
     except OSError:
-        return ""
-    stdout, _ = await proc.communicate()
-    return stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
+        return SESSION_UNKNOWN, ""
+    stdout, stderr = await proc.communicate()
+    if proc.returncode == 0:
+        return SESSION_EXISTS, stdout.decode("utf-8", errors="replace").strip()
+    # Measured on Docker 29.8: "Error response from daemon: network <name> not found".
+    # Other versions say "No such network" or "no such object".
+    err = stderr.decode("utf-8", errors="replace").lower()
+    if "not found" in err or "no such network" in err or "no such object" in err:
+        return SESSION_GONE, ""
+    return SESSION_UNKNOWN, ""
 
 
 async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
     """Take out of `name`'s queue every prompt whose session no longer exists: all of
-    them when the container is gone, and, when a container of the same name has a
-    different id (the session was killed and re-created), those accepted for the old
-    one. Docker failing to answer removes nothing."""
-    state = await _container_state(container)
-    if state == CONTAINER_UNKNOWN:
-        log_event("session_send_queue_container_unknown", session=name)
+    them when the session is gone, and, when a session of the same name has a different
+    instance (killed and created again), those accepted for the old one. Docker failing
+    to answer removes nothing."""
+    state, current = await _session_instance(name)
+    if state == SESSION_UNKNOWN:
+        log_event("session_send_queue_session_unknown", session=name)
         return
     queue = _pending_sends.get(name, [])
-    if state == CONTAINER_GONE:
+    if state == SESSION_GONE:
         dropped, kept = queue, []
     else:
-        current = await _container_id(container) if any(q.container_id for q in queue) else ""
         if not current:
             return
-        dropped = [q for q in queue if q.container_id and q.container_id != current]
+        dropped = [q for q in queue
+                   if q.session_instance and q.session_instance != current]
         kept = [q for q in queue if q not in dropped]
     if not dropped:
         return
@@ -781,27 +839,6 @@ async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
         _pending_sends.pop(name, None)
     _abandon_queue(name, dropped)
     _persist_queue(name)
-
-
-async def _container_state(container: str) -> str:
-    """Whether the session's dev container exists (running or not). `aidc kill`
-    removes it, and that is the only thing that ends a session's queue, so only a
-    definite "no such container" answer counts as gone. Any other docker failure (a
-    daemon restart, a socket error) is CONTAINER_UNKNOWN, and queues keep holding."""
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "inspect", "--format", "{{.Id}}", container,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode == 0:
-        return CONTAINER_EXISTS
-    # Measured on Docker 29.8: "Error: no such object: <name>". Older daemons word it
-    # "Error response from daemon: No such container: <name>".
-    err = stderr.decode("utf-8", errors="replace").lower()
-    if "no such object" in err or "no such container" in err:
-        return CONTAINER_GONE
-    return CONTAINER_UNKNOWN
 
 
 def _persist_queue(name: str) -> None:
@@ -955,14 +992,14 @@ async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
     # Read before touching the queue: nothing may await between taking the list and
     # appending to it, or the drainer can replace the list meanwhile and the prompt
     # would land in one nobody reads.
-    container_id = await _container_id(container)
+    _, instance = await _session_instance(name)
     queue = _pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
     queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts._now_iso(),
                                  paste_attempts=paste_attempts,
                                  conversation_id=conversation_id,
-                                 container_id=container_id))
+                                 session_instance=instance))
     await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
     _spawn_drainer(container, name)
     return len(queue)
@@ -1085,6 +1122,7 @@ def _forget_session_send_state(name: str) -> None:
     _last_screen_raw.pop(name, None)
     _waiting_notice_shown.discard(name)
     _reported_interrupts.pop(name, None)
+    _session_instances.pop(name, None)
     for path in (_working_seen_path(name), _reported_interrupt_path(name)):
         try:
             path.unlink(missing_ok=True)
@@ -1104,6 +1142,16 @@ async def _load_persisted_queue(container: str, name: str) -> None:
     and session_send, so the two cannot race or reorder."""
     if name in _queue_loaded:
         return
+    try:
+        await _load_persisted_queue_once(container, name)
+    except BaseException:
+        # Not loaded after all: the next send or resume tries again, rather than
+        # saving over prompts that were never read.
+        _queue_loaded.discard(name)
+        raise
+
+
+async def _load_persisted_queue_once(container: str, name: str) -> None:
     _queue_loaded.add(name)
     path = ts.send_queue_path(_WATCHER_STATE_DIR, name)
     if not path.exists():
@@ -1125,7 +1173,7 @@ async def _load_persisted_queue(container: str, name: str) -> None:
     saved = queues.get(name, [])
     if not saved:
         return
-    if await _container_state(container) == CONTAINER_GONE:
+    if (await _session_instance(name))[0] == SESSION_GONE:
         _abandon_queue(name, saved)
         _persist_queue(name)
         return
@@ -1165,12 +1213,10 @@ async def resume_watchers(app: Any) -> None:
         name = w["session"]
         if scope.refusal(name) is not None or name in _session_watchers:
             continue
-        container = f"aidc-{name}-dev"
-        gone = await _container_state(container) == CONTAINER_GONE
-        recreated = False
-        if not gone and w["container_id"]:
-            current = await _container_id(container)
-            recreated = bool(current) and current != w["container_id"]
+        state, current = await _session_instance(name)
+        gone = state == SESSION_GONE
+        recreated = bool(w["session_instance"] and current
+                         and current != w["session_instance"])
         if gone or recreated:
             # The conversation was watching a session that no longer exists; a new
             # session under the same name has not been asked to report to it.
@@ -1480,6 +1526,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
         if ts.watermark_exists(state_dir, session, conversation_id)
         else ts.Watermark(session=session, conversation_id=conversation_id)
     )
+    mark.baselined_at = ts._now_iso()
     # Resolve the active transcript PREFERRING the pinned session_id (as the drain
     # does) — on reconnect a frozen sibling transcript can carry a NEWER mtime (the
     # copy-forward mirror re-touches it), and a prefer-less resolve would mis-pin to
@@ -1561,6 +1608,17 @@ _TORN_READ_RECOVER_POLLS = 15
 _STALE_PIN_RECOVER_POLLS = 5
 
 
+def _resume_fields(mark: ts.Watermark, seen: float | None) -> dict[str, Any]:
+    """Where delivery resumed on a new transcript, and from what, for the log: the
+    anchor line, the moment it resumed after (None when nothing was known, and it then
+    anchored at the file's end), so a lost or replayed reply after Claude restarts
+    can be traced."""
+    return {"anchor_uuid": mark.last_delivered_uuid,
+            "seen_until": (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seen))
+                           if seen is not None else None),
+            "anchored_at_end": seen is None}
+
+
 def _rotate_if_stale_pin(session: str, conversation_id: str,
                          key: tuple[str, str], sid: str, pinned_objs: list,
                          transcripts_base: Path, state_dir: Path) -> bool:
@@ -1608,10 +1666,11 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
         return False
 
     mark = ts.load_watermark(state_dir, session, conversation_id)
+    seen = ts.seen_until(pinned_objs, mark)
     mark.session_id = best_stem
     mark.byte_offset = len(best_data.encode("utf-8"))
     mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-        ts.parse_jsonl(best_data), ts.seen_until(pinned_objs, mark.updated_at))
+        ts.parse_jsonl(best_data), seen)
     mark.consecutive_deliveries = 0
     mark.last_delivery_at = 0.0
     ts.save_watermark(state_dir, mark)
@@ -1619,7 +1678,8 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     _consumed_idle_counts.pop(key, None)
     log_event("transcript_stale_pin_recovered", session=session,
               conversation_id=conversation_id, dead_session_id=sid,
-              new_session_id=best_stem, reason="fully_consumed_idle")
+              new_session_id=best_stem, reason="fully_consumed_idle",
+              **_resume_fields(mark, seen))
     return True
 
 
@@ -1743,14 +1803,14 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # saw activity (its last watermark save): what came after is delivered, its
         # older history is not — never reset last_delivered_uuid to "" and replay
         # the whole file, which was the replay bug.
+        seen = ts.seen_until([], mark)
         mark.session_id = sid
         mark.byte_offset = end_offset
-        mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-            objs, ts.seen_until([], mark.updated_at))
+        mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(objs, seen)
         ts.save_watermark(state_dir, mark)
         _settle_state.pop(key, None)
         log_event("transcript_rotated", session=session, conversation_id=conversation_id,
-                  session_id=sid, forward_baselined=True)
+                  session_id=sid, **_resume_fields(mark, seen))
         return
 
     if not mark.session_id:
@@ -1796,10 +1856,11 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                     newest_data = newest.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     return
+                seen = ts.seen_until(objs, mark)
                 mark.session_id = newest.stem
                 mark.byte_offset = len(newest_data.encode("utf-8"))
                 mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-                    ts.parse_jsonl(newest_data), ts.seen_until(objs, mark.updated_at))
+                    ts.parse_jsonl(newest_data), seen)
                 mark.consecutive_deliveries = 0
                 mark.last_delivery_at = 0.0
                 ts.save_watermark(state_dir, mark)
@@ -1807,7 +1868,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 _torn_read_counts.pop(key, None)
                 log_event("transcript_stale_pin_recovered", session=session,
                           conversation_id=conversation_id, dead_session_id=sid,
-                          new_session_id=newest.stem, torn_read_polls=torn)
+                          new_session_id=newest.stem, torn_read_polls=torn,
+                          **_resume_fields(mark, seen))
                 return
         log_event("transcript_torn_read_skip", session=session,
                   conversation_id=conversation_id,
@@ -2153,10 +2215,10 @@ async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: st
     # watcher tasks polling the same session. Two watchers share one durable
     # watermark and each POST every turn -> every reply delivered twice.
     _register_watcher(name, conversation_id, base_url)
-    container_id = await _container_id(f"aidc-{name}-dev")
+    _, instance = await _session_instance(name)
     try:
         ts.save_watch(_WATCHER_STATE_DIR, name, conversation_id, base_url,
-                      container_id=container_id)
+                      session_instance=instance)
     except OSError as exc:
         log_event("session_watch_persist_failed", session=name, error_type=type(exc).__name__)
     # Baseline forward-only AFTER registering. The watcher sleeps one poll interval
@@ -2645,7 +2707,7 @@ def register(app: Any) -> None:
         """
         log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt))
         container = f"aidc-{name}-dev"
-        if await _container_state(container) == CONTAINER_GONE:
+        if (await _session_instance(name))[0] == SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
             # neither opens a webhook nor leaves one persisted. Audit every refusal:
             # these paths used to return silently, so the ONLY trace of a dropped send
@@ -2655,7 +2717,7 @@ def register(app: Any) -> None:
                       prompt_len=len(prompt), reason="no_such_session")
             _forget_session_send_state(name)
             return _envelope_err(
-                f"There is no session named '{name}' (its container does not exist). "
+                f"There is no session named '{name}'. "
                 "Check session_list.", code="no_such_session"
             )
 

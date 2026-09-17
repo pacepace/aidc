@@ -19,10 +19,30 @@
 
 set -eu
 
-# Config squid is actually started from. Overridden below when a DNS override
-# is active; the Dockerfile's CMD no longer carries `-f` so that this single
-# variable is the only thing that decides it.
-CONF=/etc/squid/squid.conf
+# Config squid is actually started from. Overridden below when the config has to
+# be derived (a DNS override, the aidc-mcp deny rule); the Dockerfile's CMD no
+# longer carries `-f` so that this single variable is the only thing that decides
+# it. The AIDC_SQUID_* overrides exist for tests/unit/test-squid-entrypoint.sh.
+CONF="${AIDC_SQUID_CONF:-/etc/squid/squid.conf}"
+DERIVED="${AIDC_SQUID_DERIVED:-/tmp/aidc-squid.conf}"
+SQUID_ENTRYPOINT="${AIDC_SQUID_ENTRYPOINT:-/usr/local/bin/entrypoint.sh}"
+
+# Everything derived is written to $DERIVED, never in place: under the 7.x Rock
+# squid runs as UID 584792 while /etc/squid is root-owned, so an in-place edit
+# fails and squid would start from the UNMODIFIED config, reporting healthy.
+#
+# The Rock ships no coreutils beyond cat (no cp, mv, cut, head, sed, wc): use
+# only sh builtins, cat, grep, awk and perl here. The unit test runs this script
+# with exactly those on PATH.
+derive_from_conf() {
+    if [ "$CONF" != "$DERIVED" ]; then
+        cat "$CONF" > "$DERIVED" || {
+            echo "[aidc-squid] FATAL: could not copy ${CONF} to ${DERIVED}" >&2
+            exit 1
+        }
+        CONF="$DERIVED"
+    fi
+}
 
 if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
     # IMPORTANT: we do NOT write the override list into dns_nameservers.
@@ -52,8 +72,8 @@ if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
     # ACL file references inside squid.conf are absolute (/etc/squid/*.txt), so
     # they still resolve from the derived copy, and the refresher's SIGHUP
     # reload re-reads this same path.
-    DERIVED=/tmp/aidc-squid.conf
-    perl -ne 'print unless /^dns_nameservers /' "$CONF" > "$DERIVED" || {
+    derive_from_conf
+    perl -i -ne 'print unless /^dns_nameservers /' "$DERIVED" || {
         echo "[aidc-squid] FATAL: could not derive DNS-override config from ${CONF}" >&2
         exit 1
     }
@@ -69,7 +89,43 @@ if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
         echo "[aidc-squid] FATAL: derived config ${DERIVED} is empty" >&2
         exit 1
     fi
-    CONF="$DERIVED"
+fi
+
+# aidc-mcp (MCP-12). AIDC_MCP_DENY is "addr:port" from the host's mcp config. The
+# session's squid otherwise allows every destination for local sources, so a dev
+# container could reach aidc-mcp and only its bearer token would stop a request.
+# Deny that port ahead of `http_access allow localnet`: on that address, or on
+# every destination when aidc-mcp is bound to all interfaces.
+if [ -n "${AIDC_MCP_DENY:-}" ]; then
+    mcp_addr="${AIDC_MCP_DENY%:*}"
+    mcp_port="${AIDC_MCP_DENY##*:}"
+    case "$mcp_port" in
+        ''|*[!0-9]*) echo "[aidc-squid] FATAL: bad AIDC_MCP_DENY port in '${AIDC_MCP_DENY}'" >&2; exit 1 ;;
+    esac
+    case "$mcp_addr" in
+        ''|*[!0-9a-fA-F:.]*) echo "[aidc-squid] FATAL: bad AIDC_MCP_DENY address in '${AIDC_MCP_DENY}'" >&2; exit 1 ;;
+    esac
+    derive_from_conf
+    rules="acl aidc_mcp_port port ${mcp_port}"
+    case "$mcp_addr" in
+        0.0.0.0|::) rules="${rules}
+http_access deny aidc_mcp_port" ;;
+        *) rules="${rules}
+acl aidc_mcp_dst dst ${mcp_addr}
+http_access deny aidc_mcp_dst aidc_mcp_port" ;;
+    esac
+    AIDC_MCP_RULES="$rules" perl -i -pe 'if (/^http_access allow localnet/ && !$done) { print "$ENV{AIDC_MCP_RULES}\n"; $done = 1 }' "$DERIVED" || {
+        echo "[aidc-squid] FATAL: could not add the aidc-mcp deny rule to ${DERIVED}" >&2
+        exit 1
+    }
+    # Verify it landed BEFORE the allow: a rule after `allow localnet` never matches.
+    deny_line=$(awk '/^http_access deny aidc_mcp/ { print NR; exit }' "$DERIVED")
+    allow_line=$(awk '/^http_access allow localnet/ { print NR; exit }' "$DERIVED")
+    if [ -z "$deny_line" ] || [ -z "$allow_line" ] || [ "$deny_line" -ge "$allow_line" ]; then
+        echo "[aidc-squid] FATAL: aidc-mcp deny rule missing or after 'allow localnet' in ${DERIVED}" >&2
+        exit 1
+    fi
+    echo "[aidc-squid] denying aidc-mcp at ${AIDC_MCP_DENY} to this session (MCP-12)" >&2
 fi
 
 # Chain to the base image's entrypoint, passing the effective config path.
@@ -83,4 +139,4 @@ fi
 #
 # `-f` is supplied here rather than in CMD so the DNS-override branch can steer
 # it; CMD carries only the run-mode flags.
-exec /usr/local/bin/entrypoint.sh -f "$CONF" "$@"
+exec "$SQUID_ENTRYPOINT" -f "$CONF" "$@"

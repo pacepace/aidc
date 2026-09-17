@@ -13,6 +13,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Security
+- **A dev container can no longer reach the MCP control plane.** Each session's Squid allowed
+  every destination for local sources, and `aidc mcp` listens on a host interface, so a sandboxed
+  agent could reach the server that drives every session through its own proxy; only the bearer
+  token stood in the way. `aidc create` now passes `mcp.bind_address` / `mcp.port` to the
+  session's Squid, which denies that address and port ahead of its allow rule (and refuses to
+  start if the rule does not land). Sessions created earlier get it on `aidc kill` + `aidc create`.
+
 ### Fixed
 - **A Stop hook that pushes back no longer makes the watcher report a reply as finished
   early.** When a Stop hook blocked Claude's stop (prawduct's gates do this routinely),
@@ -50,6 +58,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   status line says so (sessions created on the new image).
 
 ### Added
+- **A session-scoped MCP mode.** `AIDC_MCP_ALLOWED_SESSIONS=a,b` limits an `aidc-mcp` server to
+  those sessions: every tool and resource refuses any other, session creation is refused, and
+  listings show only the allowed ones. It is for testing an orchestrator that runs inside a dev
+  container, whose MCP token must not reach the rest of the host.
 - **Interrupts reach the orchestrator.** When someone presses Esc after Claude has started
   on a task, the watcher delivers what Claude had written so far, opened by a note that the
   person at the terminal stopped it, and the callback carries `interrupted: true`. It used to

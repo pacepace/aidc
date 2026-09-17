@@ -678,6 +678,23 @@ fi
 unset _dns_list _ip
 export DNS_SERVERS DNS_BLOCK
 
+# ---- keep the dev container away from aidc-mcp (MCP-12) ---------------------
+#
+# The session's squid allows every destination for local sources, and aidc-mcp
+# listens on a host interface (mcp.bind_address:mcp.port). Without a rule, a dev
+# container can reach it through squid and only the bearer token stops a request.
+# The squid entrypoint turns MCP_DENY into a deny rule ahead of `allow localnet`,
+# and refuses to start on a malformed value; check it here too, so a bad
+# mcp.bind_address / mcp.port says so instead of surfacing as an unhealthy squid.
+MCP_DENY=$(aidc_mcp_deny_target)
+case "${MCP_DENY%:*}" in
+    ''|*[!0-9a-fA-F:.]*) die "mcp.bind_address '${MCP_DENY%:*}' is not an IP address (needed to keep sessions away from aidc-mcp)" ;;
+esac
+case "${MCP_DENY##*:}" in
+    ''|*[!0-9]*) die "mcp.port '${MCP_DENY##*:}' is not a port number (needed to keep sessions away from aidc-mcp)" ;;
+esac
+export MCP_DENY
+
 # ---- container-only-path overlays (CLI-18/19) -------------------------------
 #
 # For each entry in AIDC_CONTAINER_ONLY_PATHS, expand globs against the

@@ -74,51 +74,6 @@ mcp_validate_bind_address() {
     return 1
 }
 
-# Read a single child key of a top-level YAML mapping.
-# Args: file parent-key child-key
-# Echoes the value (stripped of quotes / comments / surrounding whitespace) or
-# nothing if absent. Handles the flat-block schema aidc uses; not a general YAML
-# parser.
-_aidc_yaml_nested() {
-    local file="$1" parent="$2" child="$3"
-    [ -f "$file" ] || return 0
-    awk -v parent="$parent" -v child="$child" '
-        BEGIN { in_block=0 }
-        $0 ~ "^"parent":" { in_block=1; next }
-        /^[A-Za-z]/      { in_block=0 }
-        in_block && $0 ~ "^[[:space:]]+"child":" {
-            v=$0
-            sub("^[[:space:]]+"child":[[:space:]]*", "", v)
-            sub(/[[:space:]]*#.*$/, "", v)
-            sub(/^["'\'']/, "", v); sub(/["'\'']$/, "", v)
-            sub(/[[:space:]]+$/, "", v)
-            print v
-            exit
-        }
-    ' "$file"
-}
-
-mcp_load_settings() {
-    # Read mcp.bind_address and mcp.port from global config.
-    # Prefer yq when present, otherwise use the nested-aware awk parser.
-    local cfg="${CONFIG_DIR}/config.yaml"
-    AIDC_MCP_BIND_ADDRESS="127.0.0.1"
-    AIDC_MCP_PORT="7878"
-    [ -f "$cfg" ] || return 0
-
-    local b="" p=""
-    if command -v yq >/dev/null 2>&1; then
-        b=$(yq eval '.mcp.bind_address // ""' "$cfg" 2>/dev/null || printf '')
-        p=$(yq eval '.mcp.port // ""' "$cfg" 2>/dev/null || printf '')
-        [ "$b" = "null" ] && b=""
-        [ "$p" = "null" ] && p=""
-    fi
-    if [ -z "$b" ]; then b=$(_aidc_yaml_nested "$cfg" "mcp" "bind_address"); fi
-    if [ -z "$p" ]; then p=$(_aidc_yaml_nested "$cfg" "mcp" "port"); fi
-    [ -n "$b" ] && AIDC_MCP_BIND_ADDRESS="$b"
-    [ -n "$p" ] && AIDC_MCP_PORT="$p"
-}
-
 # ---- verbs -------------------------------------------------------------------
 
 mcp_start() {

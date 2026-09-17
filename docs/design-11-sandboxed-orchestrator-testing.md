@@ -8,8 +8,7 @@ on the host.
 **Requirements implemented:** MCP-31 (session-scoped MCP). Relates to MCP-12 (dev containers
 cannot reach `aidc-mcp`).
 
-**Status:** the session-scoped mode is built; the MCP-12 enforcement and the joint test are next
-(build plan Chunks 06–08).
+**Status:** the session-scoped mode and MCP-12 enforcement are built; the joint test is next.
 
 ---
 
@@ -69,8 +68,51 @@ The test MCP runs from the branch checkout on the host (`python -m aidc_mcp` wit
 `AIDC_MCP_TRANSCRIPTS` and `AIDC_MCP_ALLOWED_SESSIONS`). Its `config.yaml` sits next to its
 token file.
 
-## MCP-12 enforcement (next)
+## MCP-12 enforcement
 
-Squid gets a deny rule for the live MCP's bind address and port, ahead of `allow localnet`, so a
-dev container cannot reach it at all. The test MCP runs on a different port and stays reachable
-for the length of the test. That exposure is deliberate, and bounded by MCP-31.
+`aidc create` resolves the address with `aidc_mcp_deny_target` (`scripts/lib/config.sh`) and
+passes it to the session's squid as `AIDC_MCP_DENY=addr:port`. The running `aidc-mcp`
+container's published binding wins, because that is what is listening. Otherwise it uses
+`mcp.bind_address` / `mcp.port` from the global config (`mcp_load_settings`, shared with
+`aidc mcp`), read from `~/.config/aidc`, or, inside the `aidc-mcp` container (which runs
+`aidc create` for `session_create`, with `HOME=/root`), from the `/aidc-config` mount. A
+malformed address or port stops `aidc create` with a message naming the key.
+
+Known gap, not in this change: the general `load_config` still reads only `~/.config/aidc`, so a
+session the MCP creates through `session_create` does not see the rest of the global config.
+It needs its own look, because paths in that config (e.g. `audit_dir`) are host paths. The squid entrypoint derives the config (the same writable copy the DNS
+override uses) and inserts, immediately before `http_access allow localnet`:
+
+```
+acl aidc_mcp_port port <port>
+acl aidc_mcp_dst dst <addr>
+http_access deny aidc_mcp_dst aidc_mcp_port
+```
+
+When the server is bound to all interfaces (`0.0.0.0` / `::`), the rule denies that port to every
+destination instead. The entrypoint refuses to start squid (fails loudly) on a malformed value, or
+when the deny rule did not land before the allow, because an open proxy that reports healthy is the
+failure to avoid. `tests/unit/test-squid-entrypoint.sh` covers the rendering, and the derived config
+is accepted by the image's `squid -k parse`.
+
+The rule is rendered into a session's compose file at create time, and `aidc upgrade` reuses that
+file and replaces only the dev container, so a session created before this change does not get it
+from an upgrade. Two ways to apply it:
+
+- `aidc kill` + `aidc create`. This loses the session's volumes (Claude login, the container's home
+  directory, images built inside it).
+- **Recreate only the session's proxy**, which leaves the dev container and its volumes untouched.
+  After `aidc rebuild` at the new version, edit `/tmp/aidc-<session>.yaml`: set the `squid`
+  service's image to the new tag, and add `AIDC_MCP_DENY: "<bind_address>:<port>"` under its
+  `environment`. Then run
+  `docker compose -p aidc-<session> -f /tmp/aidc-<session>.yaml up -d --no-deps --force-recreate squid`.
+  Proxied traffic stops for about 20 s while squid restarts and turns healthy.
+
+Verified 2026-09-17 on rc images:
+- **A new session:** the live MCP port gets squid's `TCP_DENIED/403`, a test MCP on another port
+  is still reached (401 from the server), and HTTPS egress returns 200.
+- **An existing session**, after the proxy-only recreate: its dev container kept its start time
+  and running Claude, and the live port turned from reachable (401) to denied (403).
+
+The test MCP runs on a different port and stays reachable for the length of the joint test. That
+exposure is deliberate, and bounded by MCP-31.

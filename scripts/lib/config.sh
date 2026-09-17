@@ -370,3 +370,87 @@ emit_loaded_config_yaml() {
         printf '  []\n'
     fi
 }
+
+# Read a single child key of a top-level YAML mapping.
+# Args: file parent-key child-key
+# Echoes the value (stripped of quotes / comments / surrounding whitespace) or
+# nothing if absent. Handles the flat-block schema aidc uses; not a general YAML
+# parser.
+_aidc_yaml_nested() {
+    local file="$1" parent="$2" child="$3"
+    [ -f "$file" ] || return 0
+    awk -v parent="$parent" -v child="$child" '
+        BEGIN { in_block=0 }
+        $0 ~ "^"parent":" { in_block=1; next }
+        /^[A-Za-z]/      { in_block=0 }
+        in_block && $0 ~ "^[[:space:]]+"child":" {
+            v=$0
+            sub("^[[:space:]]+"child":[[:space:]]*", "", v)
+            sub(/[[:space:]]*#.*$/, "", v)
+            sub(/^["'\'']/, "", v); sub(/["'\'']$/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            print v
+            exit
+        }
+    ' "$file"
+}
+
+# The global config file readable from here: the host's ~/.config/aidc, or, inside
+# the aidc-mcp container (which runs `aidc create` for session_create, with HOME
+# /root), the /aidc-config mount. Echoes nothing when neither exists.
+_aidc_global_config_file() {
+    local host_cfg="${HOME}/.config/aidc/config.yaml"
+    local mcp_cfg="${AIDC_MCP_CONFIG_MOUNT:-/aidc-config}/config.yaml"
+    if [ -f "$host_cfg" ]; then
+        printf '%s' "$host_cfg"
+    elif [ -f "$mcp_cfg" ]; then
+        printf '%s' "$mcp_cfg"
+    fi
+}
+
+mcp_load_settings() {
+    # Read mcp.bind_address and mcp.port from global config into
+    # AIDC_MCP_BIND_ADDRESS / AIDC_MCP_PORT (defaults 127.0.0.1 / 7878).
+    # Prefer yq when present, otherwise use the nested-aware awk parser.
+    local cfg
+    cfg=$(_aidc_global_config_file)
+    AIDC_MCP_BIND_ADDRESS="127.0.0.1"
+    AIDC_MCP_PORT="7878"
+    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT
+    [ -n "$cfg" ] || return 0
+
+    local b="" p=""
+    if command -v yq >/dev/null 2>&1; then
+        b=$(yq eval '.mcp.bind_address // ""' "$cfg" 2>/dev/null || printf '')
+        p=$(yq eval '.mcp.port // ""' "$cfg" 2>/dev/null || printf '')
+        [ "$b" = "null" ] && b=""
+        [ "$p" = "null" ] && p=""
+    fi
+    if [ -z "$b" ]; then b=$(_aidc_yaml_nested "$cfg" "mcp" "bind_address"); fi
+    if [ -z "$p" ]; then p=$(_aidc_yaml_nested "$cfg" "mcp" "port"); fi
+    [ -n "$b" ] && AIDC_MCP_BIND_ADDRESS="$b"
+    [ -n "$p" ] && AIDC_MCP_PORT="$p"
+    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT
+}
+
+# aidc_mcp_deny_target: "addr:port" of the aidc-mcp server that sessions must not
+# reach (MCP-12), for the session's squid. The running aidc-mcp container's
+# published binding is what is actually listening, so it wins; without one, the
+# configured bind address and port (what `aidc mcp start` would use). The same
+# answer holds on the host and inside the aidc-mcp container, which reaches the
+# host docker daemon through its socket.
+aidc_mcp_deny_target() {
+    local bound
+    bound=$(docker inspect aidc-mcp \
+        --format '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{.HostIp}}:{{.HostPort}}{{"\n"}}{{end}}{{end}}' \
+        2>/dev/null | awk 'NF { print; exit }')
+    case "$bound" in
+        :*) bound="0.0.0.0${bound}" ;;   # empty HostIp: published on every interface
+    esac
+    if [ -n "$bound" ]; then
+        printf '%s' "$bound"
+        return 0
+    fi
+    mcp_load_settings
+    printf '%s:%s' "$AIDC_MCP_BIND_ADDRESS" "$AIDC_MCP_PORT"
+}

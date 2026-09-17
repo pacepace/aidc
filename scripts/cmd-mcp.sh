@@ -74,51 +74,6 @@ mcp_validate_bind_address() {
     return 1
 }
 
-# Read a single child key of a top-level YAML mapping.
-# Args: file parent-key child-key
-# Echoes the value (stripped of quotes / comments / surrounding whitespace) or
-# nothing if absent. Handles the flat-block schema aidc uses; not a general YAML
-# parser.
-_aidc_yaml_nested() {
-    local file="$1" parent="$2" child="$3"
-    [ -f "$file" ] || return 0
-    awk -v parent="$parent" -v child="$child" '
-        BEGIN { in_block=0 }
-        $0 ~ "^"parent":" { in_block=1; next }
-        /^[A-Za-z]/      { in_block=0 }
-        in_block && $0 ~ "^[[:space:]]+"child":" {
-            v=$0
-            sub("^[[:space:]]+"child":[[:space:]]*", "", v)
-            sub(/[[:space:]]*#.*$/, "", v)
-            sub(/^["'\'']/, "", v); sub(/["'\'']$/, "", v)
-            sub(/[[:space:]]+$/, "", v)
-            print v
-            exit
-        }
-    ' "$file"
-}
-
-mcp_load_settings() {
-    # Read mcp.bind_address and mcp.port from global config.
-    # Prefer yq when present, otherwise use the nested-aware awk parser.
-    local cfg="${CONFIG_DIR}/config.yaml"
-    AIDC_MCP_BIND_ADDRESS="127.0.0.1"
-    AIDC_MCP_PORT="7878"
-    [ -f "$cfg" ] || return 0
-
-    local b="" p=""
-    if command -v yq >/dev/null 2>&1; then
-        b=$(yq eval '.mcp.bind_address // ""' "$cfg" 2>/dev/null || printf '')
-        p=$(yq eval '.mcp.port // ""' "$cfg" 2>/dev/null || printf '')
-        [ "$b" = "null" ] && b=""
-        [ "$p" = "null" ] && p=""
-    fi
-    if [ -z "$b" ]; then b=$(_aidc_yaml_nested "$cfg" "mcp" "bind_address"); fi
-    if [ -z "$p" ]; then p=$(_aidc_yaml_nested "$cfg" "mcp" "port"); fi
-    [ -n "$b" ] && AIDC_MCP_BIND_ADDRESS="$b"
-    [ -n "$p" ] && AIDC_MCP_PORT="$p"
-}
-
 # ---- verbs -------------------------------------------------------------------
 
 mcp_start() {
@@ -134,21 +89,43 @@ mcp_start() {
     mcp_ensure_token
     mcp_load_settings
     mcp_validate_bind_address "$AIDC_MCP_BIND_ADDRESS" || die "bad bind_address"
+    # session_create runs the CLI inside this container, and every path it hands docker
+    # is a HOST path. It needs the audit dir mounted to write a session's snapshot and
+    # meta.json there; AIDC_MCP_MOUNTS (below) tells it which host path that mount is.
+    load_config
+    mkdir -p "$AIDC_AUDIT_DIR"
 
     ensure_image mcp   # inventory-driven build-if-missing (lib/common.sh)
 
     mkdir -p "$AUDIT_DIR"
     chmod 0700 "$AUDIT_DIR"   # private: transcripts/audit are not world-readable
     info "starting $CONTAINER on ${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}"
+    # Every host dir this server is given, as -v flags, from the one list that also
+    # becomes AIDC_MCP_MOUNTS — so a mount cannot be granted without being reachable.
+    MOUNT_ARGS=()
+    while IFS= read -r line; do [ -n "$line" ] && MOUNT_ARGS+=("$line"); done \
+        <<<"$(AIDC_MCP_STATE_DIR="$AUDIT_DIR" mcp_mount_args)"
+    # mcp.session_create: the env that makes the tool exist (its mount is in the list).
+    CREATE_ARGS=()
+    while IFS= read -r line; do [ -n "$line" ] && CREATE_ARGS+=("$line"); done <<<"$(mcp_session_create_args)"
+    if [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ]; then
+        info "session_create: ENABLED -- ${HOME} is mounted into ${CONTAINER} (mcp.session_create)"
+    else
+        info "session_create: not offered (set mcp.session_create: true to enable; it mounts your home)"
+    fi
     docker run -d \
         --name "$CONTAINER" \
         --restart unless-stopped \
         -v "/var/run/docker.sock:/var/run/docker.sock:rw" \
         -v "${AIDC_ROOT}:/aidc:ro" \
         -v "${CONFIG_DIR}:/aidc-config:ro" \
-        -v "${AUDIT_DIR}:/var/log/aidc-mcp:rw" \
+        ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
         -e "AIDC_MCP_PORT=${AIDC_MCP_PORT}" \
+        -e "AIDC_HOST_HOME=${HOME}" \
+        -e "AIDC_MCP_STATE_HOST=${AUDIT_DIR}" \
+        -e "AIDC_MCP_MOUNTS=$(AIDC_MCP_STATE_DIR="$AUDIT_DIR" mcp_mounts_env)" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
+        ${CREATE_ARGS[@]+"${CREATE_ARGS[@]}"} \
         "$IMAGE" >/dev/null
     sleep 1
     mcp_status
@@ -176,6 +153,15 @@ mcp_status() {
     printf '  bind:        %s:%s\n' "$AIDC_MCP_BIND_ADDRESS" "$AIDC_MCP_PORT"
     printf '  token file:  %s\n' "$TOKEN_FILE"
     printf '  audit dir:   %s\n' "$AUDIT_DIR"
+    # From the RUNNING container, not the config: the two differ until a restart.
+    if docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | grep -qx 'AIDC_MCP_SESSION_CREATE=true'; then
+        printf '  session_create: offered (this server can create sessions; %s is mounted)\n' \
+            "$(docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                2>/dev/null | sed -n 's/^AIDC_HOST_HOME=//p' | head -1)"
+    else
+        printf '  session_create: not offered (mcp.session_create is off for this container)\n'
+    fi
     if [ -f "${AUDIT_DIR}/access.log" ]; then
         last_access=$(tail -1 "${AUDIT_DIR}/access.log" 2>/dev/null | head -c 200)
         [ -n "$last_access" ] && printf '  last event:  %s\n' "$last_access"

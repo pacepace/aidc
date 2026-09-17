@@ -381,7 +381,9 @@ the safer default for a conversation.)
 **Payload** is backward compatible with the original contract, so the MetaLLM side needs no
 change: `POST {callback_url}/api/v1/internal/callback/{conversation_id}` with
 `{"content": <text>, "ok": <bool>, "source": "agent_watch", "session": <name>,
-"prompt_origin": "terminal" | "orchestrator" | ""}` and `Authorization: Bearer <mcp-token>`.
+"prompt_origin": "terminal" | "orchestrator" | "", "interrupted": <bool>}` and
+`Authorization: Bearer <mcp-token>`. The body is now pinned, field by field, in
+`docs/design-10-turn-state-and-sending.md` D5; that table is authoritative.
 `session` names which aidc session finished the turn; `prompt_origin` says whose prompt it
 answers (next section).
 
@@ -465,7 +467,7 @@ size, and `error_type` + `repr` on failure), extended with delivery-source conte
 | `stop_reason: null` then a `user` line | Turn abandoned; log + advance, no delivery. |
 | Tool-only turn, no text | `delivery_empty_turn`; advance, no delivery. |
 | API-error assistant turn | Deliver `ok:false` with error text; advance. |
-| Active file genuinely rotates (pinned file gone) | Re-resolve; forward-baseline onto the new file (deliver nothing from its history). |
+| Active file genuinely rotates (pinned file gone) | Re-resolve; forward-baseline onto the new file (deliver nothing from its history). Superseded by design 10 D8: resume from when the watcher last saw activity, so a reply written in the new file before the move is delivered. |
 | Mirror re-touches an old file's mtime | Pinned to the tracked `session_id`; no flap, no replay. |
 | Torn/partial mirror read | Last-delivered uuid missing from pinned file → skip pass, retry next poll. |
 | Empty `end_turn` then real answer | Coalesced into one turn; held until the transcript settles. |

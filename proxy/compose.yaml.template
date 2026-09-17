@@ -51,6 +51,8 @@ services:
       # fails over on timeout -- a split-horizon dnsmasq answering REFUSED
       # would kill public lookups).
       AIDC_DNS_SERVERS: "${DNS_SERVERS}"
+      # aidc-mcp's addr:port, denied to the dev container (MCP-12).
+      AIDC_MCP_DENY: "${MCP_DENY}"
     dns:
 ${DNS_BLOCK}
     networks:

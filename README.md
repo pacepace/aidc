@@ -7,6 +7,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 - **Git is local-only.** No SSH keys. No GitHub tokens. No `gh` CLI. Pre-push hook hard-fails any push attempt. The container has full local git — branches, commits, rebases, stashes — but nothing leaves.
 - **Network egress is enforced.** The session bridge is a Docker `internal` network — no NAT, so there is no route out except through the Squid sidecar. Blocklist (URLhaus + ThreatFox + HaGeZi-TIF, refreshed every 6h), state-actor TLD policy, Quad9 upstream. Not just `HTTP_PROXY`: a privileged process that strips the proxy vars and adds its own route still gets `Network is unreachable`.
 - **Docker is isolated.** DinD inside the sandbox. The host Docker daemon is unreachable. Claude can build and run images; they live and die with the session.
+- **The MCP control plane is off limits.** A session's Squid denies the `aidc mcp` server's bind address and port (from `mcp.bind_address` / `mcp.port` when the session is created), so a sandboxed agent cannot reach the server that drives every session, even with a stolen token. Sessions created before this change get the rule on `aidc kill` + `aidc create`. That rule is the whole enforcement, so it holds for a session whose traffic goes through its Squid: one created with `--egress direct`, or attached to another network with `--network`, can route around it — as those options already warn at create time.
 - **Compromise is detected and recovered.** A policy sidecar tails the proxy log. A malware-list hit writes a taint flag, optionally pauses the container. Recovery is `aidc kill` + `aidc create`, not "clean up."
 - **Everything is audited.** Squid access log, shell history, Claude session transcript, policy events — all preserved on host after `aidc kill`.
 
@@ -462,7 +463,7 @@ aidc mcp start
 aidc mcp token show           # the bearer token to put in the client's MCP config
 ```
 
-From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mcp` with that bearer. It gets the full tool surface (`session_create`, `session_invoke`, `file_get`, etc.). See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md).
+From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mcp` with that bearer. It gets the tool surface (`session_invoke`, `file_get`, `session_send`, etc.; `session_create` only if you enabled it). See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md).
 
 ### Driving sessions from an orchestrator
 
@@ -473,7 +474,7 @@ The MCP server is built for an orchestrating agent that runs somewhere else on y
 1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
 2. The agent calls `session_invoke_async(name, prompt, conversation_id)` (or `session_send`, below). The call returns immediately.
 3. aidc runs the task in the named session container (`session_invoke_async` runs `aidc-claude --print <prompt>` with a 30-minute cap).
-4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|""}`.
+4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|"", "interrupted": true|false}` (plus `"speaker": "human"|"agent"` with `metallm.send_speaker: true`). Two callbacks are notices rather than replies and carry `error_code`: `"prompt_dropped"` for a queued prompt whose session was removed before it could be pasted, and `"prompt_waiting"`, sent once, for a queued prompt that has waited 10 minutes (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
 5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 
 **Setup (one time):**
@@ -500,7 +501,7 @@ metallm:
 
 `session_invoke` and `session_invoke_async` run `claude --print` — headless, no UI, result as text. For work that builds a conversation thread, needs visible progress, or spans many turns: use the session tools.
 
-**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the orchestrator's conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session is still mid-turn, the prompt is queued and injected the moment that turn ends (the return says `queued`); nothing is lost and nothing needs re-sending.
+**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. Claude's reply is delivered back into the orchestrator's conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session cannot take it yet (Claude is mid-turn, someone has unsent text in Claude's input box, Claude is restarting, or the paste did not land), the prompt is queued and pasted as soon as the session is free; the return says `queued` with a `waiting_reason`, and `session_status` lists what is still waiting and why. A queued prompt is never dropped: it survives an `aidc-mcp` restart and leaves the queue only when pasted or when the session is killed or re-created (then it is kept in the MCP's dead-letter dir, and the conversation that sent it gets a `prompt_dropped` callback). The webhook survives a restart too: a reply written while the MCP was down still arrives, once. While a prompt waits on someone's unsent text, the session's tmux status line says so.
 
 **`session_resend(name)`** — re-delivers the session's most recent reply when a callback was lost (a dropped POST, an MCP restart at the wrong moment). It refuses to re-post a reply the orchestrator already acknowledged and returns the content to the caller instead, so it can never inject a duplicate.
 
@@ -632,12 +633,17 @@ notify_webhook: ""                    # POSTed to on taint events
 mcp:
   bind_address: 127.0.0.1             # bind the MCP server here. Change to e.g. your ZeroTier/Tailscale IP for remote access.
   port: 7878
+  session_create: false               # offer the session_create tool. Creating a session means reading a repo and
+                                      # writing Claude's per-project memory on the HOST, so turning this on mounts
+                                      # your home dir into the aidc-mcp container. Off, the tool is not offered at all.
 
 # Only relevant if an orchestrator drives sessions over MCP (the key keeps its historical name):
 metallm:
   callback_url: ""                    # base URL of the orchestrator's callback endpoint (e.g. https://orchestrator.example.com).
                                       # Required for session_invoke_async / session_send to deliver results back.
                                       # See "Driving sessions from an orchestrator" above.
+  send_speaker: false                 # add "speaker": "human"|"agent" to session_send replies. Leave off until the
+                                      # orchestrator records human turns instead of dropping them (design 10 D4).
 ```
 
 ## Taint
@@ -656,7 +662,7 @@ Once tainted, **kill and recreate** is the only path. The session does not get "
 
 When `aidc mcp` is running, an external AI orchestrator on your overlay network gets:
 
-**Tools** (function calls): `session_create`, `session_list`, `session_status`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `file_get`, `file_put`, `audit_get`, `taint_mark`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP.)
+**Tools** (function calls): `session_create` (only with `mcp.session_create: true`, see the config above), `session_list`, `session_status`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `file_get`, `file_put`, `audit_get`, `taint_mark`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP.)
 
 **Resources** (read-only data): `aidc://sessions`, `aidc://sessions/{name}/status`, `aidc://sessions/{name}/audit`, `aidc://sessions/{name}/audit/{filename}`, `aidc://config`.
 

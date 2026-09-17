@@ -14,13 +14,20 @@ import subprocess
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from aidc_mcp import tools
+from aidc_mcp import scope, tools
 
 
 def _tool(name):
     app = FastMCP("t")
     tools.register(app)
     return app._tool_manager._tools[name].fn
+
+
+def _create_tool(monkeypatch):
+    """session_create exists only where the operator turned it on (scope.ENABLE_CREATE_ENV
+    / mcp.session_create), because it needs their home mounted into the container."""
+    monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+    return _tool("session_create")
 
 
 # --- fakes for the subprocess layer ------------------------------------------
@@ -94,19 +101,89 @@ def _patch_cli(monkeypatch, result, record=None):
 # --- session_create ----------------------------------------------------------
 
 class TestSessionCreate:
-    async def test_requires_repo(self):
-        res = await _tool("session_create")(name="proj")
+    def test_absent_unless_the_operator_enabled_it(self, monkeypatch):
+        monkeypatch.delenv(scope.ENABLE_CREATE_ENV, raising=False)
+        app = FastMCP("t")
+        tools.register(app)
+        assert "session_create" not in app._tool_manager._tools
+        assert "session_send" in app._tool_manager._tools   # the rest are unaffected
+
+    def test_present_when_enabled(self, monkeypatch):
+        monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+        app = FastMCP("t")
+        tools.register(app)
+        assert "session_create" in app._tool_manager._tools
+
+    def test_any_other_value_leaves_it_off(self, monkeypatch):
+        for value in ("1", "yes", "TRUE ", ""):
+            monkeypatch.setenv(scope.ENABLE_CREATE_ENV, value)
+            app = FastMCP("t")
+            tools.register(app)
+            present = "session_create" in app._tool_manager._tools
+            assert present is (value.strip().lower() == "true"), value
+
+    async def test_requires_repo(self, monkeypatch):
+        res = await _create_tool(monkeypatch)(name="proj")
         assert res["ok"] is False and "repo" in res["error"]
 
-    async def test_happy_path(self, monkeypatch):
+    async def test_a_path_outside_the_exposed_home_is_refused(self, monkeypatch, tmp_path):
+        """repo and workspace become HOST bind mounts in the new session, but this server
+        checks them against its own filesystem. Inside aidc-mcp those differ: /mnt, /srv
+        and /tmp exist in the image, so naming one would mount the HOST's directory into
+        the session (on WSL2, /mnt is every Windows drive)."""
+        monkeypatch.setenv("AIDC_HOST_HOME", str(tmp_path / "home"))
+        (tmp_path / "home").mkdir()
+
+        def boom(*a, **k):
+            raise AssertionError("the CLI must not run for a refused path")
+
+        monkeypatch.setattr(tools, "_run_cli", boom)
+        create = _create_tool(monkeypatch)
+        for repo in ("/mnt", "/srv/x", str(tmp_path / "elsewhere")):
+            res = await create(name="proj", repo=repo, ctx=None)
+            assert res["ok"] is False, repo
+            assert res["error_code"] == "path_not_allowed", repo
+            assert str(tmp_path / "home") in res["error"]
+
+    async def test_a_workspace_outside_it_is_refused_too(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / "repo").mkdir(parents=True)
+        monkeypatch.setenv("AIDC_HOST_HOME", str(home))
+
+        def boom(*a, **k):
+            raise AssertionError("the CLI must not run for a refused path")
+
+        monkeypatch.setattr(tools, "_run_cli", boom)
+        res = await _create_tool(monkeypatch)(
+            name="proj", repo=str(home / "repo"), workspace="/srv", ctx=None)
+        assert res["ok"] is False and res["error_code"] == "path_not_allowed"
+
+    async def test_a_path_inside_the_exposed_home_is_allowed(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / "repo").mkdir(parents=True)
+        monkeypatch.setenv("AIDC_HOST_HOME", str(home))
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
-        res = await _tool("session_create")(name="proj", repo="/host/repo", ctx=None)
+        res = await _create_tool(monkeypatch)(name="proj", repo=str(home / "repo"), ctx=None)
+        assert res["ok"] is True
+
+    async def test_no_host_home_means_no_extra_restriction(self, monkeypatch, tmp_path):
+        """On the host (not inside aidc-mcp) the CLI sees the same filesystem the mounts
+        are resolved against, so the path check there is the CLI's own."""
+        monkeypatch.delenv("AIDC_HOST_HOME", raising=False)
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        res = await _create_tool(monkeypatch)(name="proj", repo="/srv/anything", ctx=None)
+        assert res["ok"] is True
+
+    async def test_happy_path(self, monkeypatch):
+        monkeypatch.delenv("AIDC_HOST_HOME", raising=False)
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        res = await _create_tool(monkeypatch)(name="proj", repo="/host/repo", ctx=None)
         assert res["ok"] is True
         assert res["data"] == {"name": "proj", "log": "created"}
 
     async def test_failure_surfaces_stderr(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
-        res = await _tool("session_create")(name="proj", repo="/r", ctx=None)
+        res = await _create_tool(monkeypatch)(name="proj", repo="/r", ctx=None)
         assert res["ok"] is False and res["error"] == "boom"
 
 
@@ -209,7 +286,7 @@ class TestSessionInvokeAsync:
             fired.append(coro)
             coro.close()  # don't actually run the background job
 
-        monkeypatch.setattr(tools, "_fire", fake_fire)
+        monkeypatch.setattr(tools, "fire", fake_fire)
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is True
         assert res["data"] == {"status": "running", "session": "proj", "conversation_id": "c1"}
@@ -470,6 +547,26 @@ def _write_cfg(monkeypatch, tmp_path, text):
     return cfg
 
 
+class TestMetallmSendSpeaker:
+    def test_off_without_the_key_or_the_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "absent.yaml")
+        assert tools._metallm_send_speaker() is False
+        _write_cfg(monkeypatch, tmp_path, "metallm:\n  callback_url: http://m\n")
+        assert tools._metallm_send_speaker() is False
+
+    def test_on_only_for_true(self, monkeypatch, tmp_path):
+        _write_cfg(monkeypatch, tmp_path,
+                   "metallm:\n  send_speaker: true    # after MetaLLM records human turns\n")
+        assert tools._metallm_send_speaker() is True
+        _write_cfg(monkeypatch, tmp_path, "metallm:\n  send_speaker: yes\n")
+        assert tools._metallm_send_speaker() is False
+
+    def test_a_key_under_another_section_does_not_count(self, monkeypatch, tmp_path):
+        _write_cfg(monkeypatch, tmp_path,
+                   "metallm:\n  callback_url: http://m\nmcp:\n  send_speaker: true\n")
+        assert tools._metallm_send_speaker() is False
+
+
 class TestMetallmCallbackUrl:
     def test_absent_metallm_section(self, monkeypatch, tmp_path):
         """The prod failure: config has only an mcp: section, so session_send
@@ -513,3 +610,91 @@ class TestTurnSettleSeconds:
     def test_falls_back_on_garbage(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path, "metallm:\n  turn_settle_seconds: soon\n")
         assert tools._metallm_turn_settle_seconds(default=4.0) == 4.0
+
+
+# --- _session_instance: a session is its network; only "not found" ends it ------
+
+async def test_session_instance_exists_with_the_network_id(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(stdout=b"572d0316d0a7\n", returncode=0))
+    assert await tools._session_instance("proj") == (tools.SESSION_EXISTS, "572d0316d0a7")
+
+
+async def test_session_instance_gone_when_the_network_is_not_found(monkeypatch):
+    # Exact stderr measured from `docker inspect --type network` on Docker 29.8.
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Error response from daemon: network aidc-nosuch-net not found\n",
+        returncode=1))
+    assert await tools._session_instance("nosuch") == (tools.SESSION_GONE, "")
+
+
+async def test_session_instance_gone_on_other_not_found_wordings(monkeypatch):
+    for stderr in (b"Error: No such network: aidc-x-net\n",
+                   b"Error: no such object: aidc-x-net\n"):
+        _patch_async_proc(monkeypatch, FakeProc(stderr=stderr, returncode=1))
+        assert await tools._session_instance("x") == (tools.SESSION_GONE, "")
+
+
+async def test_session_instance_gone_when_the_wording_differs_but_names_the_network(
+        monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Error: network \"aidc-proj-net\" not found\n", returncode=1))
+    assert await tools._session_instance("proj") == (tools.SESSION_GONE, "")
+
+
+async def test_a_not_found_about_something_else_is_not_a_gone_session(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"context \"remote\" not found\n", returncode=1))
+    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
+
+
+async def test_session_instance_unknown_on_any_other_docker_failure(monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+               b"Is the docker daemon running?\n", returncode=1))
+    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
+
+
+async def test_session_instance_reads_the_session_network(monkeypatch):
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        return FakeProc(stdout=b"id\n", returncode=0)
+
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", fake_exec)
+    await tools._session_instance("proj")
+    assert calls == [("docker", "inspect", "--type", "network", "--format", "{{.Id}}",
+                      "aidc-proj-net")]
+
+
+# --- error_code: every failure envelope says what kind of failure it is ----------
+
+def test_every_error_envelope_carries_a_known_code():
+    """A caller decides 'tell the person' from 'retry once' by the code, not the prose.
+    `code` is a required keyword, so this pins the set and the envelope shape."""
+    env = tools._envelope_err("There is no session named 'x'", code="no_such_session")
+    assert env == {"ok": False, "error": "There is no session named 'x'",
+                   "error_code": "no_such_session"}
+    import ast
+    import inspect as _inspect
+    tree = ast.parse(_inspect.getsource(tools))
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_envelope_err":
+            kw = {k.arg: k.value for k in node.keywords}
+            assert "code" in kw, f"_envelope_err without code at line {node.lineno}"
+            assert isinstance(kw["code"], ast.Constant), f"non-literal code at {node.lineno}"
+            used.add(kw["code"].value)
+    assert used <= tools.ERROR_CODES, used - tools.ERROR_CODES
+    assert {"no_such_session", "queue_full", "out_of_scope", "cli_failed"} <= used
+
+
+def test_every_error_code_is_in_the_documented_table():
+    """design 10 D6 is the table an orchestrator reads to decide what to do with a
+    failure (project-state.yaml names it as the record for MCP-32), so a code that
+    exists in the code and not in the table is a contract nobody can act on."""
+    from pathlib import Path
+    design = (Path(__file__).resolve().parents[2]
+              / "docs" / "design-10-turn-state-and-sending.md").read_text(encoding="utf-8")
+    missing = sorted(code for code in tools.ERROR_CODES if f"`{code}`" not in design)
+    assert not missing, f"error codes missing from design 10 D6: {missing}"

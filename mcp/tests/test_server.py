@@ -28,6 +28,22 @@ async def test_lifespan_start_resumes_once_and_passes_through(monkeypatch):
     assert resumed_with == [mcp_app]
 
 
+async def test_a_failing_queue_resume_does_not_stop_webhooks_resuming(monkeypatch):
+    resumed = []
+
+    async def queues():
+        raise OSError("disk full")
+
+    async def watchers(app):
+        resumed.append(app)
+
+    monkeypatch.setattr(tools, "resume_send_queues", queues)
+    monkeypatch.setattr(tools, "resume_watchers", watchers)
+    app = object()
+    await tools.resume_on_startup(app)
+    assert resumed == [app]
+
+
 async def test_startup_resumes_queues_before_webhooks(monkeypatch):
     order = []
 

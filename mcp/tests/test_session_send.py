@@ -213,6 +213,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
 async def test_errors_when_the_session_does_not_exist(wiring):
     app, send = _make_send()
     wiring.container = tools.CONTAINER_GONE
+    tools._sent_awaiting_echo["proj"] = ("from before it was killed", 0.0)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -221,6 +222,7 @@ async def test_errors_when_the_session_does_not_exist(wiring):
     assert res["error_code"] == "no_such_session"
     assert not wiring.paste_calls
     assert "proj" not in tools._pending_sends
+    assert "proj" not in tools._sent_awaiting_echo   # its send-path state is forgotten
     # Checked before the webhook opens: nothing is started or saved for it.
     assert "proj" not in tools._session_watchers
     assert not ts.watch_path(tools._WATCHER_STATE_DIR, "proj").exists()
@@ -465,6 +467,60 @@ async def test_a_prompt_sent_without_a_conversation_records_the_open_webhooks(wi
     assert q.conversation_id == "c-watched"
 
 
+async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(wiring):
+    """The drainer checks the prompt's session again under the paste lock: the wait for
+    a free session can be long enough for it to be killed and created again."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="for the old session", conversation_id="c1")
+
+    async def recreated_while_waiting(container, name):
+        wiring.container_id = "id-2"
+        return ""
+
+    wiring.idle_ok = True
+    tools._check_free = recreated_while_waiting   # restored by monkeypatch at teardown
+    await _let_drainer_run("proj", ticks=100)
+
+    assert not wiring.paste_calls
+    assert "proj" not in tools._pending_sends
+    [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")
+    assert json.loads(dead.read_text())["prompt"] == "for the old session"
+
+
+async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enqueue(
+        wiring, monkeypatch):
+    """_enqueue_send awaits the container id; the drainer can replace the session's
+    queue list meanwhile. The prompt must land in the list that is kept."""
+    replacement = [ts.QueuedPrompt("kept", "2026-09-17T04:00:00Z", container_id="id-1")]
+
+    async def container_id(container):
+        tools._pending_sends["proj"] = replacement
+        return "id-1"
+
+    monkeypatch.setattr(tools, "_container_id", container_id)
+    await tools._enqueue_send("proj", "aidc-proj-dev", "new", "claude_busy")
+    assert [q.text for q in tools._pending_sends["proj"]] == ["kept", "new"]
+
+
+async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
+    path = ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    # Startup cannot tell whose it is (the name is inside the file): logged, left alone.
+    await tools.resume_send_queues()
+    assert path.read_text() == "{not json"
+
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="new", conversation_id="c1")
+    [aside] = path.parent.glob(f"{path.name}.unreadable-*")
+    assert aside.read_text() == "{not json"
+    assert [q.text for q in ts.load_send_queues(path.parent)[0]["proj"]] == ["new"]
+
+
 async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring):
     """After a restart, a session_send can arrive before startup has resumed the saved
     queue. The saved prompts still go first, and resume does not load them twice."""
@@ -542,6 +598,7 @@ async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
     assert res["data"]["status"] == "queued"
     assert res["data"]["waiting_reason"] == "paste_failing"
     assert not _sent_enter(wiring.tmux_calls)  # no Enter after a failed paste
+    assert tools._pending_sends["proj"][0].paste_attempts == 1   # the failed paste counts
 
     wiring.paste_ok = True
     await _let_drainer_run("proj", ticks=100)

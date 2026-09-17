@@ -15,7 +15,7 @@ import pytest
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
-from aidc_mcp.screen import EMPTY, ScreenState
+from aidc_mcp.screen import EMPTY, ScreenState, classify
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
 NOW = 1_789_609_900.0   # 2026-09-17T01:51:40Z
@@ -40,6 +40,8 @@ def _reply(uuid, text, stop="end_turn", when=ISO_NOW):
 SUMMARY = {"type": "system", "subtype": "stop_hook_summary", "hookErrors": []}
 DURATION = {"type": "system", "subtype": "turn_duration", "durationMs": 900}
 FINISHED = [_typed("u0", "q"), _reply("a0", "A."), SUMMARY, DURATION]
+# The prompt in claude-2.1.27x-esc-before-output-sent-prompt-restored.ansi.
+RESTORED = "Think carefully, then write a 300-word explanation of how TCP slow start works."
 
 
 class Session:
@@ -117,6 +119,39 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == ""
+
+    async def test_a_prompt_put_back_in_the_box_is_a_stop_without_the_working_text(
+            self, session):
+        """Claude Code returns the prompt to the input box when Esc is pressed before
+        it writes anything. That is proof enough, with no working text ever seen; the
+        session is then held for the person's text in the box, not for a turn."""
+        session.write([*FINISHED, _typed("u1", RESTORED)], age=10.0)
+        session.screen = _screen("esc-before-output-sent-prompt-restored")
+        assert await session.check() == "input_has_text"
+        assert tools._last_free_verdict["proj"][1] == "prompt_restored"
+
+    async def test_other_text_in_the_box_is_not_proof_of_a_stop(self, session):
+        session.write([*FINISHED, _typed("u1", "a different prompt")], age=10.0)
+        session.screen = _screen("esc-before-output-sent-prompt-restored")
+        assert await session.check() == "claude_busy"
+        assert tools._last_free_verdict["proj"][1] == "status_row_unproven"
+
+    async def test_the_working_text_is_remembered_across_a_restart(self, session):
+        session.screen = _screen("busy-tool-empty-box")
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+        assert await session.check() == "claude_busy"          # seen working
+        tools._working_indicator_seen.clear()                  # the MCP restarts
+        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+        session.screen = _screen("idle-empty")
+        assert await session.check() == ""
+        assert tools._last_free_verdict["proj"][1] == "status_row_idle"
+
+    async def test_a_removed_session_forgets_the_working_text_on_disk(self, session):
+        session.screen = _screen("busy-tool-empty-box")
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+        await session.check()
+        tools._forget_session_send_state("proj")
+        assert not tools._working_indicator_known("proj")
 
     async def test_without_ever_seeing_the_working_text_a_quiet_open_turn_stays_busy(
             self, session):
@@ -410,6 +445,43 @@ class TestInterruptedBeforeOutputDelivery:
         await self.drain(quiet=tools._LOG_STALL_S)
         await self.drain(quiet=tools._LOG_STALL_S)
         assert [t.terminal_uuid for t in self.posted] == ["u1"]
+
+    async def test_a_restored_prompt_is_reported_without_waiting_for_the_stall_window(
+            self, tmp_path):
+        """The joint test of 2026-09-17: an MCP restarted a minute earlier had never
+        seen the working text, and reported this Esc only after ten minutes."""
+        self._setup(tmp_path, [_typed("u1", RESTORED)], seen=False)
+        self.screen = classify(_screen("esc-before-output-sent-prompt-restored"))
+        await self.drain()
+        self.append_tail()
+        await self.drain(quiet=10.0)
+        await self.drain(quiet=10.0)
+        assert [(t.terminal_uuid, t.interrupted) for t in self.posted] == [("u1", True)]
+
+    async def test_only_the_latest_report_per_session_is_remembered(self, tmp_path):
+        self._setup(tmp_path, [_typed("u1", "first")])
+        await self.drain()
+        self.append_tail()
+        await self.drain()
+        await self.drain()
+        self.tail = [_typed("u1", "first"), _typed("u2", "second")]
+        self.append_tail()
+        await self.drain()
+        await self.drain()
+        assert [t.terminal_uuid for t in self.posted] == ["u1", "u2"]
+        assert {r for r in tools._reported_interrupts if r[0] == "sess"} == {("sess", "u2")}
+
+    async def test_a_prompt_whose_turn_ended_with_no_reply_is_not_called_interrupted(
+            self, tmp_path):
+        """Only an open turn the screen shows stopped is an interrupt. A prompt followed
+        by Claude Code's end-of-turn record and no reply has not been measured; calling
+        it "interrupted at the terminal" would say something nobody saw happen."""
+        self._setup(tmp_path, [_typed("u1", "q"), DURATION])
+        await self.drain()
+        self.append_tail()
+        for _ in range(3):
+            await self.drain()
+        assert self.posted == []
 
     async def test_not_reported_when_claude_is_not_running(self, tmp_path):
         self._setup(tmp_path, [_typed("u1", "q")])

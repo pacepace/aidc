@@ -81,7 +81,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   person at the terminal stopped it, and the callback carries `interrupted: true`. It used to
   be dropped without a word. `ok` stays true: an interrupt is not a failure. An Esc pressed
   before Claude writes anything, which leaves no trace in the transcript, is recognized from
-  the status bar and reported with "Claude had not written anything yet".
+  the prompt Claude Code puts back in the input box (or else from the status bar) and reported
+  within seconds with "Claude had not written anything yet".
 - **Replies arrive a few seconds sooner.** When Claude Code writes its end-of-turn record,
   the watcher delivers at once instead of waiting out `metallm.turn_settle_seconds`. Without
   the record the wait applies as before.

@@ -1365,16 +1365,24 @@ class TestPersistedSendQueue:
 
 class TestPersistedWatch:
     def test_roundtrip_and_remove(self, tmp_path):
-        save_watch(tmp_path, "a/b", "c1", "http://cb")
+        save_watch(tmp_path, "a/b", "c1", "http://cb", container_id="id-1")
         save_watch(tmp_path, "proj", "c2", "http://cb")
         watches, unreadable = load_watches(tmp_path)
         assert watches == [
-            {"session": "a/b", "conversation_id": "c1", "callback_base": "http://cb"},
-            {"session": "proj", "conversation_id": "c2", "callback_base": "http://cb"}]
+            {"session": "a/b", "conversation_id": "c1", "callback_base": "http://cb",
+             "container_id": "id-1"},
+            {"session": "proj", "conversation_id": "c2", "callback_base": "http://cb",
+             "container_id": ""}]
         assert unreadable == [] and not list(tmp_path.glob("*.new"))
         remove_watch(tmp_path, "a/b")
         remove_watch(tmp_path, "never-watched")   # no error
         assert [w["session"] for w in load_watches(tmp_path)[0]] == ["proj"]
+
+    def test_a_file_saved_before_container_ids_still_loads(self, tmp_path):
+        watch_path(tmp_path, "proj").write_text(
+            '{"session": "proj", "conversation_id": "c1", "callback_base": "http://cb"}')
+        [w], unreadable = load_watches(tmp_path)
+        assert w["container_id"] == "" and unreadable == []
 
     def test_rewatch_replaces_the_conversation(self, tmp_path):
         save_watch(tmp_path, "proj", "c1", "http://cb")

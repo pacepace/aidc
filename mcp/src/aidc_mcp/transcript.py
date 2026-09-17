@@ -1171,13 +1171,15 @@ def watch_path(base_dir: Path, session: str) -> Path:
     return Path(base_dir) / f"{_slug(session)}.watch.json"
 
 
-def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str) -> None:
+def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str, *,
+               container_id: str = "") -> None:
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     path = watch_path(base, session)
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
-                               "callback_base": callback_base, "updated_at": _now_iso()},
+                               "callback_base": callback_base, "container_id": container_id,
+                               "updated_at": _now_iso()},
                               indent=1), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -1187,8 +1189,9 @@ def remove_watch(base_dir: Path, session: str) -> None:
 
 
 def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
-    """Every persisted webhook as {session, conversation_id, callback_base}, plus the
-    files that could not be read (left in place)."""
+    """Every persisted webhook as {session, conversation_id, callback_base,
+    container_id}, plus the files that could not be read (left in place).
+    `container_id` is "" when the session's id could not be read when it was saved."""
     watches: list[dict[str, str]] = []
     unreadable: list[Path] = []
     for path in sorted(Path(base_dir).glob("*.watch.json")):
@@ -1197,6 +1200,8 @@ def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
             entry = {k: data[k] for k in ("session", "conversation_id", "callback_base")}
             if not all(isinstance(v, str) and v for v in entry.values()):
                 raise ValueError("incomplete watch")
+            container_id = data.get("container_id", "")
+            entry["container_id"] = container_id if isinstance(container_id, str) else ""
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
             unreadable.append(path)
             continue

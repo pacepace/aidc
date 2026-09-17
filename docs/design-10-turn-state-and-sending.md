@@ -224,8 +224,8 @@ reported inside the envelope, not through the MCP error flag.
 - Failure: `{"ok": false, "error": "<a sentence for a model or person to read>", "error_code": "<kind>"}`,
   sometimes with `data` for context.
 
-`error_code` lets a caller decide what to do without matching prose (agreed with the metallm
-session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
+`error_code` lets a caller decide what to do without matching prose (MCP-32, agreed with the
+metallm session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
 missing a code or uses one outside the set:
 
 | Code | Meaning | Caller |
@@ -243,8 +243,7 @@ missing a code or uses one outside the set:
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
 
-`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope` or
-`invalid_argument`. Every other condition, a failed paste included, queues the prompt. The
+`session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every other condition, a failed paste included, queues the prompt. The
 metallm side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 
@@ -255,10 +254,12 @@ answered, and no callback was sent, because webhooks lived only in memory. Now:
 
 - Opening a webhook (`session_watch`, or `session_send` with a `conversation_id`) saves
   `watcher-state/<session>.watch.json` (`session`, `conversation_id`, `callback_base`,
-  `updated_at`; atomic write). `session_unwatch` removes it.
+  `container_id`, `updated_at`; atomic write). `session_unwatch` removes it.
 - At startup (`server.ResumeOnStartup`), after the send queues, `resume_watchers` reopens every
-  saved webhook in scope whose session still exists, and removes the file of one that does not.
-  An unreadable file is logged and left in place.
+  saved webhook in scope whose session still exists, and removes the file of one whose container
+  is gone or has a different id (killed and created again: the new session was never asked to
+  report to that conversation). An id that cannot be read keeps the webhook. An unreadable file
+  is logged and left in place. A failure resuming the queues does not stop the webhooks resuming.
 - A resumed webhook does **not** re-anchor the watermark to the end of the transcript, as a new
   one does. It continues from the saved watermark, so a reply written while the MCP was down is
   delivered, and the delivery ledger keeps it to once.
@@ -297,12 +298,22 @@ Two questions are kept apart, because they have different callers:
 3. A reply still waiting on its Stop hooks stays **working** until 120 s of quiet
    (`_STOP_HOOK_WAIT_S`, the same hold the watcher's delivery uses, D1), whatever the screen
    shows.
-4. Past that hold, and for any other quiet open turn, the status row decides: `esc to interrupt` means **working** (a long silent tool
-   call, or thinking before the first line). Its absence means **stopped**, trusted once this
-   MCP process has seen the working text on that session's screen; until then, only after 10
-   minutes of quiet. So a Claude Code that renames the text costs a slow queue, never a paste
-   into a running turn. The send path learns the text on its own screen reads; the watcher
-   reads the screen while a turn is in progress until it has seen it once.
+4. Past that hold, and for any other quiet open turn, the screen decides. `esc to interrupt` on
+   the status row means **working** (a long silent tool call, or thinking before the first
+   line). Otherwise, an input box holding exactly a prompt the transcript shows unanswered
+   (compared ignoring whitespace, since the box wraps and indents) means **stopped**
+   (`prompt_restored`): Claude Code puts the prompt back when Esc is pressed before it writes
+   anything. Failing both, the working text's absence means **stopped**, trusted once the MCP
+   has seen that text on the session's screen; until then, only after 10 minutes of quiet. So a
+   Claude Code that renames the text costs a slow queue, never a paste into a running turn. The
+   send path learns the text on its own screen reads; the watcher reads the screen while a turn
+   is in progress until it has seen it once. Having seen it is remembered in
+   `watcher-state/<session>.working-text-seen`, so a restart does not forget it, and forgotten
+   when the session is gone.
+
+   The joint test showed why both matter: an MCP restarted a minute before an Esc pressed 1 s
+   into a turn had never seen the working text, and reported the interrupt only after the
+   10-minute fallback.
 
 **Pasting requires two consecutive free readings**, 2.5 s apart (past the mirror's copy
 interval, so both cannot come from the same stale copy), in `_wait_until_free`. That catches a
@@ -340,8 +351,9 @@ Only three things, each invisible to the transcript:
 1. **Unsent text in Claude's input box.** The transcript records a prompt only after it is sent.
 2. **Whether Claude is at its input prompt at all.** After a start or restart, Claude can be on a
    login, trust, or startup screen while the transcript's last turn reads closed.
-3. **Whether `esc to interrupt` is on the status row**, and only when the transcript shows an open
-   turn that has gone quiet (S1). Never used while the transcript can answer.
+3. **Whether `esc to interrupt` is on the status row, and what text the input box holds**, and
+   only when the transcript shows an open turn that has gone quiet (S1). Never used while the
+   transcript can answer.
 
 Both are read from one `capture-pane -e` of the `claude` window (with escape sequences, so text
 attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
@@ -406,13 +418,17 @@ ways:
    watermark) on every change; an emptied queue removes its file. When `aidc-mcp` starts
    (`server.ResumeOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
    persisted queue a drainer, and dead-letters the queue of a session whose container is gone. An
-   unreadable queue file is logged and left in place. Loading a saved queue happens once per
+   unreadable queue file is logged and left in place at startup (its session's name is inside
+   it); the first send to that session renames it to `<file>.unreadable-<time>` before saving,
+   so it is kept for a person rather than overwritten. Loading a saved queue happens once per
    process, under the session's send lock, from whichever comes first: startup resume or a
    `session_send` to that session. Saved prompts always go ahead of new ones.
 5. **The only exits** are "pasted" and "session gone": its container no longer exists, or a
    container of the same name has a different id than when the prompt was accepted (killed and
    re-created; each prompt records the id, so the new session is never handed the old one's
-   prompts). A gone prompt is written to the send dead-letter dir with reason `session_killed`
+   prompts). The drainer checks this at the start of each round and again under the send lock
+   right before pasting, since its wait for a free session can outlast a kill and re-create. A
+   gone prompt is written to the send dead-letter dir with reason `session_killed`
    and reported to its conversation (D5, `prompt_dropped`). Docker failing to answer is neither.
 
 **Why a prompt is waiting** is always one of a closed set, reported in the `session_send` result

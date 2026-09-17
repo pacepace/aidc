@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from aidc_mcp.screen import EMPTY, HAS_TEXT, NOT_AT_PROMPT, UNRECOGNIZED, ScreenState, classify
+from aidc_mcp.screen import (
+    EMPTY,
+    HAS_TEXT,
+    NOT_AT_PROMPT,
+    UNRECOGNIZED,
+    ScreenState,
+    classify,
+    same_text,
+)
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
 
@@ -26,6 +34,7 @@ def _screen(name):
     ("busy-with-queued-message", ScreenState(EMPTY, working=True)),
     # An Esc before Claude wrote anything puts the prompt back in the box.
     ("esc-before-output-prompt-restored", ScreenState(HAS_TEXT, working=False)),
+    ("esc-before-output-sent-prompt-restored", ScreenState(HAS_TEXT, working=False)),
     ("trust-folder", ScreenState(NOT_AT_PROMPT, working=False)),
     # No box and no known dialog hint. (The send path reports a shell as "Claude not
     # running" before it ever reads the screen.)
@@ -33,6 +42,32 @@ def _screen(name):
 ])
 def test_real_captures(name, expected):
     assert classify(_screen(name)) == expected
+
+
+@pytest.mark.parametrize("name, typed", [
+    ("typed-unsent", None),   # checked only for being non-empty below
+    ("typed-multiline", "line one\nline two"),
+    ("esc-before-output-prompt-restored",
+     "Write a 600-word essay about lighthouses. Do not use any tools."),
+    # A prompt the MCP pasted, restored by an Esc 1 s later (joint test, 2026-09-17).
+    ("esc-before-output-sent-prompt-restored",
+     "Think carefully, then write a 300-word explanation of how TCP slow start works."),
+])
+def test_typed_text_is_read_from_the_box(name, typed):
+    state = classify(_screen(name))
+    assert state.typed if typed is None else state.typed == typed
+
+
+@pytest.mark.parametrize("name", ["idle-empty", "busy-with-queued-message", "trust-folder"])
+def test_no_typed_text_without_text_in_the_box(name):
+    assert classify(_screen(name)).typed == ""
+
+
+def test_same_text_ignores_wrapping_and_indent():
+    assert same_text("Think carefully, then write\n  a 300-word explanation",
+                     "Think carefully, then write a 300-word explanation")
+    assert same_text("line one\nline two", "line one line two")
+    assert not same_text("reply ONE", "reply TWO")
 
 
 RULE = "─" * 60

@@ -327,7 +327,8 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="reply SEVEN", conversation_id="conv-1")
-    assert ts.watch_path(h.state, "proj").exists()
+    [saved], _ = ts.load_watches(h.state)
+    assert saved["container_id"] == "id-1"
 
     # The MCP goes down: every in-memory watcher is gone, the saved files are not.
     for task in tools._session_watchers.values():
@@ -368,6 +369,25 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
     assert not tools._session_watchers
     assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
     assert ts.watch_path(h.state, "other").exists()      # another server's to resume
+
+
+async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
+    """A session killed and created again under the same name was never asked to report
+    to the old conversation."""
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", container_id="id-1")
+    h.container_id = "id-2"
+    await tools.resume_watchers(h.app)
+    assert "proj" not in tools._session_watchers
+    assert not ts.watch_path(h.state, "proj").exists()
+
+
+async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", container_id="id-1")
+    h.container_id = ""
+    await tools.resume_watchers(h.app)
+    assert "proj" in tools._session_watchers
 
 
 async def _settle_background():

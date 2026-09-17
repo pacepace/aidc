@@ -6,9 +6,10 @@ only for:
     is sent), so the MCP never pastes on top of what a person is typing;
   - whether Claude is at its input prompt at all (a startup, login or trust screen, or
     a layout this module does not recognize, has no input box);
-  - whether the status row says Claude is working (`esc to interrupt`), which the send
-    path consults only when the transcript shows a turn in progress that has gone
-    quiet: an Esc before Claude writes anything leaves no marker in the transcript.
+  - whether the status row says Claude is working (`esc to interrupt`), and the text in
+    the input box, which are consulted only when the transcript shows a turn in
+    progress that has gone quiet: an Esc before Claude writes anything leaves no marker
+    in the transcript, but Claude Code puts the prompt back in the box.
 
 Layout measured on Claude Code 2.1.270 and 2.1.274 (docs/design-10-turn-state-and-sending.md):
 the input box is the region between the last two full-width `─` rules, its first row
@@ -21,7 +22,7 @@ hold prompts rather than typing blind.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 EMPTY = "empty"
 HAS_TEXT = "has_text"
@@ -48,6 +49,17 @@ _OTHER_ESCAPE_RE = re.compile(r"\x1b(?:\[[\x20-\x3f]*[\x40-\x7e]|\][^\x07\x1b]*(
 class ScreenState:
     input_box: str   # EMPTY, HAS_TEXT, NOT_AT_PROMPT or UNRECOGNIZED
     working: bool    # the status row shows `esc to interrupt`
+    # The text in the input box when it is HAS_TEXT: the non-dim characters, rows
+    # joined with newlines, continuation indent and trailing padding removed. How
+    # Claude Code wraps a long line is not preserved, so compare it with
+    # same_text(), which ignores whitespace.
+    typed: str = field(default="", compare=False)
+
+
+def same_text(a: str, b: str) -> bool:
+    """Whether two texts match ignoring all whitespace: the input box wraps and
+    indents what was typed, and a pasted prompt had its newlines flattened."""
+    return "".join(a.split()) == "".join(b.split())
 
 
 def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
@@ -112,6 +124,9 @@ def classify(ansi: str) -> ScreenState:
     if not box or not plain[top + 1].startswith(_BOX_GLYPH):
         return ScreenState(no_box.input_box, working)
 
-    typed = box[0][len(_BOX_GLYPH):] + [cell for row in box[1:] for cell in row]
-    has_text = any(not ch.isspace() and not is_dim for ch, is_dim in typed)
-    return ScreenState(HAS_TEXT if has_text else EMPTY, working)
+    rows_typed = [box[0][len(_BOX_GLYPH):], *box[1:]]
+    if not any(not ch.isspace() and not is_dim for row in rows_typed for ch, is_dim in row):
+        return ScreenState(EMPTY, working)
+    text = "\n".join("".join(ch for ch, is_dim in row if not is_dim).strip()
+                     for row in rows_typed)
+    return ScreenState(HAS_TEXT, working, typed=text.strip())

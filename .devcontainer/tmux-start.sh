@@ -29,9 +29,11 @@ tmux send-keys -t "$SESSION:logs" "echo 'Logs window. Tail what you need here.'"
 
 # While the aidc MCP holds an orchestrator prompt because someone has unsent text in
 # Claude's input box, it sets the @aidc_waiting option; show it on the status line so
-# the person knows why nothing is happening. Unset, the status line is tmux's default.
+# the person knows why nothing is happening. The message replaces the title and clock
+# while it shows: tmux cuts an over-long right side from its START, which would lose the
+# beginning of the message on a narrow terminal. Unset, the status line is tmux's default.
 tmux set-option -t "$SESSION" status-right-length 120
 tmux set-option -t "$SESSION" status-right \
-    '#{?@aidc_waiting,#[reverse] #{@aidc_waiting} #[default] ,}"#{=21:pane_title}" %H:%M %d-%b-%y'
+    '#{?@aidc_waiting,#[reverse] #{@aidc_waiting} #[default],"#{=21:pane_title}" %H:%M %d-%b-%y}'
 
 tmux select-window -t "$SESSION:claude"

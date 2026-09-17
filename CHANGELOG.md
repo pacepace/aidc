@@ -32,6 +32,12 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   without blocking no longer counts as a pushback.
 - **A reply to a background task's notification is no longer labelled as answering a prompt
   that was interrupted before Claude wrote anything.**
+- **Replies are no longer lost when `aidc-mcp` restarts.** Webhooks lived only in memory, so a
+  restart silently stopped every one: a prompt resumed from the send queue was answered and the
+  answer never came back. Webhooks are now saved and reopened at startup, and a reply written
+  while the MCP was down is delivered once.
+- **A re-created session is no longer handed the old session's waiting prompts.** Each queued
+  prompt records which container it was accepted for.
 
 ### Changed
 - **Whether a session is busy now comes from Claude's transcript, not from watching the
@@ -50,12 +56,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   long as its session exists, is held while Claude restarts, retries failed pastes without a
   limit, and is saved to disk and resumed when the MCP starts. It leaves the queue only by being
   pasted, or when its session is killed (then it goes to the dead-letter dir). `session_send`
-  queues instead of refusing when Claude is not running, and refuses only a session that does
-  not exist.
+  queues instead of refusing when Claude is not running or a paste fails, and refuses only a
+  session that does not exist.
+- **A prompt that can never be pasted is reported back.** When a session is removed while
+  prompts wait for it, each prompt's conversation gets a callback with `ok: false`,
+  `error_code: "prompt_dropped"` and the prompt's text, instead of silence.
 - **You can see why a prompt is waiting.** `session_send` returns a `waiting_reason` when it
   queues, and `session_status` lists every waiting prompt with its reason and paste attempts.
   While a prompt waits because someone has unsent text in Claude's input box, the session's tmux
-  status line says so (sessions created on the new image).
+  status line says so, in place of the window title and clock (sessions created on the new
+  image).
 
 ### Added
 - **Tool failures say what kind of failure they are.** Every `{"ok": false, "error": ...}`

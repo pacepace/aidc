@@ -93,6 +93,13 @@ def harness(tmp_path, monkeypatch):
     explicitly by the test for determinism."""
     base = tmp_path / "transcripts"
     state = tmp_path / "watcher-state"
+
+    class Rig:
+        pass
+
+    rig = Rig()
+    rig.container = tools.CONTAINER_EXISTS
+    rig.container_id = "id-1"
     metallm = FakeMetallm()
     paste_calls: list[str] = []
 
@@ -131,9 +138,13 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_check_free", check_free)
 
     async def container_state(container):
-        return tools.CONTAINER_EXISTS
+        return rig.container
+
+    async def container_id(container):
+        return rig.container_id
 
     monkeypatch.setattr(tools, "_container_state", container_state)
+    monkeypatch.setattr(tools, "_container_id", container_id)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)
@@ -169,10 +180,7 @@ def harness(tmp_path, monkeypatch):
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
-    class Rig:
-        pass
-
-    rig = Rig()
+    rig.app = app
     rig.base = base
     rig.state = state
     rig.metallm = metallm
@@ -308,6 +316,113 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
     assert len(dead) == 1
     assert json.loads(dead[0].read_text())["content"] == "UNDELIVERABLE"
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == "a1"
+
+
+async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_once(harness):
+    """An aidc-mcp restart must not cost a reply. The webhook is saved when it opens and
+    reopened at startup from its saved watermark, not re-anchored to the end of the
+    transcript, so a reply written while the MCP was down is delivered exactly once.
+    (Joint test with MetaLLM, 2026-09-17: a queued prompt pasted after a restart was
+    answered, and the answer never came back.)"""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="reply SEVEN", conversation_id="conv-1")
+    assert ts.watch_path(h.state, "proj").exists()
+
+    # The MCP goes down: every in-memory watcher is gone, the saved files are not.
+    for task in tools._session_watchers.values():
+        task.cancel()
+    tools._session_watchers.clear()
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "reply SEVEN"),
+                                            _assistant("a1", "SEVEN")])
+
+    await tools.resume_on_startup(h.app)
+    assert "proj" in tools._session_watchers
+    await h.drain()
+    await h.drain()
+
+    assert [p["json"]["content"] for p in h.metallm.posts] == ["SEVEN"]
+    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+
+
+async def test_unwatch_forgets_the_saved_webhook(harness):
+    h = harness
+    await h.send(name="proj", prompt="q", conversation_id="conv-1")
+    await h.app._tool_manager._tools["session_unwatch"].fn(name="proj")
+    assert not ts.watch_path(h.state, "proj").exists()
+    tools._session_watchers.clear()
+    await tools.resume_watchers(h.app)
+    assert "proj" not in tools._session_watchers
+
+
+async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness, monkeypatch):
+    h = harness
+    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local")
+    ts.save_watch(h.state, "other", "conv-2", "http://metallm.local")
+    monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
+    h.container = tools.CONTAINER_GONE
+
+    await tools.resume_watchers(h.app)
+
+    assert not tools._session_watchers
+    assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
+    assert ts.watch_path(h.state, "other").exists()      # another server's to resume
+
+
+async def _settle_background():
+    await asyncio.gather(*list(tools._background_tasks))
+
+
+async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harness):
+    """A queued prompt that can never be pasted is reported back to the conversation
+    that sent it, with its text, and recorded in the send dead-letter directory."""
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
+                        container_id="id-1"),
+        ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", container_id="id-1")]
+    h.container = tools.CONTAINER_GONE
+
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await _settle_background()
+
+    assert "proj" not in tools._pending_sends
+    assert [p["json"] for p in h.metallm.posts] == [{
+        "content": ("[Not delivered: the session 'proj' was removed before this prompt "
+                    "could be pasted. It was never seen by the agent.]\n\nreply EIGHT"),
+        "ok": False, "source": "agent_watch", "session": "proj",
+        "prompt_origin": "orchestrator", "interrupted": False,
+        "error_code": "prompt_dropped"}]
+    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+    assert len(list((h.state / "dead-letter").glob("send__proj__*.json"))) == 2
+
+
+async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harness):
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("for the old one", "2026-09-17T04:00:00Z", conversation_id="conv-1",
+                        container_id="id-1"),
+        ts.QueuedPrompt("for the new one", "2026-09-17T04:00:05Z", conversation_id="conv-1",
+                        container_id="id-2")]
+    h.container_id = "id-2"   # killed and created again under the same name
+
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await _settle_background()
+
+    assert [q.text for q in tools._pending_sends["proj"]] == ["for the new one"]
+    assert [p["json"]["error_code"] for p in h.metallm.posts] == ["prompt_dropped"]
+    assert "for the old one" in h.metallm.posts[0]["json"]["content"]
+
+
+async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
+    h = harness
+    tools._pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
+                                                    container_id="id-1")]
+    h.container = tools.CONTAINER_UNKNOWN
+    h.container_id = ""
+    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    assert [q.text for q in tools._pending_sends["proj"]] == ["keep"]
+    assert not h.metallm.posts
 
 
 # --- Deliverable 2: resend a lost/missed reply, WITHOUT a backlog replay -------

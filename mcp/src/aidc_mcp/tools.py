@@ -2,7 +2,8 @@
 
 Each tool is a thin wrapper that shells out to the `aidc` CLI (mounted
 at /aidc/scripts/aidc inside the container). Tools return a structured
-envelope: {"ok": bool, "error"?: str, "data"?: any}.
+envelope: {"ok": true, "data": ...} or {"ok": false, "error": str, "error_code": str,
+"data"?: any}, where error_code is one of ERROR_CODES (design 10 D6).
 
 Long-running tools (session_create, session_invoke) accept a `Context`
 parameter and emit progress notifications during execution.
@@ -182,6 +183,10 @@ _ECHO_POLL_S = 2.0
 
 TURN_RUNNING = "running"
 TURN_IDLE = "idle"
+# The idle verdicts that come from the screen rather than the transcript: a turn the
+# transcript still shows open, judged stopped. The send path and the watcher both
+# treat exactly these as "Claude stopped with that prompt unanswered".
+_STOPPED_BY_SCREEN = frozenset({"status_row_idle", "log_stalled"})
 
 # Per-session asyncio locks: serialize concurrent session_send calls.
 _session_send_locks: dict[str, asyncio.Lock] = {}
@@ -225,9 +230,8 @@ _PENDING_MAX_DEPTH = 25
 
 # What a person attached to the session sees on the tmux status line while a queued
 # prompt waits on their unsent text. tmux-start.sh shows the @aidc_waiting option.
-_WAITING_ON_INPUT_TEXT = (
-    "aidc: orchestrator message waiting — press Enter or clear your input to let it through"
-)
+# Short enough to show whole on an 80-column terminal (tests/unit/test-tmux-status-line.sh).
+_WAITING_ON_INPUT_TEXT = "aidc: orchestrator message waiting — press Enter or clear your input"
 
 # Per-session background watcher tasks. The KEYS are the sessions with an open
 # webhook (responses stream back to the orchestrator). We surface that set in the
@@ -441,7 +445,7 @@ async def _session_state(container: str, name: str) -> SessionState:
     if status != "ok":
         return SessionState(True, screen, TURN_IDLE, f"transcript_{status}")
     turn, why = _turn_verdict(name, objs, time.time() - mtime, screen)
-    if turn == TURN_IDLE and why in ("status_row_idle", "log_stalled"):
+    if turn == TURN_IDLE and why in _STOPPED_BY_SCREEN:
         cut_off = ts.unanswered_prompt_turn(objs)
         if (cut_off is not None and name in _session_watchers
                 and (name, cut_off.terminal_uuid) not in _reported_interrupts):
@@ -669,6 +673,47 @@ _drainer_failures: dict[str, int] = {}
 _waiting_notice_shown: set[str] = set()
 
 
+async def _container_id(container: str) -> str:
+    """The container's docker id, or "" when it cannot be read (gone, or docker
+    failing). Recorded with each queued prompt; see
+    _drop_prompts_of_removed_session."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "--format", "{{.Id}}", container,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
+
+
+async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
+    """Take out of `name`'s queue every prompt whose session no longer exists: all of
+    them when the container is gone, and, when a container of the same name has a
+    different id (the session was killed and re-created), those accepted for the old
+    one. Docker failing to answer removes nothing."""
+    state = await _container_state(container)
+    if state == CONTAINER_UNKNOWN:
+        log_event("session_send_queue_container_unknown", session=name)
+        return
+    queue = _pending_sends.get(name, [])
+    if state == CONTAINER_GONE:
+        dropped, kept = queue, []
+    else:
+        current = await _container_id(container) if any(q.container_id for q in queue) else ""
+        if not current:
+            return
+        dropped = [q for q in queue if q.container_id and q.container_id != current]
+        kept = [q for q in queue if q not in dropped]
+    if not dropped:
+        return
+    if kept:
+        _pending_sends[name] = kept
+    else:
+        _pending_sends.pop(name, None)
+    _abandon_queue(name, dropped)
+    _persist_queue(name)
+
+
 async def _container_state(container: str) -> str:
     """Whether the session's dev container exists (running or not). `aidc kill`
     removes it, and that is the only thing that ends a session's queue, so only a
@@ -744,18 +789,9 @@ async def _drain_pending_sends(container: str, name: str) -> None:
     failed = False
     try:
         while _pending_sends.get(name):
-            state = await _container_state(container)
-            if state == CONTAINER_GONE:
-                queued = _pending_sends.pop(name, [])
-                for q in queued:
-                    _write_send_dead_letter(name, q, "session_killed")
-                _persist_queue(name)
-                _waiting_notice_shown.discard(name)
-                log_event("session_send_queue_abandoned", session=name,
-                          dropped=len(queued), reason="session_killed")
+            await _drop_prompts_of_removed_session(container, name)
+            if not _pending_sends.get(name):
                 return
-            if state == CONTAINER_UNKNOWN:
-                log_event("session_send_queue_container_unknown", session=name)
             reason = await _wait_until_free(container, name, timeout=_QUEUE_POLL_S)
             if reason:
                 await _set_waiting_reason(container, name, reason)
@@ -833,7 +869,8 @@ def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def _enqueue_send(name: str, container: str, prompt: str, reason: str) -> int:
+async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
+                        conversation_id: str = "") -> int:
     """Queue a prompt for pasting when the session frees up; returns queue depth.
 
     Returns 0 when the queue is at _PENDING_MAX_DEPTH and the prompt was refused.
@@ -842,37 +879,161 @@ async def _enqueue_send(name: str, container: str, prompt: str, reason: str) -> 
     queue = _pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
-    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts._now_iso()))
+    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts._now_iso(),
+                                 conversation_id=conversation_id,
+                                 container_id=await _container_id(container)))
     await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
     _spawn_drainer(container, name)
     return len(queue)
 
 
+_DROPPED_NOTE = ("[Not delivered: the session '{session}' was removed before this prompt "
+                 "could be pasted. It was never seen by the agent.]")
+
+
+def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
+    """The session these prompts were accepted for is gone. Record each in the send
+    dead-letter dir, tell each prompt's conversation it was not delivered (never
+    silence: the orchestrator was promised it would go in), and forget the session's
+    send-path state."""
+    for q in prompts:
+        _write_send_dead_letter(name, q, "session_killed")
+    _fire(_notify_dropped(name, prompts))
+    _forget_session_send_state(name)
+    log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
+              reason="session_killed")
+
+
+async def _notify_dropped(name: str, prompts: list[ts.QueuedPrompt]) -> None:
+    base = _metallm_callback_url()
+    for q in prompts:
+        if not q.conversation_id or not base:
+            # Sent without a webhook: nobody to tell beyond the dead-letter record.
+            log_event("session_send_dropped_notified", session=name, delivered=False,
+                      reason="no_conversation" if base else "no_callback_url")
+            continue
+        digest = hashlib.sha256(f"{q.enqueued_at}\n{q.text}".encode()).hexdigest()[:16]
+        turn = ts.Turn(terminal_uuid=f"dropped-{digest}",
+                       text=f"{_DROPPED_NOTE.format(session=name)}\n\n{q.text}",
+                       ok=False, prompt_origin="orchestrator", error_code="prompt_dropped")
+
+        async def post_fn(t: ts.Turn, attempt: int, cid: str = q.conversation_id) -> bool:
+            return await _post_turn(base, cid, t, attempt=attempt, session=name)
+
+        try:
+            delivered = await _deliver_with_retry(turn, post_fn=post_fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # prawduct:allow prawduct/broad-except -- report, don't crash
+            log_event("session_send_dropped_notify_error", session=name,
+                      error_type=type(exc).__name__, error=repr(exc))
+            delivered = False
+        if not delivered:
+            _write_dead_letter(Path(_WATCHER_STATE_DIR), name, q.conversation_id, turn)
+        log_event("session_send_dropped_notified", session=name,
+                  conversation_id=q.conversation_id, delivered=delivered)
+
+
+def _watched_conversation(name: str) -> str:
+    """The conversation `name`'s open webhook delivers to, or "" without one."""
+    if name not in _session_watchers:
+        return ""
+    watches, _ = ts.load_watches(_WATCHER_STATE_DIR)
+    return next((w["conversation_id"] for w in watches if w["session"] == name), "")
+
+
+def _forget_session_send_state(name: str) -> None:
+    """Send-path state lives as long as the session, not as long as a watcher: a
+    session_unwatch must not drop a paste's busy hold. It is cleared here, when the
+    session is gone."""
+    _working_indicator_seen.discard(name)
+    _sent_awaiting_echo.pop(name, None)
+    _last_free_verdict.pop(name, None)
+    _last_screen_raw.pop(name, None)
+    _waiting_notice_shown.discard(name)
+    for reported in [r for r in _reported_interrupts if r[0] == name]:
+        _reported_interrupts.discard(reported)
+
+
+# Sessions whose persisted queue file has been read into _pending_sends by this
+# process (by startup resume or by the first send to arrive before it).
+_queue_loaded: set[str] = set()
+
+
+async def _load_persisted_queue(container: str, name: str) -> None:
+    """Read `name`'s saved queue once per process, ahead of anything queued in memory,
+    and start its drainer. Called under the session's send lock by both startup resume
+    and session_send, so the two cannot race or reorder."""
+    if name in _queue_loaded:
+        return
+    _queue_loaded.add(name)
+    path = ts.send_queue_path(_WATCHER_STATE_DIR, name)
+    if not path.exists():
+        return
+    queues, unreadable = ts.load_send_queues(path.parent)
+    if path in unreadable:
+        log_event("session_send_queue_unreadable", path=str(path))
+        return
+    saved = queues.get(name, [])
+    if not saved:
+        return
+    if await _container_state(container) == CONTAINER_GONE:
+        _abandon_queue(name, saved)
+        ts.save_send_queue(_WATCHER_STATE_DIR, name, [])
+        return
+    _pending_sends[name] = saved + _pending_sends.get(name, [])
+    if saved[0].waiting_reason == "input_has_text":
+        # The tmux option outlives the MCP; remember it is showing, so the drainer
+        # clears it when the prompt goes in.
+        _waiting_notice_shown.add(name)
+    _persist_queue(name)
+    _spawn_drainer(container, name)
+    log_event("session_send_queue_resumed", session=name, depth=len(saved))
+
+
+async def resume_on_startup(app: Any) -> None:
+    """Everything aidc-mcp must pick up after a restart: saved send queues first, then
+    the webhooks that deliver their replies."""
+    await resume_send_queues()
+    await resume_watchers(app)
+
+
+async def resume_watchers(app: Any) -> None:
+    """Re-open every persisted webhook in scope whose session still exists, WITHOUT
+    re-baselining: delivery continues from the saved watermark, and the delivery
+    ledger keeps it exactly once. A reply produced while the MCP was down, such as
+    one to a prompt resumed from the queue, is delivered once rather than skipped."""
+    watches, unreadable = ts.load_watches(_WATCHER_STATE_DIR)
+    for path in unreadable:
+        log_event("session_watch_unreadable", path=str(path))
+    resumed = False
+    for w in watches:
+        name = w["session"]
+        if scope.refusal(name) is not None or name in _session_watchers:
+            continue
+        if await _container_state(f"aidc-{name}-dev") == CONTAINER_GONE:
+            ts.remove_watch(_WATCHER_STATE_DIR, name)
+            log_event("session_watch_dropped", session=name, reason="session_killed")
+            continue
+        _register_watcher(name, w["conversation_id"], w["callback_base"])
+        log_event("session_watch_resumed", session=name, conversation_id=w["conversation_id"])
+        resumed = True
+    if resumed:
+        await _announce_watchers(app)
+
+
 async def resume_send_queues() -> None:
-    """Pick up every persisted queue after an aidc-mcp start: prompts for a session
-    whose container still exists get a drainer; prompts for a session that is gone are
-    dead-lettered. Unreadable queue files are logged and left for a person."""
+    """Pick up every persisted queue in scope after an aidc-mcp start. Unreadable
+    queue files are logged and left for a person."""
     queues, unreadable = ts.load_send_queues(_WATCHER_STATE_DIR)
     for path in unreadable:
         log_event("session_send_queue_unreadable", path=str(path))
-    for name, prompts in queues.items():
+    for name in queues:
         if scope.refusal(name) is not None:
             continue   # another server's session: leave its queue file alone
-        container = f"aidc-{name}-dev"
-        if await _container_state(container) == CONTAINER_GONE:
-            for q in prompts:
-                _write_send_dead_letter(name, q, "session_killed")
-            ts.save_send_queue(_WATCHER_STATE_DIR, name, [])
-            log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
-                      reason="session_killed")
-            continue
-        _pending_sends[name] = prompts
-        if prompts[0].waiting_reason == "input_has_text":
-            # The tmux option outlives the MCP; remember it is showing, so the drainer
-            # clears it when the prompt goes in.
-            _waiting_notice_shown.add(name)
-        _spawn_drainer(container, name)
-        log_event("session_send_queue_resumed", session=name, depth=len(prompts))
+        lock = _session_send_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            await _load_persisted_queue(f"aidc-{name}-dev", name)
 
 
 _WAITING_EXPLAINED = {
@@ -982,12 +1143,6 @@ def _evict_session_state(name: str) -> None:
         _logged_withdrawn_drops.discard(drop)
     for key in [k for k in _unanswered_polls if k[0] == name]:
         _unanswered_polls.pop(key, None)
-    for reported in [r for r in _reported_interrupts if r[0] == name]:
-        _reported_interrupts.discard(reported)
-    _working_indicator_seen.discard(name)
-    _sent_awaiting_echo.pop(name, None)
-    _last_free_verdict.pop(name, None)
-    _last_screen_raw.pop(name, None)
     for key in [k for k in _torn_read_counts if k[0] == name]:
         _torn_read_counts.pop(key, None)
     for key in [k for k in _consumed_idle_counts if k[0] == name]:
@@ -1055,7 +1210,8 @@ async def _post_turn(
                 # with the orchestrator's side before any field changes.
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
                       "session": session, "prompt_origin": turn.prompt_origin,
-                      "interrupted": turn.interrupted},
+                      "interrupted": turn.interrupted,
+                      **({"error_code": turn.error_code} if turn.error_code else {})},
                 headers={"Authorization": f"Bearer {bearer}"},
             )
         elapsed_s = round(time.monotonic() - start, 3)
@@ -1326,7 +1482,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
         _unanswered_polls.pop(key, None)
         return None
     verdict, why = _turn_verdict(session, suffix, quiet, state)
-    if verdict == TURN_RUNNING:
+    if verdict != TURN_IDLE or why not in _STOPPED_BY_SCREEN:
         if why != "status_row_unproven":
             _unanswered_polls.pop(key, None)
         return None
@@ -1802,6 +1958,15 @@ def _make_watcher_done_callback(name: str):
     return _cb
 
 
+def _register_watcher(name: str, conversation_id: str, base_url: str) -> None:
+    existing = _session_watchers.get(name)
+    if existing is not None:
+        existing.cancel()
+    task = asyncio.create_task(_run_transcript_watcher(name, conversation_id, base_url))
+    _session_watchers[name] = task
+    task.add_done_callback(_make_watcher_done_callback(name))
+
+
 async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: str) -> None:
     """Baseline forward-only, spawn the transcript watcher, register it, and
     announce the change. Shared by session_send / session_watch.
@@ -1817,12 +1982,11 @@ async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: st
     # guard while an `await` sat between the check and the registration, leaving TWO
     # watcher tasks polling the same session. Two watchers share one durable
     # watermark and each POST every turn -> every reply delivered twice.
-    existing = _session_watchers.get(name)
-    if existing is not None:
-        existing.cancel()
-    task = asyncio.create_task(_run_transcript_watcher(name, conversation_id, base_url))
-    _session_watchers[name] = task
-    task.add_done_callback(_make_watcher_done_callback(name))
+    _register_watcher(name, conversation_id, base_url)
+    try:
+        ts.save_watch(_WATCHER_STATE_DIR, name, conversation_id, base_url)
+    except OSError as exc:
+        log_event("session_watch_persist_failed", session=name, error_type=type(exc).__name__)
     # Baseline forward-only AFTER registering. The watcher sleeps one poll interval
     # before its first drain and _drain_transcript_once self-baselines defensively,
     # and this await completes before the caller injects any prompt, so the anchor
@@ -2308,6 +2472,19 @@ def register(app: Any) -> None:
             prompt: the message to send.
         """
         log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt))
+        container = f"aidc-{name}-dev"
+        if await _container_state(container) == CONTAINER_GONE:
+            # Checked before anything else, so a send to a session that does not exist
+            # neither opens a webhook nor leaves one persisted. Audit every refusal:
+            # these paths used to return silently, so the ONLY trace of a dropped send
+            # was the ABSENCE of the session_send_sent line below — which is how prod
+            # 2026-08-22 conv 01a01cf6 lost a prompt with nothing in the log naming it.
+            log_event("tool_call", tool="session_send_failed", session=name,
+                      prompt_len=len(prompt), reason="no_such_session")
+            return _envelope_err(
+                f"There is no session named '{name}' (its container does not exist). "
+                "Check session_list.", code="no_such_session"
+            )
 
         # Auto-register the transcript watcher if one isn't already running.
         # Capture WHY when we can't: both gates fail silently, and a send with no
@@ -2335,27 +2512,15 @@ def register(app: Any) -> None:
                 log_event("tool_call", tool="session_send_auto_watch", session=name,
                           conversation_id=conversation_id)
 
-        if name not in _session_send_locks:
-            _session_send_locks[name] = asyncio.Lock()
-        lock = _session_send_locks[name]
-
-        container = f"aidc-{name}-dev"
+        lock = _session_send_locks.setdefault(name, asyncio.Lock())
 
         queued_depth = 0
         sanitized = prompt.replace("\n", " ").strip()
         wait_reason = ""
         async with lock:
-            if await _container_state(container) == CONTAINER_GONE:
-                # Audit every refusal. These paths used to return silently, so the
-                # ONLY trace of a dropped send was the ABSENCE of the
-                # session_send_sent line below — which is how prod 2026-08-22 conv
-                # 01a01cf6 lost a prompt with nothing in the log naming the gate.
-                log_event("tool_call", tool="session_send_failed", session=name,
-                          prompt_len=len(prompt), reason="no_such_session")
-                return _envelope_err(
-                    f"There is no session named '{name}' (its container does not exist). "
-                    "Check session_list.", code="no_such_session"
-                )
+            # A queue saved before a restart goes first, even if this send arrives
+            # before startup has resumed it.
+            await _load_persisted_queue(container, name)
 
             # Inject only when free so we never paste into a turn already in flight
             # or on top of a person's unsent text. A busy session does not cost the
@@ -2366,8 +2531,17 @@ def register(app: Any) -> None:
             wait_reason = ("queued_behind" if _pending_sends.get(name)
                            else await _wait_until_free(container, name,
                                                        timeout=_SEND_FREE_WAIT_S))
+            if not wait_reason and not await _inject(container, sanitized, _SESSION_WINDOW,
+                                                     session=name):
+                # A paste that did not land is a fact about one attempt, not about the
+                # session: queue it, and the drainer retries with backoff.
+                wait_reason = "paste_failing"
+                log_event("tool_call", tool="session_send_paste_failed", session=name,
+                          prompt_len=len(prompt))
             if wait_reason:
-                queued_depth = await _enqueue_send(name, container, sanitized, wait_reason)
+                queued_depth = await _enqueue_send(
+                    name, container, sanitized, wait_reason,
+                    conversation_id=conversation_id or _watched_conversation(name))
                 if queued_depth == 0:
                     log_event("tool_call", tool="session_send_failed", session=name,
                               prompt_len=len(prompt), reason="queue_full",
@@ -2380,11 +2554,6 @@ def register(app: Any) -> None:
                     )
                 log_event("tool_call", tool="session_send_queued", session=name,
                           prompt_len=len(prompt), depth=queued_depth, reason=wait_reason)
-            elif not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
-                log_event("tool_call", tool="session_send_failed", session=name,
-                          prompt_len=len(prompt), reason="paste_failed")
-                return _envelope_err("failed to inject prompt into session window",
-                                     code="paste_failed")
 
         # Non-blocking: the reply is delivered by the transcript watcher, not returned
         # here. If no watcher is open, the reply has nowhere to go — say so plainly.
@@ -2683,6 +2852,7 @@ def register(app: Any) -> None:
         Cancels the background watcher started by session_watch.
         No-op if no watcher is active for the session.
         """
+        ts.remove_watch(_WATCHER_STATE_DIR, name)
         task = _session_watchers.pop(name, None)
         if task is not None:
             task.cancel()

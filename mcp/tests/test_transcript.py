@@ -22,19 +22,23 @@ from aidc_mcp.transcript import (
     extract_completed_turns,
     human_prompt_text,
     load_send_queues,
+    load_watches,
     load_watermark,
     log_shows_turn_in_progress,
     objs_after_uuid,
     parse_jsonl,
     prompt_seen_since,
     record_sent_prompt,
+    remove_watch,
     render_delivery,
     resolve_active_transcript,
     save_send_queue,
+    save_watch,
     save_watermark,
     send_queue_path,
     sent_prompts_path,
     unanswered_prompt_turn,
+    watch_path,
     watermark_path,
 )
 
@@ -1327,7 +1331,8 @@ class TestLocalCommandsAcrossReaders:
 
 class TestPersistedSendQueue:
     def test_roundtrip_keeps_order_and_fields(self, tmp_path):
-        prompts = [QueuedPrompt("first", "2026-09-17T02:00:00Z", 0, "claude_busy"),
+        prompts = [QueuedPrompt("first", "2026-09-17T02:00:00Z", 0, "claude_busy",
+                                conversation_id="c1", container_id="id-1"),
                    QueuedPrompt("second", "2026-09-17T02:00:05Z", 2, "queued_behind")]
         save_send_queue(tmp_path, "proj", prompts)
         queues, unreadable = load_send_queues(tmp_path)
@@ -1356,3 +1361,36 @@ class TestPersistedSendQueue:
 
     def test_missing_dir_loads_nothing(self, tmp_path):
         assert load_send_queues(tmp_path / "absent") == ({}, [])
+
+
+class TestPersistedWatch:
+    def test_roundtrip_and_remove(self, tmp_path):
+        save_watch(tmp_path, "a/b", "c1", "http://cb")
+        save_watch(tmp_path, "proj", "c2", "http://cb")
+        watches, unreadable = load_watches(tmp_path)
+        assert watches == [
+            {"session": "a/b", "conversation_id": "c1", "callback_base": "http://cb"},
+            {"session": "proj", "conversation_id": "c2", "callback_base": "http://cb"}]
+        assert unreadable == [] and not list(tmp_path.glob("*.new"))
+        remove_watch(tmp_path, "a/b")
+        remove_watch(tmp_path, "never-watched")   # no error
+        assert [w["session"] for w in load_watches(tmp_path)[0]] == ["proj"]
+
+    def test_rewatch_replaces_the_conversation(self, tmp_path):
+        save_watch(tmp_path, "proj", "c1", "http://cb")
+        save_watch(tmp_path, "proj", "c2", "http://cb")
+        assert [w["conversation_id"] for w in load_watches(tmp_path)[0]] == ["c2"]
+
+    def test_corrupt_or_incomplete_files_are_reported_and_left_alone(self, tmp_path):
+        bad = watch_path(tmp_path, "bad")
+        bad.write_text("{not json")
+        partial = watch_path(tmp_path, "partial")
+        partial.write_text('{"session": "partial", "conversation_id": ""}')
+        listed = watch_path(tmp_path, "list")
+        listed.write_text("[]")
+        watches, unreadable = load_watches(tmp_path)
+        assert watches == [] and sorted(unreadable) == sorted([bad, partial, listed])
+        assert bad.exists() and partial.exists()
+
+    def test_missing_dir_loads_nothing(self, tmp_path):
+        assert load_watches(tmp_path / "absent") == ([], [])

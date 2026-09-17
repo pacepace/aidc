@@ -49,6 +49,7 @@ class Wiring:
     def __init__(self):
         self.claude_running = True
         self.container = tools.CONTAINER_EXISTS
+        self.container_id = "id-1"
         self.idle_ok = True
         self.paste_ok = True
         self.paste_calls = []
@@ -76,6 +77,9 @@ def wiring(monkeypatch):
     async def container_state(container):
         return w.container
 
+    async def container_id(container):
+        return "" if w.container == tools.CONTAINER_GONE else w.container_id
+
     async def load_paste(container, text, window):
         w.paste_calls.append((container, text, window))
         return w.paste_ok
@@ -99,6 +103,7 @@ def wiring(monkeypatch):
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
     monkeypatch.setattr(tools, "_container_state", container_state)
+    monkeypatch.setattr(tools, "_container_id", container_id)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
     monkeypatch.setattr(tools, "_capture_screen", capture)
@@ -216,6 +221,9 @@ async def test_errors_when_the_session_does_not_exist(wiring):
     assert res["error_code"] == "no_such_session"
     assert not wiring.paste_calls
     assert "proj" not in tools._pending_sends
+    # Checked before the webhook opens: nothing is started or saved for it.
+    assert "proj" not in tools._session_watchers
+    assert not ts.watch_path(tools._WATCHER_STATE_DIR, "proj").exists()
 
 
 async def test_claude_not_running_holds_the_prompt_instead_of_refusing(wiring):
@@ -419,6 +427,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     await _REAL_SLEEP(0)
     tools._pending_sends.clear()
     tools._pending_drainers.clear()
+    tools._queue_loaded.clear()
 
     wiring.idle_ok = True
     await tools.resume_send_queues()
@@ -435,6 +444,42 @@ async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
     assert "gone" not in tools._pending_sends
     [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
     assert json.loads(dead.read_text())["reason"] == "session_killed"
+
+
+async def test_queued_prompts_record_the_session_they_were_accepted_for(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="hello", conversation_id="c1")
+    [q] = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+    assert (q.conversation_id, q.container_id) == ("c1", "id-1")
+
+
+async def test_a_prompt_sent_without_a_conversation_records_the_open_webhooks(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watched", "http://cb")
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="hello")
+    [q] = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+    assert q.conversation_id == "c-watched"
+
+
+async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring):
+    """After a restart, a session_send can arrive before startup has resumed the saved
+    queue. The saved prompts still go first, and resume does not load them twice."""
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj", [
+        ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
+                        conversation_id="c1", container_id="id-1")])
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+
+    res = await send(name="proj", prompt="new", conversation_id="c1")
+    assert res["data"]["status"] == "queued"
+    await tools.resume_send_queues()
+    await _let_drainer_run("proj", ticks=100)
+
+    assert [text for _, text, _ in wiring.paste_calls] == ["saved", "new"]
 
 
 async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_paste(wiring):
@@ -484,15 +529,25 @@ async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeyp
     assert entry["paste_attempts"] == 2
 
 
-async def test_errors_when_paste_fails(wiring):
+async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
+    """A paste that does not land is one failed attempt, not a failed send: the prompt
+    is queued and pasted once the paste works."""
     app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
     wiring.paste_ok = False
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
-    assert res["ok"] is False
-    assert "inject" in res["error"]
+    assert res["ok"] is True
+    assert res["data"]["status"] == "queued"
+    assert res["data"]["waiting_reason"] == "paste_failing"
     assert not _sent_enter(wiring.tmux_calls)  # no Enter after a failed paste
+
+    wiring.paste_ok = True
+    await _let_drainer_run("proj", ticks=100)
+    assert "proj" not in tools._pending_sends
+    assert [text for _, text, _ in wiring.paste_calls][-1] == "hello"
+    assert _sent_enter(wiring.tmux_calls)
 
 
 # --- injected-prompt record (terminal-typed prompt attribution) ----------------

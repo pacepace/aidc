@@ -263,12 +263,24 @@ class TestWatchForEcho:
 
 
 class TestEviction:
-    def test_evict_clears_per_session_send_state(self):
+    def _fill(self):
         tools._working_indicator_seen.add("proj")
         tools._sent_awaiting_echo["proj"] = ("x", NOW)
         tools._reported_interrupts.add(("proj", "u1"))
         tools._last_free_verdict["proj"] = ("", "log_finished")
+
+    def test_unwatching_keeps_the_send_paths_state(self):
+        """A session_unwatch must not make a prompt just pasted look unsent: that
+        state belongs to the session, not to its webhook."""
+        self._fill()
         tools._evict_session_state("proj")
+        assert "proj" in tools._working_indicator_seen
+        assert tools._sent_awaiting_echo["proj"] == ("x", NOW)
+        assert "proj" in tools._last_free_verdict
+
+    def test_a_removed_session_forgets_it(self):
+        self._fill()
+        tools._forget_session_send_state("proj")
         assert "proj" not in tools._working_indicator_seen
         assert "proj" not in tools._sent_awaiting_echo
         assert ("proj", "u1") not in tools._reported_interrupts

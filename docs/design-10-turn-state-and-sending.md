@@ -9,11 +9,13 @@ a dev container's tmux `claude` window:
   how it avoids typing over a person's unsent text, and how the per-session queue holds prompts
   until they land.
 
-**Requirements implemented:** MCP-24 .. MCP-30 (`docs/requirements.md`). Extends MCP-15..19 and
+**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-34 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
-**Status:** designed 2026-09-17, not built. Transcript and screen facts measured in a dev container
-on Claude Code 2.1.270 and 2.1.274 the same day.
+**Status:** designed and built 2026-09-17 (branch `feature/turn-state`), except D4's `speaker`,
+which waits on MetaLLM. Transcript and screen facts measured in a dev container on Claude Code
+2.1.270 and 2.1.274 the same day. D7 and the dropped-prompt callback in D5 came out of the joint
+test with the metallm session that day.
 
 ---
 
@@ -194,6 +196,23 @@ the metallm session and written here before either side builds it.
 | `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. MetaLLM does not read it (confirmed 2026-09-17); `speaker` carries what it needs. | MCP-23 |
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
 | `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. **Not sent until MetaLLM's record-without-wake change is deployed.** | MCP-27 |
+| `error_code` | string | Present only on a callback that reports a failure rather than a reply. The one value is `"prompt_dropped"` (below). It never says anything `content` does not. | MCP-33 |
+
+**A prompt that will never be pasted** (MCP-33). A queued prompt leaves the queue unpasted only
+when its session is gone: the container no longer exists, or a container of the same name has a
+different id because the session was killed and created again. Each such prompt that came with a
+`conversation_id` gets one callback to that conversation (agreed with the metallm session
+2026-09-17):
+
+```json
+{ "content": "[Not delivered: the session '<s>' was removed before this prompt could be pasted. It was never seen by the agent.]\n\n<the prompt>",
+  "ok": false, "source": "agent_watch", "session": "<s>", "prompt_origin": "orchestrator",
+  "interrupted": false, "error_code": "prompt_dropped" }
+```
+
+It is retried and dead-lettered like a reply, and the prompt is also written to the send
+dead-letter dir. A prompt sent without a `conversation_id` has nobody to tell; only the
+dead-letter record remains.
 
 ### D6. The tool result envelope
 
@@ -220,12 +239,29 @@ missing a code or uses one outside the set:
 | `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
 | `command_failed` | a command inside the session failed | tell the person |
 | `timeout` | a command inside the session ran out of time | tell the person |
-| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` paths | tell the person |
+| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste) | tell the person |
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
 
-`session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every
-other condition queues the prompt.
+`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope` or
+`invalid_argument`. Every other condition, a failed paste included, queues the prompt. The
+metallm side never retries a `session_send`, even after a transport failure (a retry could paste
+the prompt twice), and retries a read once on a transport failure or `cli_failed`.
+
+### D7. A webhook survives an `aidc-mcp` restart (MCP-34)
+
+Found in the joint test: after a restart the send queue resumed and pasted its prompt, Claude
+answered, and no callback was sent, because webhooks lived only in memory. Now:
+
+- Opening a webhook (`session_watch`, or `session_send` with a `conversation_id`) saves
+  `watcher-state/<session>.watch.json` (`session`, `conversation_id`, `callback_base`,
+  `updated_at`; atomic write). `session_unwatch` removes it.
+- At startup (`server.ResumeOnStartup`), after the send queues, `resume_watchers` reopens every
+  saved webhook in scope whose session still exists, and removes the file of one that does not.
+  An unreadable file is logged and left in place.
+- A resumed webhook does **not** re-anchor the watermark to the end of the transcript, as a new
+  one does. It continues from the saved watermark, so a reply written while the MCP was down is
+  delivered, and the delivery ledger keeps it to once.
 
 Combinations are independent. An interrupted turn on a prompt the person typed carries
 `interrupted: true` and (once enabled) `speaker: "human"`, so MetaLLM records it without waking
@@ -338,13 +374,15 @@ When the input box holds unsent text, a prompt is not injected. It stays queued,
 status line of the session shows:
 
 ```
-aidc: orchestrator message waiting — press Enter or clear your input to let it through
+aidc: orchestrator message waiting — press Enter or clear your input
 ```
 
 The line is set when the queue's first prompt starts waiting on input-box text, and cleared as
 soon as that prompt is pasted or waits for a different reason. The MCP sets and unsets the tmux
-user option `@aidc_waiting`; `tmux-start.sh` puts it at the front of `status-right` (shown in
-reverse video, and only while set), so nothing else on the status line changes. A session created
+user option `@aidc_waiting`; `tmux-start.sh` shows it in `status-right`, in reverse video, in
+place of the window title and clock while it is set. tmux cuts an over-long `status-right` from
+its start, so the message is kept short enough to show whole on an 80-column terminal, and
+`tests/unit/test-tmux-status-line.sh` renders the real status line at that width. A session created
 before this change has no such `status-right` and shows nothing until it is recreated on the new
 image.
 
@@ -362,14 +400,20 @@ ways:
    holds the queue. `session_send` itself queues instead of refusing; it refuses only a session
    whose container does not exist. Pasting resumes when Claude is back at its prompt.
 3. **Paste failures retry** with backoff (2, 4, 8 … s, capped at 60 s) and no attempt limit;
-   each is logged and shown as `paste_failing`.
+   each is logged and shown as `paste_failing`. A failed paste in `session_send` itself queues
+   the prompt the same way.
 4. **Persisted.** The queue is written to the watcher-state dir (atomic temp+rename, like the
    watermark) on every change; an emptied queue removes its file. When `aidc-mcp` starts
-   (`server.ResumeQueuesOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
+   (`server.ResumeOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
    persisted queue a drainer, and dead-letters the queue of a session whose container is gone. An
-   unreadable queue file is logged and left in place.
-5. **The only exits** are "pasted" and "session killed" (its container is gone). On kill, every
-   waiting prompt is written to the send dead-letter dir with reason `session_killed`.
+   unreadable queue file is logged and left in place. Loading a saved queue happens once per
+   process, under the session's send lock, from whichever comes first: startup resume or a
+   `session_send` to that session. Saved prompts always go ahead of new ones.
+5. **The only exits** are "pasted" and "session gone": its container no longer exists, or a
+   container of the same name has a different id than when the prompt was accepted (killed and
+   re-created; each prompt records the id, so the new session is never handed the old one's
+   prompts). A gone prompt is written to the send dead-letter dir with reason `session_killed`
+   and reported to its conversation (D5, `prompt_dropped`). Docker failing to answer is neither.
 
 **Why a prompt is waiting** is always one of a closed set, reported in the `session_send` result
 when it queues (`waiting_reason`, plus a sentence in `delivery`) and in `session_status`'s
@@ -401,8 +445,12 @@ has had, and the last recorded waiting reason. File:
   "updated_at": "2026-09-17T12:00:00Z",
   "prompts": [
     { "text": "...", "enqueued_at": "2026-09-17T11:58:02Z",
-      "paste_attempts": 0, "waiting_reason": "input_has_text" } ] }
+      "paste_attempts": 0, "waiting_reason": "input_has_text",
+      "conversation_id": "...", "container_id": "..." } ] }
 ```
+
+`conversation_id` is where to report the prompt if it is dropped (`""` without a webhook);
+`container_id` is the session's docker id when the prompt was accepted.
 
 Prompt text is stored as the queue receives it (already newline-flattened by `session_send`).
 Same trust level as the existing send record and dead-letter files, which already store prompts.
@@ -421,12 +469,14 @@ Same trust level as the existing send record and dead-letter files, which alread
 
 ## Cross-references
 
-- Requirements: MCP-15..19, MCP-23, MCP-24..30 (`docs/requirements.md`).
+- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..34 (`docs/requirements.md`).
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
   `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
 - Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,
   `_enqueue_send`, `_inject`, `_session_state`, `_turn_verdict`, `_paste_reason`, `_check_free`,
-  `_wait_until_free`, `_wait_for_turn_end`, `_watch_for_echo`, `session_run`, `session_resend`);
+  `_wait_until_free`, `_wait_for_turn_end`, `_watch_for_echo`, `_load_persisted_queue`,
+  `_drop_prompts_of_removed_session`, `_notify_dropped`, `resume_on_startup`, `resume_watchers`,
+  `session_run`, `session_resend`);
   `mcp/src/aidc_mcp/screen.py` (`classify`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.
 - MetaLLM callback contract: `api/src/api/v1/internal/callback.py` in the metallm repo.

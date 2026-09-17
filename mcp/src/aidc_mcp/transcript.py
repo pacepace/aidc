@@ -101,6 +101,10 @@ class Turn:
     # to withdraw: the reply before it was already delivered as finished, because
     # the hook ran longer than the watcher waited. Diagnostic, like `superseded`.
     late_pushback: bool = field(default=False, compare=False)
+    # Set only on a callback that is not a reply: "prompt_dropped" when a queued
+    # prompt could not be pasted because its session is gone. Everything it says is
+    # also in `text`, so a receiver that ignores the code still reads it right.
+    error_code: str = field(default="", compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -1101,6 +1105,12 @@ class QueuedPrompt:
     enqueued_at: str
     paste_attempts: int = 0
     waiting_reason: str = ""
+    # The conversation that sent it, so a prompt that can never be pasted is reported
+    # back there instead of vanishing ("" when it came with no webhook).
+    conversation_id: str = ""
+    # The session's docker container id when it was accepted, so a session killed and
+    # re-created under the same name is not handed the old session's prompts.
+    container_id: str = ""
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
@@ -1135,7 +1145,9 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
             prompts = [QueuedPrompt(text=str(e["text"]),
                                     enqueued_at=str(e.get("enqueued_at", "")),
                                     paste_attempts=int(e.get("paste_attempts", 0)),
-                                    waiting_reason=str(e.get("waiting_reason", "")))
+                                    waiting_reason=str(e.get("waiting_reason", "")),
+                                    conversation_id=str(e.get("conversation_id", "")),
+                                    container_id=str(e.get("container_id", "")))
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
@@ -1145,6 +1157,51 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
         if prompts:
             queues[session] = prompts
     return queues, unreadable
+
+
+# --- persisted webhooks (MCP-34) ------------------------------------------------
+#
+# Which conversation a session's replies go to. The watcher that delivers them runs in
+# memory, and a prompt that outlives an aidc-mcp restart may never be followed by the
+# session_send that would re-open it, so its reply would be produced and dropped.
+# Readers: the MCP on start (which watchers to resume), and a person inspecting
+# watcher-state/. Written when a watcher opens, removed on session_unwatch.
+
+def watch_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{_slug(session)}.watch.json"
+
+
+def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str) -> None:
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = watch_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
+                               "callback_base": callback_base, "updated_at": _now_iso()},
+                              indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def remove_watch(base_dir: Path, session: str) -> None:
+    watch_path(base_dir, session).unlink(missing_ok=True)
+
+
+def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
+    """Every persisted webhook as {session, conversation_id, callback_base}, plus the
+    files that could not be read (left in place)."""
+    watches: list[dict[str, str]] = []
+    unreadable: list[Path] = []
+    for path in sorted(Path(base_dir).glob("*.watch.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entry = {k: data[k] for k in ("session", "conversation_id", "callback_base")}
+            if not all(isinstance(v, str) and v for v in entry.values()):
+                raise ValueError("incomplete watch")
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(path)
+            continue
+        watches.append(entry)
+    return watches, unreadable
 
 
 def record_sent_prompt(base_dir: Path, session: str, text: str, *,

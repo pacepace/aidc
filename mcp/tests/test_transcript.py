@@ -21,13 +21,16 @@ from aidc_mcp.transcript import (
     extract_completed_turns,
     human_prompt_text,
     load_watermark,
+    log_shows_turn_in_progress,
     objs_after_uuid,
     parse_jsonl,
+    prompt_seen_since,
     record_sent_prompt,
     render_delivery,
     resolve_active_transcript,
     save_watermark,
     sent_prompts_path,
+    unanswered_prompt_turn,
     watermark_path,
 )
 
@@ -956,6 +959,15 @@ class TestStopHookPushback:
         assert extract_completed_turns(objs, dropped) == [Turn("a2", "B.", prompts=("next",))]
         assert dropped == ["a1"]
 
+    def test_pushback_still_in_progress_is_not_reported_as_dropped(self):
+        """The read ends while Claude is still working after the pushback (its next
+        model call takes seconds). That group has not been dropped: it is open."""
+        dropped: list[str] = []
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _feedback("f1"), _summary(["BLOCKED"])]
+        assert extract_completed_turns(objs, dropped) == []
+        assert dropped == []
+
     def test_unexplained_continuation_after_a_reply_is_counted(self):
         """A reply followed by more assistant work with no pushback or prompt between
         is what a block that leaves no trace would look like; it is counted so the
@@ -1124,3 +1136,186 @@ class TestRealTranscript:
 
     def test_ends_on_turn_end(self):
         assert ends_on_turn_end(self._objs()) is True
+
+
+# --- turn state for the send path (design-10 S1) --------------------------------
+
+def _queued(text, ts_="2026-09-17T01:51:55.350Z"):
+    return {"type": "queue-operation", "operation": "enqueue", "timestamp": ts_,
+            "content": text}
+
+
+def _at(obj, ts_):
+    return {**obj, "timestamp": ts_}
+
+
+class TestLogShowsTurnInProgress:
+    DONE = [_summary(), _turn_duration()]
+
+    def test_empty_transcript_is_not_busy(self):
+        assert log_shows_turn_in_progress([]) is False
+
+    def test_unanswered_prompt_is_busy(self):
+        assert log_shows_turn_in_progress([_typed("u1", "q")]) is True
+
+    def test_tool_use_and_tool_result_are_busy(self):
+        base = [_typed("u1", "q"), _assistant("a1", [_tool()], "tool_use")]
+        assert log_shows_turn_in_progress(base) is True
+        assert log_shows_turn_in_progress(base + [_tool_result()]) is True
+
+    def test_finished_turn_is_not_busy(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), *self.DONE]
+        assert log_shows_turn_in_progress(objs) is False
+
+    def test_noise_after_a_finished_turn_is_ignored(self):
+        meta = {"type": "user", "uuid": "m", "isMeta": True,
+                "message": {"role": "user", "content": "<system-reminder>x</system-reminder>"}}
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), *self.DONE,
+                _queued("x"), {"type": "attachment"}, meta]
+        assert log_shows_turn_in_progress(objs) is False
+
+    def test_reply_whose_stop_hooks_have_not_reported_is_busy(self):
+        history = [_typed("u0", "old"), _assistant("a0", [_text("old")], "end_turn"), *self.DONE]
+        objs = history + [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn")]
+        assert log_shows_turn_in_progress(objs) is True
+
+    def test_reply_in_a_transcript_without_stop_records_is_not_busy(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn")]
+        assert log_shows_turn_in_progress(objs) is False
+
+    def test_pushback_is_busy_with_or_without_its_summary(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"), _feedback("f1")]
+        assert log_shows_turn_in_progress(objs) is True
+        assert log_shows_turn_in_progress(objs + [_summary(["BLOCKED"])]) is True
+
+    def test_hook_that_failed_without_blocking_is_not_busy(self):
+        objs = [_typed("u1", "q"), _assistant("a1", [_text("A.")], "end_turn"),
+                _summary(["Failed with non-blocking status code: x"])]
+        assert log_shows_turn_in_progress(objs) is False
+
+    def test_interrupt_api_error_and_interactive_block_are_not_busy(self):
+        base = [_typed("u1", "q"), _assistant("a1", [_tool()], "tool_use")]
+        assert log_shows_turn_in_progress(base + [_interrupt("i1")]) is False
+        err = _assistant("e1", [_text("overloaded")], "end_turn", isApiErrorMessage=True)
+        assert log_shows_turn_in_progress([_typed("u1", "q"), err, _summary()]) is False
+        assert log_shows_turn_in_progress(
+            [_typed("u1", "q"), _assistant("a1", [_ask()], "tool_use")]) is False
+
+    def test_real_transcript(self):
+        objs = parse_jsonl(
+            (FIXTURES / "claude-2.1.274-pushback-interrupt-task.jsonl").read_text())
+        assert log_shows_turn_in_progress(objs) is False
+        essay = next(i for i, o in enumerate(objs)
+                     if "lighthouses" in str(o.get("message", "")))
+        assert log_shows_turn_in_progress(objs[:essay + 1]) is True
+
+
+class TestUnansweredPromptTurn:
+    def test_prompt_with_no_reply(self):
+        assert unanswered_prompt_turn([_typed("u1", "write an essay")]) == Turn(
+            "u1", "", prompts=("write an essay",), interrupted=True)
+
+    def test_noise_after_the_prompt_is_ignored(self):
+        objs = [_typed("u1", "q"), {"type": "attachment"}, _queued("x"), _summary()]
+        assert unanswered_prompt_turn(objs).terminal_uuid == "u1"
+
+    def test_several_unanswered_prompts_are_one_turn_on_the_last(self):
+        objs = [_assistant("a0", [_text("old")], "end_turn"), _typed("u1", "/model"),
+                _typed("u2", "go")]
+        assert unanswered_prompt_turn(objs) == Turn(
+            "u2", "", prompts=("/model", "go"), interrupted=True)
+
+    def test_answered_or_working_is_none(self):
+        assert unanswered_prompt_turn([]) is None
+        assert unanswered_prompt_turn(
+            [_typed("u1", "q"), _assistant("a1", [_thinking()], "tool_use")]) is None
+        assert unanswered_prompt_turn([_typed("u1", "q"), _tool_result()]) is None
+        assert unanswered_prompt_turn(
+            [_typed("u1", "q"), _assistant("a1", [_tool()], "tool_use"), _interrupt("i1")]) is None
+
+    def test_system_sourced_prompt_alone_is_none(self):
+        """Nobody asked for a background task's notification turn, so there is no one
+        to tell it was cut off."""
+        note = {"type": "user", "uuid": "n1", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        assert unanswered_prompt_turn([note]) is None
+        assert unanswered_prompt_turn([_typed("u1", "q"), note]) is None
+
+    def test_uuidless_prompt_cannot_anchor(self):
+        p = _typed("u1", "q"); del p["uuid"]
+        assert unanswered_prompt_turn([p]) is None
+
+
+class TestPromptSeenSince:
+    SENT = 1_789_609_900.0   # 2026-09-17T01:51:40Z
+
+    def test_user_line_after_the_send(self):
+        objs = [_at(_typed("u1", "fix the  test"), "2026-09-17T01:51:41.000Z")]
+        assert prompt_seen_since(objs, "fix the test", self.SENT) is True
+
+    def test_queued_while_busy_counts(self):
+        """Measured: a prompt pasted while Claude works is written only as a
+        queue-operation, and answered inside the running turn."""
+        objs = [_queued("fix the test", "2026-09-17T01:51:42.000Z")]
+        assert prompt_seen_since(objs, "fix the test", self.SENT) is True
+
+    def test_an_older_identical_prompt_does_not_count(self):
+        objs = [_at(_typed("u1", "next"), "2026-09-17T01:40:00.000Z")]
+        assert prompt_seen_since(objs, "next", self.SENT) is False
+
+    def test_different_text_does_not_count(self):
+        objs = [_at(_typed("u1", "other"), "2026-09-17T01:51:41.000Z")]
+        assert prompt_seen_since(objs, "next", self.SENT) is False
+
+    def test_line_without_a_readable_timestamp_counts(self):
+        """Unorderable lines cannot prove the prompt is older; the log-based busy check
+        still applies after this, so accepting it cannot type into a running turn."""
+        assert prompt_seen_since([_typed("u1", "next")], "next", self.SENT) is True
+        assert prompt_seen_since([_at(_typed("u1", "next"), 12)], "next", self.SENT) is True
+
+
+# --- slash commands, local commands and bash mode, read the same by every reader --
+
+def _cmd(uuid, name="/login", args=""):
+    return {"type": "user", "uuid": uuid, "timestamp": "2026-09-17T01:51:41.000Z",
+            "message": {"role": "user", "content":
+                        f"<command-name>{name}</command-name>"
+                        f"<command-message>{name[1:]}</command-message>"
+                        f"<command-args>{args}</command-args>"}}
+
+
+def _local_out(uuid, text="Login successful"):
+    return {"type": "user", "uuid": uuid,
+            "message": {"role": "user",
+                        "content": f"<local-command-stdout>{text}</local-command-stdout>"}}
+
+
+def _bash_out(uuid):
+    return {"type": "user", "uuid": uuid,
+            "message": {"role": "user", "content": "<bash-stdout>ok</bash-stdout>"}}
+
+
+class TestLocalCommandsAcrossReaders:
+    DONE = [_typed("u0", "q"), _assistant("a0", [_text("A.")], "end_turn"), _summary(),
+            _turn_duration()]
+
+    def test_finished_local_command_is_not_a_turn_in_progress(self):
+        """Measured: /login writes the command and its stdout, and Claude never
+        replies. Sends after it must not wait out the stall window."""
+        assert log_shows_turn_in_progress([*self.DONE, _cmd("c1"), _local_out("c2")]) is False
+        assert log_shows_turn_in_progress([*self.DONE, _bash_out("b1")]) is False
+
+    def test_slash_command_without_output_is_a_request_to_claude(self):
+        assert log_shows_turn_in_progress([*self.DONE, _cmd("c1", "/review")]) is True
+
+    def test_interrupted_skill_command_is_reported(self):
+        assert unanswered_prompt_turn([*self.DONE, _cmd("c1", "/review", "src")]) == Turn(
+            "c1", "", prompts=("/review src",), interrupted=True)
+
+    def test_local_command_output_is_never_reported(self):
+        assert unanswered_prompt_turn([*self.DONE, _cmd("c1"), _local_out("c2")]) is None
+
+    def test_a_pasted_slash_command_is_found_by_its_rendered_form(self):
+        objs = [*self.DONE, _cmd("c1", "/review", "src")]
+        assert prompt_seen_since(objs, "/review src", TestPromptSeenSince.SENT) is True

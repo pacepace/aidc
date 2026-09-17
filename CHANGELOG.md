@@ -25,11 +25,24 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 - **A reply to a background task's notification is no longer labelled as answering a prompt
   that was interrupted before Claude wrote anything.**
 
+### Changed
+- **Whether a session is busy now comes from Claude's transcript, not from watching the
+  screen.** The MCP used to wait for the tmux pane to stop changing for 1.5 s, which depends on
+  Claude Code animating something while it works. The transcript now decides. The screen is read
+  only for what the transcript cannot show: text a person has typed but not sent (a prompt now
+  waits instead of being pasted on top of it), whether Claude is at its input prompt at all (a
+  startup, login or trust screen holds prompts), and, when the transcript shows a turn in progress
+  that has gone quiet, whether the status bar still says Claude is working. After a paste, the
+  session counts as busy until the transcript shows the prompt arrived. `session_run` reads its
+  replies from the transcript too, and the pane-scraping code is gone.
+
 ### Added
 - **Interrupts reach the orchestrator.** When someone presses Esc after Claude has started
   on a task, the watcher delivers what Claude had written so far, opened by a note that the
   person at the terminal stopped it, and the callback carries `interrupted: true`. It used to
-  be dropped without a word. `ok` stays true: an interrupt is not a failure.
+  be dropped without a word. `ok` stays true: an interrupt is not a failure. An Esc pressed
+  before Claude writes anything, which leaves no trace in the transcript, is recognized from
+  the status bar and reported with "Claude had not written anything yet".
 - **Replies arrive a few seconds sooner.** When Claude Code writes its end-of-turn record,
   the watcher delivers at once instead of waiting out `metallm.turn_settle_seconds`. Without
   the record the wait applies as before.

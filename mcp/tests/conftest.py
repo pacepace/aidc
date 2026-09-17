@@ -28,6 +28,12 @@ async def clean_session_watchers():
         tools._settle_state.clear()
         tools._session_send_locks.clear()
         tools._tool_base_desc.clear()
+        tools._sent_awaiting_echo.clear()
+        tools._working_indicator_seen.clear()
+        tools._unanswered_polls.clear()
+        tools._reported_interrupts.clear()
+        tools._last_free_verdict.clear()
+        tools._last_screen_raw.clear()
 
     _reset()
     yield

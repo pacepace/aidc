@@ -37,6 +37,7 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 # Assistant stop_reason values that mark a turn as complete (control returns to user).
@@ -328,6 +329,22 @@ def human_prompt_text(obj: dict) -> str:
     return text
 
 
+# The wrapper tags that open a slash command's own line. The command may be answered
+# by Claude (a skill, a custom command) or run locally (/login, /model); either way the
+# line is the person's request. Any other opening tag is output Claude Code wrote.
+_COMMAND_TAGS = ("<command-name>", "<command-message>")
+
+
+def _is_local_output(obj: dict) -> bool:
+    """A user line carrying output Claude Code produced locally: a local slash
+    command's stdout, `!` bash-mode input and output, and any wrapper a later Claude
+    Code adds. Claude never replies to these, so they end whatever preceded them."""
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    text = _text_of(msg).strip()
+    return bool(_OPENS_WITH_TAG_RE.match(text)) and not text.startswith(_COMMAND_TAGS)
+
+
 def _is_interrupt_marker(obj: dict) -> bool:
     raw_msg = obj.get("message")
     msg = raw_msg if isinstance(raw_msg, dict) else {}
@@ -476,7 +493,7 @@ def extract_completed_turns(objs: list[dict],
         committed_ok = True
         terminal_had_text = False
 
-    def flush() -> None:
+    def flush(end_of_read: bool = False) -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
         nonlocal prompts, saw_assistant, interrupted, superseded, terminal_had_text
         nonlocal withdrawn_uuid, late_pushback
@@ -491,7 +508,9 @@ def extract_completed_turns(objs: list[dict],
                               ok=committed_ok, prompts=tuple(prompts),
                               interrupted=interrupted, superseded=superseded,
                               late_pushback=late_pushback))
-        elif withdrawn_uuid and dropped is not None:
+        elif withdrawn_uuid and dropped is not None and not end_of_read:
+            # Only a group something else closed was dropped. At the end of the read
+            # a pushed-back group is still open: Claude is working on its next reply.
             dropped.append(withdrawn_uuid)
         pending = []
         committed = ""
@@ -635,8 +654,161 @@ def extract_completed_turns(objs: list[dict],
                 # (the retry succeeded): deliver the successful answer, not a failure.
                 committed_ok = True
 
-    flush()  # emit the final open group if it reached a terminal
+    flush(end_of_read=True)  # emit the final open group if it reached a terminal
     return turns
+
+
+def _has_stop_records(objs: list[dict]) -> bool:
+    return any(obj.get("type") == "system"
+               and _system_subtype(obj) in (_STOP_HOOK_SUMMARY, _TURN_DURATION)
+               for obj in objs)
+
+
+def log_shows_turn_in_progress(objs: list[dict]) -> bool:
+    """True when the transcript's tail shows Claude still working on a turn.
+
+    This is the send path's source of truth for "busy" (design-10 S1). Busy: a
+    prompt with no reply yet, a tool call or tool result, a Stop-hook pushback
+    Claude has not answered, or a reply whose Stop hooks have not reported yet (in a
+    transcript that writes stop records). Not busy: a finished turn, an interrupt, an
+    API error, a turn waiting on an interactive-input tool, a local command's output
+    (/login, `!` bash mode), or nothing at all.
+
+    A transcript cannot show an Esc pressed before Claude wrote anything: it still
+    reads as busy. The caller resolves that case from the screen.
+    """
+    stop_records = None
+    after_summary = False
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            sub = _system_subtype(obj)
+            if sub == _TURN_DURATION:
+                return False
+            if sub == _STOP_HOOK_SUMMARY:
+                after_summary = True   # the line before it says whether it was a block
+            continue
+        raw_msg = obj.get("message")
+        msg = raw_msg if isinstance(raw_msg, dict) else {}
+        if otype == "user":
+            if obj.get("isMeta"):
+                if _is_stop_hook_feedback(obj):
+                    return True
+                continue
+            if after_summary:
+                return False
+            if _is_interrupt_marker(obj) or _is_local_output(obj):
+                return False
+            return True   # a prompt awaiting a reply, or a tool result mid-turn
+        if otype == "assistant":
+            if after_summary or obj.get("isApiErrorMessage"):
+                return False
+            if _blocking_tool_use_block(msg) is not None:
+                return False
+            stop = msg.get("stop_reason")
+            if isinstance(stop, str) and stop in TERMINAL_STOP:
+                if stop_records is None:
+                    stop_records = _has_stop_records(objs)
+                return stop_records   # Stop hooks still running
+            return True
+    return False
+
+
+def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
+    """The prompt(s) at the transcript's tail that Claude never started on, as an
+    interrupted turn anchored on the last of them, or None.
+
+    Claude Code writes nothing when Esc is pressed before Claude has written anything,
+    so this shape alone cannot say whether Claude was interrupted or simply has not
+    started yet. The caller decides that (quiet transcript, and the screen's status
+    row); this only builds the turn to deliver. A tail whose only prompt was raised
+    by Claude Code itself (a background task's notification) returns None: nobody
+    asked, so nobody is waiting to hear it was cut off. Neither does a local command
+    and its output (/login, `!` bash mode), which Claude never replies to. A slash
+    command with no output after it is a request to Claude (a skill), and counts.
+    """
+    collected: list[dict] = []
+    for obj in reversed(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype not in _MESSAGE_TYPES:
+            continue
+        if otype == "assistant" or _role(obj) != "user":
+            break
+        if obj.get("isMeta"):
+            continue
+        if _is_interrupt_marker(obj) or not _is_real_user_prompt(obj):
+            break
+        if _is_local_output(obj):
+            # A local command's output (/login, `!` bash mode): Claude never answers
+            # those, so nothing before it is waiting on Claude.
+            break
+        collected.append(obj)
+        if _is_system_sourced_prompt(obj):
+            break
+    if not collected or _is_system_sourced_prompt(collected[0]):
+        return None
+    collected.reverse()
+    anchor = _uuid_of(collected[-1])
+    prompts = tuple(t for t in (human_prompt_text(o) for o in collected
+                                if not _is_system_sourced_prompt(o)) if t)
+    if not anchor or not prompts:
+        return None
+    return Turn(terminal_uuid=anchor, text="", prompts=prompts, interrupted=True)
+
+
+def _wall_time(obj: dict) -> float | None:
+    raw = obj.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+# Clock skew allowed between the MCP host and the dev container when deciding a
+# transcript line was written after a send.
+_ECHO_SKEW_S = 5.0
+
+
+def prompt_seen_since(objs: list[dict], text: str, sent_at: float) -> bool:
+    """True when the transcript shows `text` arrived at or after `sent_at` (epoch s)."""
+    return prompt_index_since(objs, text, sent_at) is not None
+
+
+def prompt_index_since(objs: list[dict], text: str, sent_at: float) -> int | None:
+    """Index of the latest line showing `text` arrived at or after `sent_at` (epoch s).
+
+    A prompt reaches the transcript as a `user` line, or, when it was pasted while
+    Claude was working, only as a `queue-operation` enqueue carrying its text (Claude
+    Code then answers it inside the running turn). Matching is whitespace-insensitive.
+    A matching line with no readable timestamp counts: it cannot be shown older.
+    """
+    want = normalize_prompt(text)
+    for index in range(len(objs) - 1, -1, -1):
+        obj = objs[index]
+        otype = obj.get("type")
+        if otype == "queue-operation":
+            content = obj.get("content")
+            seen = isinstance(content, str) and normalize_prompt(content) == want
+        elif otype == "user" and not obj.get("isMeta"):
+            raw_msg = obj.get("message")
+            msg = raw_msg if isinstance(raw_msg, dict) else {}
+            # A pasted slash command is transcribed as wrapper tags; compare its
+            # rendered `/name args` form too.
+            seen = want in (normalize_prompt(_text_of(msg)),
+                            normalize_prompt(human_prompt_text(obj)))
+        else:
+            continue
+        if seen:
+            wall = _wall_time(obj)
+            if wall is None or wall >= sent_at - _ECHO_SKEW_S:
+                return index
+    return None
 
 
 def objs_after_uuid(objs: list[dict], last_delivered_uuid: str | None) -> list[dict] | None:

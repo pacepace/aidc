@@ -52,7 +52,7 @@ class Wiring:
         self.paste_ok = True
         self.paste_calls = []
         self.tmux_calls = []
-        self.idle_wait_count = 0
+        self.free_checks = 0
         self.captured = False
         self.sleeps = []
 
@@ -64,9 +64,11 @@ def wiring(monkeypatch):
     async def is_running(container):
         return w.claude_running
 
-    async def wait_idle(container, window, timeout):
-        w.idle_wait_count += 1
-        return w.idle_ok
+    async def check_free(container, name):
+        w.free_checks += 1
+        if not w.claude_running:
+            return "claude_not_running"
+        return "" if w.idle_ok else "claude_busy"
 
     async def load_paste(container, text, window):
         w.paste_calls.append((container, text, window))
@@ -77,19 +79,20 @@ def wiring(monkeypatch):
         return 0
 
     async def capture(container, window):
-        # session_send must NEVER capture the pane — that was the blocking path.
+        # Only the free check reads the screen; it is patched above, so any capture
+        # means some path reads the pane on its own.
         w.captured = True
         return ""
 
     async def fake_sleep(seconds):
-        # Record the post-Enter settle without actually waiting (keeps tests fast).
+        # Record poll sleeps without actually waiting (keeps tests fast).
         w.sleeps.append(seconds)
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
-    monkeypatch.setattr(tools, "_wait_for_idle", wait_idle)
+    monkeypatch.setattr(tools, "_check_free", check_free)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-    monkeypatch.setattr(tools, "_capture_pane", capture)
+    monkeypatch.setattr(tools, "_capture_screen", capture)
     monkeypatch.setattr(tools.asyncio, "sleep", fake_sleep)
     return w
 
@@ -114,11 +117,12 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     # Prompt pasted with newlines flattened to spaces, then Enter sent.
     assert wiring.paste_calls[0][1] == "line one line two"
     assert _sent_enter(wiring.tmux_calls)
-    # Non-blocking contract: pre-send idle check only, and no pane capture.
-    assert wiring.idle_wait_count == 1
+    # Non-blocking contract: two consecutive free readings before the paste, and no
+    # pane capture of a reply.
+    assert wiring.free_checks == 2
     assert wiring.captured is False
-    # Post-Enter settle ran so a rapid follow-up send won't paste mid-turn.
-    assert 2.0 in wiring.sleeps
+    # Until the transcript shows the prompt, a follow-up send reads the session busy.
+    assert tools._sent_awaiting_echo["proj"][0] == "line one line two"
 
 
 async def test_sent_warns_when_no_webhook_open(wiring):

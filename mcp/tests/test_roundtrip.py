@@ -8,8 +8,8 @@ The pieces that are REAL here:
   - _post_turn (the outbound-to-metallm HTTP boundary, exact payload + URL).
 
 The pieces that are STUBBED (the non-deterministic edges):
-  - the tmux/Docker boundary (_is_claude_running / _wait_for_idle / _load_and_paste
-    / _tmux_exec / _capture_pane) — no container.
+  - the tmux/Docker boundary (_is_claude_running / _check_free / _load_and_paste
+    / _tmux_exec / _capture_screen) — no container.
   - the background poll TIMER (_run_transcript_watcher) — replaced with an
     alive-forever no-op so the drain is driven explicitly, deterministically.
   - the outbound httpx client — a FakeMetallm sink records every callback POST.
@@ -99,8 +99,8 @@ def harness(tmp_path, monkeypatch):
     async def is_running(container):
         return True
 
-    async def wait_idle(container, window, timeout):
-        return True
+    async def check_free(container, name):
+        return ""
 
     async def load_paste(container, text, window):
         paste_calls.append(text)
@@ -128,10 +128,10 @@ def harness(tmp_path, monkeypatch):
         await real_baseline(name, conversation_id, transcripts_base=base, state_dir=state)
 
     monkeypatch.setattr(tools, "_is_claude_running", is_running)
-    monkeypatch.setattr(tools, "_wait_for_idle", wait_idle)
+    monkeypatch.setattr(tools, "_check_free", check_free)
     monkeypatch.setattr(tools, "_load_and_paste", load_paste)
     monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-    monkeypatch.setattr(tools, "_capture_pane", capture)
+    monkeypatch.setattr(tools, "_capture_screen", capture)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
@@ -504,10 +504,10 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "OLD ANSWER")])
     await h.drain()
 
-    async def never_idle(container, window, timeout):
-        return False
+    async def busy(container, name):
+        return tools.SessionState(True, None, tools.TURN_RUNNING, "log_growing")
 
-    monkeypatch.setattr(tools, "_wait_for_idle", never_idle)
+    monkeypatch.setattr(tools, "_session_state", busy)
     res = await h.resend_tool(name="proj", conversation_id="conv-1")
 
     assert res["ok"] is True

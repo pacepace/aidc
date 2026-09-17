@@ -75,6 +75,7 @@ below fails safe when a line is missing or unrecognized.
 | Esc **after** Claude has written anything writes a `user` line `[Request interrupted by user]` (with `interruptedMessageId`) and no system line; Stop hooks do not run | container |
 | Esc **before** Claude has written anything writes **nothing**: the prompt line stays with no reply, and the prompt text is put back into the input box on screen | container |
 | A background task finishing writes a `user` line `<task-notification>…` with `promptSource: "system"` and `origin.kind: "task-notification"`, and Claude runs a new turn on it | container |
+| A prompt submitted while Claude is working is not written as a `user` line. Claude Code writes a `queue-operation` enqueue carrying its text, removes it at the next tool boundary, and answers it inside the running turn | container |
 
 Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md` (not committed).
 
@@ -204,37 +205,64 @@ the orchestrator and labels it as stopped at the terminal.
 
 ### S1. The transcript decides whether Claude is busy (MCP-28)
 
-A per-session **turn state** is read from the session's mirrored transcript (the same file design
-09's watcher resolves: pinned session id, newest `*.jsonl` fallback, `subagents/` excluded).
-Claude is **busy** when the newest relevant line leaves a turn open:
+Two questions are kept apart, because they have different callers:
 
-- a real user prompt with no terminal after it,
-- an assistant line with `stop_reason: "tool_use"`, or a tool result, with no terminal after it,
-- a terminal that a pushback (D1) has withdrawn.
+- **Is Claude working on a turn?** `_session_state` returns a `SessionState` whose `turn` is
+  `running` or `idle`, with `why` naming the evidence. `session_resend`'s "still working"
+  warning and `session_run`'s wait for a turn to end (`_wait_for_turn_end`) read only this.
+  A person's unsent text, or a prompt Esc put back in the box, does not keep a turn running.
+- **May a prompt be pasted now?** `_paste_reason` combines the turn with the screen (S2) and
+  returns `""` or a reason (S4's table). `_check_free` is that answer; `session_send` and the
+  queue drainer use it. Every change of verdict is logged as `session_free_check` with its
+  `why`, so a "free" reached without transcript evidence (no transcript, an unreadable one, the
+  status row, a stall) is on record.
 
-Claude is **free** when the newest relevant line closes a turn: a terminal (preferably followed
-by `turn_duration`), an interrupt line, or an API-error line with nothing after it for the settle
-window.
+**One rule for "Claude stopped".** `_turn_verdict` is shared by the send path and the watcher:
 
-`_wait_for_idle` (pane byte-stability) is removed from `session_send`, the queue drainer,
-`session_run`, and `session_resend`. `session_run`'s per-turn response comes from the transcript
-too, which retires `_extract_delta` and `_strip_ansi` (MCP-15 already barred them from delivery).
+1. The transcript's tail (`transcript.log_shows_turn_in_progress`) says **not working** for a
+   finished turn, an interrupt marker, an API error, a turn waiting on an interactive-input
+   tool, a local command's output (`/login`, `!` bash mode), or an empty transcript. It says
+   **working** for a prompt with no reply, a tool call or result, an unanswered Stop-hook
+   pushback, or a reply whose Stop hooks have not reported yet.
+2. A turn the transcript shows in progress is **working** while the transcript has been quiet
+   for less than 6 s (the mirror copies about every 2 s).
+3. A reply still waiting on its Stop hooks stays **working** until 120 s of quiet
+   (`_STOP_HOOK_WAIT_S`, the same hold the watcher's delivery uses, D1).
+4. Otherwise the status row decides: `esc to interrupt` means **working** (a long silent tool
+   call, or thinking before the first line). Its absence means **stopped**, trusted once this
+   MCP process has seen the working text on that session's screen; until then, only after 10
+   minutes of quiet. So a Claude Code that renames the text costs a slow queue, never a paste
+   into a running turn. The send path learns the text on its own screen reads; the watcher
+   reads the screen while a turn is in progress until it has seen it once.
 
-**After a send, busy until the transcript shows it.** The container mirror copies the transcript
-about every 2s, so right after a paste the transcript still shows the previous closed turn. After
-injecting, the session counts as busy until a user line matching the injected prompt (by the
-normalized fingerprint MCP-23 already records) appears. If it has not appeared after a bounded
-wait (the paste did not land), the prompt is treated as not sent and stays queued (S3).
+**Pasting requires two consecutive free readings**, 2.5 s apart (past the mirror's copy
+interval, so both cannot come from the same stale copy), in `_wait_until_free`. That catches a
+turn starting the moment another ends (a background task's notification). The drainer re-checks
+once more under the send lock right before pasting, and `_wait_for_turn_end` likewise needs two
+idle readings. `session_resend` takes a single reading: it only labels a reply, it does not paste.
+Pane byte-stability (`_wait_for_idle`) and pane-scraped replies (`_extract_delta`, `_strip_ansi`)
+are gone; `session_run` reads each reply from the transcript, starting at its prompt's line.
 
-**An open turn that has gone quiet.** The transcript can show a turn as open when Claude is not
-working: an Esc before Claude wrote anything leaves no marker (measured), and a crash mid-turn
-leaves the last line open. Only then, when the transcript shows an open turn and has not grown for
-a few seconds, the screen's status row decides: if it does not show `esc to interrupt`, Claude has
-stopped. For a prompt with no assistant line after it, that is reported as an interrupt (D3, with
-"Claude had not written anything yet"), and the session counts as free. While the transcript is
-growing, or the status row still shows `esc to interrupt`, the session stays busy. If a future
-Claude Code drops that wording, the check never finds it, so this path falls back to a long quiet
-period (minutes) with Claude running and at its input prompt. It never types into a busy session.
+**After a paste, busy until the transcript shows it.** Right after a paste the mirrored
+transcript still shows the previous finished turn. `_inject` marks the session busy
+(`sent_prompt_not_in_log`) and starts `_watch_for_echo`, which clears the mark once the transcript
+shows the prompt: a `user` line with the same text (or, for a slash command, its rendered
+`/name args`), or a `queue-operation` enqueue with that text when it was pasted into a running
+turn. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
+logged, whether or not anything checks the session again.
+
+[DECISION: a prompt that never shows in the transcript is logged, not re-sent | a paste whose
+tmux commands returned success almost always landed (a lagging or rotated transcript is the likelier
+cause), and a duplicate prompt answered twice is worse than a missing log line | Pace can veto]
+
+**Esc before Claude writes anything.** Claude Code writes no marker, so the transcript shows a
+prompt with no reply. The watcher reports it (D3) when `_turn_verdict` says stopped on two
+consecutive polls with Claude running at its input box: an interrupted turn anchored on the
+prompt's line, with "Claude had not written anything yet", delivered once and consuming the
+sent-record entry. Until it has reported that prompt, the send path holds a session with an open
+watcher as `interrupt_not_reported_yet`, so the orchestrator hears about the interrupt before its
+next prompt lands. A tail made of a local command's output or a background task's notification is
+never reported; a slash command with no output (a skill Claude was about to run) is.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 
@@ -257,9 +285,14 @@ attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
 - **Empty** means nothing after `❯\xa0`, or only dim text: the placeholder (`Try "…"`) is drawn
   with SGR 2 and appears for a fraction of a second after startup. Typed text is unstyled.
 - **Multi-line** unsent text continues on rows indented two spaces, still between the rules.
-- **Not at prompt:** no such box row. Examples seen: the folder-trust menu on first launch (`❯`
-  used as a menu cursor, no `─` box), and a bare shell after `/exit` (`pane_current_command` is
-  `bash`).
+- **Not at prompt:** no such box row, with a dialog footer (`Enter to confirm` / `Esc to cancel`),
+  as on the folder-trust menu at first launch (`❯` used as a menu cursor, no `─` box).
+- **Unrecognized:** no box row and no dialog footer. A bare shell after `/exit` looks like this,
+  but the send path reports that as "Claude not running" (`pane_current_command` is `bash`)
+  before reading the screen, so in practice this is a layout aidc does not know.
+- **Colour codes:** only the SGR intensity attribute counts as dim. The numbers inside an
+  extended colour (`38;5;N`, `38;2;R;G;B`, and the 48/58 forms) are skipped, so a `2` there is not
+  mistaken for dim.
 
 Cursor position was recorded (x=2 on an empty box row) but is not needed: the row content decides.
 
@@ -308,7 +341,8 @@ when it queues and in `session_status` for every waiting prompt:
 | `claude_busy` | the transcript shows a turn in progress |
 | `input_has_text` | the person has unsent text in Claude's input box |
 | `claude_not_running` | the `claude` window is at a shell |
-| `screen_unrecognized` | Claude is running but the screen is not its input prompt (startup, login, or an unrecognized layout) |
+| `claude_not_at_prompt` | Claude is running and showing a dialog (e.g. the folder-trust or login screen) instead of its input box |
+| `screen_unrecognized` | Claude is running but the screen is neither its input box nor a known dialog; the capture is saved to `watcher-state/screens/<session>-unrecognized.ansi` for whoever updates `screen.py` |
 | `paste_failing` | the paste did not land; retrying |
 | `queued_behind` | an earlier prompt in the queue is waiting |
 
@@ -351,6 +385,8 @@ Same trust level as the existing send record and dead-letter files, which alread
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
   `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
 - Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,
-  `_enqueue_send`, `_inject`, `_wait_for_idle`, `session_run`, `session_resend`).
+  `_enqueue_send`, `_inject`, `_session_state`, `_turn_verdict`, `_paste_reason`, `_check_free`,
+  `_wait_until_free`, `_wait_for_turn_end`, `_watch_for_echo`, `session_run`, `session_resend`);
+  `mcp/src/aidc_mcp/screen.py` (`classify`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.
 - MetaLLM callback contract: `api/src/api/v1/internal/callback.py` in the metallm repo.

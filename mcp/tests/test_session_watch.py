@@ -1,57 +1,12 @@
-"""Tests for the shared-session helpers that survive the design-09 cutover.
+"""Tests for the watcher task registry (_session_watchers) lifecycle.
 
-The old tmux-scraping delivery watcher (_run_watcher) and its callback
-instrumentation were removed when delivery moved to the JSONL transcript
-(see test_transcript.py / test_transcript_delivery.py). What remains here:
-  _extract_delta   — still used for claude_session_send/run's synchronous
-                     "response returned directly" convenience value.
-  _session_watchers — watcher task registry lifecycle.
+Delivery reads the JSONL transcript (test_transcript.py, test_transcript_delivery.py),
+and so does session_run's synchronous reply; nothing scrapes reply text off the
+pane any more (design-10 S1).
 """
 import asyncio
 
-from aidc_mcp.tools import (
-    _extract_delta,
-    _session_watchers,
-)
-
-# ---------------------------------------------------------------------------
-# _extract_delta (synchronous convenience return for claude_session_send/run)
-# ---------------------------------------------------------------------------
-
-class TestExtractDelta:
-    def test_returns_content_after_anchor(self):
-        baseline = "line1\nline2\nline3"
-        final = "line1\nline2\nline3\nnew content"
-        assert _extract_delta(baseline, final) == "new content"
-
-    def test_empty_baseline_returns_full_final(self):
-        assert _extract_delta("", "result here") == "result here"
-
-    def test_blank_only_baseline_returns_full_final(self):
-        assert _extract_delta("   \n\n  ", "answer") == "answer"
-
-    def test_same_content_returns_empty(self):
-        content = "Claude> ready\nline1\nline2"
-        assert _extract_delta(content, content) == ""
-
-    def test_anchor_not_found_returns_full_final(self):
-        assert _extract_delta("completely different", "new stuff only") == "new stuff only"
-
-    def test_strips_ansi_from_both(self):
-        baseline = "\x1b[1mline1\x1b[0m\nline2"
-        final = "\x1b[1mline1\x1b[0m\nline2\nnew line"
-        assert _extract_delta(baseline, final) == "new line"
-
-    def test_uses_last_anchor_occurrence(self):
-        baseline = "prompt>"
-        final = "prompt>\necho\nprompt>\nreal answer"
-        assert _extract_delta(baseline, final) == "real answer"
-
-    def test_multi_line_anchor(self):
-        baseline = "header\nbody\nfooter"
-        final = "header\nbody\nfooter\nnew paragraph"
-        assert _extract_delta(baseline, final) == "new paragraph"
-
+from aidc_mcp.tools import _session_watchers
 
 # ---------------------------------------------------------------------------
 # _session_watchers lifecycle (claude_session_watch/unwatch)

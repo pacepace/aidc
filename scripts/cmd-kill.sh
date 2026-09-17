@@ -37,7 +37,18 @@ NAME="${1:-}"
 validate_session_name "$NAME"
 require_docker
 aidc_retire_auth_bridge
-session_exists "$NAME" || die "no such session: $NAME"
+if ! session_exists "$NAME"; then
+    # No containers, but a network may be left over (from a kill that could not remove
+    # it). aidc-mcp still counts the session as alive while it exists, so remove it.
+    if docker network inspect "aidc-${NAME}-net" >/dev/null 2>&1 \
+            || docker network inspect "aidc-${NAME}-egress" >/dev/null 2>&1; then
+        remove_session_networks "$NAME" || \
+            die "could not remove the leftover network(s) of '${NAME}'; remove by hand: docker network rm aidc-${NAME}-net aidc-${NAME}-egress"
+        printf "Session '%s' had no containers left; removed its leftover network(s).\n" "$NAME"
+        exit 0
+    fi
+    die "no such session: $NAME"
+fi
 
 DEV="$(container_name "$NAME" dev)"
 AUDIT_CT="$(container_name "$NAME" audit)"

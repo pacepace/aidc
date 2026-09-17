@@ -6,10 +6,9 @@
 # `docker compose down` leaves a network in place, printing "Resource is still in
 # use" and exiting 0 (measured on Docker 29.8 / Compose 5.5), while a container
 # outside the project is attached: an `aidc proxy` forwarder, or another session
-# joined with `aidc network`. `aidc kill` used to remove the forwarders only after
-# the down, so a killed session's network survived: the MCP kept treating the
-# session as alive, and a session created again under the name reused the network,
-# id and all, inheriting the old one's queued prompts.
+# joined with `aidc network`. A network that survives a kill keeps the session alive
+# in the MCP, and a session created again under the name would reuse it, id and all,
+# inheriting the old one's queued prompts.
 #
 # `docker` is a PATH stub that keeps network state in files, so no daemon is needed.
 # Hygiene: scratch lives under tests/scratch/ INSIDE the repo (gitignored).
@@ -52,12 +51,15 @@ case "$1 $2" in
         [ -s "$S/net-$3" ] && { echo "Error: network $3 has active endpoints" >&2; exit 1; }
         rm -f "$S/net-$3"; exit 0 ;;
     "ps -a")
-        case "$*" in *fwd*) echo fwd-id ;; *label=aidc.session*) echo dev-id ;; esac
+        case "$*" in *fwd*) echo fwd-id ;; *label=aidc.session*) [ -z "${NO_SESSION:-}" ] && echo dev-id ;; esac
         exit 0 ;;
     "rm -f")
         # A forwarder removed is detached from every network.
         for f in "$S"/net-*; do [ -f "$f" ] || continue
             grep -vx "aidc-killme-fwd-8002" "$f" > "$f.new"; mv "$f.new" "$f"; done
+        exit 0 ;;
+    "inspect aidc-killme-dev")
+        [ -n "${NO_SESSION:-}" ] && exit 1
         exit 0 ;;
 esac
 exit 0
@@ -129,6 +131,26 @@ case "$out" in
     *"still treats it as a live session"*) echo "  PASS: and says why"; PASS=$((PASS + 1)) ;;
     *) echo "  FAIL: and says why (got: $out)"; FAIL=$((FAIL + 1)) ;;
 esac
+
+# 6. A leftover network with no session left: kill removes it instead of refusing.
+reset_state
+: > "$SCRATCH/state/net-aidc-killme-net"
+out=$(env PATH="$SCRATCH/bin:/usr/bin:/bin" STUB_STATE="$SCRATCH/state" HOME="$SCRATCH/home" \
+    NO_SESSION=1 AIDC_SCRIPTS="$AIDC_ROOT/scripts" \
+    bash "$AIDC_ROOT/scripts/cmd-kill.sh" killme 2>&1)
+rc=$?
+eq "kill of a leftover network succeeds" 0 "$rc"
+eq "and removes it" "no" "$([ -f "$SCRATCH/state/net-aidc-killme-net" ] && echo yes || echo no)"
+eq "and says so" "Session 'killme' had no containers left; removed its leftover network(s)." "$out"
+
+# 7. No session and no network is still "no such session".
+reset_state
+out=$(env PATH="$SCRATCH/bin:/usr/bin:/bin" STUB_STATE="$SCRATCH/state" HOME="$SCRATCH/home" \
+    NO_SESSION=1 AIDC_SCRIPTS="$AIDC_ROOT/scripts" \
+    bash "$AIDC_ROOT/scripts/cmd-kill.sh" killme 2>&1)
+rc=$?
+eq "kill of nothing fails" 1 "$rc"
+eq "with no such session" "[aidc] error: no such session: killme" "$out"
 
 echo
 echo "session networks: ${PASS} passed, ${FAIL} failed"

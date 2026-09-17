@@ -494,7 +494,8 @@ ways:
    (`remove_session_networks`): compose leaves a network that an outside container is still
    attached to, exiting 0, and a leftover network would keep a killed session alive here and hand
    a session created again under the name its predecessor's prompts. `aidc create` removes such a
-   leftover from an older kill before it starts. The drainer checks this at the start of each round and again under the send lock
+   leftover before it starts, and `aidc kill` on a name with no containers but a leftover network
+   removes the network. The drainer checks this at the start of each round and again under the send lock
    right before pasting, since its wait for a free session can outlast a kill and re-create. A
    gone prompt is written to the send dead-letter dir with reason `session_killed`
    and reported to its conversation (D5, `prompt_dropped`). Docker failing to answer is neither.

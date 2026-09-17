@@ -875,9 +875,8 @@ if ! docker volume inspect aidc-pyenv-versions >/dev/null 2>&1; then
     docker volume create aidc-pyenv-versions >/dev/null
 fi
 
-# A network left behind by an earlier kill of a session with this name (older aidc
-# removed port-forwarders only after `compose down`, which then kept the network)
-# would be reused, id and all, and aidc-mcp would take this new session for that one.
+# A network left behind by an earlier session with this name would be reused, id and
+# all, and aidc-mcp would take this new session for that one.
 remove_session_networks "$NAME" || \
     die "a network from an earlier session named '${NAME}' could not be removed; remove it by hand: docker network rm aidc-${NAME}-net aidc-${NAME}-egress"
 

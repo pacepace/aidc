@@ -557,6 +557,13 @@ async def test_session_instance_gone_on_other_not_found_wordings(monkeypatch):
         assert await tools._session_instance("x") == (tools.SESSION_GONE, "")
 
 
+async def test_session_instance_gone_when_the_wording_differs_but_names_the_network(
+        monkeypatch):
+    _patch_async_proc(monkeypatch, FakeProc(
+        stderr=b"Error: network \"aidc-proj-net\" not found\n", returncode=1))
+    assert await tools._session_instance("proj") == (tools.SESSION_GONE, "")
+
+
 async def test_a_not_found_about_something_else_is_not_a_gone_session(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"context \"remote\" not found\n", returncode=1))

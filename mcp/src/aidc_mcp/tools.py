@@ -806,11 +806,11 @@ async def _session_instance(name: str) -> tuple[str, str]:
     if proc.returncode == 0:
         return SESSION_EXISTS, stdout.decode("utf-8", errors="replace").strip()
     # Measured on Docker 29.8: "Error response from daemon: network <name> not found".
-    # Other versions say "No such network: <name>" or "no such object: <name>".
+    # Other versions say "No such network: <name>" or "no such object: <name>". The
+    # message must name this network, so a "not found" about anything else (a docker
+    # context, say) is not taken for a killed session.
     err = stderr.decode("utf-8", errors="replace").lower()
-    net = f"aidc-{name}-net"
-    if (f"network {net} not found" in err or f"no such network: {net}" in err
-            or f"no such object: {net}" in err):
+    if f"aidc-{name}-net" in err and ("not found" in err or "no such" in err):
         return SESSION_GONE, ""
     return SESSION_UNKNOWN, ""
 

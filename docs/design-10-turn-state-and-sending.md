@@ -12,9 +12,8 @@ a dev container's tmux `claude` window:
 **Requirements implemented:** MCP-24 .. MCP-30 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
-**Status:** designed 2026-09-17, not built. Some transcript and screen facts below are marked
-**to measure**: they come from host transcripts or from another project's notes and must be
-confirmed inside an aidc dev container before the code relies on them.
+**Status:** designed 2026-09-17, not built. Transcript and screen facts measured in a dev container
+on Claude Code 2.1.270 and 2.1.274 the same day.
 
 ---
 
@@ -61,17 +60,22 @@ transcript cannot show, and each such use is listed below with its reason.
 
 ## Transcript facts this design relies on
 
-Verified on host transcripts (Claude Code 2.1.273, 2026-09-16/17) unless marked **to measure**.
-The JSONL is an undocumented internal format (see design 09): every rule below fails safe when a
-line is missing or unrecognized.
+Measured in an aidc dev container on Claude Code 2.1.270 and 2.1.274 (2026-09-17), and on host
+transcripts (2.1.273). The JSONL is an undocumented internal format (see design 09): every rule
+below fails safe when a line is missing or unrecognized.
 
-| Fact | Evidence | Status |
-|---|---|---|
-| A Stop-hook block writes a `user` line with `isMeta: true` and string content starting `Stop hook feedback:` | 14 such lines in the metallm project's host transcripts | verified on host; **to measure** in container |
-| The same block writes a `system` line, `subtype: "stop_hook_summary"`, with non-empty `hookErrors`, in the same millisecond | tangle's scan of ~10k Stop events across 2.1.x | reported by a peer session; **to measure** |
-| When every Stop hook allowed the stop, Claude Code writes `system` / `subtype: "turn_duration"` (with `durationMs`, `messageCount`) right after | 7 of 7 turns in this repo's own session transcript; ~9.9k in tangle's scan; never after a blocked summary | verified on host; **to measure** in container |
-| `turn_duration` is sometimes absent after an allowed stop (155 of ~10k in tangle's scan, cause unknown) | tangle's scan | reported; treat as not guaranteed |
-| Esc writes a `user` line whose text starts `[Request interrupted by user` and usually no system line after it | already relied on by MCP-23 attribution; tangle's scan (76 followed by `turn_duration`, ~400 by nothing) | verified shape; **to measure** in container |
+| Fact | Evidence |
+|---|---|
+| A Stop-hook block writes a `user` line with `isMeta: true` and string content starting `Stop hook feedback:`, whether the hook blocks by JSON `decision: "block"` or by exit 2 | container: both kinds; host: 14 lines in the metallm project |
+| The feedback line is followed ~150 ms later by `system` / `stop_hook_summary` with non-empty `hookErrors` (both block kinds). No `turn_duration` follows a blocked stop | container: both kinds |
+| An allowed stop writes `stop_hook_summary` with `hookErrors: []`, then `system` / `turn_duration` within a few ms. One `turn_duration` covers the whole exchange, pushbacks included | container: 5 of 5 allowed stops; host: 7 of 7; tangle's scan ~9.9k |
+| `turn_duration` is sometimes absent after an allowed stop (155 of ~10k in tangle's scan, cause unknown) | reported by a peer session; not reproduced; treat as not guaranteed |
+| A reply's thinking and text are written as separate `assistant` lines, each with `stop_reason: end_turn` | container |
+| Esc **after** Claude has written anything writes a `user` line `[Request interrupted by user]` (with `interruptedMessageId`) and no system line; Stop hooks do not run | container |
+| Esc **before** Claude has written anything writes **nothing**: the prompt line stays with no reply, and the prompt text is put back into the input box on screen | container |
+| A background task finishing writes a `user` line `<task-notification>…` with `promptSource: "system"` and `origin.kind: "task-notification"`, and Claude runs a new turn on it | container |
+
+Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md` (not committed).
 
 ---
 
@@ -223,13 +227,21 @@ Only two things, both invisible to the transcript:
    login, trust, or startup screen while the transcript's last turn reads closed.
 
 Both are read from one `capture-pane -e` of the `claude` window (with escape sequences, so text
-attributes are visible) plus the cursor position (`display-message -p '#{cursor_x},#{cursor_y}'`).
-The expected signals, **all to measure** on the Claude Code version in the container:
+attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
 
-- the input box is recognizable by its border and prompt glyph;
-- an empty box shows placeholder text drawn dim (TangleClaw measured SGR 2 on Claude Code 2.1.x),
-  and typed text is not dim;
-- the cursor sits at the start of an empty box.
+- **The input box** is the region between the last two full-width `─` rules near the bottom of
+  the pane; the status row sits directly below the second rule.
+- **Its first row** starts with the glyph `❯` followed by a no-break space (`❯\xa0`). Earlier
+  prompts in the scrollback also start with `❯` but are drawn on a background colour
+  (`\x1b[48;5;237m`), so they do not match.
+- **Empty** means nothing after `❯\xa0`, or only dim text: the placeholder (`Try "…"`) is drawn
+  with SGR 2 and appears for a fraction of a second after startup. Typed text is unstyled.
+- **Multi-line** unsent text continues on rows indented two spaces, still between the rules.
+- **Not at prompt:** no such box row. Examples seen: the folder-trust menu on first launch (`❯`
+  used as a menu cursor, no `─` box), and a bare shell after `/exit` (`pane_current_command` is
+  `bash`).
+
+Cursor position was recorded (x=2 on an empty box row) but is not needed: the row content decides.
 
 When the screen cannot be classified (a Claude Code redesign), the send path treats it as **not
 safe to type** and says so (S3). An unrecognized screen holds prompts; it never types into them.

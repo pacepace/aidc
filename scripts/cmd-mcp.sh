@@ -100,6 +100,14 @@ mcp_start() {
     mkdir -p "$AUDIT_DIR"
     chmod 0700 "$AUDIT_DIR"   # private: transcripts/audit are not world-readable
     info "starting $CONTAINER on ${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}"
+    # mcp.session_create: the home mount and the env that makes the tool exist.
+    CREATE_ARGS=()
+    while IFS= read -r line; do [ -n "$line" ] && CREATE_ARGS+=("$line"); done <<<"$(mcp_session_create_args)"
+    if [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ]; then
+        info "session_create: ENABLED -- ${HOME} is mounted into ${CONTAINER} (mcp.session_create)"
+    else
+        info "session_create: not offered (set mcp.session_create: true to enable; it mounts your home)"
+    fi
     docker run -d \
         --name "$CONTAINER" \
         --restart unless-stopped \
@@ -113,6 +121,7 @@ mcp_start() {
         -e "AIDC_AUDIT_HOST=${AIDC_AUDIT_DIR}" \
         -v "${AIDC_AUDIT_DIR}:/var/aidc-audit:rw" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
+        ${CREATE_ARGS[@]+"${CREATE_ARGS[@]}"} \
         "$IMAGE" >/dev/null
     sleep 1
     mcp_status

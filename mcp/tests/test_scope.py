@@ -114,9 +114,13 @@ def test_scoping_keeps_the_tool_schemas_and_context_injection(app):
     assert set(invoke.parameters["properties"]) == {"name", "prompt"}
 
 
-async def test_session_create_is_refused_when_scoped(app, monkeypatch, forbid_side_effects):
+async def test_session_create_is_refused_when_scoped(monkeypatch, forbid_side_effects):
+    """Even with the operator's opt-in, a scoped server refuses to create sessions."""
+    monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+    a = FastMCP("t")
+    tools.register(a)
     monkeypatch.setenv(scope.ENV, "jointtest")
-    result = await app._tool_manager._tools["session_create"].fn(
+    result = await a._tool_manager._tools["session_create"].fn(
         name="jointtest", repo="/tmp")
     assert result["ok"] is False and "cannot create sessions" in result["error"]
     assert result["error_code"] == "create_not_allowed"

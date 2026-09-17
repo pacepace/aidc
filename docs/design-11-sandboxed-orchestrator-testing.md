@@ -79,7 +79,11 @@ container's published binding wins, because that is what is listening. Otherwise
 `aidc create` for `session_create`, with `HOME=/root`), from the `/aidc-config` mount. A
 malformed address or port stops `aidc create` with a message naming the key.
 
-`aidc mcp start` gives the container the host's home and its state and audit dirs
+`session_create` is offered only when the operator sets `mcp.session_create: true`, which is also
+what mounts their home into the container: creating a session reads a repo and writes Claude's
+per-project memory, both host paths the container otherwise cannot see. Off (the default) the tool
+is not registered, so an orchestrator plans without it instead of calling one that cannot work; a
+scoped server refuses it either way. `aidc mcp start` gives the container the host's home and its state and audit dirs
 (`AIDC_HOST_HOME`, `AIDC_MCP_STATE_HOST`, `AIDC_AUDIT_HOST`, with the audit dir mounted at
 `/var/aidc-audit`). `aidc create` run in there derives every path it hands docker from the host's
 home, creates it through the matching mount, and gives it the owner of that tree — created as

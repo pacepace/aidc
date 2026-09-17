@@ -2412,8 +2412,11 @@ def register(app: Any) -> None:
     """Attach every tool to the given FastMCP app."""
 
     # --- session_create -------------------------------------------------
+    #
+    # Registered only when the operator turned it on (mcp.session_create), because it
+    # needs their home mounted into this container to read a repo and write Claude's
+    # per-project memory. Off, the tool does not exist rather than existing and failing.
 
-    @app.tool()
     async def session_create(
         name: str,
         profile: str = "multi",
@@ -2457,6 +2460,9 @@ def register(app: Any) -> None:
             return _envelope_ok({"name": name, "log": result["stdout"]})
         return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
                              code="cli_failed")
+
+    if scope.session_create_enabled():
+        app.tool()(session_create)
 
     # --- session_list ---------------------------------------------------
 

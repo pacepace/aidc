@@ -49,6 +49,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   prompt inside the running turn without recording it as a prompt, so its record used to sit for
   24 hours, where the same words typed by a person could match it and be delivered as the
   orchestrator's own.
+- **`session_create` is offered only when you turn it on.** `mcp.session_create: true` mounts your
+  home into the `aidc-mcp` container, which is what lets it read a repo and write Claude's
+  per-project memory for a session it creates. Off (the default) the tool is not registered at all,
+  so an orchestrator plans without it rather than calling something that cannot work.
 - **`session_create` through the MCP works at all.** The `aidc-mcp` image was missing
   `envsubst` and the docker compose plugin, which `aidc create` needs, so the tool
   failed at the door in every released image. A test keeps the image's packages in step

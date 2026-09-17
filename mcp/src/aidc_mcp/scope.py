@@ -16,6 +16,8 @@ import os
 import re
 
 ENV = "AIDC_MCP_ALLOWED_SESSIONS"
+# Set by `aidc mcp start` from mcp.session_create, alongside the home mount it needs.
+ENABLE_CREATE_ENV = "AIDC_MCP_SESSION_CREATE"
 
 
 def allowed_sessions() -> frozenset[str] | None:
@@ -39,6 +41,18 @@ def create_refusal() -> str | None:
     if allowed_sessions() is None:
         return None
     return "this MCP server is limited to named sessions and cannot create sessions"
+
+
+def session_create_enabled() -> bool:
+    """Whether this server offers session_create at all.
+
+    Creating a session means reading a repo and writing Claude's per-project memory on
+    the HOST, so `aidc mcp start` has to mount the operator's home into this container —
+    which the operator opts into with `mcp.session_create: true`. Off (the default), the
+    tool is not registered: an orchestrator plans without it rather than calling
+    something that cannot work. A scoped server never offers it (create_refusal).
+    """
+    return os.environ.get(ENABLE_CREATE_ENV, "").strip().lower() == "true"
 
 
 def filter_list(raw: str) -> str:

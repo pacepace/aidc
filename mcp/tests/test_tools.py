@@ -14,13 +14,20 @@ import subprocess
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from aidc_mcp import tools
+from aidc_mcp import scope, tools
 
 
 def _tool(name):
     app = FastMCP("t")
     tools.register(app)
     return app._tool_manager._tools[name].fn
+
+
+def _create_tool(monkeypatch):
+    """session_create exists only where the operator turned it on (scope.ENABLE_CREATE_ENV
+    / mcp.session_create), because it needs their home mounted into the container."""
+    monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+    return _tool("session_create")
 
 
 # --- fakes for the subprocess layer ------------------------------------------
@@ -94,19 +101,40 @@ def _patch_cli(monkeypatch, result, record=None):
 # --- session_create ----------------------------------------------------------
 
 class TestSessionCreate:
-    async def test_requires_repo(self):
-        res = await _tool("session_create")(name="proj")
+    def test_absent_unless_the_operator_enabled_it(self, monkeypatch):
+        monkeypatch.delenv(scope.ENABLE_CREATE_ENV, raising=False)
+        app = FastMCP("t")
+        tools.register(app)
+        assert "session_create" not in app._tool_manager._tools
+        assert "session_send" in app._tool_manager._tools   # the rest are unaffected
+
+    def test_present_when_enabled(self, monkeypatch):
+        monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+        app = FastMCP("t")
+        tools.register(app)
+        assert "session_create" in app._tool_manager._tools
+
+    def test_any_other_value_leaves_it_off(self, monkeypatch):
+        for value in ("1", "yes", "TRUE ", ""):
+            monkeypatch.setenv(scope.ENABLE_CREATE_ENV, value)
+            app = FastMCP("t")
+            tools.register(app)
+            present = "session_create" in app._tool_manager._tools
+            assert present is (value.strip().lower() == "true"), value
+
+    async def test_requires_repo(self, monkeypatch):
+        res = await _create_tool(monkeypatch)(name="proj")
         assert res["ok"] is False and "repo" in res["error"]
 
     async def test_happy_path(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
-        res = await _tool("session_create")(name="proj", repo="/host/repo", ctx=None)
+        res = await _create_tool(monkeypatch)(name="proj", repo="/host/repo", ctx=None)
         assert res["ok"] is True
         assert res["data"] == {"name": "proj", "log": "created"}
 
     async def test_failure_surfaces_stderr(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
-        res = await _tool("session_create")(name="proj", repo="/r", ctx=None)
+        res = await _create_tool(monkeypatch)(name="proj", repo="/r", ctx=None)
         assert res["ok"] is False and res["error"] == "boom"
 
 

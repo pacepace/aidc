@@ -463,7 +463,7 @@ aidc mcp start
 aidc mcp token show           # the bearer token to put in the client's MCP config
 ```
 
-From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mcp` with that bearer. It gets the full tool surface (`session_create`, `session_invoke`, `file_get`, etc.). See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md).
+From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mcp` with that bearer. It gets the tool surface (`session_invoke`, `file_get`, `session_send`, etc.; `session_create` only if you enabled it). See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md).
 
 ### Driving sessions from an orchestrator
 
@@ -633,6 +633,9 @@ notify_webhook: ""                    # POSTed to on taint events
 mcp:
   bind_address: 127.0.0.1             # bind the MCP server here. Change to e.g. your ZeroTier/Tailscale IP for remote access.
   port: 7878
+  session_create: false               # offer the session_create tool. Creating a session means reading a repo and
+                                      # writing Claude's per-project memory on the HOST, so turning this on mounts
+                                      # your home dir into the aidc-mcp container. Off, the tool is not offered at all.
 
 # Only relevant if an orchestrator drives sessions over MCP (the key keeps its historical name):
 metallm:
@@ -659,7 +662,7 @@ Once tainted, **kill and recreate** is the only path. The session does not get "
 
 When `aidc mcp` is running, an external AI orchestrator on your overlay network gets:
 
-**Tools** (function calls): `session_create`, `session_list`, `session_status`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `file_get`, `file_put`, `audit_get`, `taint_mark`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP.)
+**Tools** (function calls): `session_create` (only with `mcp.session_create: true`, see the config above), `session_list`, `session_status`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `file_get`, `file_put`, `audit_get`, `taint_mark`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP.)
 
 **Resources** (read-only data): `aidc://sessions`, `aidc://sessions/{name}/status`, `aidc://sessions/{name}/audit`, `aidc://sessions/{name}/audit/{filename}`, `aidc://config`.
 

@@ -524,21 +524,41 @@ mcp_load_settings() {
     cfg=$(_aidc_global_config_file)
     AIDC_MCP_BIND_ADDRESS="127.0.0.1"
     AIDC_MCP_PORT="7878"
-    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT
+    AIDC_MCP_SESSION_CREATE="false"
+    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT AIDC_MCP_SESSION_CREATE
     [ -n "$cfg" ] || return 0
 
-    local b="" p=""
+    local b="" p="" c=""
     if command -v yq >/dev/null 2>&1; then
         b=$(yq eval '.mcp.bind_address // ""' "$cfg" 2>/dev/null || printf '')
         p=$(yq eval '.mcp.port // ""' "$cfg" 2>/dev/null || printf '')
+        c=$(yq eval '.mcp.session_create // ""' "$cfg" 2>/dev/null || printf '')
         [ "$b" = "null" ] && b=""
         [ "$p" = "null" ] && p=""
+        [ "$c" = "null" ] && c=""
     fi
     if [ -z "$b" ]; then b=$(_aidc_yaml_nested "$cfg" "mcp" "bind_address"); fi
     if [ -z "$p" ]; then p=$(_aidc_yaml_nested "$cfg" "mcp" "port"); fi
+    if [ -z "$c" ]; then c=$(_aidc_yaml_nested "$cfg" "mcp" "session_create"); fi
     [ -n "$b" ] && AIDC_MCP_BIND_ADDRESS="$b"
     [ -n "$p" ] && AIDC_MCP_PORT="$p"
-    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT
+    [ "$c" = "true" ] && AIDC_MCP_SESSION_CREATE="true"
+    export AIDC_MCP_BIND_ADDRESS AIDC_MCP_PORT AIDC_MCP_SESSION_CREATE
+}
+
+# The extra `docker run` arguments `aidc mcp start` needs when mcp.session_create is on.
+#
+# Creating a session means reading a repo and writing Claude's per-project memory on the
+# HOST, so the server needs the operator's home at the same path it has on the host.
+# That is a real widening — the container can then read and write everything under it —
+# so it is opt-in, and with it off the MCP does not offer session_create at all rather
+# than offering one that cannot work. (The container already has the docker socket,
+# which is root-equivalent on the host, so this grants no power it lacked; it makes the
+# paths line up.) Prints nothing when the setting is off.
+mcp_session_create_args() {
+    [ "${AIDC_MCP_SESSION_CREATE:-}" = "true" ] || return 0
+    printf -- '-v\n%s:%s:rw\n-e\nAIDC_MCP_SESSION_CREATE=true\n' \
+        "$(aidc_host_home)" "$(aidc_host_home)"
 }
 
 # aidc_mcp_deny_target: "addr:port" of the aidc-mcp server that sessions must not

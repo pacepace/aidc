@@ -107,6 +107,32 @@ eq "a host path with no mount is unreachable there" "unreachable" \
     "$(local_path /home/pace/.claude/projects/x /home/pace \
         /home/pace/.local/state/aidc-mcp /var/log/aidc-mcp)"
 
+# mcp.session_create: off by default, and what it adds to `docker run` when on.
+create_args() {
+    # $1 = config body
+    printf '%s' "$1" > "$SCRATCH/host/.config/aidc/config.yaml"
+    # shellcheck disable=SC2016  # $AIDC_ROOT expands in the inner shell, on purpose
+    env -i PATH="/usr/bin:/bin" HOME="$SCRATCH/host" AIDC_ROOT="$AIDC_ROOT" bash -c '
+        . "$AIDC_ROOT/scripts/lib/config.sh"
+        mcp_load_settings
+        printf "%s|" "$AIDC_MCP_SESSION_CREATE"
+        mcp_session_create_args | tr "\n" " "'
+}
+
+eq "session_create is off when the key is absent" "false|" \
+    "$(create_args 'mcp:
+  port: 7878
+')"
+eq "off when it is false" "false|" \
+    "$(create_args 'mcp:
+  session_create: false
+')"
+eq "on it mounts the host home and sets the env" \
+    "true|-v $SCRATCH/host:$SCRATCH/host:rw -e AIDC_MCP_SESSION_CREATE=true " \
+    "$(create_args 'mcp:
+  session_create: true
+')"
+
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

@@ -34,7 +34,7 @@ aidc_config_defaults() {
     # let it keep running while a human gets paged.
     AIDC_TAINT_RESPONSE="freeze"
     AIDC_TLD_TAINTS="false"
-    AIDC_AUDIT_DIR="${HOME}/aidc-audit"
+    AIDC_AUDIT_DIR="$(aidc_host_home)/aidc-audit"
     AIDC_STATE_ACTOR_TLDS=".ru
 .cn
 .by
@@ -213,6 +213,15 @@ _aidc_dedupe_lines() {
 
 # ---- expansion helper --------------------------------------------------------
 #
+# The HOME of the person this aidc belongs to. Every path this CLI hands to docker
+# (mounts, audit dir, the transcript mirror) is resolved by the daemon ON THE HOST, so
+# it must be a host path. aidc-mcp runs this same CLI for session_create inside its own
+# container, where HOME is /root: `aidc mcp start` passes the real one as
+# AIDC_HOST_HOME, and every host path is derived from this.
+aidc_host_home() {
+    printf '%s' "${AIDC_HOST_HOME:-$HOME}"
+}
+
 # Expand a leading ~ or $HOME so audit_dir/foo and ~/foo both resolve.
 
 _aidc_expand_path() {
@@ -222,7 +231,7 @@ _aidc_expand_path() {
     # explicitly via ${HOME} in the branch body.
     # shellcheck disable=SC2088
     case "$p" in
-        '~'|'~/'*) printf '%s' "${HOME}${p#\~}" ;;
+        '~'|'~/'*) printf '%s' "$(aidc_host_home)${p#\~}" ;;
         *)         printf '%s' "$p" ;;
     esac
 }
@@ -264,10 +273,17 @@ load_config() {
     # the fallback covers it.
     aidc_config_defaults
 
+    # Which files were actually read, for `aidc create` to report: a session created
+    # on the defaults because no config was found looks identical otherwise.
+    AIDC_CONFIG_SOURCES=""
+    export AIDC_CONFIG_SOURCES
+
     local f val
     for f in "$global_cfg" "$workspace_cfg" "$project_cfg"; do
         [ -z "$f" ] && continue
         [ -f "$f" ] || continue
+
+        AIDC_CONFIG_SOURCES="${AIDC_CONFIG_SOURCES:+${AIDC_CONFIG_SOURCES} }${f}"
 
         # Scalars: each non-empty value overrides.
         val=$(_aidc_yaml_scalar "$f" "profile");         [ -n "$val" ] && AIDC_PROFILE="$val"

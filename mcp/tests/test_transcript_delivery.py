@@ -6,6 +6,7 @@ post function and no-op sleep, against fixture transcript files in tmp dirs.
 import asyncio
 import json
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -519,6 +520,58 @@ class TestDrain:
         assert ts.load_watermark(state, "sess", "conv").session_id == "B"
         # B's own reply, written after this conversation connected, follows (MCP-35).
         assert rec.delivered == ["a1", "b1"]
+
+    async def test_a_damaged_transcript_is_recovered_with_no_newer_session(
+            self, tmp_path, monkeypatch):
+        """A compaction can lose the resume line with no new session at all. Gating the
+        recovery on a newer file (as first built) wedged the watcher for good in that
+        case: replies on disk, watermark frozen, nothing said."""
+        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-09-17T04:00:00Z")
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u0", "seed"), "2026-09-17T03:59:00.000Z"),
+            _ts(_assistant("a0", "SEED"), "2026-09-17T03:59:01.000Z"),
+        ])
+        rec = Recorder()
+        await _drain(base, state, rec)                 # baseline at 04:00:00
+        # The file is compacted: the anchor line is gone, a later reply is not.
+        _mk_transcript(base, "sess", "A", [
+            _ts(_user("u1", "q"), "2026-09-17T04:01:00.000Z"),
+            _ts(_assistant("a1", "STRANDED"), "2026-09-17T04:01:02.000Z"),
+        ])
+        for _ in range(_TORN_READ_RECOVER_POLLS + 1):
+            await _drain(base, state, rec)
+
+        assert rec.delivered == ["a1"]
+
+    async def test_a_move_to_another_transcript_keeps_the_loop_guard_run(
+            self, tmp_path, monkeypatch):
+        """The loop guard resets only on a genuinely idle gap: a runaway that restarts
+        Claude must not clear its own backstop by rotating the transcript."""
+        monkeypatch.setattr(ts, "_now_iso", lambda: "2026-07-04T04:00:02Z")
+        base = tmp_path / "t"; state = tmp_path / "s"
+        sess, conv = "guard", "c"
+        _consumed_idle_counts.pop((sess, conv), None)
+        _mk_transcript(base, sess, "old", [
+            _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
+            _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
+        ])
+        rec = Recorder()
+        await _drain(base, state, rec, sess, conv)
+        mark = ts.load_watermark(state, sess, conv)
+        mark.consecutive_deliveries = 7
+        mark.last_delivery_at = time.time()   # recent: not the idle gap that does reset
+        ts.save_watermark(state, mark)
+        _mk_transcript(base, sess, "new", [
+            _ts(_user("u2", "go"), "2026-07-04T18:00:00.000Z"),
+            _ts(_assistant("b1", "NEW"), "2026-07-04T18:00:01.000Z"),
+        ])
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 1):
+            await _drain(base, state, rec, sess, conv)
+
+        moved = ts.load_watermark(state, sess, conv)
+        assert moved.session_id == "new"
+        assert moved.consecutive_deliveries == 8   # the run continued through the move
 
     async def test_a_damaged_transcript_with_nothing_left_is_not_replayed(
             self, tmp_path, monkeypatch):

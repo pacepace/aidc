@@ -49,6 +49,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   prompt inside the running turn without recording it as a prompt, so its record used to sit for
   24 hours, where the same words typed by a person could match it and be delivered as the
   orchestrator's own.
+- **Sessions created through the MCP use your host paths, not the MCP container's.**
+  `aidc mcp` runs the CLI inside its own container, where `HOME` is `/root`, so a
+  session it created pointed its audit dir and its transcript mirror at `/root/...` on
+  the host — and its replies, written where nothing was reading, never reached the
+  orchestrator. `aidc mcp start` now passes the host's home and state dir, and every
+  host path is derived from those. Restart `aidc mcp` to pick this up.
+- **`aidc create` says which config files it read**, and the profile, taint response
+  and audit dir they produced, so a session created on the defaults is not silent.
+- **`aidc kill` says when it detaches another session's container** from a network it
+  is removing.
 - **Sessions created through the MCP read your global aidc config.** They used to fall back to the
   defaults, ignoring the profile, taint response and audit dir the host is configured with.
 - **`aidc kill` no longer leaves a session's networks behind.** With an `aidc proxy` port

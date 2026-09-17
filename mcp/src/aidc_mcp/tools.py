@@ -539,7 +539,7 @@ async def _session_state(container: str, name: str) -> SessionState:
     objs, mtime, status = _session_transcript(name)
     awaiting = _sent_awaiting_echo.get(name)
     if awaiting is not None:
-        if ts.prompt_seen_since(objs, *awaiting):
+        if _prompt_arrived(name, awaiting[0], awaiting[1], objs):
             _sent_awaiting_echo.pop(name, None)
         else:
             return SessionState(True, screen, TURN_RUNNING, "sent_prompt_not_in_log")
@@ -648,6 +648,33 @@ async def _wait_for_turn_end(container: str, name: str, timeout: float) -> str:
     return "claude_busy"
 
 
+def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -> bool:
+    """Whether the transcript shows a pasted prompt arrived — and, when it arrived as a
+    queued message, give its send record back.
+
+    Claude Code records a prompt pasted while it is working only as a `queue-operation`
+    and answers it inside the running turn, so it never becomes a prompt line and no
+    turn can claim it. Its record would then wait out its 24 h, where the same words
+    typed by a person would match it and be delivered as the orchestrator's own prompt.
+    Both watchers of a pasted prompt (the free check and _watch_for_echo) come through
+    here, because either can be the one that sees it first.
+    """
+    index = ts.prompt_index_since(objs, text, sent_at)
+    if index is None:
+        return False
+    if objs[index].get("type") == "queue-operation":
+        try:
+            consumed = ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
+        except OSError as exc:
+            log_event("session_send_record_release_failed", session=session,
+                      error_type=type(exc).__name__, error=repr(exc))
+        else:
+            if consumed:
+                log_event("session_send_queued_by_claude", session=session,
+                          prompt_len=len(text))
+    return True
+
+
 async def _watch_for_echo(session: str, text: str, sent_at: float) -> None:
     """Clear the busy hold a paste set once the transcript shows the prompt, or after
     _ECHO_WAIT_S, logging a prompt that never showed. Runs on its own so the log line
@@ -657,18 +684,7 @@ async def _watch_for_echo(session: str, text: str, sent_at: float) -> None:
         if _sent_awaiting_echo.get(session) != entry:
             return   # seen by a free check, or superseded by a later paste
         objs, _, _ = _session_transcript(session)
-        index = ts.prompt_index_since(objs, text, sent_at)
-        if index is not None:
-            if objs[index].get("type") == "queue-operation":
-                # Claude was working, so Claude Code recorded the prompt only as a
-                # queued message and answers it inside the running turn: it never
-                # becomes a prompt line, so no turn can claim it and consume its send
-                # record. Consume it here, or the entry waits out its 24 h and can
-                # match the same words typed by a person in the meantime — which would
-                # deliver that person's turn as the orchestrator's own.
-                ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
-                log_event("session_send_queued_by_claude", session=session,
-                          prompt_len=len(text))
+        if _prompt_arrived(session, text, sent_at, objs):
             if _sent_awaiting_echo.get(session) == entry:
                 _sent_awaiting_echo.pop(session, None)
             return
@@ -1684,8 +1700,9 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     mark.byte_offset = len(best_data.encode("utf-8"))
     mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
         ts.parse_jsonl(best_data), seen)
-    mark.consecutive_deliveries = 0
-    mark.last_delivery_at = 0.0
+    # The loop-guard run is NOT reset here. Watermark documents it as reset only by a
+    # genuinely idle gap, and a runaway that restarts Claude (or rotates its transcript)
+    # would otherwise clear its own backstop.
     ts.save_watermark(state_dir, mark)
     _settle_state.pop(key, None)
     _consumed_idle_counts.pop(key, None)
@@ -1863,36 +1880,36 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         torn = _torn_read_counts.get(key, 0) + 1
         _torn_read_counts[key] = torn
         if torn >= _TORN_READ_RECOVER_POLLS:
+            # The pinned file has lost the line this conversation resumes from, for
+            # good: a torn final line from a session killed mid-write, or a compaction.
+            # Look for replies in it that were never delivered: anchored at the point
+            # this conversation last connected or last delivered, and checked against
+            # the ledger, so neither history from before the connect nor anything
+            # already delivered counts. If any are left, re-anchor INSIDE this file and
+            # let the ordinary pass deliver them. This runs whether or not another
+            # transcript exists: a compaction can lose the anchor with no new session at
+            # all, and gating it on a newer file (as first built) wedged the watcher
+            # silently in exactly that case, replies sitting on disk undelivered.
+            seen = ts.seen_until([], mark)
+            anchor = ts.resume_anchor_on_new_transcript(objs, seen)
+            left = ts.objs_after_uuid(objs, anchor or None) or []
+            delivered_before = ts.load_delivered(state_dir, session, conversation_id)
+            undelivered = [t for t in ts.extract_completed_turns(left)
+                           if (t.interrupted or not t.is_empty)
+                           and ts.delivery_fingerprint(t) not in delivered_before]
             newest = ts.resolve_active_transcript(Path(transcripts_base) / session)
+            if undelivered:
+                mark.last_delivered_uuid = anchor
+                ts.save_watermark(state_dir, mark)
+                _settle_state.pop(key, None)
+                _torn_read_counts.pop(key, None)
+                log_event("transcript_torn_read_reanchored", session=session,
+                          conversation_id=conversation_id, session_id=sid,
+                          newer_session_id=newest.stem if newest is not None else "",
+                          torn_read_polls=torn, undelivered_turns=len(undelivered),
+                          **_resume_fields(mark, seen))
+                return
             if newest is not None and newest.stem != sid:
-                # The pinned file has lost the line this conversation resumes from, for
-                # good: a torn final line from a session killed mid-write, or a
-                # compaction. Before moving on, look for replies in it that were never
-                # delivered: anchored at the point this conversation last connected or
-                # last delivered, and checked against the ledger, so neither history
-                # from before the connect nor anything already delivered counts. If any
-                # are left, re-anchor INSIDE this file and let the ordinary pass deliver
-                # them; the stale-pin follow moves on once it is consumed. Going
-                # straight to the newer file, as this did when it was written, lost them
-                # silently.
-                seen = ts.seen_until([], mark)
-                anchor = ts.resume_anchor_on_new_transcript(objs, seen)
-                left = ts.objs_after_uuid(objs, anchor or None) or []
-                delivered_before = ts.load_delivered(state_dir, session, conversation_id)
-                undelivered = [t for t in ts.extract_completed_turns(left)
-                               if (t.interrupted or not t.is_empty)
-                               and ts.delivery_fingerprint(t) not in delivered_before]
-                if undelivered:
-                    mark.last_delivered_uuid = anchor
-                    ts.save_watermark(state_dir, mark)
-                    _settle_state.pop(key, None)
-                    _torn_read_counts.pop(key, None)
-                    log_event("transcript_torn_read_reanchored", session=session,
-                              conversation_id=conversation_id, session_id=sid,
-                              newer_session_id=newest.stem, torn_read_polls=torn,
-                              undelivered_turns=len(undelivered),
-                              **_resume_fields(mark, seen))
-                    return
                 try:
                     newest_data = newest.read_text(encoding="utf-8", errors="replace")
                 except OSError:
@@ -1901,9 +1918,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 mark.byte_offset = len(newest_data.encode("utf-8"))
                 mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
                     ts.parse_jsonl(newest_data), ts.seen_until(objs, mark))
-                mark.consecutive_deliveries = 0
-                mark.last_delivery_at = 0.0
-                ts.save_watermark(state_dir, mark)
+                ts.save_watermark(state_dir, mark)   # loop-guard run kept, as above
                 _settle_state.pop(key, None)
                 _torn_read_counts.pop(key, None)
                 log_event("transcript_stale_pin_recovered", session=session,
@@ -2145,11 +2160,15 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
     # is being asked for may be in the one before — which is exactly the case where a
     # reply went missing (joint test scenario 10, 2026-09-17).
     target = None
+    source = ""
     for path in ts.session_transcripts(Path(transcripts_base) / session,
                                        prefer_session_id=prefer):
         try:
             data = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
+            log_event("transcript_resend_unreadable", session=session,
+                      conversation_id=conversation_id, session_id=path.stem,
+                      error_type=type(exc).__name__)
             continue
         # Only non-empty (deliverable) turns can be resent — an empty tool-only turn
         # was never a reply to the orchestrator in the first place.
@@ -2162,6 +2181,7 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         else:
             target = deliverable[-1]
         if target is not None:
+            source = path.stem
             break
     if target is None:
         return ("no_reply", None)
@@ -2192,7 +2212,8 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
         ts.record_delivered(state_dir, session, conversation_id, fingerprint)
     log_event("transcript_resend", session=session, conversation_id=conversation_id,
               turn_uuid=target.terminal_uuid, content_len=len(target.text), ok=ok,
-              forced=force)
+              forced=force, session_id=source,
+              from_earlier_transcript=bool(prefer) and source != prefer)
     return ("resent" if ok else "failed", target)
 
 

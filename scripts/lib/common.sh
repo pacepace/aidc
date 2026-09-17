@@ -358,6 +358,14 @@ remove_session_networks() {
         docker network inspect "$net" >/dev/null 2>&1 || continue
         for ct in $(docker network inspect "$net" \
                 --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null); do
+            # Anything still attached that is not this session's own (another session
+            # joined with `aidc network`, a leftover forwarder) loses that network
+            # here. Say so: silently cutting a live session off a network it was
+            # attached to is the kind of thing someone debugs for an hour.
+            case "$ct" in
+                "aidc-${session}-"*) ;;
+                *) info "detaching ${ct} from ${net} (it is not part of session '${session}')" ;;
+            esac
             docker network disconnect -f "$net" "$ct" >/dev/null 2>&1 || true
         done
         docker network rm "$net" >/dev/null 2>&1 || true

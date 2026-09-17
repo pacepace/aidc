@@ -103,6 +103,8 @@ mcp_start() {
         -v "${CONFIG_DIR}:/aidc-config:ro" \
         -v "${AUDIT_DIR}:/var/log/aidc-mcp:rw" \
         -e "AIDC_MCP_PORT=${AIDC_MCP_PORT}" \
+        -e "AIDC_HOST_HOME=${HOME}" \
+        -e "AIDC_MCP_STATE_HOST=${AUDIT_DIR}" \
         -p "${AIDC_MCP_BIND_ADDRESS}:${AIDC_MCP_PORT}:${AIDC_MCP_PORT}" \
         "$IMAGE" >/dev/null
     sleep 1

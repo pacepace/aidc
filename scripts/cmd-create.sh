@@ -286,6 +286,9 @@ AUDIT_DIR="${AIDC_AUDIT_DIR}/${NAME}-${TS}"
 mkdir -p "$AUDIT_DIR"
 AUDIT_DIR=$(realpath_portable "$AUDIT_DIR")
 
+info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
+info "  profile=${AIDC_PROFILE} taint_response=${AIDC_TAINT_RESPONSE} audit_dir=${AIDC_AUDIT_DIR}"
+
 # Config snapshot -- a frozen record of what was active at session start.
 emit_loaded_config_yaml > "${AUDIT_DIR}/config-snapshot.yaml"
 
@@ -325,7 +328,7 @@ unset _role
 #      (compose template handles the mount declaration)
 
 ENCODED_REPO=$(printf '%s' "$REPO_PATH" | sed 's|[/.]|-|g')
-HOST_CLAUDE_PROJECT_DIR="${HOME}/.claude/projects/${ENCODED_REPO}"
+HOST_CLAUDE_PROJECT_DIR="$(aidc_host_home)/.claude/projects/${ENCODED_REPO}"
 
 # Memory mount toggleable via config.
 CLAUDE_MEMORY_MOUNT=""
@@ -405,7 +408,7 @@ fi
 #    claude.ai session belongs to the container: it refreshes on the volume,
 #    survives restart and upgrade, supports Remote Control, and may be a
 #    different account from the host's. `aidc kill` discards it.
-AIDC_CLAUDE_TOKEN_FILE="${HOME}/.config/aidc/claude-oauth-token"
+AIDC_CLAUDE_TOKEN_FILE="$(aidc_host_home)/.config/aidc/claude-oauth-token"
 AIDC_CLAUDE_TOKEN=""
 USING_LONG_LIVED_TOKEN=0
 
@@ -429,7 +432,7 @@ export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
 
 # Settings bridge. settings.json holds theme / output style / env.
 CLAUDE_SETTINGS_MOUNT=""
-HOST_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+HOST_CLAUDE_SETTINGS="$(aidc_host_home)/.claude/settings.json"
 if [ -f "$HOST_CLAUDE_SETTINGS" ]; then
     CLAUDE_SETTINGS_MOUNT="- ${HOST_CLAUDE_SETTINGS}:/home/vscode/.claude/settings.json:rw"
     info "settings: bridged from host ~/.claude/settings.json"
@@ -445,7 +448,7 @@ fi
 # installs it on first start only, so whatever Claude writes there afterwards
 # (the account you log in with, settings you change) is never overwritten.
 CLAUDE_STATE_SEED="${AUDIT_DIR}/claude-state-seed.json"
-HOST_CLAUDE_STATE="${HOME}/.claude.json"
+HOST_CLAUDE_STATE="$(aidc_host_home)/.claude.json"
 if [ -f "$HOST_CLAUDE_STATE" ]; then
     if ( umask 0077; aidc_claude_state_seed "$HOST_CLAUDE_STATE" "$REPO_PATH" "$WORKSPACE_PATH" > "$CLAUDE_STATE_SEED" ); then
         info "state: seeded from host ~/.claude.json (onboarding + this project's trust; no account)"
@@ -481,7 +484,7 @@ fi
 # onto the host's settings.json.
 CLAUDE_PLUGINS_MOUNT=""
 CLAUDE_PLUGINS_MOUNT_ABS=""
-HOST_CLAUDE_PLUGINS="${HOME}/.claude/plugins"
+HOST_CLAUDE_PLUGINS="$(aidc_host_home)/.claude/plugins"
 if [ "${AIDC_SHARE_PLUGINS:-true}" = "true" ] && [ -d "$HOST_CLAUDE_PLUGINS" ]; then
     CLAUDE_PLUGINS_MOUNT="- ${HOST_CLAUDE_PLUGINS}:/home/vscode/.claude/plugins:ro"
     if [ "$HOST_CLAUDE_PLUGINS" != "/home/vscode/.claude/plugins" ]; then
@@ -503,7 +506,7 @@ fi
 # ~/.claude/projects/<enc>/*.jsonl into it every ~2s, giving MCP direct, scoped,
 # per-session read access with no blanket mount of the host's ~/.claude/projects.
 # See docs/design-09-callback-delivery.md. Must match cmd-mcp.sh's AUDIT_DIR base.
-MCP_AUDIT_BASE="${XDG_STATE_HOME:-$HOME/.local/state}/aidc-mcp"
+MCP_AUDIT_BASE="${AIDC_MCP_STATE_HOST:-${XDG_STATE_HOME:-$(aidc_host_home)/.local/state}/aidc-mcp}"
 MCP_TRANSCRIPTS_DIR="${MCP_AUDIT_BASE}/transcripts/${NAME}"
 mkdir -p "$MCP_TRANSCRIPTS_DIR"
 # Keep the whole tree private (transcripts hold conversation content).

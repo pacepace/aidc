@@ -371,6 +371,19 @@ class TestWatchForEcho:
         assert "proj" not in tools._sent_awaiting_echo
         assert "session_send_not_seen_in_transcript" not in logged
 
+    async def test_the_free_check_also_gives_a_queued_prompts_record_back(self, session):
+        """Either watcher of a pasted prompt can be the one that sees it arrive: the
+        free check runs every 2.5 s and _watch_for_echo every 2 s, and whichever wins
+        clears the marker. If only one of them released the record, the other winning
+        left it to sit for 24 h — where a person's identical words would match it."""
+        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
+                                   "timestamp": ISO_NOW, "content": "next task"}])
+        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        assert await session.check() == ""
+        assert "proj" not in tools._sent_awaiting_echo
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+
     async def test_a_prompt_claude_queued_gives_its_send_record_back(self, session):
         """Claude Code records a prompt pasted while it is working only as a queued
         message and answers it inside the running turn, so no turn ever claims it. Its

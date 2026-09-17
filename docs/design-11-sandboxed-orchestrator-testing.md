@@ -8,7 +8,8 @@ on the host.
 **Requirements implemented:** MCP-31 (session-scoped MCP). Relates to MCP-12 (dev containers
 cannot reach `aidc-mcp`).
 
-**Status:** the session-scoped mode and MCP-12 enforcement are built; the joint test is next.
+**Status:** built, and used for the joint test with the metallm session on 2026-09-17
+(`.prawduct/artifacts/joint-test-metallm.md`).
 
 ---
 

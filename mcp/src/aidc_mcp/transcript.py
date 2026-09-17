@@ -23,9 +23,11 @@ docs/design-09-callback-delivery.md):
     2.1.270/2.1.274; see docs/design-10-turn-state-and-sending.md).
   - Esc after Claude has written anything writes a "[Request interrupted by
     user" line; Esc before that writes nothing at all.
-  - `--continue` APPENDS to the same file (no re-emission); new files appear only
-    on fresh sessions. So a per-file byte offset + terminal-uuid is a sound
-    exactly-once key.
+  - Every Claude run writes its OWN file: `--continue` starts a new one and leaves
+    the old in place (measured on 2.1.274, design-10 D8). A per-file byte offset +
+    terminal-uuid is still a sound exactly-once key WITHIN a file; across files the
+    watcher follows the move (design-10 D8) and the delivery ledger is what keeps
+    delivery to once.
 """
 
 from __future__ import annotations

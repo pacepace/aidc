@@ -92,14 +92,14 @@ def _yaml_scalar(raw: str) -> str:
     return value[:cut].strip()
 
 
-def _metallm_callback_url() -> str:
-    """Read metallm.callback_url from the aidc config file.
+def _metallm_setting(key: str) -> str | None:
+    """The scalar `metallm.<key>` from the aidc config file, or None when unset.
 
     Inside the container the config lives at /aidc-config/config.yaml
     (mounted from ~/.config/aidc/config.yaml on the host).
     """
     if not _CONFIG_PATH.exists():
-        return ""
+        return None
     in_metallm_section = False
     for line in _CONFIG_PATH.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
@@ -107,12 +107,23 @@ def _metallm_callback_url() -> str:
             in_metallm_section = True
             continue
         if in_metallm_section:
-            if stripped.startswith("callback_url:"):
-                return _yaml_scalar(stripped.split(":", 1)[1]).rstrip("/")
+            if stripped.startswith(f"{key}:"):
+                return _yaml_scalar(stripped.split(":", 1)[1])
             # A non-empty, non-comment line at column 0 is a new top-level key.
             if stripped and not stripped.startswith("#") and not line[0:1].isspace():
                 break
-    return ""
+    return None
+
+
+def _metallm_callback_url() -> str:
+    """Read metallm.callback_url from the aidc config file."""
+    return (_metallm_setting("callback_url") or "").rstrip("/")
+
+
+def _metallm_send_speaker() -> bool:
+    """Read metallm.send_speaker (default false). Off until the orchestrator records a
+    `speaker: "human"` turn instead of dropping it (design 10 D4)."""
+    return (_metallm_setting("send_speaker") or "").lower() == "true"
 
 
 def _metallm_turn_settle_seconds(default: float = 4.0) -> float:
@@ -124,24 +135,13 @@ def _metallm_turn_settle_seconds(default: float = 4.0) -> float:
     so the watcher signals "ready" once per exchange instead of mid-stream. <= 0
     disables the wait. Default 4s.
     """
-    if not _CONFIG_PATH.exists():
+    value = _metallm_setting("turn_settle_seconds")
+    if value is None:
         return default
-    in_metallm_section = False
-    for line in _CONFIG_PATH.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped == "metallm:":
-            in_metallm_section = True
-            continue
-        if in_metallm_section:
-            if stripped.startswith("turn_settle_seconds:"):
-                value = _yaml_scalar(stripped.split(":", 1)[1])
-                try:
-                    return float(value)
-                except ValueError:
-                    return default
-            if stripped and not stripped.startswith("#") and not line[0:1].isspace():
-                break
-    return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 # Holds references to background tasks so they aren't GC'd before completion.
 _background_tasks: set[asyncio.Task[None]] = set()
@@ -861,6 +861,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
             await _drop_prompts_of_removed_session(container, name)
             if not _pending_sends.get(name):
                 return
+            _notify_long_waits(name)
             reason = await _wait_until_free(container, name, timeout=_QUEUE_POLL_S)
             if reason:
                 await _set_waiting_reason(container, name, reason)
@@ -978,24 +979,33 @@ def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
     send-path state."""
     for q in prompts:
         _write_send_dead_letter(name, q, "session_killed")
-    _fire(_notify_dropped(name, prompts))
+    _fire(_notify_prompts(name, [(q, _DROPPED_NOTE.format(session=name)) for q in prompts],
+                          "prompt_dropped"))
     _forget_session_send_state(name)
     log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
               reason="session_killed")
 
 
-async def _notify_dropped(name: str, prompts: list[ts.QueuedPrompt]) -> None:
+async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
+                         error_code: str) -> None:
+    """Tell each queued prompt's conversation something about it that is not a reply:
+    the note, a blank line, then the prompt, with `error_code` naming which (design 10
+    D5). "prompt_dropped" is a failure, so ok is false; "prompt_waiting" is a status
+    (nothing has failed, and a receiver that shows ok false as an error would invite a
+    resend), so ok is true. Retried, and dead-lettered when it cannot be delivered,
+    like a reply."""
+    event = f"session_send_{error_code}_notified"
     base = _metallm_callback_url()
-    for q in prompts:
+    for q, note in notices:
         if not q.conversation_id or not base:
-            # Sent without a webhook: nobody to tell beyond the dead-letter record.
-            log_event("session_send_dropped_notified", session=name, delivered=False,
+            # Sent without a webhook: nobody to tell beyond the log.
+            log_event(event, session=name, delivered=False,
                       reason="no_conversation" if base else "no_callback_url")
             continue
         digest = hashlib.sha256(f"{q.enqueued_at}\n{q.text}".encode()).hexdigest()[:16]
-        turn = ts.Turn(terminal_uuid=f"dropped-{digest}",
-                       text=f"{_DROPPED_NOTE.format(session=name)}\n\n{q.text}",
-                       ok=False, prompt_origin="orchestrator", error_code="prompt_dropped")
+        turn = ts.Turn(terminal_uuid=f"{error_code}-{digest}", text=f"{note}\n\n{q.text}",
+                       ok=error_code != "prompt_dropped", prompt_origin="orchestrator",
+                       error_code=error_code)
 
         async def post_fn(t: ts.Turn, attempt: int, cid: str = q.conversation_id) -> bool:
             return await _post_turn(base, cid, t, attempt=attempt, session=name)
@@ -1005,13 +1015,56 @@ async def _notify_dropped(name: str, prompts: list[ts.QueuedPrompt]) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- report, don't crash
-            log_event("session_send_dropped_notify_error", session=name,
+            log_event(f"session_send_{error_code}_notify_error", session=name,
                       error_type=type(exc).__name__, error=repr(exc))
             delivered = False
         if not delivered:
             _write_dead_letter(Path(_WATCHER_STATE_DIR), name, q.conversation_id, turn)
-        log_event("session_send_dropped_notified", session=name,
-                  conversation_id=q.conversation_id, delivered=delivered)
+        log_event(event, session=name, conversation_id=q.conversation_id,
+                  delivered=delivered)
+
+
+# How long a queued prompt waits before its conversation is told, once, that it is
+# still waiting (design 10 D5, MCP-36). A paste normally happens within seconds.
+# AIDC_MCP_PROMPT_WAITING_S overrides it, for testing.
+_PROMPT_WAITING_S = float(os.environ.get("AIDC_MCP_PROMPT_WAITING_S", "600"))
+_WAITING_NOTE = ("[Still waiting: this prompt has been queued for the session '{session}' "
+                 "for {minutes}, because {why}. It has not been seen by the agent yet. "
+                 "It will still go in when the session is free.]")
+
+
+def _notify_long_waits(name: str) -> None:
+    """Tell each prompt that has waited _PROMPT_WAITING_S, once, that it is still
+    waiting and why. Whatever keeps a queue from moving, a person's forgotten text, a
+    dialog nobody answered, or a bug, the orchestrator was told the prompt would go in
+    and would otherwise hear nothing."""
+    queue = _pending_sends.get(name) or []
+    now = time.time()
+    due = []
+    for q in queue:
+        if q.waiting_notified:
+            continue
+        accepted = ts._wall_time({"timestamp": q.enqueued_at})
+        if accepted is None or now - accepted < _PROMPT_WAITING_S:
+            continue
+        q.waiting_notified = True
+        due.append((q, int(now - accepted)))
+    if not due:
+        return
+    _persist_queue(name)
+    head_why = _WAITING_EXPLAINED.get(queue[0].waiting_reason, "the session is not free")
+    notices = []
+    for q, waited in due:
+        why = (head_why if q is queue[0]
+               else f"{_WAITING_EXPLAINED['queued_behind']} (held because {head_why})")
+        minutes = waited // 60
+        notices.append((q, _WAITING_NOTE.format(
+            session=name, why=why,
+            minutes=f"{minutes} minute{'s' if minutes != 1 else ''}" if minutes
+            else f"{waited} seconds")))
+        log_event("session_send_prompt_waiting", session=name, waited_s=waited,
+                  reason=q.waiting_reason or "queued_behind")
+    _fire(_notify_prompts(name, notices, "prompt_waiting"))
 
 
 def _watched_conversation(name: str) -> str:
@@ -1319,12 +1372,15 @@ async def _post_turn(
                 # ``interrupted`` is true when the person pressed Esc and cut the turn
                 # off. It is not a failure, so ``ok`` stays true; the content opens
                 # with a note saying so, which is all a receiver that ignores the
-                # field needs. The whole body is pinned in design-10 D5 and agreed
-                # with the orchestrator's side before any field changes.
+                # field needs. ``speaker`` ("human" | "agent") only when
+                # metallm.send_speaker is on. The whole body is pinned in design-10
+                # D5 and agreed with the orchestrator's side before any field changes.
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
                       "session": session, "prompt_origin": turn.prompt_origin,
                       "interrupted": turn.interrupted,
-                      **({"error_code": turn.error_code} if turn.error_code else {})},
+                      **({"error_code": turn.error_code} if turn.error_code else {}),
+                      **({"speaker": turn.speaker}
+                         if turn.speaker and _metallm_send_speaker() else {})},
                 headers={"Authorization": f"Bearer {bearer}"},
             )
         elapsed_s = round(time.monotonic() - start, 3)
@@ -1858,6 +1914,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
             text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
             prompt_origin=("terminal" if terminal_prompts
                            else "orchestrator" if turn.prompts else ""),
+            speaker=("human" if turn.prompts and len(terminal_prompts) == len(turn.prompts)
+                     else "agent"),
         )
         if terminal_prompts:
             # record_remaining is the health signal: entries that keep piling up

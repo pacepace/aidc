@@ -72,6 +72,13 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   image).
 
 ### Added
+- **The orchestrator hears when a queued prompt is stuck.** A prompt that has waited in a
+  session's queue for 10 minutes gets one callback to its conversation saying it is still
+  waiting, why, and that the agent has not seen it (`error_code: "prompt_waiting"`). It still goes
+  in when the session is free.
+- **`speaker` on session replies, behind `metallm.send_speaker`.** `"human"` when every prompt a
+  reply answers was typed at the session's terminal, `"agent"` otherwise. Off by default: turn it
+  on only once the orchestrator records human turns instead of dropping them.
 - **Tool failures say what kind of failure they are.** Every `{"ok": false, "error": ...}`
   envelope now carries an `error_code` (e.g. `no_such_session`, `queue_full`, `out_of_scope`,
   `cli_failed`), so an orchestrator can tell "tell the person" from "retry once" without matching

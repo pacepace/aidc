@@ -521,6 +521,23 @@ async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
     assert [q.text for q in ts.load_send_queues(path.parent)[0]["proj"]] == ["new"]
 
 
+async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeypatch):
+    notices = []
+
+    async def capture(name, items, error_code):
+        notices.append((name, [q.text for q, _ in items], error_code))
+
+    monkeypatch.setattr(tools, "_PROMPT_WAITING_S", 0.0)
+    monkeypatch.setattr(tools, "_notify_prompts", capture)
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="stuck", conversation_id="c1")
+    for _ in range(20):
+        await _REAL_SLEEP(0)
+    assert notices == [("proj", ["stuck"], "prompt_waiting")]
+
+
 async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring):
     """After a restart, a session_send can arrive before startup has resumed the saved
     queue. The saved prompts still go first, and resume does not load them twice."""

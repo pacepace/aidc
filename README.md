@@ -474,7 +474,7 @@ The MCP server is built for an orchestrating agent that runs somewhere else on y
 1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
 2. The agent calls `session_invoke_async(name, prompt, conversation_id)` (or `session_send`, below). The call returns immediately.
 3. aidc runs the task in the named session container (`session_invoke_async` runs `aidc-claude --print <prompt>` with a 30-minute cap).
-4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|"", "interrupted": true|false}`, plus `"error_code": "prompt_dropped"` on the one callback that reports a queued prompt whose session was removed before it could be pasted (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
+4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"orchestrator"|"", "interrupted": true|false}` (plus `"speaker": "human"|"agent"` with `metallm.send_speaker: true`). Two callbacks are notices rather than replies and carry `error_code`: `"prompt_dropped"` for a queued prompt whose session was removed before it could be pasted, and `"prompt_waiting"`, sent once, for a queued prompt that has waited 10 minutes (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
 5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 
 **Setup (one time):**
@@ -639,6 +639,8 @@ metallm:
   callback_url: ""                    # base URL of the orchestrator's callback endpoint (e.g. https://orchestrator.example.com).
                                       # Required for session_invoke_async / session_send to deliver results back.
                                       # See "Driving sessions from an orchestrator" above.
+  send_speaker: false                 # add "speaker": "human"|"agent" to session_send replies. Leave off until the
+                                      # orchestrator records human turns instead of dropping them (design 10 D4).
 ```
 
 ## Taint

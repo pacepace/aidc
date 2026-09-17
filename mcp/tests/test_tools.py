@@ -470,6 +470,26 @@ def _write_cfg(monkeypatch, tmp_path, text):
     return cfg
 
 
+class TestMetallmSendSpeaker:
+    def test_off_without_the_key_or_the_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "absent.yaml")
+        assert tools._metallm_send_speaker() is False
+        _write_cfg(monkeypatch, tmp_path, "metallm:\n  callback_url: http://m\n")
+        assert tools._metallm_send_speaker() is False
+
+    def test_on_only_for_true(self, monkeypatch, tmp_path):
+        _write_cfg(monkeypatch, tmp_path,
+                   "metallm:\n  send_speaker: true    # after MetaLLM records human turns\n")
+        assert tools._metallm_send_speaker() is True
+        _write_cfg(monkeypatch, tmp_path, "metallm:\n  send_speaker: yes\n")
+        assert tools._metallm_send_speaker() is False
+
+    def test_a_key_under_another_section_does_not_count(self, monkeypatch, tmp_path):
+        _write_cfg(monkeypatch, tmp_path,
+                   "metallm:\n  callback_url: http://m\nmcp:\n  send_speaker: true\n")
+        assert tools._metallm_send_speaker() is False
+
+
 class TestMetallmCallbackUrl:
     def test_absent_metallm_section(self, monkeypatch, tmp_path):
         """The prod failure: config has only an mcp: section, so session_send

@@ -102,9 +102,14 @@ class Turn:
     # the hook ran longer than the watcher waited. Diagnostic, like `superseded`.
     late_pushback: bool = field(default=False, compare=False)
     # Set only on a callback that is not a reply: "prompt_dropped" when a queued
-    # prompt could not be pasted because its session is gone. Everything it says is
-    # also in `text`, so a receiver that ignores the code still reads it right.
+    # prompt could not be pasted because its session is gone, "prompt_waiting" when
+    # one has waited long. Everything it says is also in `text`, so a receiver that
+    # ignores the code still reads it right.
     error_code: str = field(default="", compare=False)
+    # Set by the watcher at delivery time: "human" when every prompt the turn answers
+    # was typed at the terminal, "agent" otherwise. Sent only when the aidc setting
+    # metallm.send_speaker is on (design 10 D4).
+    speaker: str = field(default="", compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -1146,6 +1151,9 @@ class QueuedPrompt:
     # The session's docker container id when it was accepted, so a session killed and
     # re-created under the same name is not handed the old session's prompts.
     container_id: str = ""
+    # True once its conversation has been told the prompt is still waiting, so it is
+    # told once, across restarts too.
+    waiting_notified: bool = False
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
@@ -1182,7 +1190,8 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     paste_attempts=int(e.get("paste_attempts", 0)),
                                     waiting_reason=str(e.get("waiting_reason", "")),
                                     conversation_id=str(e.get("conversation_id", "")),
-                                    container_id=str(e.get("container_id", "")))
+                                    container_id=str(e.get("container_id", "")),
+                                    waiting_notified=e.get("waiting_notified") is True)
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")

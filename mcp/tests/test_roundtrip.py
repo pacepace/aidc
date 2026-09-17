@@ -390,6 +390,111 @@ async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
     assert "proj" in tools._session_watchers
 
 
+# --- speaker (design 10 D4), sent only with metallm.send_speaker on -------------
+
+async def _deliver_turn(h, objs):
+    _agent_writes(h.base, "proj", "sid-A", objs)
+    await h.drain()
+    return h.metallm.posts[-1]["json"]
+
+
+async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
+    objs = [_user("u1", "from the orchestrator"), _assistant("a1", "ONE")]
+    assert (await _deliver_turn(h, objs))["speaker"] == "agent"
+
+    objs += [_user("u2", "typed by a person"), _assistant("a2", "TWO")]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["prompt_origin"]) == ("human", "terminal")
+
+    # Mixed: one prompt from each. The typed one is in the content; the turn is the
+    # agent's.
+    await h.send(name="proj", prompt="orchestrator again", conversation_id="conv-1")
+    objs += [_user("u3", "orchestrator again"), _user("u4", "and a person"),
+             _assistant("a3", "THREE")]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["prompt_origin"]) == ("agent", "terminal")
+    assert len(h.metallm.posts) == 3
+
+
+async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="warm up", conversation_id="conv-1")
+    objs = [_user("u1", "warm up"), _assistant("a1", "OK")]
+    await _deliver_turn(h, objs)
+    interrupt = {"type": "user", "uuid": "i1",
+                 "message": {"role": "user", "content": [
+                     {"type": "text", "text": "[Request interrupted by user]"}]}}
+    objs += [_user("u2", "typed, then stopped"),
+             _assistant("a2", "Starting", stop="tool_use"), interrupt]
+    body = await _deliver_turn(h, objs)
+    assert (body["speaker"], body["interrupted"]) == ("human", True)
+
+
+async def test_speaker_is_not_sent_when_disabled(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: False)
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q", conversation_id="conv-1")
+    await _deliver_turn(h, [_user("u1", "q"), _assistant("a1", "A"),
+                            _user("u2", "typed"), _assistant("a2", "B")])
+    assert all("speaker" not in p["json"] for p in h.metallm.posts)
+
+
+# --- prompt_waiting (design 10 D5, MCP-36) ---------------------------------------
+
+LONG_AGO = "2026-09-17T04:00:00Z"
+
+
+async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
+    h = harness
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("first", LONG_AGO, waiting_reason="input_has_text",
+                        conversation_id="conv-1", container_id="id-1"),
+        ts.QueuedPrompt("second", LONG_AGO, waiting_reason="queued_behind",
+                        conversation_id="conv-1", container_id="id-1"),
+        ts.QueuedPrompt("just now", ts._now_iso(), waiting_reason="queued_behind",
+                        conversation_id="conv-1", container_id="id-1"),
+        ts.QueuedPrompt("no webhook", LONG_AGO, waiting_reason="queued_behind",
+                        container_id="id-1")]
+
+    tools._notify_long_waits("proj")
+    await _settle_background()
+    tools._notify_long_waits("proj")
+    await _settle_background()
+
+    bodies = [p["json"] for p in h.metallm.posts]
+    assert [b["content"].split("\n\n")[-1] for b in bodies] == ["first", "second"]
+    first = bodies[0]
+    assert {k: v for k, v in first.items() if k != "content"} == {
+        "ok": True, "source": "agent_watch", "session": "proj",
+        "prompt_origin": "orchestrator", "interrupted": False,
+        "error_code": "prompt_waiting"}
+    assert first["content"].startswith(
+        "[Still waiting: this prompt has been queued for the session 'proj' for ")
+    assert ("because someone has unsent text in Claude's input box" in first["content"])
+    assert "(held because someone has unsent text" in bodies[1]["content"]
+    saved = ts.load_send_queues(h.state)[0]["proj"]
+    assert [q.waiting_notified for q in saved] == [True, True, False, True]
+
+
+async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
+    h = harness
+    ts.save_send_queue(h.state, "proj", [
+        ts.QueuedPrompt("first", LONG_AGO, waiting_reason="claude_busy",
+                        conversation_id="conv-1", container_id="id-1",
+                        waiting_notified=True)])
+    tools._pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
+    tools._notify_long_waits("proj")
+    await _settle_background()
+    assert h.metallm.posts == []
+
+
 async def _settle_background():
     await asyncio.gather(*list(tools._background_tasks))
 

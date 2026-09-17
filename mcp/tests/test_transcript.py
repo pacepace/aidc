@@ -1332,7 +1332,8 @@ class TestLocalCommandsAcrossReaders:
 class TestPersistedSendQueue:
     def test_roundtrip_keeps_order_and_fields(self, tmp_path):
         prompts = [QueuedPrompt("first", "2026-09-17T02:00:00Z", 0, "claude_busy",
-                                conversation_id="c1", container_id="id-1"),
+                                conversation_id="c1", container_id="id-1",
+                                waiting_notified=True),
                    QueuedPrompt("second", "2026-09-17T02:00:05Z", 2, "queued_behind")]
         save_send_queue(tmp_path, "proj", prompts)
         queues, unreadable = load_send_queues(tmp_path)

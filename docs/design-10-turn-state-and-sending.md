@@ -9,11 +9,11 @@ a dev container's tmux `claude` window:
   how it avoids typing over a person's unsent text, and how the per-session queue holds prompts
   until they land.
 
-**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-35 (`docs/requirements.md`). Extends MCP-15..19 and
+**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-36 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
-**Status:** designed and built 2026-09-17 (branch `feature/turn-state`), except D4's `speaker`,
-which waits on MetaLLM. Transcript and screen facts measured in a dev container on Claude Code
+**Status:** designed and built 2026-09-17 (branch `feature/turn-state`). D4's `speaker` is built
+behind `metallm.send_speaker`, off until MetaLLM's side is deployed. Transcript and screen facts measured in a dev container on Claude Code
 2.1.270 and 2.1.274 the same day. D7, D8 and the dropped-prompt callback in D5 came out of the
 joint test with the metallm session that day.
 
@@ -180,6 +180,15 @@ without wake" (the turn is written into the conversation, runs no turn, leaves B
 renders under a distinct source). aidc starts sending `speaker` only when the metallm session
 reports that change released and deployed.
 
+**Built behind a setting** (Pace, 2026-09-17). `metallm.send_speaker: true` in the aidc config
+turns it on; off (the default) leaves the payload unchanged. The metallm session corrected an
+assumption on the way: the released MetaLLM (v0.46.0) already reads `speaker` and drops `human`
+turns, so sending it unconditionally before its deploy would hide typed turns rather than change
+nothing. The setting lets the joint test prove the whole path against metallm's dev instance while
+the live MCP keeps it off. Turn it on only once the metallm session confirms record-without-wake
+is released and deployed, and the production host's running version is checked. It is not sent on
+the `prompt_dropped` and `prompt_waiting` notices, which are not replies.
+
 ### D5. The callback payload contract
 
 aidc and MetaLLM once built the same feature twice with fields neither side read (`prompt_origin`
@@ -195,8 +204,8 @@ the metallm session and written here before either side builds it.
 | `session` | string | The aidc session that produced the turn. | design 09 |
 | `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. MetaLLM does not read it (confirmed 2026-09-17); `speaker` carries what it needs. | MCP-23 |
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
-| `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. **Not sent until MetaLLM's record-without-wake change is deployed.** | MCP-27 |
-| `error_code` | string | Present only on a callback that reports a failure rather than a reply. The one value is `"prompt_dropped"` (below). It never says anything `content` does not. | MCP-33 |
+| `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. Sent only on replies, and only with `metallm.send_speaker: true` (D4), which stays off until MetaLLM's record-without-wake change is deployed. | MCP-27 |
+| `error_code` | string | Present only on a callback that is not a reply, naming what it is: `"prompt_dropped"` (a failure, `ok: false`) or `"prompt_waiting"` (a status, `ok: true`), both below. It never says anything `content` does not. | MCP-33, MCP-36 |
 
 **A prompt that will never be pasted** (MCP-33). A queued prompt leaves the queue unpasted only
 when its session is gone: the container no longer exists, or a container of the same name has a
@@ -213,6 +222,26 @@ different id because the session was killed and created again. Each such prompt 
 It is retried and dead-lettered like a reply, and the prompt is also written to the send
 dead-letter dir. A prompt sent without a `conversation_id` has nobody to tell; only the
 dead-letter record remains.
+
+**A prompt that has waited long** (MCP-36; proposed by the metallm session, approved by Pace
+2026-09-17). The orchestrator is told a queued prompt will go in when the session is free, and
+by design it does not poll, so a queue that never moves (a bug, a forgotten dialog, text left in
+the box) would otherwise leave it waiting in silence. A queued prompt with a `conversation_id` that
+has waited 10 minutes (`AIDC_MCP_PROMPT_WAITING_S` overrides it, for tests) gets one callback,
+once, with the flag persisted in the queue file so a restart does not repeat it:
+
+```json
+{ "content": "[Still waiting: this prompt has been queued for the session '<s>' for N minutes, because <reason>. It has not been seen by the agent yet. It will still go in when the session is free.]\n\n<the prompt>",
+  "ok": true, "source": "agent_watch", "session": "<s>", "prompt_origin": "orchestrator",
+  "interrupted": false, "error_code": "prompt_waiting" }
+```
+
+`<reason>` is `session_status`'s `waiting_because` for the queue's first prompt; a prompt behind
+it reads "an earlier prompt is still waiting (held because <that reason>)". `ok` is true: nothing
+has failed, and MetaLLM renders `ok: false` as an error, which invites a resend (the metallm
+session's objection, accepted). The drainer checks once per round, so the notice can be up to about
+a minute late. If the prompt is pasted later, its reply follows as usual; if the session goes,
+`prompt_dropped` follows.
 
 ### D6. The tool result envelope
 
@@ -505,7 +534,7 @@ Same trust level as the existing send record and dead-letter files, which alread
 
 ## Cross-references
 
-- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..35 (`docs/requirements.md`).
+- Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..36 (`docs/requirements.md`).
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
   `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
 - Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,

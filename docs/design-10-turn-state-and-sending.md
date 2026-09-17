@@ -227,8 +227,9 @@ Two questions are kept apart, because they have different callers:
 2. A turn the transcript shows in progress is **working** while the transcript has been quiet
    for less than 6 s (the mirror copies about every 2 s).
 3. A reply still waiting on its Stop hooks stays **working** until 120 s of quiet
-   (`_STOP_HOOK_WAIT_S`, the same hold the watcher's delivery uses, D1).
-4. Otherwise the status row decides: `esc to interrupt` means **working** (a long silent tool
+   (`_STOP_HOOK_WAIT_S`, the same hold the watcher's delivery uses, D1), whatever the screen
+   shows.
+4. Past that hold, and for any other quiet open turn, the status row decides: `esc to interrupt` means **working** (a long silent tool
    call, or thinking before the first line). Its absence means **stopped**, trusted once this
    MCP process has seen the working text on that session's screen; until then, only after 10
    minutes of quiet. So a Claude Code that renames the text costs a slow queue, never a paste

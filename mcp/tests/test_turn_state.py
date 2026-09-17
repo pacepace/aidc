@@ -129,6 +129,28 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=1.0)
         assert await session.check() == "claude_busy"
 
+    async def test_stop_hook_hold_is_busy_whatever_the_screen_shows(self, session):
+        tools._working_indicator_seen.add("proj")
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=30.0)
+        assert await session.check() == "claude_busy"
+        assert tools._last_free_verdict["proj"][1] == "stop_hooks_running"
+
+    async def test_past_the_stop_hook_hold_an_idle_status_row_means_free(self, session):
+        tools._working_indicator_seen.add("proj")
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
+                      age=tools._STOP_HOOK_WAIT_S)
+        assert await session.check() == ""
+        assert tools._last_free_verdict["proj"][1] == "status_row_idle"
+
+    async def test_past_the_stop_hook_hold_a_working_status_row_still_wins(self, session):
+        """A Stop hook that runs longer than the hold (a long review gate) with the
+        status row still saying Claude is working must not get a prompt pasted in."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
+                      age=tools._STOP_HOOK_WAIT_S + 60)
+        session.screen = _screen("busy-tool-empty-box")
+        assert await session.check() == "claude_busy"
+        assert tools._last_free_verdict["proj"][1] == "status_row_working"
+
     async def test_just_pasted_prompt_is_busy_until_the_log_shows_it(self, session):
         session.write(FINISHED)
         tools._sent_awaiting_echo["proj"] = ("next task", NOW - 3)

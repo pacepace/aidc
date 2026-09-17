@@ -408,18 +408,17 @@ def _turn_verdict(name: str, objs: list[dict], quiet: float,
     the send path and the watcher use.
 
     The transcript decides. When it shows a turn in progress that has gone quiet, a
-    reply still waiting on its Stop hooks is held for _STOP_HOOK_WAIT_S; anything else
-    is settled by the status row's working text, trusted once this process has seen it
-    on the session, else after _LOG_STALL_S.
+    reply still waiting on its Stop hooks is held for _STOP_HOOK_WAIT_S whatever the
+    screen shows. Past that hold, and for every other quiet open turn, the status row's
+    working text settles it: shown means working; absent means stopped, trusted once
+    this process has seen the text on the session, else only after _LOG_STALL_S.
     """
     if not ts.log_shows_turn_in_progress(objs):
         return TURN_IDLE, "log_finished"
     if quiet < _LOG_QUIET_S:
         return TURN_RUNNING, "log_growing"
-    if ts.awaiting_stop_hooks(objs, objs):
-        if quiet < _STOP_HOOK_WAIT_S:
-            return TURN_RUNNING, "stop_hooks_running"
-        return TURN_IDLE, "stop_record_missing"
+    if ts.awaiting_stop_hooks(objs, objs) and quiet < _STOP_HOOK_WAIT_S:
+        return TURN_RUNNING, "stop_hooks_running"
     if screen is None:
         return TURN_RUNNING, "screen_unread"
     if screen.working:

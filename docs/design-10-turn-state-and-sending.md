@@ -114,9 +114,11 @@ today. A Claude Code that stops writing it costs a few seconds per reply, never 
 
 When a group with no terminal is followed by an interrupt line, the interrupt closes the turn:
 
-- `ok: false`.
+- `interrupted: true`, with `ok: true`. An interrupt is a person's choice, not a failure.
 - Content opens with the note below, then the text Claude wrote before the interrupt, or the
-  sentence "Claude had not written anything yet." when there is none.
+  sentence "Claude had not written anything yet." when there is none. The note carries the
+  meaning on its own, so a receiver that ignores `interrupted` still shows the reader what
+  happened.
 - The turn's anchor is the interrupt line's uuid (it has one; a uuid-less interrupt line is not
   treated as terminal, for the same reason as design 09's empty-uuid rule).
 - `prompt_origin` and `speaker` are computed from the turn's prompts as for any other turn. An
@@ -130,8 +132,12 @@ finished. The text below is what Claude had written up to that point, and it is 
 The interrupt line is delivered without waiting for the next prompt. It still goes through the
 settle gate, because Claude Code can write more lines right after an interrupt.
 
-MetaLLM renders `ok: false` as `[ERROR] <content>` under an `agent_watch_error` source. That was
-checked in MetaLLM's `api/src/api/v1/internal/callback.py` and needs no change.
+**Why not `ok: false`.** It was the first choice, but MetaLLM renders `ok: false` as
+"Dev agent (error)" with an `[ERROR]` prefix, which reads as a crash. MetaLLM's `CallbackRequest`
+is a plain pydantic model that ignores unknown fields (confirmed by the metallm session,
+2026-09-17), so `interrupted` can ship before MetaLLM knows it: until then the turn shows as an
+ordinary reply with the note on top. MetaLLM will render `interrupted: true` as
+"stopped at the terminal".
 
 ### D4. `speaker` says who the turn belongs to (MCP-27)
 
@@ -147,7 +153,31 @@ The payload gains `speaker`:
 BUSY not cleared). Sending the field before MetaLLM changes that would hide every person turn
 from the orchestrator. The metallm session has been asked (2026-09-17) to change the rule so a
 human turn is shown to the orchestrator as something the person did, not answered, and not
-counted as its own task finishing. aidc starts sending `speaker` only after that ships.
+counted as its own task finishing. The metallm session confirmed the same day: Pace chose "record
+without wake" (the turn is written into the conversation, runs no turn, leaves BUSY alone, and
+renders under a distinct source). aidc starts sending `speaker` only when the metallm session
+reports that change released and deployed.
+
+### D5. The callback payload contract
+
+aidc and MetaLLM once built the same feature twice with fields neither side read (`prompt_origin`
+vs `speaker`). This table is the single description of the shared-session callback body
+(`POST {callback_url}/api/v1/internal/callback/{conversation_id}`). A change to it is agreed with
+the metallm session and written here before either side builds it.
+
+| Field | Type | Values and meaning | Since |
+|---|---|---|---|
+| `content` | string | The reply text. May open with the terminal-prompt note (MCP-23) and/or the interrupt note (D3). | design 09 |
+| `ok` | bool | `false` only when the turn ended on an API error Claude Code did not recover from. An interrupt is `true`. | design 09 |
+| `source` | string | Always `"agent_watch"` for this path. | design 09 |
+| `session` | string | The aidc session that produced the turn. | design 09 |
+| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. | MCP-23 |
+| `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
+| `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. **Not sent until MetaLLM's record-without-wake change is deployed.** | MCP-27 |
+
+Combinations are independent. An interrupted turn on a prompt the person typed carries
+`interrupted: true` and (once enabled) `speaker: "human"`, so MetaLLM records it without waking
+the orchestrator and labels it as stopped at the terminal.
 
 ---
 

@@ -89,7 +89,7 @@ lint, the shell unit tests, and the MCP suite (pytest + ruff + mypy on Python 3.
 
 ## Governance
 
-This repository is governed by **[Prawduct](https://github.com/pacepace/prawduct)** — its
+This repository is governed by **[Prawduct](https://github.com/brookstalley/prawduct)** — its
 build cycle, planning method, and independent Critic/PR review shape how work is scoped and
 merged.
 

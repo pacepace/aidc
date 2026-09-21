@@ -35,5 +35,5 @@ covered.
 
 What aidc defends against, what it explicitly does **not**, and the trust boundaries between
 host, dev container, proxy, and control plane are documented in the safety model:
-[`docs/done/design-07-safety-model.md`](docs/done/design-07-safety-model.md). Read it before
+[`docs/security-model.md`](docs/security-model.md). Read it before
 reporting so we can tell an in-scope escape from an accepted, documented limitation.

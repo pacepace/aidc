@@ -416,7 +416,7 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
   This is a deliberate, documented widening of the sandbox: traffic to an attached network
   does not pass through squid, so the blocklist does not apply and taint detection cannot see
-  it, and the attachment is bidirectional. `docs/done/design-07-safety-model.md` now sizes
+  it, and the attachment is bidirectional. `docs/security-model.md` now sizes
   that honestly, and both the CLI and the config template say so at the point of use.
   (NET-13, CLI-24, CLI-25)
 

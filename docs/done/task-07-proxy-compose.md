@@ -27,7 +27,7 @@ From `docs/design-04-proxy-stack.md`:
 
 > Order matters: proxy stack must be ready before the dev container starts pulling base images, or those pulls go direct and bypass policy.
 
-From `docs/design-07-safety-model.md`:
+From `docs/security-model.md`:
 > Response `freeze` — additionally call `docker pause aidc-<session>-dev`. The compose template mounts `/var/run/docker.sock` from the host into the policy container ONLY when `taint_response: freeze`.
 
 ---

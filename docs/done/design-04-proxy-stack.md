@@ -165,7 +165,7 @@ All sidecars live in the same Docker Compose stack as Squid. They share named vo
 2. For each access line, parse the destination domain.
 3. If the line is a `TCP_DENIED` event and the deny reason involves the `malware_domains` ACL (i.e., a hit on the refresher-managed blocklist), trigger taint.
 4. If the deny involves only `bad_tld`, log but do not taint (unless the per-session config enables `tld_taints: true`).
-5. Taint action: write `/var/state/tainted` with timestamp + offending line. Then execute the configured taint response (see `design-07-safety-model.md`).
+5. Taint action: write `/var/state/tainted` with timestamp + offending line. Then execute the configured taint response (see `docs/security-model.md`).
 
 **Configurable response** (SEC-05):
 

@@ -2,7 +2,7 @@
 
 Covered elsewhere; this file only points there.
 
-- `docs/done/design-07-safety-model.md` — the threat model, what aidc does and does not protect
+- `docs/security-model.md` — the threat model, what aidc does and does not protect
   against, the taint model, and the deliberate holes (attached networks, TCP egress relays, a
   repo's own config).
 - `docs/requirements.md` — the enforceable rules: NET (egress enforcement, relays), SEC (taint,

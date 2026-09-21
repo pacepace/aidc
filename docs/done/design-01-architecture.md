@@ -1,6 +1,6 @@
 # Design 01 — Container Architecture
 
-**What this covers.** The dev container's base image, Dev Container Features, mount rules, language-runtime profiles, and how the architecture varies (or doesn't) across macOS, Linux, and WSL2. Sibling docs cover proxy stack (`design-04`), CLI (`design-05`), and safety model (`design-07`).
+**What this covers.** The dev container's base image, Dev Container Features, mount rules, language-runtime profiles, and how the architecture varies (or doesn't) across macOS, Linux, and WSL2. Sibling docs cover proxy stack (`design-04`), CLI (`design-05`), and safety model (`docs/security-model.md`).
 
 **Requirements implemented:** CTR-01 through CTR-11.
 
@@ -116,7 +116,7 @@ A session goes through three states:
 2. **Running** — tmux session is up; Claude is either active inside it or idle waiting for input. Pace can `aidc attach <name>` at any time.
 3. **Killed** — `aidc kill <name>` stops the dev container and the proxy stack, removes both, and (by default) preserves the audit volume on the host for later review.
 
-Tainted sessions (`design-07-safety-model.md`) can only exit running state via kill — there is no rehabilitation.
+Tainted sessions (`docs/security-model.md`) can only exit running state via kill — there is no rehabilitation.
 
 ---
 

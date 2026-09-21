@@ -1,8 +1,8 @@
-# Design 07 — Safety Model
+# Security model
 
 **What this covers.** The end-to-end threat model: what aidc protects against, how each defense works, and the **taint mechanism** that turns "the proxy saw something bad" into "this container is dead, throw it away." This doc is the place to look when asking "is X safe?" or "what happens when Y goes wrong?"
 
-**Requirements implemented:** SEC-01 through SEC-08. Cross-references most other design docs.
+**Requirements implemented:** SEC-01 through SEC-09, and the deliberate holes of NET-13 and NET-15. Cross-references most other design docs.
 
 ---
 

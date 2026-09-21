@@ -74,8 +74,8 @@ Both written into `docs/requirements.md` in Chunk A/B.
   `claude_mode`, `claude_resume`, `blocklist_additions`, `container_only_paths`,
   `state_actor_tlds` additions. Everything else is operator-only (global config or CLI flag); a
   repo value is listed and ignored unless `--trust-repo-config` | Pace approved the rule for
-  `egress_tcp`/`networks`/`ports` 2026-09-21; the wider key list shipped and Pace was told
-  2026-09-21 that he can narrow it — revisit on his answer]
+  `egress_tcp`/`networks`/`ports` 2026-09-21; Pace confirmed the wider key list ("keep")
+  2026-09-21]
 - [ASSUMPTION: breaking a repo that relies on its own `networks:`/`ports:`/`egress:` is acceptable —
   the fix is one flag, and the create output names it | MED impact | Pace can veto]
 

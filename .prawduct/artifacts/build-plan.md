@@ -44,6 +44,14 @@ Both written into `docs/requirements.md` in Chunk A/B.
 
 ## Design decisions
 
+- [DECISION: one relay per destination HOST, listening on each of its ports (not one per host:port as
+  first written): Docker answers an alias with every container that carries it, so two relays for one
+  host could hand a client the relay for the other port. Found while building; NET-15 amended.]
+- [DECISION: live relays survive restart and upgrade (first plan: lost on upgrade). Upgrade recreates
+  only dev and a relay targets an address, not dev, so there was nothing to lose. NET-15 amended.]
+- [DECISION: MCP session_create has no way to pass --trust-repo-config, so orchestrator-created
+  sessions never apply a repo's widening settings. Intended: that is exactly the untrusted path. The
+  refusals appear in the create log. Recorded in README.]
 - [DECISION: one relay sidecar per destination, rendered into the session's compose file like the
   declared port forwarders, on the session network (aliased to the destination's hostname) and the
   egress network | alternatives: `aidc network` (a local bridge, no route to remote addresses),
@@ -61,7 +69,8 @@ Both written into `docs/requirements.md` in Chunk A/B.
   `claude_mode`, `claude_resume`, `blocklist_additions`, `container_only_paths`,
   `state_actor_tlds` additions. Everything else is operator-only (global config or CLI flag); a
   repo value is listed and ignored unless `--trust-repo-config` | Pace approved the rule for
-  `egress_tcp`/`networks`/`ports` 2026-09-21; the wider key list is pending his confirmation]
+  `egress_tcp`/`networks`/`ports` 2026-09-21; the wider key list shipped and Pace was told
+  2026-09-21 that he can narrow it — revisit on his answer]
 - [ASSUMPTION: breaking a repo that relies on its own `networks:`/`ports:`/`egress:` is acceptable —
   the fix is one flag, and the create output names it | MED impact | Pace can veto]
 

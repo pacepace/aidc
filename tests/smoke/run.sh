@@ -270,7 +270,8 @@ if [ -z "$EGRESS_HOST_IP" ]; then
 else
     EGRESS_RELAY="aidc-${SESSION}-egress-$(printf '%s' "$EGRESS_HOST_IP" | tr '.' '-')"
     EGRESS_ECHO="aidc-${SESSION}-smoke-echo"
-    docker run -d --name "$EGRESS_ECHO" -p "${EGRESS_PORT}:7777" \
+    EGRESS_PORT2=$((EGRESS_PORT + 1000))
+    docker run -d --name "$EGRESS_ECHO" -p "${EGRESS_PORT}:7777" -p "${EGRESS_PORT2}:7777" \
         "aidc/forwarder:$(cat "$AIDC_ROOT/VERSION")" \
         TCP-LISTEN:7777,fork,reuseaddr EXEC:cat >/dev/null
     assert "the relay is running" \
@@ -289,7 +290,54 @@ else
         "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_HOST_IP}/${EGRESS_PORT}\"'"
     assert "the relay carries no other port" \
         "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_RELAY}/22\"'"
-    docker rm -f "$EGRESS_ECHO" >/dev/null 2>&1 || true
+fi
+echo
+
+# --- step 5c: live TCP egress relays (aidc egress) ----------------------
+# The live command, and the hostname path: the session reaches the relay under the
+# destination's own name (the alias that keeps TLS hostname checks passing). A name
+# that resolves on the host to the host's address is needed; <ip>.nip.io is public
+# DNS that answers with the address in the name. Skipped where it does not resolve.
+echo "[5c/11] live TCP egress relays"
+echo_via() {   # $1 = host, $2 = port: what comes back from the echo server
+    dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${1}/${2}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true
+}
+if [ -z "$EGRESS_HOST_IP" ]; then
+    echo "  SKIP: no host IPv4 address found (ip route get)"
+else
+    assert "a live relay for a host with a declared one is refused (one name, one relay)" \
+        "! $AIDC egress ${SESSION} add ${EGRESS_HOST_IP}:${EGRESS_PORT2}"
+    assert "removing a declared destination live is refused" \
+        "! $AIDC egress ${SESSION} rm ${EGRESS_HOST_IP}:${EGRESS_PORT}"
+    NIP_HOST="${EGRESS_HOST_IP}.nip.io"
+    if [ "$(getent ahostsv4 "$NIP_HOST" 2>/dev/null | awk 'NR == 1 { print $1 }')" != "$EGRESS_HOST_IP" ]; then
+        echo "  SKIP: ${NIP_HOST} does not resolve here; live add by name not checked"
+    else
+        assert "aidc egress add relays a destination by name" \
+            "$AIDC egress ${SESSION} add ${NIP_HOST}:${EGRESS_PORT}"
+        assert "the session reaches it under the destination's own name" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ]"
+        assert "a second port on the same host is added" \
+            "$AIDC egress ${SESSION} add ${NIP_HOST}:${EGRESS_PORT2}"
+        assert "and both ports work" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ] && [ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT2})\" = aidc-egress ]"
+        assert "aidc egress ls lists the live relay's ports" \
+            "[ \"\$($AIDC egress ${SESSION} ls | grep -c '^adhoc .*${NIP_HOST}:')\" = 2 ]"
+        assert "aidc status lists relays" \
+            "$AIDC status ${SESSION} | grep -q '${NIP_HOST}:${EGRESS_PORT2}'"
+        assert "rm removes one port" \
+            "$AIDC egress ${SESSION} rm ${NIP_HOST}:${EGRESS_PORT2}"
+        assert "and keeps the other" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ] && [ -z \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT2})\" ]"
+    fi
+    # NET-15: relays are not tied to the dev container, so a restart keeps both kinds.
+    "$AIDC" restart "$SESSION" >/dev/null 2>&1 || true
+    assert "after aidc restart the declared relay still carries traffic" \
+        "[ \"\$(echo_via ${EGRESS_RELAY} ${EGRESS_PORT})\" = aidc-egress ]"
+    if [ -n "${NIP_HOST:-}" ] && $AIDC egress "$SESSION" ls 2>/dev/null | grep -q "^adhoc .*${NIP_HOST}:"; then
+        assert "and so does the live one" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ]"
+    fi
 fi
 echo
 
@@ -393,6 +441,19 @@ echo "[7/11] proxy enforcement"
 # only honor lowercase). Without this, assertions can pass for the wrong
 # reason -- e.g. DNS failure -- and we never exercise squid at all.
 PROXY="http://aidc-proxy:3128"
+# The refresher's first blocklist load ends in `kill -HUP` to squid, and squid
+# refuses connections for the ~20 s it takes to reload a multi-million-entry list.
+# These checks fail in a millisecond, so all of them can land inside that window
+# (and the malware request below then never reaches squid, so nothing taints).
+# Wait for the first load and the reload to finish: this step tests enforcement,
+# not availability during a reload.
+for _ in $(seq 1 90); do
+    if docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh OK' \
+            && dev_exec "curl -fsS --max-time 5 -x ${PROXY} -o /dev/null http://example.com" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 assert "egress to example.com via proxy returns 200" \
     "dev_exec 'curl -fsS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://example.com' | grep -q 200"
 
@@ -530,6 +591,10 @@ assert "policy container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-policy\""
 assert "egress relay removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egress-\""
+assert "live egress relays removed" \
+    "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egressx-\""
+assert "the session's networks are gone" \
+    "! docker network ls --format '{{.Name}}' | grep -q \"^aidc-${SESSION}-\""
 echo
 
 # --- step 11: audit dir populated after kill ------------------------------

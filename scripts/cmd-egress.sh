@@ -66,7 +66,7 @@ validate_session_name "$NAME"
 require_docker
 session_exists "$NAME" || die "no such session: $NAME (try: aidc list)"
 
-# The relay of the session for $1, as "container|kind|host|ip|ports", or nothing.
+# The relay of the session for $1, as "container|kind|host|ip|ports|state", or nothing.
 relay_for_host() {
     aidc_egress_relays "$NAME" | awk -F'|' -v h="$1" '$3 == h { print; exit }'
 }
@@ -112,7 +112,7 @@ do_add() {
         die "${host} has a relay declared at create time (ports: ${ports}); add ${host}:${want} to egress_tcp: and recreate the session"
     fi
 
-    ip=$(aidc_egress_resolve "$host") || die "cannot resolve ${host} from this machine (no IPv4 address)"
+    ip=$(aidc_egress_resolve_or_die "$host")
     if why=$(aidc_egress_refusal "$ip" "$want" "$(aidc_mcp_deny_target)"); then
         die "refusing ${spec}: ${why}"
     fi
@@ -155,22 +155,16 @@ do_rm() {
 }
 
 do_ls() {
-    local relays
-    relays=$(aidc_egress_relays "$NAME")
-    if [ -z "$relays" ]; then
+    local lines
+    lines=$(aidc_egress_describe "$NAME")
+    if [ -z "$lines" ]; then
         printf 'no TCP egress relays for session %s\n' "$NAME"
         return 0
     fi
     set +e
     set +o pipefail
     printf '%-9s  %-40s  %s\n' "KIND" "REACH AS" "FORWARDS TO"
-    local ct kind host ip ports port
-    while IFS='|' read -r ct kind host ip ports; do
-        [ -z "$ct" ] && continue
-        for port in $ports; do
-            printf '%-9s  %-40s  %s\n' "$kind" "$(aidc_egress_reach_as "$NAME" "$host"):${port}" "${ip}:${port}"
-        done
-    done <<<"$relays"
+    printf '%s\n' "$lines"
 }
 
 do_clear() {

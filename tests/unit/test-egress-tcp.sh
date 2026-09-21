@@ -86,6 +86,25 @@ ok    "65535 is a port"          aidc_egress_valid_port 65535
 notok "256.1.1.1 is not IPv4 (and not a name either)" aidc_egress_valid_host 256.1.1.1
 ok    "a single-label name"      aidc_egress_valid_host postgres
 
+echo "=== egress_tcp: names ==="
+
+# Two hosts must never share a container name: replacing one relay would remove the other.
+eq "a dot becomes a hyphen" "yuga-example" "$(aidc_egress_slug yuga.example)"
+eq "a hyphen doubles" "a--b-example" "$(aidc_egress_slug a-b.example)"
+if [ "$(aidc_egress_slug a-b.example)" != "$(aidc_egress_slug a.b-example)" ]; then
+    echo "  PASS: a-b.example and a.b-example get different names"; PASS=$((PASS + 1))
+else
+    echo "  FAIL: a-b.example and a.b-example get different names"; FAIL=$((FAIL + 1))
+fi
+eq "an address" "10-42-0-101" "$(aidc_egress_slug 10.42.0.101)"
+
+echo "=== egress_tcp: resolving ==="
+
+eq "an IPv4 destination resolves to itself, without asking anyone" "10.42.0.101" \
+    "$(PATH=/nonexistent aidc_egress_resolve 10.42.0.101)"
+PATH=/nonexistent aidc_egress_resolve db.example >/dev/null 2>&1; rc=$?
+eq "no resolver tool is its own answer (2), not 'no such name'" "2" "$rc"
+
 echo "=== egress_tcp: refusals ==="
 
 refused() { aidc_egress_refusal "$@" >/dev/null; }

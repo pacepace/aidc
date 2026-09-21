@@ -119,14 +119,9 @@ fi
 
 # TCP egress relays (NET-15): the only non-HTTP ways out of a proxied session.
 printf '\n-- tcp egress --\n'
-relays=$(aidc_egress_relays "$NAME")
+relays=$(aidc_egress_describe "$NAME")
 if [ -n "$relays" ]; then
-    while IFS='|' read -r _ct _kind _host _ip _ports; do
-        [ -z "$_ct" ] && continue
-        for _p in $_ports; do
-            printf '  %-8s %s:%s -> %s:%s\n' "$_kind" "$(aidc_egress_reach_as "$NAME" "$_host")" "$_p" "$_ip" "$_p"
-        done
-    done <<<"$relays"
+    printf '%s\n' "$relays" | sed 's/^/  /'
 else
     printf '  (none)\n'
 fi

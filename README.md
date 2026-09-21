@@ -267,7 +267,11 @@ and taint detection don't see it; the connection log is the record. The relay re
 aidc-mcp's own address and port, and loopback.
 
 `egress_tcp` is operator-only: a repo's own `.aidc/config.yaml` can't open it (see
-[Config](#config)). For a clustered database whose driver discovers other nodes (YugabyteDB
+[Config](#config)). A session created by an orchestrator through the MCP's `session_create`
+never trusts the repo's config either; the names in your own `egress_tcp:` are then resolved
+inside the aidc-mcp container, which uses the host's upstream DNS servers but not a per-link
+resolver (systemd-resolved routing a ZeroTier domain, say). If such a name doesn't resolve
+there, use its IP address. For a clustered database whose driver discovers other nodes (YugabyteDB
 smart drivers, Cassandra), list each node, or turn discovery off (`load_balance=false`).
 
 ### Egress is enforced, not requested

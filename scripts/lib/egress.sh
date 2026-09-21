@@ -107,9 +107,13 @@ aidc_egress_parse() {
     return 0
 }
 
-# aidc_egress_slug <host>: the host as a container-name-safe token.
+# aidc_egress_slug <host>: the host as a container-name-safe token, one per host:
+# each hyphen doubles and each dot becomes a hyphen, so a-b.example (a--b-example) and
+# a.b-example (a-b--example) cannot collide. No label starts or ends with a hyphen, so
+# a dot never meets one and the mapping cannot be read two ways. Two hosts sharing a
+# slug would share a container name, and replacing one relay would remove the other.
 aidc_egress_slug() {
-    printf '%s' "$1" | tr '.' '-'
+    printf '%s' "$1" | sed -e 's/-/--/g' -e 's/\./-/g'
 }
 
 # aidc_egress_refusal <ip> <port> <mcp_deny>: prints why the destination is refused
@@ -208,28 +212,67 @@ aidc_egress_reach_as() {
 
 # aidc_egress_resolve <host>: the host's first IPv4 address, from THIS machine's
 # resolver (see the header for why not the relay's). An IPv4 host is itself.
+#
+# Returns 1 when the name has no IPv4 address, 2 when this machine has no tool to ask
+# (no getent and no working python3: a Mac without the Command Line Tools), so a
+# caller can say which. Inside aidc-mcp (session_create) "this machine" is the aidc-mcp
+# container, whose resolver is the host's upstream DNS, not any per-link resolver the
+# host has (systemd-resolved routing a ZeroTier domain, say).
 aidc_egress_resolve() {
-    local host="$1" ip=""
+    local host="$1" ip="" tried=0
     if aidc_egress_is_ipv4 "$host"; then
         printf '%s' "$host"; return 0
     fi
     if command -v getent >/dev/null 2>&1; then
+        tried=1
         ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR == 1 { print $1 }') || ip=""
-    elif command -v python3 >/dev/null 2>&1; then
+    fi
+    if ! aidc_egress_is_ipv4 "$ip" && python3 -c 'import socket' >/dev/null 2>&1; then
+        tried=1
         ip=$(python3 -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$host" 2>/dev/null) || ip=""
     fi
+    [ "$tried" -eq 1 ] || return 2
     aidc_egress_is_ipv4 "$ip" || return 1
     printf '%s' "$ip"
+}
+
+# aidc_egress_resolve_or_die <host>: the address, or die saying why there is none.
+aidc_egress_resolve_or_die() {
+    local ip rc=0
+    ip=$(aidc_egress_resolve "$1") || rc=$?
+    case "$rc" in
+        0) printf '%s' "$ip" ;;
+        2) die "cannot resolve ${1}: no resolver tool here (needs getent or python3)" ;;
+        *) die "cannot resolve ${1} from this machine (no IPv4 address)" ;;
+    esac
 }
 
 # ---- DOCKER ------------------------------------------------------------------
 
 # aidc_egress_relays <session>: one line per relay of the session, running or not,
-# "container|kind|host|ip|ports" (kind: declared or adhoc; ports space-separated).
+# "container|kind|host|ip|ports|state" (kind: declared or adhoc; ports space-separated;
+# state: docker's, e.g. running, restarting, exited). A relay exits when any of its
+# listeners dies, so a relay that is not running is one that is not relaying.
 aidc_egress_relays() {
     docker ps -a --filter "label=aidc.session=$1" --filter "label=aidc.egress" \
-        --format '{{.Names}}|{{.Label "aidc.egress"}}|{{.Label "aidc.egress.host"}}|{{.Label "aidc.egress.ip"}}|{{.Label "aidc.egress.ports"}}' \
+        --format '{{.Names}}|{{.Label "aidc.egress"}}|{{.Label "aidc.egress.host"}}|{{.Label "aidc.egress.ip"}}|{{.Label "aidc.egress.ports"}}|{{.State}}' \
         2>/dev/null | sort
+}
+
+# aidc_egress_describe <session>: the relays as display lines,
+# "kind  reach-as:port -> ip:port  [state]" (state shown only when not running).
+aidc_egress_describe() {
+    local ct kind host ip ports state port flag
+    while IFS='|' read -r ct kind host ip ports state; do
+        [ -z "$ct" ] && continue
+        flag=""
+        [ "$state" = "running" ] || flag="  [${state:-unknown}: not relaying; docker logs ${ct}]"
+        for port in $ports; do
+            printf '%-9s  %-40s  %s%s\n' "$kind" "$(aidc_egress_reach_as "$1" "$host"):${port}" "${ip}:${port}" "$flag"
+        done
+    done <<EOF_REL
+$(aidc_egress_relays "$1")
+EOF_REL
 }
 
 # aidc_egress_adhoc_name <session> <host>

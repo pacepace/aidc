@@ -49,6 +49,11 @@ Both written into `docs/requirements.md` in Chunk A/B.
   host could hand a client the relay for the other port. Found while building; NET-15 amended.]
 - [DECISION: live relays survive restart and upgrade (first plan: lost on upgrade). Upgrade recreates
   only dev and a relay targets an address, not dev, so there was nothing to lose. NET-15 amended.]
+- [DECISION: names are resolved on the host, except for sessions created through aidc-mcp's
+  session_create, which runs `aidc create` inside the aidc-mcp container and so resolves there
+  (host upstream DNS, no per-link resolvers). Resolving on the host from inside the container is
+  not possible, and refusing egress_tcp there would remove the feature for orchestrated sessions.
+  Documented in README and NET-15; `aidc egress ls` shows the address to check.]
 - [DECISION: MCP session_create has no way to pass --trust-repo-config, so orchestrator-created
   sessions never apply a repo's widening settings. Intended: that is exactly the untrusted path. The
   refusals appear in the create log. Recorded in README.]

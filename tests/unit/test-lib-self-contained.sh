@@ -25,7 +25,7 @@ for f in "$AIDC_ROOT"/scripts/lib/*.sh; do
         # Defined here? Then calling it is fine.
         grep -qE "^[[:space:]]*${h}[[:space:]]*\(\)" "$f" && continue
         # A call: the helper as a command word, outside comments.
-        hits=$(grep -nE "(^|[;&|(){]|then|else|do)[[:space:]]*${h}[[:space:]]" "$f" \
+        hits=$(grep -nE "(^|[;&|(){]|then|else|do)[[:space:]]*${h}([[:space:]]|$)" "$f" \
             | grep -vE '^[0-9]+:[[:space:]]*#' || true)
         [ -n "$hits" ] && calls="${calls}${hits}
 "

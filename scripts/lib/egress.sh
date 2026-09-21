@@ -8,7 +8,7 @@
 # HOST can reach -- over ZeroTier, a VPN, a LAN -- gets one relay per destination
 # host instead:
 #
-#   dev --(session network)--> aidc-<s>-egress-<host>  --(egress network)--> host:port
+#   dev --(session network)--> aidc-<s>-egress-<slug>  --(egress network)--> host:port
 #
 # The relay is an aidc/forwarder (socat) container on both session networks. On the
 # session network it carries the destination's own name as an alias, so the session

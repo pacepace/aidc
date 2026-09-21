@@ -263,8 +263,31 @@ echo
 # The smoke's repo config sets audit_dir, which create applied only because of
 # --trust-repo-config. Without the flag it is set aside and reported.
 echo "[5a/11] repo-config trust"
+# A refusal must stop the command (non-zero) AND say why: a bare `!` also passes on
+# a crash. Used by the steps below too.
+refused_with() {   # $1 = expected text; the rest = the aidc command
+    local want="$1" out rc=0
+    shift
+    out=$("$AIDC" "$@" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "$want"
+}
+# aidc-mcp's address:port as the config and the running container give it.
+smoke_mcp_target() {
+    # shellcheck source=/dev/null  # the libraries, in a subshell so nothing leaks
+    (. "$AIDC_ROOT/scripts/lib/common.sh"; . "$AIDC_ROOT/scripts/lib/config.sh"; aidc_mcp_deny_target)
+}
 assert "aidc config reports the repo's audit_dir as not applied" \
     "(cd \"$TMP_REPO\" && \"$AIDC\" config) | grep -A5 'NOT applied' | grep -q 'audit_dir: ${AUDIT_DIR_OVERRIDE}'"
+# One create, without --trust-repo-config, that is refused before it builds anything:
+# its own output must carry the SEC-09 report and the egress_tcp refusal.
+# shellcheck disable=SC2034  # read inside the assert strings below, which eval it
+CREATE_REFUSED=$("$AIDC" create "${SESSION}-x" --repo "$TMP_REPO" --egress-tcp no-such-host.invalid:5432 2>&1 || true)
+assert "aidc create reports the repo's audit_dir as not applied" \
+    "printf '%s' \"\$CREATE_REFUSED\" | grep -A2 'NOT applied' | grep -q 'audit_dir: ${AUDIT_DIR_OVERRIDE}'"
+assert "aidc create refuses an egress_tcp name that does not resolve" \
+    "printf '%s' \"\$CREATE_REFUSED\" | grep -q 'no address to relay to'"
+assert "and leaves nothing behind" \
+    "! docker ps -a --format '{{.Names}}' | grep -q '^aidc-${SESSION}-x-'"
 echo
 
 # --- step 5b: TCP egress relay (NET-15) ---------------------------------
@@ -307,31 +330,12 @@ echo
 # that resolves on the host to the host's address is needed; <ip>.nip.io is public
 # DNS that answers with the address in the name. Skipped where it does not resolve.
 echo "[5c/11] live TCP egress relays"
-# aidc-mcp's address:port as a destination. Bound on loopback or every interface, its
-# port on this host's address is what a session would have to use to reach it.
-smoke_mcp_target() {
-    local t
-    # shellcheck source=/dev/null  # the libraries, in a subshell so nothing leaks
-    t=$(. "$AIDC_ROOT/scripts/lib/common.sh"; . "$AIDC_ROOT/scripts/lib/config.sh"; aidc_mcp_deny_target)
-    case "${t%:*}" in
-        0.0.0.0|127.*) printf '%s:%s' "$EGRESS_HOST_IP" "${t##*:}" ;;
-        *) printf '%s' "$t" ;;
-    esac
-}
 echo_via() {   # $1 = host, $2 = port: what comes back from the echo server
     dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${1}/${2}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true
 }
 if [ -z "$EGRESS_HOST_IP" ]; then
     echo "  SKIP: no host IPv4 address found (ip route get)"
 else
-    # Each refusal must stop the command (non-zero) AND say why: a bare `!` would also
-    # pass on a crash.
-    refused_with() {   # $1 = expected text; the rest = the aidc command
-        local want="$1" out rc=0
-        shift
-        out=$("$AIDC" "$@" 2>&1) || rc=$?
-        [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$want"
-    }
     assert "a live relay for a host with a declared one is refused (one name, one relay)" \
         "refused_with 'declared at create time' egress ${SESSION} add ${EGRESS_HOST_IP}:${EGRESS_PORT2}"
     assert "removing a declared destination live is refused" \
@@ -342,8 +346,18 @@ else
         "refused_with 'loopback' egress ${SESSION} add 127.0.0.1:5432"
     assert "a session service name is refused" \
         "refused_with 'already uses' egress ${SESSION} add squid:3128"
-    assert "aidc-mcp's address and port are refused" \
-        "refused_with 'aidc-mcp' egress ${SESSION} add \$(smoke_mcp_target)"
+    # aidc-mcp bound to one address: that address and port. Bound to every interface:
+    # its port on any address, so a documentation address (192.0.2.1, never routed)
+    # shows the refusal without colliding with the declared relay. Bound to loopback,
+    # nothing a relay could reach is listening, so there is nothing to refuse.
+    MCP_TARGET=$(smoke_mcp_target)
+    case "${MCP_TARGET%:*}" in
+        127.*) echo "  SKIP: aidc-mcp is bound to loopback; no relay could reach it" ;;
+        0.0.0.0) assert "aidc-mcp's port is refused on any address (it listens on all)" \
+                     "refused_with 'aidc-mcp' egress ${SESSION} add 192.0.2.1:${MCP_TARGET##*:}" ;;
+        *) assert "aidc-mcp's address and port are refused" \
+               "refused_with 'aidc-mcp' egress ${SESSION} add ${MCP_TARGET}" ;;
+    esac
     NIP_HOST="${EGRESS_HOST_IP}.nip.io"
     if [ "$(getent ahostsv4 "$NIP_HOST" 2>/dev/null | awk 'NR == 1 { print $1 }')" != "$EGRESS_HOST_IP" ]; then
         echo "  SKIP: ${NIP_HOST} does not resolve here; live add by name not checked"
@@ -446,11 +460,11 @@ fi
 assert "add is idempotent" \
     "$AIDC network ${SESSION} add ${SMOKE_NET}"
 assert "refuses the host network" \
-    "! $AIDC network ${SESSION} add host"
+    "refused_with \"refusing to attach the 'host' network\" network ${SESSION} add host"
 assert "refuses docker's default bridge" \
-    "! $AIDC network ${SESSION} add bridge"
+    "refused_with \"default 'bridge' network\" network ${SESSION} add bridge"
 assert "refuses a nonexistent network" \
-    "! $AIDC network ${SESSION} add definitely-not-a-real-network"
+    "refused_with 'no such docker network' network ${SESSION} add definitely-not-a-real-network"
 assert "refuses to detach the session's own network" \
     "! $AIDC network ${SESSION} rm aidc-${SESSION}-net"
 assert "aidc network rm detaches it" \

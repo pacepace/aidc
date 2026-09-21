@@ -94,8 +94,15 @@ restart_adhoc() {
     docker rm -f "$(aidc_egress_adhoc_name "$NAME" "$host")" >/dev/null 2>&1 || true
     [ $# -eq 0 ] && return 0
     if ! aidc_egress_start_adhoc "$NAME" "$audit" "aidc/forwarder:${AIDC_VERSION_TAG}" "$host" "$ip" "$@"; then
-        if [ -n "$had" ]; then
-            die "could not start the relay for ${host}; its previous relay is gone too, so port(s) ${had} are no longer relayed (aidc egress ${NAME} add ${host}:<port> to restore)"
+        # Lost: ports that were relayed and were meant to stay (not one being removed).
+        local lost="" p q
+        for p in $had; do
+            for q in "$@"; do
+                if [ "$p" = "$q" ]; then lost="${lost:+${lost} }${p}"; fi
+            done
+        done
+        if [ -n "$lost" ]; then
+            die "could not start the relay for ${host}; its previous relay is gone too, so port(s) ${lost} are no longer relayed (aidc egress ${NAME} add ${host}:<port> to restore)"
         fi
         die "could not start the relay for ${host}"
     fi

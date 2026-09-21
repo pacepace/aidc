@@ -1,0 +1,8 @@
+# Learnings — core
+
+**Reading a rule is not applying it.** For any rule below that bears on the decision in front of you, name the rule and say what it changes about that decision — or say that it does not apply, which is also an answer.
+
+## Boundaries between processes, containers and namespaces
+
+- When a value is produced in one place and consumed in another — a path the aidc-mcp container checks but the host's docker daemon resolves, state held in one process that a restart must still know, an id that names a container rather than the session — check that the consumer resolves it in the same namespace and lifetime, because every serious defect of the 2026-09-17 joint test and its reviews was a fact true for one process, container, file or filesystem treated as a fact about the session. Instances: webhooks kept only in memory (a reply lost across an MCP restart); a reported interrupt kept only in memory (a queue wedged after restart); a new transcript read from its end (the first reply after a Claude restart lost); "same session" decided by the dev container id (an upgrade looked like a kill); session_create checking a caller's repo path in the container's filesystem while docker mounted the host's (a host-directory escape).
+- When a fix rests on a derived value (a path string, a mapped id) or on unit tests alone, run the real path once before calling it done, because the session_create host-path fix passed its tests while the live probe still said "mirror CANNOT write" (the directories were root-owned). Instance: 2026-09-17, a container shaped exactly like aidc-mcp, one create, one write probe.

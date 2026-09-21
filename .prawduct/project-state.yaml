@@ -336,6 +336,36 @@ build_state:
 #   - migrations/
 #   - src/api/contract.py
 
+# Declared 2026-09-21 (Pace: "yes"). Where a missed defect costs most:
+risk_surfaces:
+  # 1. The sandbox walls: a mistake here quietly lets the agent out.
+  - proxy/
+  - scripts/lib/network.sh
+  - scripts/lib/egress.sh
+  - scripts/lib/config.sh
+  - scripts/cmd-create.sh
+  - scripts/cmd-network.sh
+  - scripts/cmd-egress.sh
+  - scripts/cmd-proxy.sh
+  - .devcontainer/Dockerfile
+  - .devcontainer/entrypoint.sh
+  # 2. The control server: a mistake here lets someone on the network drive sessions.
+  #    Also the contract paths from boundary-patterns.md (a present key replaces them).
+  - mcp/src/aidc_mcp/auth.py
+  - mcp/src/aidc_mcp/scope.py
+  - mcp/src/aidc_mcp/server.py
+  - mcp/src/aidc_mcp/tools.py
+  - mcp/src/aidc_mcp/resources.py
+  - mcp/src/aidc_mcp/transcript.py
+  - scripts/cmd-mcp.sh
+  - .devcontainer/transcript-mirror.sh
+  # 3. Install and release: a mistake here ships to everyone.
+  - install.sh
+  - release/
+  - .github/workflows/
+  - mcp/pyproject.toml
+  - mcp/uv.lock
+
 # =============================================================================
 # RELEASE VERSION FILES (opt-in)
 # =============================================================================

@@ -34,3 +34,20 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+
+## 2026-09-21: TCP egress relays and repo-config trust
+
+<!-- prawduct: scope=egress-tcp -->
+
+**Why:** a proxied session could not reach a database the host reaches over ZeroTier, a VPN or
+the LAN without removing isolation, and a repo's own `.aidc/config.yaml` (writable from inside the
+session) could widen its own sandbox.
+
+**What:** Chunk A: SEC-09. One table classifies every config key; from a workspace or repo config,
+only safe or tightening values apply, and the rest are shown and need `--trust-repo-config`.
+Chunk B: NET-15 declared relays (`egress_tcp:`, `--egress-tcp`), one per host, forwarding only to
+the address resolved on the host and logging each connection. Chunk C: `aidc egress <s>
+add|rm|ls|clear`, relays in `aidc status`, cleanup by kill, and docs. Also: `aidc create` builds the
+forwarder image that declared `--port` forwards needed. Reviews rev-20260921T204623Z-fa131876 and
+rev-20260921T210529Z-fbc10ffb; smoke 81/81. Filed #34 (squid refuses connections for ~20 s on
+each blocklist reload).

@@ -389,8 +389,8 @@ jq -n \
 # all profiles) per the task shard's "Image naming convention" note.
 
 # ensure_image lives in lib/common.sh (inventory-driven; shared with cmd-mcp
-# and cmd-proxy). We build the proxy stack + dev-base eagerly here; mcp and
-# forwarder are lazy-built by their respective subcommands on first use.
+# and cmd-proxy). We build the proxy stack + dev-base eagerly here; mcp is built
+# by `aidc mcp`, and forwarder just below, only when this session needs it.
 for _role in squid refresher policy audit dev-base; do
     ensure_image "$_role"
 done

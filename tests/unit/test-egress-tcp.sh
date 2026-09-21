@@ -3,8 +3,8 @@
 #
 # Covers the Docker-free half: parsing and validation, the refusals (aidc-mcp,
 # loopback), grouping destinations by host, and the rendered compose service. The
-# relay actually carrying a connection, and logging it, is exercised by
-# tests/smoke/test-egress-tcp.sh.
+# relay actually carrying a connection, and logging it, is exercised by step 5b of
+# tests/smoke/run.sh.
 #
 # The load-bearing assertions:
 #   - one relay per HOST: Docker answers an alias with every container carrying it,

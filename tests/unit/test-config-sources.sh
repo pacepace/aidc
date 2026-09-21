@@ -338,6 +338,20 @@ got=$(env -i PATH="/usr/bin:/bin" HOME="$SCRATCH/trust/home" AIDC_ROOT="$AIDC_RO
 eq "a workspace config is held to the same rule" \
     "|$SCRATCH/trust/ws/.aidc/config.yaml: networks: wsnet" "$got"
 
+# Every key the shipped config template offers has a trust class (SEC-09). A key
+# added to the template and read by hand, outside the table, would otherwise apply
+# from a repo's config by default.
+unclassified=$(env -i PATH="/usr/bin:/bin" AIDC_ROOT="$AIDC_ROOT" bash -c '
+    . "$AIDC_ROOT/scripts/lib/config.sh"
+    default_config_yaml | awk -F: "/^[a-z_]+:/ { print \$1 }" | while read -r k; do
+        _aidc_config_keys | cut -d"|" -f1 | grep -qx "$k" || printf "%s " "$k"
+    done')
+eq "every key in the config template has a trust class" "" "$unclassified"
+# And the table covers what load_config exports: no AIDC_* setting set from config
+# outside it.
+unlisted=$(grep -oE 'val=\$\(_aidc_yaml_(scalar|list) "\$f" "[a-z_]+"' "$AIDC_ROOT/scripts/lib/config.sh" || true)
+eq "load_config reads no key by name outside the table" "" "$unlisted"
+
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

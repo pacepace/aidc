@@ -391,6 +391,52 @@ _aidc_taint_rank() {
     esac
 }
 
+# Every config key load_config reads, one row each: key|kind|class|variable.
+#   kind   scalar | list | block (a nested mapping with its own loader)
+#   class  what a workspace/repo config may do with it (SEC-09):
+#          safe     applied as written: it cannot open a path out or reach the host
+#          tighten  applied only when the value tightens (_aidc_repo_tightens)
+#          operator never applied from there, only reported: global config and flags only
+#          global   not read from a repo config at all (block keys)
+# load_config reads ONLY the keys listed here, so a new key does nothing until it has
+# a row, and so a class. tests/unit/test-config-sources.sh fails on any key in the
+# shipped config template without one.
+_aidc_config_keys() {
+    cat <<'ROWS'
+profile|scalar|safe|AIDC_PROFILE
+claude_mode|scalar|safe|AIDC_CLAUDE_MODE
+claude_resume|scalar|safe|AIDC_CLAUDE_RESUME
+taint_response|scalar|tighten|AIDC_TAINT_RESPONSE
+tld_taints|scalar|tighten|AIDC_TLD_TAINTS
+share_memory|scalar|tighten|AIDC_SHARE_MEMORY
+share_plugins|scalar|tighten|AIDC_SHARE_PLUGINS
+share_scratchpad|scalar|tighten|AIDC_SHARE_SCRATCHPAD
+egress|scalar|tighten|AIDC_EGRESS
+audit_dir|scalar|operator|AIDC_AUDIT_DIR
+notify_webhook|scalar|operator|AIDC_NOTIFY_WEBHOOK
+state_actor_tlds|list|safe|AIDC_STATE_ACTOR_TLDS
+blocklist_additions|list|safe|AIDC_BLOCKLIST_ADDITIONS
+container_only_paths|list|safe|AIDC_CONTAINER_ONLY_PATHS
+ports|list|operator|AIDC_PORTS
+dns_servers|list|operator|AIDC_DNS_SERVERS
+networks|list|operator|AIDC_NETWORKS
+egress_tcp|list|operator|AIDC_EGRESS_TCP
+mcp|block|global|
+metallm|block|global|
+ROWS
+}
+
+# _aidc_repo_tightens <key> <value> <current>: does a repo's value only tighten?
+_aidc_repo_tightens() {
+    case "$1" in
+        taint_response) [ "$(_aidc_taint_rank "$2")" -ge "$(_aidc_taint_rank "$3")" ] ;;
+        tld_taints)     [ "$2" = "true" ] ;;
+        share_*)        [ "$2" = "false" ] ;;
+        egress)         [ "$2" = "proxied" ] ;;
+        *)              return 1 ;;
+    esac
+}
+
 # Record a setting a workspace/repo config asked for and did not get.
 _aidc_repo_request() {
     AIDC_REPO_REQUESTED="${AIDC_REPO_REQUESTED}${1}: ${2}
@@ -473,98 +519,37 @@ load_config() {
             trusted=true
         fi
 
-        # Scalars: each non-empty value overrides.
-        val=$(_aidc_yaml_scalar "$f" "profile");         [ -n "$val" ] && AIDC_PROFILE="$val"
-        val=$(_aidc_yaml_scalar "$f" "claude_mode");     [ -n "$val" ] && AIDC_CLAUDE_MODE="$val"
-        val=$(_aidc_yaml_scalar "$f" "claude_resume");   [ -n "$val" ] && AIDC_CLAUDE_RESUME="$val"
-
-        val=$(_aidc_yaml_scalar "$f" "taint_response")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || \
-               [ "$(_aidc_taint_rank "$val")" -ge "$(_aidc_taint_rank "$AIDC_TAINT_RESPONSE")" ]; then
-                AIDC_TAINT_RESPONSE="$val"
-            else
-                _aidc_repo_request "$f" "taint_response: $val"
-            fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "tld_taints")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || [ "$val" = "true" ]; then
-                AIDC_TLD_TAINTS="$val"
-            else
-                _aidc_repo_request "$f" "tld_taints: $val"
-            fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "share_memory")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || [ "$val" = "false" ]; then AIDC_SHARE_MEMORY="$val"
-            else _aidc_repo_request "$f" "share_memory: $val"; fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "share_plugins")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || [ "$val" = "false" ]; then AIDC_SHARE_PLUGINS="$val"
-            else _aidc_repo_request "$f" "share_plugins: $val"; fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "share_scratchpad")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || [ "$val" = "false" ]; then AIDC_SHARE_SCRATCHPAD="$val"
-            else _aidc_repo_request "$f" "share_scratchpad: $val"; fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "egress")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ] || [ "$val" = "proxied" ]; then AIDC_EGRESS="$val"
-            else _aidc_repo_request "$f" "egress: $val"; fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "audit_dir")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ]; then AIDC_AUDIT_DIR=$(_aidc_expand_path "$val")
-            else _aidc_repo_request "$f" "audit_dir: $val"; fi
-        fi
-        val=$(_aidc_yaml_scalar "$f" "notify_webhook")
-        if [ -n "$val" ]; then
-            if [ "$trusted" = true ]; then AIDC_NOTIFY_WEBHOOK="$val"
-            else _aidc_repo_request "$f" "notify_webhook: $val"; fi
-        fi
-
-        # Lists: append to running aggregate, dedupe at the end. The first three
-        # only ever add blocking or hiding; the rest open paths, so they are
-        # operator-only like the scalars above.
-        local tlds adds cops ports dnss nets etcp
-        tlds=$(_aidc_yaml_list "$f" "state_actor_tlds" || true)
-        adds=$(_aidc_yaml_list "$f" "blocklist_additions" || true)
-        cops=$(_aidc_yaml_list "$f" "container_only_paths" || true)
-        ports=$(_aidc_yaml_list "$f" "ports" || true)
-        dnss=$(_aidc_yaml_list "$f" "dns_servers" || true)
-        nets=$(_aidc_yaml_list "$f" "networks" || true)
-        etcp=$(_aidc_yaml_list "$f" "egress_tcp" || true)
-        if [ -n "$tlds" ]; then
-            AIDC_STATE_ACTOR_TLDS=$(printf '%s\n%s' "$AIDC_STATE_ACTOR_TLDS" "$tlds" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$adds" ]; then
-            AIDC_BLOCKLIST_ADDITIONS=$(printf '%s\n%s' "$AIDC_BLOCKLIST_ADDITIONS" "$adds" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$cops" ]; then
-            AIDC_CONTAINER_ONLY_PATHS=$(printf '%s\n%s' "$AIDC_CONTAINER_ONLY_PATHS" "$cops" | _aidc_dedupe_lines)
-        fi
-        if [ "$trusted" = true ]; then
-            if [ -n "$ports" ]; then
-                AIDC_PORTS=$(printf '%s\n%s' "$AIDC_PORTS" "$ports" | _aidc_dedupe_lines)
-            fi
-            if [ -n "$dnss" ]; then
-                AIDC_DNS_SERVERS=$(printf '%s\n%s' "$AIDC_DNS_SERVERS" "$dnss" | _aidc_dedupe_lines)
-            fi
-            if [ -n "$nets" ]; then
-                AIDC_NETWORKS=$(printf '%s\n%s' "$AIDC_NETWORKS" "$nets" | _aidc_dedupe_lines)
-            fi
-            if [ -n "$etcp" ]; then
-                AIDC_EGRESS_TCP=$(printf '%s\n%s' "$AIDC_EGRESS_TCP" "$etcp" | _aidc_dedupe_lines)
-            fi
-        else
-            _aidc_repo_request_list "$f" ports "$ports"
-            _aidc_repo_request_list "$f" dns_servers "$dnss"
-            _aidc_repo_request_list "$f" networks "$nets"
-            _aidc_repo_request_list "$f" egress_tcp "$etcp"
-        fi
+        local key kind class var cur
+        while IFS='|' read -r key kind class var; do
+            [ -n "$key" ] || continue
+            case "$kind" in
+                scalar)
+                    val=$(_aidc_yaml_scalar "$f" "$key")
+                    [ -n "$val" ] || continue
+                    cur="${!var}"
+                    if [ "$trusted" = true ] || [ "$class" = safe ] || \
+                       { [ "$class" = tighten ] && _aidc_repo_tightens "$key" "$val" "$cur"; }; then
+                        if [ "$key" = audit_dir ]; then val=$(_aidc_expand_path "$val"); fi
+                        printf -v "$var" '%s' "$val"
+                    else
+                        _aidc_repo_request "$f" "${key}: ${val}"
+                    fi
+                    ;;
+                list)
+                    val=$(_aidc_yaml_list "$f" "$key" || true)
+                    [ -n "$val" ] || continue
+                    if [ "$trusted" = true ] || [ "$class" = safe ]; then
+                        cur="${!var}"
+                        printf -v "$var" '%s' "$(printf '%s\n%s' "$cur" "$val" | _aidc_dedupe_lines)"
+                    else
+                        _aidc_repo_request_list "$f" "$key" "$val"
+                    fi
+                    ;;
+                *) : ;;   # block: a nested mapping, read from the global config by its own loader
+            esac
+        done <<EOF_KEYS
+$(_aidc_config_keys)
+EOF_KEYS
     done
 
     # Final dedupe pass on defaults-only paths too (idempotent under -e).

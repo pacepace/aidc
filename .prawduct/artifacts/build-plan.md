@@ -1,3 +1,10 @@
+---
+artifact: build-plan
+version: 1
+scope: egress-tcp
+branch: feature/egress-tcp
+---
+
 # Build Plan — egress_tcp and repo-config trust
 
 **Work:** `egress-tcp` · **Branch:** `feature/egress-tcp` (off `develop`) · **Started:** 2026-09-21
@@ -73,7 +80,7 @@ Both written into `docs/requirements.md` in Chunk A/B.
 - `egress_tcp:` list (operator-only per Chunk A) and repeatable `--egress-tcp host:port`.
 - Validate host (DNS name or IPv4) and port; resolve on the host; refuse an unresolvable name and
   the MCP address:port.
-- Render `egress-<slug>` services: `aidc/forwarder`, networks `default` (alias = hostname) and
+- Render `egress-<slug>` services on the forwarder image (proxy/forwarder/Dockerfile), networks `default` (alias = hostname) and
   `egress`, socat `-d -d -lf /var/aidc/audit/egress-<slug>.log TCP-LISTEN:<port>,fork,reuseaddr
   TCP:<address>:<port>`, audit dir mounted rw.
 - Tests: unit test of the rendered service and the refusals; smoke test with a throwaway TCP

@@ -285,8 +285,9 @@ has to live where the agent can't reach. Now a privileged process that adds its
 own default route, enables `ip_forward`, and installs its own `MASQUERADE` still
 gets `Network is unreachable`.
 
-Only `squid`, `refresher` (fetches threat feeds) and `policy` (POSTs the taint
-webhook) sit on the egress network. `dev` and `audit` never do.
+Only `squid`, `refresher` (fetches threat feeds), `policy` (POSTs the taint
+webhook) and the one-target socat sidecars (port forwards, TCP egress relays) sit
+on the egress network. `dev` and `audit` never do.
 
 **Two deliberate ways out**, both visible:
 

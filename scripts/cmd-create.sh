@@ -334,7 +334,8 @@ if [ -n "$_etcp_specs" ]; then
     while IFS= read -r _spec; do
         [ -z "$_spec" ] && continue
         aidc_egress_parse "$_spec" || die "invalid --egress-tcp/egress_tcp entry: ${_spec}"
-        _ip=$(aidc_egress_resolve_or_die "$AIDC_EGRESS_HOST")
+        _ip=$(aidc_egress_resolve_explained "$AIDC_EGRESS_HOST") || \
+            die "egress_tcp: ${AIDC_EGRESS_HOST} has no address to relay to"
         if _why=$(aidc_egress_refusal "$_ip" "$AIDC_EGRESS_PORT" "$_etcp_deny"); then
             die "egress_tcp: refusing ${_spec}: ${_why}"
         fi

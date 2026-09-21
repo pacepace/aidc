@@ -104,6 +104,12 @@ eq "an IPv4 destination resolves to itself, without asking anyone" "10.42.0.101"
     "$(PATH=/nonexistent aidc_egress_resolve 10.42.0.101)"
 PATH=/nonexistent aidc_egress_resolve db.example >/dev/null 2>&1; rc=$?
 eq "no resolver tool is its own answer (2), not 'no such name'" "2" "$rc"
+# This file sources egress.sh alone, without common.sh: a failure the library reports
+# through a helper from another library (die, info) would be a swallowed
+# command-not-found here, which is exactly how such a bug hides.
+msg=$(PATH=/nonexistent aidc_egress_resolve_explained db.example 2>&1 >/dev/null); rc=$?
+eq "the library reports a failure itself, with no helper from another library" \
+    "1|cannot resolve db.example: no resolver tool here (needs getent or python3)" "${rc}|${msg}"
 
 echo "=== egress_tcp: refusals ==="
 

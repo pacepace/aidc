@@ -112,7 +112,7 @@ do_add() {
         die "${host} has a relay declared at create time (ports: ${ports}); add ${host}:${want} to egress_tcp: and recreate the session"
     fi
 
-    ip=$(aidc_egress_resolve_or_die "$host")
+    ip=$(aidc_egress_resolve_explained "$host") || die "egress: ${host} has no address to relay to"
     if why=$(aidc_egress_refusal "$ip" "$want" "$(aidc_mcp_deny_target)"); then
         die "refusing ${spec}: ${why}"
     fi

@@ -236,14 +236,16 @@ aidc_egress_resolve() {
     printf '%s' "$ip"
 }
 
-# aidc_egress_resolve_or_die <host>: the address, or die saying why there is none.
-aidc_egress_resolve_or_die() {
+# aidc_egress_resolve_explained <host>: the address, or say on stderr why there is
+# none and return 1. Reports itself rather than calling die: die lives in another
+# library, and inside the $(...) a caller wraps this in, it would end only that subshell.
+aidc_egress_resolve_explained() {
     local ip rc=0
     ip=$(aidc_egress_resolve "$1") || rc=$?
     case "$rc" in
         0) printf '%s' "$ip" ;;
-        2) die "cannot resolve ${1}: no resolver tool here (needs getent or python3)" ;;
-        *) die "cannot resolve ${1} from this machine (no IPv4 address)" ;;
+        2) printf 'cannot resolve %s: no resolver tool here (needs getent or python3)\n' "$1" >&2; return 1 ;;
+        *) printf 'cannot resolve %s from this machine (no IPv4 address)\n' "$1" >&2; return 1 ;;
     esac
 }
 
@@ -313,6 +315,6 @@ aidc_egress_remove_adhoc() {
     local ids
     ids=$(docker ps -a --filter "label=aidc.session=$1" --filter "label=aidc.egress=adhoc" -q 2>/dev/null || true)
     [ -z "$ids" ] && return 0
-    [ -n "${2:-}" ] && info "$2"
+    if [ -n "${2:-}" ]; then printf '[aidc] %s\n' "$2" >&2; fi
     printf '%s\n' "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
 }

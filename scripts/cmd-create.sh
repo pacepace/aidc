@@ -281,7 +281,7 @@ _net_list=$(printf '%s' "$_net_list" | _aidc_dedupe_lines)
 if [ -n "$_net_list" ]; then
     while IFS= read -r _net; do
         [ -z "$_net" ] && continue
-        aidc_assert_attachable "$NAME" "$_net"
+        aidc_assert_attachable "$NAME" "$_net" || exit 1
     done <<EOFNET
 ${_net_list}
 EOFNET

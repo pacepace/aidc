@@ -95,7 +95,7 @@ do_add() {
     local net="${1:-}"
     [ -n "$net" ] || die "add requires a network name (list them with: docker network ls)"
 
-    aidc_assert_attachable "$NAME" "$net"
+    aidc_assert_attachable "$NAME" "$net" || exit 1
 
     if aidc_container_networks "$DEV_CT" | grep -qx "$net"; then
         info "${DEV_CT} is already attached to ${net}"

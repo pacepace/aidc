@@ -28,8 +28,8 @@
 #     alias with every container that carries it, so two relays for one host (one per
 #     port) would both answer, and a client could land on the relay for the other port.
 #
-# Every connection is logged by socat (-d -d) to egress-<host>-<port>.log in the
-# session's audit dir.
+# Every connection is logged by socat (-d -d) to egress-<slug>-<port>.log in the
+# session's audit dir (aidc_egress_slug: db.internal.example -> db-internal-example).
 #
 # Shared by cmd-create.sh (declared: `egress_tcp:` config, --egress-tcp) and
 # cmd-egress.sh (live: `aidc egress <s> add|rm|ls`). Pure functions are unit-tested by
@@ -97,6 +97,14 @@ aidc_egress_parse() {
     if ! aidc_egress_valid_host "$host"; then
         printf 'not a host name or IPv4 address: %s\n' "'$host'" >&2; return 1
     fi
+    # The relay answers to the host's name on the session network, so a name the
+    # session already uses there would be taken over: the session's own services and
+    # squid's alias, and aidc's container names.
+    case "$host" in
+        squid|refresher|policy|audit|dev|aidc-proxy|aidc-*)
+            printf '%s is a name the session already uses; name the destination by its full name or address\n' "'$host'" >&2
+            return 1 ;;
+    esac
     if ! aidc_egress_valid_port "$port"; then
         printf 'not a port (1-65535): %s\n' "'$port'" >&2; return 1
     fi
@@ -298,11 +306,13 @@ aidc_egress_start_adhoc() {
         -v "${audit_dir}:/var/aidc/audit:rw" \
         --entrypoint /bin/sh "$image" -c "$(aidc_egress_script "$host" "$ip" "$@")" \
         >/dev/null || return 1
+    local out
     # Reached by the same name as a declared relay would be: the host's own name, or
     # for an IPv4 destination the declared relay's container name (one relay per host,
     # so the two can never both exist).
-    if ! docker network connect --alias "$(aidc_egress_reach_as "$session" "$host")" \
-            "aidc-${session}-net" "$ct" >/dev/null 2>&1; then
+    if ! out=$(docker network connect --alias "$(aidc_egress_reach_as "$session" "$host")" \
+            "aidc-${session}-net" "$ct" 2>&1); then
+        printf 'could not join %s to aidc-%s-net: %s\n' "$ct" "$session" "$out" >&2
         docker rm -f "$ct" >/dev/null 2>&1 || true
         return 1
     fi

@@ -85,6 +85,9 @@ notok "shell metacharacters"     aidc_egress_parse 'db;rm:5432'
 ok    "65535 is a port"          aidc_egress_valid_port 65535
 notok "256.1.1.1 is not IPv4 (and not a name either)" aidc_egress_valid_host 256.1.1.1
 ok    "a single-label name"      aidc_egress_valid_host postgres
+notok "a session service name (the relay would take it over)" aidc_egress_parse squid:3128
+notok "squid's alias"            aidc_egress_parse aidc-proxy:3128
+notok "an aidc container name"   aidc_egress_parse aidc-other-dev:22
 
 echo "=== egress_tcp: names ==="
 

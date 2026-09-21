@@ -80,16 +80,25 @@ session_audit_dir() {
 
 # Replace the live relay for a host with one on the given ports (none: just remove).
 # Recreating drops that host's open connections, which is why add and rm say so.
+# Everything that can fail beforehand is checked before the old relay goes. The start
+# itself can still fail after it, so the error names the ports that were lost.
 restart_adhoc() {
-    local host="$1" ip="$2" audit
+    local host="$1" ip="$2" audit="" had
     shift 2
+    had=$(relay_for_host "$host" | awk -F'|' '$2 == "adhoc" { print $5 }')
+    if [ $# -gt 0 ]; then
+        audit=$(session_audit_dir)
+        [ -n "$audit" ] || die "cannot find the audit dir of session ${NAME} (is its audit container running?); nothing changed"
+        ensure_image forwarder
+    fi
     docker rm -f "$(aidc_egress_adhoc_name "$NAME" "$host")" >/dev/null 2>&1 || true
     [ $# -eq 0 ] && return 0
-    audit=$(session_audit_dir)
-    [ -n "$audit" ] || die "cannot find the audit dir of session ${NAME} (is its audit container running?)"
-    ensure_image forwarder
-    aidc_egress_start_adhoc "$NAME" "$audit" "aidc/forwarder:${AIDC_VERSION_TAG}" "$host" "$ip" "$@" || \
+    if ! aidc_egress_start_adhoc "$NAME" "$audit" "aidc/forwarder:${AIDC_VERSION_TAG}" "$host" "$ip" "$@"; then
+        if [ -n "$had" ]; then
+            die "could not start the relay for ${host}; its previous relay is gone too, so port(s) ${had} are no longer relayed (aidc egress ${NAME} add ${host}:<port> to restore)"
+        fi
         die "could not start the relay for ${host}"
+    fi
 }
 
 do_add() {

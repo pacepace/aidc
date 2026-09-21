@@ -19,7 +19,7 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   `aidc egress <session> add host:port` on a running session — and a small relay answers to that
   name on the session network and forwards to that one address and port. The session connects
   exactly as it would outside (`psql "…@db.internal.example:5432/…?sslmode=require"`), TLS stays
-  end to end, and every connection is logged to `egress-<host>-<port>.log` in the audit dir. The
+  end to end, and every connection is logged to a file named after the host and port (e.g. `egress-db-internal-example-5432.log`) in the audit dir. The
   name is resolved on the host, so ZeroTier, VPN and split-horizon names work. Enforcement stays
   on: this is the narrow alternative to `--egress direct` or attaching a network. Relays survive
   `aidc restart` and `aidc upgrade`; `aidc status` and `aidc egress <s> ls` list them.

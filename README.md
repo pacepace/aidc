@@ -252,7 +252,7 @@ the session network and forwards to that one address and port. The name is resol
 the host** when the relay is made, so overlay and split-horizon DNS work; if the address
 changes later, `rm` and `add` it again (or recreate). TLS is end to end — the relay never
 sees inside it, so `sslmode=verify-full` checks the real hostname as usual (if your server's
-certificate names that host). Every connection is logged to `egress-<host>-<port>.log` in
+certificate names that host). Every connection is logged to a file named after the host and port (e.g. `egress-db-internal-example-5432.log`) in
 the session's audit dir. A bare IP works too; the session then reaches it by the relay's
 name, which `aidc egress <s> ls` shows.
 

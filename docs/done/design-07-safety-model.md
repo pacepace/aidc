@@ -119,8 +119,8 @@ hole than an attached network, and its size is exact:
   resolved to on the host when the relay was made, on the ports listed. Nothing else on
   that host or network is reachable through it.
 - **Not proxied, not taint-checked** — the same as an attached network. What is recorded
-  is each connection's source, destination and time (`egress-<host>-<port>.log` in the
-  audit dir), not its content.
+  is each connection's source, destination and time, in a file in the audit dir named after
+  the host and port (e.g. `egress-db-internal-example-5432.log`), not its content.
 - **Whatever that service will serve the credentials the session holds is in reach.**
 - **Not bidirectional.** The relay publishes nothing; the destination cannot connect in.
 

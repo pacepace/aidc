@@ -259,6 +259,14 @@ assert "aidc proxy clear with no forwards is idempotent" \
 dev_exec "pkill -f 'http.server ${PF_PORT}'" >/dev/null 2>&1 || true
 echo
 
+# --- step 5a: a repo's own config cannot widen the sandbox (SEC-09) -------
+# The smoke's repo config sets audit_dir, which create applied only because of
+# --trust-repo-config. Without the flag it is set aside and reported.
+echo "[5a/11] repo-config trust"
+assert "aidc config reports the repo's audit_dir as not applied" \
+    "(cd \"$TMP_REPO\" && \"$AIDC\" config) | grep -A5 'NOT applied' | grep -q 'audit_dir: ${AUDIT_DIR_OVERRIDE}'"
+echo
+
 # --- step 5b: TCP egress relay (NET-15) ---------------------------------
 # The session reaches exactly the declared host:port through its relay, the
 # connection is logged to the audit dir, and the same address on another port is
@@ -299,16 +307,43 @@ echo
 # that resolves on the host to the host's address is needed; <ip>.nip.io is public
 # DNS that answers with the address in the name. Skipped where it does not resolve.
 echo "[5c/11] live TCP egress relays"
+# aidc-mcp's address:port as a destination. Bound on loopback or every interface, its
+# port on this host's address is what a session would have to use to reach it.
+smoke_mcp_target() {
+    local t
+    # shellcheck source=/dev/null  # the libraries, in a subshell so nothing leaks
+    t=$(. "$AIDC_ROOT/scripts/lib/common.sh"; . "$AIDC_ROOT/scripts/lib/config.sh"; aidc_mcp_deny_target)
+    case "${t%:*}" in
+        0.0.0.0|127.*) printf '%s:%s' "$EGRESS_HOST_IP" "${t##*:}" ;;
+        *) printf '%s' "$t" ;;
+    esac
+}
 echo_via() {   # $1 = host, $2 = port: what comes back from the echo server
     dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${1}/${2}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true
 }
 if [ -z "$EGRESS_HOST_IP" ]; then
     echo "  SKIP: no host IPv4 address found (ip route get)"
 else
+    # Each refusal must stop the command (non-zero) AND say why: a bare `!` would also
+    # pass on a crash.
+    refused_with() {   # $1 = expected text; the rest = the aidc command
+        local want="$1" out rc=0
+        shift
+        out=$("$AIDC" "$@" 2>&1) || rc=$?
+        [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$want"
+    }
     assert "a live relay for a host with a declared one is refused (one name, one relay)" \
-        "! $AIDC egress ${SESSION} add ${EGRESS_HOST_IP}:${EGRESS_PORT2}"
+        "refused_with 'declared at create time' egress ${SESSION} add ${EGRESS_HOST_IP}:${EGRESS_PORT2}"
     assert "removing a declared destination live is refused" \
-        "! $AIDC egress ${SESSION} rm ${EGRESS_HOST_IP}:${EGRESS_PORT}"
+        "refused_with 'declared at create time' egress ${SESSION} rm ${EGRESS_HOST_IP}:${EGRESS_PORT}"
+    assert "a name that does not resolve is refused" \
+        "refused_with 'no address to relay to' egress ${SESSION} add no-such-host.invalid:5432"
+    assert "loopback is refused" \
+        "refused_with 'loopback' egress ${SESSION} add 127.0.0.1:5432"
+    assert "a session service name is refused" \
+        "refused_with 'already uses' egress ${SESSION} add squid:3128"
+    assert "aidc-mcp's address and port are refused" \
+        "refused_with 'aidc-mcp' egress ${SESSION} add \$(smoke_mcp_target)"
     NIP_HOST="${EGRESS_HOST_IP}.nip.io"
     if [ "$(getent ahostsv4 "$NIP_HOST" 2>/dev/null | awk 'NR == 1 { print $1 }')" != "$EGRESS_HOST_IP" ]; then
         echo "  SKIP: ${NIP_HOST} does not resolve here; live add by name not checked"

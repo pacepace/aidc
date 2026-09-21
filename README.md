@@ -138,7 +138,7 @@ Dev work happens inside the container. **Testing what you built** — pointing a
 aidc create my-feature --port 3000 --port 8080:80
 ```
 
-`--port N` shorthand publishes `localhost:N` → `dev:N`. `--port H:C` lets you remap. Repeatable. You can also list them in `.aidc/config.yaml`:
+`--port N` shorthand publishes `localhost:N` → `dev:N`. `--port H:C` lets you remap. Repeatable. You can also list them in your `~/.config/aidc/config.yaml` (a repo's `.aidc/config.yaml` needs `--trust-repo-config` for this; see [Config](#config)):
 
 ```yaml
 ports:
@@ -175,7 +175,7 @@ aidc create api --network webapp_default           # attach at create time
 ```
 
 ```yaml
-# or in .aidc/config.yaml
+# or in ~/.config/aidc/config.yaml (a repo's .aidc/config.yaml needs --trust-repo-config)
 networks:
   - webapp_default
 ```
@@ -246,7 +246,7 @@ aidc create myproj --egress direct     # restores the old NATed bridge
 ```
 
 ```yaml
-egress: direct                          # or in .aidc/config.yaml
+egress: direct                          # or in ~/.config/aidc/config.yaml
 ```
 
 Use it when a session needs reachability an attached network can't provide —
@@ -276,7 +276,7 @@ By default every session resolves through Quad9 (`9.9.9.9`, `149.112.112.112`) �
 # CLI (order matters; first listed is tried first):
 aidc create myproj --dns 10.147.17.1 --dns 9.9.9.9
 
-# Or per-project / per-workspace in .aidc/config.yaml:
+# Or in ~/.config/aidc/config.yaml (a repo's .aidc/config.yaml needs --trust-repo-config):
 dns_servers:
   - 10.147.17.1     # ZeroTier-managed DNS
   - 9.9.9.9         # fall back to Quad9
@@ -573,6 +573,18 @@ Two layers, both YAML:
 ```
 
 Scalars override (later wins); lists concatenate-and-dedupe across all three.
+
+**A repo's or workspace's config can tighten the sandbox, never loosen it.** Those files are
+writable from inside the session they configure, so an agent could otherwise edit one and get
+a wider sandbox on the next `aidc create`. From a workspace or repo config, aidc applies
+`profile`, `claude_mode`, `claude_resume`, additions to `state_actor_tlds`,
+`blocklist_additions` and `container_only_paths`, and anything that only tightens
+(`egress: proxied`, `share_*: false`, `tld_taints: true`, a stricter `taint_response`).
+Anything that widens it (`egress: direct`, `networks`, `ports`, `egress_tcp`, `dns_servers`,
+`audit_dir`, `notify_webhook`, `share_*: true`, a softer `taint_response`) is listed by
+`aidc create` and ignored. Put those settings in your own `~/.config/aidc/config.yaml` or pass
+them as flags. If you wrote the repo's file yourself and want it applied as written, use
+`aidc create … --trust-repo-config`. `aidc config` shows what was set aside.
 
 ```yaml
 # example config.yaml

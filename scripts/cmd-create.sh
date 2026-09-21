@@ -41,6 +41,7 @@ PORT_FLAGS=()         # repeatable --port N or --port H:C (CLI-13)
 DNS_FLAGS=()          # repeatable --dns <ip>; overrides Quad9 + config dns_servers
 NETWORK_FLAGS=()      # repeatable --network <net>; merges with config networks: (NET-13)
 EGRESS_OVERRIDE=""    # "", "proxied", or "direct" -- empty defers to config (NET-14)
+AIDC_TRUST_REPO_CONFIG=false  # --trust-repo-config: apply a repo's sandbox-widening settings (SEC-09)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,6 +75,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--egress requires a value (proxied|direct)"
             EGRESS_OVERRIDE="$2"; shift 2 ;;
         --egress=*) EGRESS_OVERRIDE="${1#--egress=}"; shift ;;
+        --trust-repo-config) AIDC_TRUST_REPO_CONFIG=true; shift ;;
         -h|--help)
             cat <<'EOF'
 aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no-resume] [--port H:C ...]
@@ -117,6 +119,12 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                   from going around it. Use only when the session genuinely
                   needs direct reachability an attached --network can't give it
                   (overlay networks like ZeroTier/Tailscale, direct DNS).
+  --trust-repo-config
+                apply the settings in the workspace's or repo's .aidc/config.yaml
+                that widen the sandbox (egress, networks, ports, egress_tcp,
+                dns_servers, audit_dir, notify_webhook, share_*, a softer
+                taint_response). Without it they are listed and ignored: that
+                file is writable from inside the session it configures.
 EOF
             exit 0 ;;
         --*) die "unknown flag: $1" ;;
@@ -177,7 +185,9 @@ fi
 # override; lists aggregate. The workspace path is passed only when --workspace
 # was given; otherwise it's the same as repo and load_config skips the
 # double-read.
+export AIDC_TRUST_REPO_CONFIG
 load_config "$REPO_PATH" "$WORKSPACE_PATH"
+aidc_report_repo_requests
 
 if [ -n "$PROFILE_OVERRIDE" ]; then
     AIDC_PROFILE="$PROFILE_OVERRIDE"

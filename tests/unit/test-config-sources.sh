@@ -9,6 +9,8 @@
 #
 # Pure function calls: no Docker, no network.
 
+# Many checks pass a $VAR expression in single quotes for an inner shell to expand.
+# shellcheck disable=SC2016
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -242,6 +244,99 @@ eq "a chown it cannot do stops the create instead of leaving it unwritable" "ref
 
 out=$(mkdir_host "/elsewhere/x" "/host/state|$SCRATCH/mnt" /home/pace)
 eq "a path outside every mount is refused" "refused" "$out"
+
+# SEC-09: a workspace/repo config is writable from inside the session it configures,
+# so what it asks for that would widen the sandbox is set aside, not applied.
+mkdir -p "$SCRATCH/trust/home/.config/aidc" "$SCRATCH/trust/repo/.aidc"
+printf 'audit_dir: /operator/audit\nnetworks:\n  - opnet\n' \
+    > "$SCRATCH/trust/home/.config/aidc/config.yaml"
+
+trust_load() {
+    # $1 = repo config body, $2 = AIDC_TRUST_REPO_CONFIG, $3 = what to print
+    printf '%s' "$1" > "$SCRATCH/trust/repo/.aidc/config.yaml"
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    env -i PATH="/usr/bin:/bin" HOME="$SCRATCH/trust/home" AIDC_ROOT="$AIDC_ROOT" \
+        AIDC_TRUST_REPO_CONFIG="$2" REPO="$SCRATCH/trust/repo" bash -c '
+            set -eu
+            . "$AIDC_ROOT/scripts/lib/config.sh"
+            load_config "$REPO" >/dev/null 2>&1
+            eval "printf \"%s\" \"$1\""' _ "$3"
+}
+
+REPO_WIDEN='egress: direct
+audit_dir: /etc
+notify_webhook: https://evil.example/hook
+share_memory: true
+tld_taints: false
+taint_response: log
+ports:
+  - "2222:22"
+dns_servers:
+  - 6.6.6.6
+networks:
+  - bridge
+egress_tcp:
+  - db.example:5432
+'
+
+eq "a repo cannot turn egress direct" "proxied" \
+    "$(trust_load "$REPO_WIDEN" false '$AIDC_EGRESS')"
+eq "nor move the audit dir" "/operator/audit" \
+    "$(trust_load "$REPO_WIDEN" false '$AIDC_AUDIT_DIR')"
+eq "nor set a webhook" "" \
+    "$(trust_load "$REPO_WIDEN" false '$AIDC_NOTIFY_WEBHOOK')"
+eq "nor soften the taint response" "freeze" \
+    "$(trust_load "$REPO_WIDEN" false '$AIDC_TAINT_RESPONSE')"
+eq "nor add ports, dns, networks or egress_tcp" "||opnet|" \
+    "$(trust_load "$REPO_WIDEN" false '$AIDC_PORTS|$AIDC_DNS_SERVERS|$AIDC_NETWORKS|$AIDC_EGRESS_TCP')"
+requested=$(trust_load "$REPO_WIDEN" false '$AIDC_REPO_REQUESTED')
+eq "every refused setting is reported" "10" \
+    "$(printf '%s' "$requested" | grep -c "^$SCRATCH/trust/repo/.aidc/config.yaml: ")"
+case "$requested" in
+    *"egress_tcp: db.example:5432"*) echo "  PASS: with its value"; PASS=$((PASS + 1)) ;;
+    *) echo "  FAIL: with its value (got: $requested)"; FAIL=$((FAIL + 1)) ;;
+esac
+# share_memory: true and tld_taints: false equal the defaults, but are still loosening
+# requests from a repo; reporting them is harmless and keeps the rule one-directional.
+
+eq "with --trust-repo-config it all applies" \
+    "direct|/etc|log|2222:22|6.6.6.6|opnet bridge|db.example:5432|" \
+    "$(trust_load "$REPO_WIDEN" true '$AIDC_EGRESS|$AIDC_AUDIT_DIR|$AIDC_TAINT_RESPONSE|$AIDC_PORTS|$AIDC_DNS_SERVERS|$(echo $AIDC_NETWORKS)|$AIDC_EGRESS_TCP|$AIDC_REPO_REQUESTED')"
+
+REPO_TIGHTEN='profile: node
+claude_mode: safe
+egress: proxied
+share_memory: false
+share_plugins: false
+share_scratchpad: false
+tld_taints: true
+taint_response: freeze
+blocklist_additions:
+  - bad.example
+container_only_paths:
+  - node_modules
+'
+eq "tightening settings apply without the flag, and nothing is reported" \
+    "node|safe|proxied|false|false|false|true|freeze|bad.example|node_modules|" \
+    "$(trust_load "$REPO_TIGHTEN" false '$AIDC_PROFILE|$AIDC_CLAUDE_MODE|$AIDC_EGRESS|$AIDC_SHARE_MEMORY|$AIDC_SHARE_PLUGINS|$AIDC_SHARE_SCRATCHPAD|$AIDC_TLD_TAINTS|$AIDC_TAINT_RESPONSE|$AIDC_BLOCKLIST_ADDITIONS|$AIDC_CONTAINER_ONLY_PATHS|$AIDC_REPO_REQUESTED')"
+
+# The operator's own config is trusted: the same keys there apply.
+printf 'egress: direct\negress_tcp:\n  - yuga.example:5433\n' > "$SCRATCH/trust/home/.config/aidc/config.yaml"
+eq "the operator's config sets them freely" "direct|yuga.example:5433|" \
+    "$(trust_load '' false '$AIDC_EGRESS|$AIDC_EGRESS_TCP|$AIDC_REPO_REQUESTED')"
+
+# A workspace config is as writable from inside as a repo's.
+mkdir -p "$SCRATCH/trust/ws/.aidc" "$SCRATCH/trust/ws/repo"
+printf 'networks:\n  - wsnet\n' > "$SCRATCH/trust/ws/.aidc/config.yaml"
+: > "$SCRATCH/trust/home/.config/aidc/config.yaml"
+# shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+got=$(env -i PATH="/usr/bin:/bin" HOME="$SCRATCH/trust/home" AIDC_ROOT="$AIDC_ROOT" \
+    WS="$SCRATCH/trust/ws" bash -c '
+        . "$AIDC_ROOT/scripts/lib/config.sh"
+        load_config "$WS/repo" "$WS" >/dev/null 2>&1
+        printf "%s|%s" "$AIDC_NETWORKS" "$AIDC_REPO_REQUESTED"')
+eq "a workspace config is held to the same rule" \
+    "|$SCRATCH/trust/ws/.aidc/config.yaml: networks: wsnet" "$got"
 
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"

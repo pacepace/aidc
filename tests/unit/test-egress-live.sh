@@ -97,7 +97,9 @@ got=$(egress /audit s1 add 10.1.2.3:6379)
 eq "a failed start: the add fails" "1" "${got%%|*}"
 has "docker's own error is shown" "fake join failure" "$got"
 has "the port that was relayed and is now lost is named" "port(s) 5432 are no longer relayed" "$got"
-has "the half-made relay is removed" "rm -f aidc-s1-egressx-10-1-2-3" "$(cat "$SCRATCH/log")"
+# The old relay's removal logs the same line, so look only after the failed join.
+eq "the half-made relay is removed after the failed join" "1" \
+    "$(awk '/^network connect/ { after = 1; next } after && /^rm -f aidc-s1-egressx-10-1-2-3/ { n++ } END { print n + 0 }' "$SCRATCH/log")"
 
 # Removing 5432 from a relay that also carries 6379: only 6379 was meant to stay.
 got=$(FAKE_PORTS="5432 6379" egress /audit s1 rm 10.1.2.3:5432)

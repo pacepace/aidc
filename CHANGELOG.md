@@ -13,6 +13,33 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Added
+- **A proxied session can reach a TCP service the host can reach, and nothing else.** Name it —
+  `egress_tcp:` in `~/.config/aidc/config.yaml`, `aidc create --egress-tcp host:port`, or
+  `aidc egress <session> add host:port` on a running session — and a small relay answers to that
+  name on the session network and forwards to that one address and port. The session connects
+  exactly as it would outside (`psql "…@db.internal.example:5432/…?sslmode=require"`), TLS stays
+  end to end, and every connection is logged to `egress-<host>-<port>.log` in the audit dir. The
+  name is resolved on the host, so ZeroTier, VPN and split-horizon names work. Enforcement stays
+  on: this is the narrow alternative to `--egress direct` or attaching a network. Relays survive
+  `aidc restart` and `aidc upgrade`; `aidc status` and `aidc egress <s> ls` list them.
+
+### Security
+- **A repo's own `.aidc/config.yaml` can no longer widen the sandbox.** That file (and a
+  workspace's) is writable from inside the session it configures, and aidc applied everything in
+  it: `egress: direct`, `networks`, `ports`, `dns_servers`, `audit_dir` (which the policy
+  container mounts read-write, so a repo could point it anywhere on the host), `notify_webhook`,
+  the `share_*` host mounts, and a softer `taint_response`. From those files aidc now applies only
+  settings that cannot widen the sandbox, plus anything that only tightens it; the rest is listed
+  by `aidc create` (and `aidc config`) and ignored. Move those settings to your own config, or
+  pass `aidc create --trust-repo-config` if you wrote the file and want it applied as written.
+
+### Fixed
+- **`aidc create --port` works on a machine that has never run `aidc proxy`.** Declared port
+  forwards use the `aidc/forwarder` image, which only `aidc proxy` built; compose then tried to
+  pull it from a registry where it does not exist. `aidc create` now builds it when it is needed.
+- The safety-model doc gave `notify` as the default taint response; it is `freeze`.
+
 ## [1.7.0] - 2026-09-17
 
 ### Security

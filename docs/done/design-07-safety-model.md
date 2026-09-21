@@ -108,6 +108,35 @@ silently rerouting through the network you attached (`gw_priority`; see
 attached network as being inside the blast radius. `aidc status` lists current attachments
 for exactly this reason.
 
+### TCP destinations you name (NET-15)
+
+`egress_tcp:` in your config, `aidc create --egress-tcp host:port` and
+`aidc egress <session> add` let a proxied session reach a service the host can reach —
+a database over ZeroTier, a VPN, the LAN — without a route out. This is a far smaller
+hole than an attached network, and its size is exact:
+
+- **One address, the named ports.** The relay forwards to the address the name
+  resolved to on the host when the relay was made, on the ports listed. Nothing else on
+  that host or network is reachable through it.
+- **Not proxied, not taint-checked** — the same as an attached network. What is recorded
+  is each connection's source, destination and time (`egress-<host>-<port>.log` in the
+  audit dir), not its content.
+- **Whatever that service will serve the credentials the session holds is in reach.**
+- **Not bidirectional.** The relay publishes nothing; the destination cannot connect in.
+
+Refused: aidc-mcp's own address and port (MCP-12), and loopback.
+
+### A repo configuring its own sandbox (SEC-09)
+
+A `.aidc/config.yaml` in the repo or the workspace is writable from inside the session,
+so an agent can edit it and the next `aidc create` would read it. From those files aidc
+applies only settings that cannot widen the sandbox, and anything that only tightens it.
+The rest (`egress: direct`, `networks`, `ports`, `egress_tcp`, `dns_servers`, `audit_dir`
+— which the policy sidecar mounts read-write — `notify_webhook`, `share_*: true`, a
+softer `taint_response`) is listed by `aidc create` and ignored unless the operator passes
+`--trust-repo-config`. **Mitigation for the operator:** read that list before passing the
+flag; put settings you want in your own `~/.config/aidc/config.yaml`.
+
 ### Host network position attacks
 
 If the host is on a network where attackers can reach Docker's exposed ports, aidc itself doesn't harden the host. **Mitigation:** out of scope. aidc assumes the host's perimeter is secured by other means.
@@ -178,7 +207,7 @@ Write the flag + immediately `docker pause aidc-<session>-dev`. Claude is frozen
 
 ### Configuration
 
-`taint_response` is set in `~/.config/aidc/config.yaml` (global default) or `<repo>/.aidc/config.yaml` (per-project override). Default if unset: `notify` (SEC-08).
+`taint_response` is set in `~/.config/aidc/config.yaml` (global default) or `<repo>/.aidc/config.yaml` (per-project override, which may only make it stricter: SEC-09). Default if unset: `freeze` (SEC-08).
 
 ```yaml
 taint_response: freeze

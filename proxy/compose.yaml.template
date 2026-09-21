@@ -202,3 +202,4 @@ ${OVERLAY_VOLUMES_MOUNTS}
     # which prints "[aidc-user-main] ready" once tmux is up. aidc create's
     # dev-wait watches for that marker to know the container is fully ready.
 ${PORT_FORWARDER_SERVICES}
+${EGRESS_RELAY_SERVICES}

@@ -221,6 +221,55 @@ leaves through the proxied path instead of silently rerouting through the networ
 attached. (That last part needs `gw_priority`, so declared attachments require Docker
 Compose 2.34+; `aidc create` checks and tells you if yours is older.)
 
+### Reaching a database on another network (ZeroTier, VPN, LAN)
+
+A proxied session has no route out, and squid only carries HTTP. When the session needs a
+postgres, a redis or an SSH host that **the host** can reach — over ZeroTier, a VPN, the
+office LAN — name that one destination:
+
+```yaml
+# ~/.config/aidc/config.yaml
+egress_tcp:
+  - db.internal.example:5432
+  - cache.internal.example:6379
+```
+
+```bash
+aidc create api --egress-tcp db.internal.example:5432     # same thing, per session
+aidc egress api add db.internal.example:5432              # a session that's already running
+aidc egress api ls
+aidc egress api rm db.internal.example:5432
+```
+
+Inside the session nothing changes about how you connect:
+
+```bash
+psql "postgresql://app@db.internal.example:5432/app?sslmode=require"
+```
+
+Each destination gets a small relay (`aidc/forwarder`, socat) that answers to that name on
+the session network and forwards to that one address and port. The name is resolved **on
+the host** when the relay is made, so overlay and split-horizon DNS work; if the address
+changes later, `rm` and `add` it again (or recreate). TLS is end to end — the relay never
+sees inside it, so `sslmode=verify-full` checks the real hostname as usual (if your server's
+certificate names that host). Every connection is logged to `egress-<host>-<port>.log` in
+the session's audit dir. A bare IP works too; the session then reaches it by the relay's
+name, which `aidc egress <s> ls` shows.
+
+| | `aidc restart` | `aidc upgrade` | `aidc kill` |
+|---|---|---|---|
+| declared (`--egress-tcp` / `egress_tcp:`) | survives | survives | removed; comes back on `create` |
+| live (`aidc egress … add`) | survives | survives | removed |
+
+What it opens, precisely: that address, those ports, nothing else — much narrower than
+`--network` or `--egress direct`. That traffic doesn't pass through squid, so the blocklist
+and taint detection don't see it; the connection log is the record. The relay refuses
+aidc-mcp's own address and port, and loopback.
+
+`egress_tcp` is operator-only: a repo's own `.aidc/config.yaml` can't open it (see
+[Config](#config)). For a clustered database whose driver discovers other nodes (YugabyteDB
+smart drivers, Cassandra), list each node, or turn discovery off (`load_balance=false`).
+
 ### Egress is enforced, not requested
 
 The session bridge is a Docker **`internal`** network. Docker installs no NAT for
@@ -249,9 +298,9 @@ aidc create myproj --egress direct     # restores the old NATed bridge
 egress: direct                          # or in ~/.config/aidc/config.yaml
 ```
 
-Use it when a session needs reachability an attached network can't provide —
-ZeroTier/Tailscale hosts, direct DNS. `aidc create` tells you plainly that
-enforcement is off for that session.
+Use it only when a session needs reachability nothing narrower provides. To reach a
+few services over ZeroTier/Tailscale/a VPN, name them with `egress_tcp` instead (above):
+it keeps enforcement on. `aidc create` tells you plainly when enforcement is off.
 
 The other is attaching a network (below): it grants whatever that network grants,
 and most compose bridges are NATed, so attaching one restores general internet
@@ -532,12 +581,13 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 
 | Command | What it does |
 |---------|--------------|
-| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...] [--egress proxied\|direct]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. `--egress direct` disables enforced egress (see "Egress is enforced"). |
+| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...] [--egress-tcp HOST:PORT ...] [--egress proxied\|direct] [--trust-repo-config]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. `--egress-tcp` lets the session reach one TCP destination the host can reach (see "Reaching a database on another network"). `--egress direct` disables enforced egress (see "Egress is enforced"). `--trust-repo-config` applies the sandbox-widening settings in the repo's own `.aidc/config.yaml` (see "Config"). |
 | `aidc list` | All sessions; status + taint flag. |
-| `aidc status <name>` | Component health, taint, declared + adhoc ports, attached networks, audit dir path. |
+| `aidc status <name>` | Component health, taint, declared + adhoc ports, TCP egress relays, attached networks, audit dir path. |
 | `aidc attach <name>` | `docker exec -it -u vscode` into tmux. |
 | `aidc proxy <name> {add\|rm\|ls\|clear}` | Manage adhoc host->container port forwards (not persisted across restart/kill). |
 | `aidc network <name> {add\|rm\|ls}` | Attach a running session's dev container to another docker bridge so it can reach that stack's services by name. Survives `restart`, not `upgrade`/`kill` — use `create --network` for permanent. Widens the sandbox: see "Reaching another stack's services". |
+| `aidc egress <name> {add\|rm\|ls\|clear}` | Let a running session reach a TCP `host:port` the host can reach (a database over ZeroTier). Survives `restart` and `upgrade`, not `kill`; use `create --egress-tcp` or `egress_tcp:` for permanent. |
 | `aidc logs <name> [--component dev\|squid\|refresher\|policy\|audit]` | Tail logs. |
 | `aidc refresh <name>` | Force a blocklist refresh. |
 | `aidc restart <name>` | Restart the dev container in place from its existing image (proxy stack stays; adhoc forwards do NOT survive). Does **not** pick up image rebuilds — use `upgrade` for that. |
@@ -638,6 +688,12 @@ networks:                             # foreign docker bridges the dev container
                                       # is reachable on every port, unproxied and invisible to
                                       # taint detection. See "Reaching another stack's services".
   - webapp_default
+
+egress_tcp:                           # TCP destinations the session may reach through a relay,
+                                      # without a route out: a database over ZeroTier, a VPN, the LAN.
+                                      # Additive; same as `aidc create --egress-tcp`. Resolved on the
+                                      # host at create. See "Reaching a database on another network".
+  - db.internal.example:5432
 
 notify_webhook: ""                    # POSTed to on taint events
 

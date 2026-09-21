@@ -36,6 +36,8 @@ forwards ride the compose stack and come back.
 
 Network attachments (aidc network / --network) all survive: this restarts the
 container rather than recreating it, and endpoints are container state.
+TCP egress relays (aidc egress / --egress-tcp) survive too: they are separate
+containers that forward to an address, not to the dev container.
 
 Use 'aidc upgrade <name>' to swap onto a freshly rebuilt image instead.
 EOF

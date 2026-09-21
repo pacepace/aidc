@@ -32,7 +32,9 @@ START_TS=$(date +%s)
 mkdir -p "$TMP_REPO" "$AUDIT_DIR_OVERRIDE" "$TMP_REPO/.aidc"
 # Tell aidc create where to put audit data -- overrides the global config's
 # audit_dir. The smoke writes a per-project config so the override is picked
-# up via normal config merge (per-project beats global beats defaults).
+# up via normal config merge (per-project beats global beats defaults). A repo
+# config may not move the audit dir on its own (SEC-09): create is run with
+# --trust-repo-config, which is what that flag is for -- we wrote this file.
 cat > "$TMP_REPO/.aidc/config.yaml" <<EOF
 audit_dir: ${AUDIT_DIR_OVERRIDE}
 EOF
@@ -56,6 +58,9 @@ cleanup() {
     # false test cannot abort the trap under set -e and skip the rm -rf below.
     if [ -n "${SMOKE_NET:-}" ]; then
         docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${EGRESS_ECHO:-}" ]; then
+        docker rm -f "$EGRESS_ECHO" >/dev/null 2>&1 || true
     fi
 
     # git commit inside the dev container (uid 1000) leaves .git objects owned by
@@ -120,7 +125,18 @@ chmod -R a+rwX "$TMP_REPO"
 
 # --- step 1: create session ----------------------------------------------
 echo "[1/11] aidc create"
-"$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi 2>&1 | tee "$CREATE_OUT"
+# TCP egress (NET-15) needs a destination the HOST can reach and the session
+# cannot: a port published on this machine's own address. Found before create so
+# the relay can be declared; the server behind it starts after (step 5b), since the
+# relay only connects when the session does.
+EGRESS_HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}' | head -n1 || true)
+EGRESS_PORT=$((29000 + RANDOM % 1000))
+EGRESS_FLAGS=()
+if [ -n "$EGRESS_HOST_IP" ]; then
+    EGRESS_FLAGS=(--egress-tcp "${EGRESS_HOST_IP}:${EGRESS_PORT}")
+fi
+"$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi --trust-repo-config \
+    ${EGRESS_FLAGS[@]+"${EGRESS_FLAGS[@]}"} 2>&1 | tee "$CREATE_OUT"
 # Extract audit dir from the 'audit:   <path>' line in create output.
 AUDIT_DIR=$(grep -E '^[[:space:]]*audit:' "$CREATE_OUT" | head -n1 | awk '{print $2}')
 if [ -z "$AUDIT_DIR" ] || [ ! -d "$AUDIT_DIR" ]; then
@@ -241,6 +257,40 @@ assert "aidc proxy clear with no forwards is idempotent" \
     "$AIDC proxy ${SESSION} clear"
 # Tidy: stop the in-container http.server so we don't leak it into later tests.
 dev_exec "pkill -f 'http.server ${PF_PORT}'" >/dev/null 2>&1 || true
+echo
+
+# --- step 5b: TCP egress relay (NET-15) ---------------------------------
+# The session reaches exactly the declared host:port through its relay, the
+# connection is logged to the audit dir, and the same address on another port is
+# still unreachable. The unit job (tests/unit/test-egress-tcp.sh) covers parsing,
+# refusals and rendering; this is the Docker-facing half.
+echo "[5b/11] TCP egress relay"
+if [ -z "$EGRESS_HOST_IP" ]; then
+    echo "  SKIP: no host IPv4 address found (ip route get)"
+else
+    EGRESS_RELAY="aidc-${SESSION}-egress-$(printf '%s' "$EGRESS_HOST_IP" | tr '.' '-')"
+    EGRESS_ECHO="aidc-${SESSION}-smoke-echo"
+    docker run -d --name "$EGRESS_ECHO" -p "${EGRESS_PORT}:7777" \
+        "aidc/forwarder:$(cat "$AIDC_ROOT/VERSION")" \
+        TCP-LISTEN:7777,fork,reuseaddr EXEC:cat >/dev/null
+    assert "the relay is running" \
+        "docker ps --format '{{.Names}}' | grep -qx '${EGRESS_RELAY}'"
+    ECHOED=""
+    for _ in $(seq 1 10); do
+        ECHOED=$(dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${EGRESS_RELAY}/${EGRESS_PORT}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true)
+        if [ "$ECHOED" = "aidc-egress" ]; then break; fi
+        sleep 0.5
+    done
+    assert "the session reaches the declared destination through the relay" \
+        "[ '${ECHOED}' = 'aidc-egress' ]"
+    assert "the connection is logged in the audit dir" \
+        "grep -q 'accepting connection' \"\$AUDIT_DIR\"/egress-*-${EGRESS_PORT}.log"
+    assert "the destination itself is still unreachable directly" \
+        "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_HOST_IP}/${EGRESS_PORT}\"'"
+    assert "the relay carries no other port" \
+        "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_RELAY}/22\"'"
+    docker rm -f "$EGRESS_ECHO" >/dev/null 2>&1 || true
+fi
 echo
 
 # --- step 6: attached bridge networks (NET-13) ---------------------------
@@ -478,6 +528,8 @@ assert "squid container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-squid\""
 assert "policy container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-policy\""
+assert "egress relay removed" \
+    "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egress-\""
 echo
 
 # --- step 11: audit dir populated after kill ------------------------------

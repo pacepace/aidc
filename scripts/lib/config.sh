@@ -101,6 +101,13 @@ blocklist_additions: []
 # networks that do the job -- never Docker's default `bridge`.
 networks: []
 
+# TCP destinations the session may reach, host:port, without a route out: a
+# database over ZeroTier, a VPN or the LAN. Each gets a relay that answers to the
+# name inside the session and forwards to that one address and port, logging every
+# connection to the audit dir. Resolved on this machine at create. Same as
+# `aidc create --egress-tcp`. A repo's own .aidc/config.yaml cannot set this.
+egress_tcp: []
+
 notify_webhook: ""
 
 # Only relevant if you use `aidc mcp` (the control plane for AI orchestrators).

@@ -81,9 +81,12 @@ Both written into `docs/requirements.md` in Chunk A/B.
 - Done when: tests + smoke pass.
 
 ### Chunk C: `aidc egress` and docs
-- `aidc egress <session> add|rm|ls <host:port>` for a running session (adhoc relays named
-  `aidc-<s>-efwd-<slug>`, lost on upgrade like `aidc proxy` forwards); `aidc kill` sweeps them
-  before `compose down` (they attach to the session networks).
+- `aidc egress <session> add|rm|ls|clear <host:port>` for a running session (adhoc relays named
+  `aidc-<s>-egressx-<slug>`, labelled). They survive restart and upgrade like `aidc network`
+  attachments (upgrade recreates only dev; a relay targets an address, not dev); `aidc kill`
+  sweeps them before `compose down` (they attach to the session networks). A host that already
+  has a declared relay cannot get a live one (one alias, one relay) — recreate instead.
+- `aidc status` lists relays.
 - Docs: README (config + a "reaching a database on another network" section), design doc,
   CHANGELOG, requirements.
 - Done when: tests pass; cumulative Critic run and blocking findings resolved.

@@ -45,3 +45,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
 ignore_missing_imports = true
+
+[tool.uv]
+# Supply-chain cooldown (REL-09): never resolve a version uploaded in the last 14 days.
+# Most malicious releases (a hijacked maintainer account, a typosquat) are found and
+# pulled within days; waiting two weeks lets that happen before we install anything.
+# A fix that needs to land sooner is an explicit, reviewed exception:
+# `exclude-newer-package` for that one package, with the reason beside it.
+exclude-newer = "14 days"

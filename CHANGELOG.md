@@ -34,6 +34,15 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   by `aidc create` (and `aidc config`) and ignored. Move those settings to your own config, or
   pass `aidc create --trust-repo-config` if you wrote the file and want it applied as written.
 
+- **The MCP server's Python dependencies are upgraded past ten published security advisories**
+  (anyio, cryptography, mcp, pydantic-settings, starlette, among them a critical TLS host-name
+  spoofing issue in anyio). Rebuild the image to pick them up: `aidc rebuild`, then restart
+  `aidc mcp`.
+- **New dependency versions wait 14 days before aidc adopts them.** Most malicious releases (a
+  hijacked maintainer account, a typosquat) are found and pulled within days, so the MCP server's
+  dependency lock never takes anything published in the last two weeks (`exclude-newer` in
+  `mcp/pyproject.toml`, pinned by a test). Every fix above was already older than that.
+
 ### Fixed
 - **`aidc create --port` works on a machine that has never run `aidc proxy`.** Declared port
   forwards use the `aidc/forwarder` image, which only `aidc proxy` built; compose then tried to

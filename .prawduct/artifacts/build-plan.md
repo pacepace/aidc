@@ -112,8 +112,19 @@ Both written into `docs/requirements.md` in Chunk A/B.
   CHANGELOG, requirements.
 - Done when: tests pass; cumulative Critic run and blocking findings resolved.
 
+### Chunk D: dependency advisories and the 14-day supply-chain cooldown (REL-09)
+Added 2026-09-21 at Pace's request, riding the same PR ("those fixes ride in with this in one PR").
+- Upgrade mcp/uv.lock past GitHub's ten advisories, under `exclude-newer = "14 days"` in
+  mcp/pyproject.toml.
+- Dev image: system-wide cooldown defaults for uv, pip and npm (each tool's own setting, per Pace:
+  "don't go reinventing the wheel"); poetry/pipenv as uv tools. Claude Code is exempt (Pace: "we
+  can't hold back Claude Code, that changes too much"). Also exempt: Go/Rust/CPython toolchains and apt.
+- Tests: unit test pins every setting; a test image build proves each tool refuses a <14-day version.
+- Done when: tests pass, the image builds, behaviour is verified in it, and the cumulative Critic runs.
+
 ## Status
 
 - [x] Chunk A: repo-config trust (SEC-09) — built, unit-tested; reviewed with the cumulative Critic
 - [x] Chunk B: egress_tcp at create (NET-15) — reviewed: rev-20260921T204623Z-fa131876, verified rev-20260921T210529Z-fbc10ffb
 - [x] Chunk C: `aidc egress` and docs — same reviews; smoke 81/81 at dcce369
+- [ ] Chunk D: dependency advisories and the 14-day supply-chain cooldown (REL-09)

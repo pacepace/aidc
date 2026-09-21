@@ -38,10 +38,15 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   (anyio, cryptography, mcp, pydantic-settings, starlette, among them a critical TLS host-name
   spoofing issue in anyio). Rebuild the image to pick them up: `aidc rebuild`, then restart
   `aidc mcp`.
-- **New dependency versions wait 14 days before aidc adopts them.** Most malicious releases (a
-  hijacked maintainer account, a typosquat) are found and pulled within days, so the MCP server's
-  dependency lock never takes anything published in the last two weeks (`exclude-newer` in
-  `mcp/pyproject.toml`, pinned by a test). Every fix above was already older than that.
+- **New package versions wait 14 days, in aidc and inside sessions.** Most malicious releases (a
+  hijacked maintainer account, a typosquat) are found and pulled within days. The MCP server's
+  dependency lock never takes anything published in the last two weeks, and the dev image sets the
+  same rule as a system default for uv, pip and npm, so it also covers what the agent installs
+  inside a session. A project's own config still governs that project, and one command can
+  override it (`uv --exclude-newer false`, `pip --uploaded-prior-to <now>`,
+  `npm --min-release-age=0`). Claude Code is exempt and stays current; so are the Go, Rust and
+  Python toolchains and system packages. poetry and pipenv are now installed as uv tools. Needs
+  `aidc rebuild` and `aidc upgrade <session>`.
 
 ### Fixed
 - **`aidc create --port` works on a machine that has never run `aidc proxy`.** Declared port

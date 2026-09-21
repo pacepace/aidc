@@ -429,6 +429,23 @@ aidc claude-token clear       # removes it; new sessions log in inside instead
 
 Trade-offs: running `claude setup-token` invalidates the host's current login once (`/login` on the host afterwards); the token is **inference-only**, so **Remote Control does not work** in sessions that use it, and `/login` inside such a session is ignored while the token is set; rotate yearly by re-running setup. Billing stays on your subscription. Existing sessions keep whatever they were created with; `aidc kill` + `aidc create` moves one onto the other path.
 
+### New package versions wait 14 days
+
+Inside a session, `pip install`, `uv add` / `uv pip install` and `npm install` skip any version
+published in the last 14 days. Most malicious releases, from a hijacked maintainer account or a
+typosquat, are found and pulled within days, so waiting two weeks keeps them out. It's a
+system-wide default, so a project's own `uv.toml`, `pip.conf` or `.npmrc` still sets its own
+rule. When you really need something newer, override it for that one command:
+
+```bash
+uv add somepkg --exclude-newer false
+pip install --uploaded-prior-to "$(date -u +%FT%TZ)" somepkg
+npm install --min-release-age=0 somepkg
+```
+
+Claude Code is exempt and stays current, and so are the Go, Rust and Python toolchains and
+Ubuntu's own packages (holding back security updates there would do more harm than good).
+
 ### Inside the session
 
 `aidc attach <name>` drops you into a `tmux` session named `main` with three windows.

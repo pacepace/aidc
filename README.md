@@ -270,8 +270,10 @@ aidc-mcp's own address and port, and loopback.
 [Config](#config)). A session created by an orchestrator through the MCP's `session_create`
 never trusts the repo's config either; the names in your own `egress_tcp:` are then resolved
 inside the aidc-mcp container, which uses the host's upstream DNS servers but not a per-link
-resolver (systemd-resolved routing a ZeroTier domain, say). If such a name doesn't resolve
-there, use its IP address. For a clustered database whose driver discovers other nodes (YugabyteDB
+resolver (systemd-resolved routing a ZeroTier domain, say). Such a name may not resolve
+there, or may resolve to a different, public address than it does on the host. Check with
+`aidc egress <s> ls` (it shows the address each relay forwards to), and list the IP address
+instead when they differ. For a clustered database whose driver discovers other nodes (YugabyteDB
 smart drivers, Cassandra), list each node, or turn discovery off (`load_balance=false`).
 
 ### Egress is enforced, not requested

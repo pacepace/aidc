@@ -52,11 +52,11 @@ Both written into `docs/requirements.md` in Chunk A/B.
 - [DECISION: MCP session_create has no way to pass --trust-repo-config, so orchestrator-created
   sessions never apply a repo's widening settings. Intended: that is exactly the untrusted path. The
   refusals appear in the create log. Recorded in README.]
-- [DECISION: one relay sidecar per destination, rendered into the session's compose file like the
-  declared port forwarders, on the session network (aliased to the destination's hostname) and the
-  egress network | alternatives: `aidc network` (a local bridge, no route to remote addresses),
-  `--egress direct` (removes isolation), Squid CONNECT (Postgres clients cannot use an HTTP proxy),
-  ZeroTier in the container (the whole overlay) | Pace approved 2026-09-21]
+- [DECISION: relays render into the session's compose file like the declared port forwarders, on the
+  session network (aliased to the destination's hostname) and the egress network | alternatives:
+  `aidc network` (a local bridge, no route to remote addresses), `--egress direct` (removes
+  isolation), Squid CONNECT (Postgres clients cannot use an HTTP proxy), ZeroTier in the container
+  (the whole overlay) | Pace approved 2026-09-21]
 - [DECISION: the destination is resolved on the HOST at create/add time and the relay targets the
   address | the relay carries the destination's name as an alias on the session network, so if it
   resolved the name itself Docker's DNS would answer with the relay's own address and it would
@@ -110,5 +110,5 @@ Both written into `docs/requirements.md` in Chunk A/B.
 ## Status
 
 - [x] Chunk A: repo-config trust (SEC-09) — built, unit-tested; reviewed with the cumulative Critic
-- [ ] Chunk B: egress_tcp at create (NET-15)
-- [ ] Chunk C: `aidc egress` and docs
+- [x] Chunk B: egress_tcp at create (NET-15) — reviewed: rev-20260921T204623Z-fa131876, verified rev-20260921T210529Z-fbc10ffb
+- [x] Chunk C: `aidc egress` and docs — same reviews; smoke 81/81 at dcce369

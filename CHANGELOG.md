@@ -37,7 +37,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   Code runs, so an agent could have added one. The file is now copied into the session when it is
   created (preferences you change inside stay inside; host changes reach sessions created after).
   The status-line script `~/.claude/statusline-command.sh` is bridged read-only, and only that
-  file.
+  file. A session created before this release keeps its live mount through `aidc upgrade`;
+  `aidc kill` + `aidc create` closes it.
 - **A repo's own `.aidc/config.yaml` can no longer widen the sandbox.** That file (and a
   workspace's) is writable from inside the session it configures, and aidc applied everything in
   it: `egress: direct`, `networks`, `ports`, `dns_servers`, `audit_dir` (which the policy

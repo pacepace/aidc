@@ -69,9 +69,9 @@ if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
     # the wrong nameservers. That silent-success mode is the thing to avoid, so
     # everything below is written to fail loudly instead.
     #
-    # ACL file references inside squid.conf are absolute (/etc/squid/*.txt), so
-    # they still resolve from the derived copy, and the refresher's SIGHUP
-    # reload re-reads this same path.
+    # ACL file references inside squid.conf are absolute (/etc/squid/*.txt), and
+    # the blocklist helper is given its file by absolute path, so both still
+    # resolve from the derived copy.
     derive_from_conf
     perl -i -ne 'print unless /^dns_nameservers /' "$DERIVED" || {
         echo "[aidc-squid] FATAL: could not derive DNS-override config from ${CONF}" >&2

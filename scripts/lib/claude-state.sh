@@ -42,3 +42,47 @@ aidc_claude_state_seed() {
                          else {} end)))
     ' "$src"
 }
+
+# aidc_statusline_scripts <settings.json> <host-home>
+# The status line's script, for the settings bridge. settings.json is mounted into
+# the session, so its statusLine command runs there too, but a script it names under
+# ~/.claude exists only on the host and the line shows nothing.
+#
+# settings.json is WRITABLE from inside a session, so nothing it names may choose a
+# mount source: an agent could name ~/.claude/.credentials.json, another project's
+# transcript, or a symlink planted in its rw-mounted memory dir. The only file ever
+# bridged is the conventional ~/.claude/statusline-command.sh (the file Claude Code's
+# own /statusline setup writes), and only as a regular, non-symlinked file under a
+# non-symlinked ~/.claude (CTR-13). Prints one line per script the command names
+# under ~/.claude: "bridge statusline-command.sh" for that one, "skip <rel>" for
+# anything else, so the caller can say why the line will stay empty.
+aidc_statusline_scripts() {
+    local settings="$1" home="$2" cmd token rel
+    [ -f "$settings" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    cmd=$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null) || return 0
+    [ -n "$cmd" ] || return 0
+    for token in $cmd; do
+        token="${token#\"}"; token="${token%\"}"; token="${token#\'}"; token="${token%\'}"
+        token="${token%;}"; token="${token%|}"; token="${token%&}"
+        # The patterns are the literal text a settings.json carries, not expansions
+        # (a bare ~ or $HOME in a pattern would expand to THIS machine's home).
+        # shellcheck disable=SC2016,SC2088
+        case "$token" in
+            '$HOME/.claude/'*)     rel="${token#'$HOME/.claude/'}" ;;
+            '${HOME}/.claude/'*)   rel="${token#'${HOME}/.claude/'}" ;;
+            '~/.claude/'*)         rel="${token#'~/.claude/'}" ;;
+            "${home}/.claude/"*)   rel="${token#"${home}"/.claude/}" ;;
+            *) continue ;;
+        esac
+        [ -n "$rel" ] || continue
+        if [ "$rel" = "statusline-command.sh" ] \
+                && [ ! -L "${home}/.claude" ] && [ -d "${home}/.claude" ] \
+                && [ ! -L "${home}/.claude/${rel}" ] && [ -f "${home}/.claude/${rel}" ]; then
+            printf 'bridge %s\n' "$rel"
+        else
+            printf 'skip %s\n' "$rel"
+        fi
+    done
+    return 0
+}

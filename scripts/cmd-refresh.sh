@@ -5,7 +5,7 @@
 #
 # Invokes the refresher sidecar's one-shot refresh.sh, which re-pulls the
 # upstream feeds, merges with per-project blocklist_additions, and atomically
-# rewrites /etc/squid/blocklist.txt then signals squid (kill -HUP 1).
+# rewrites /etc/squid/blocklist.txt. Squid picks it up without a reload (NET-16).
 
 set -euo pipefail
 
@@ -19,8 +19,9 @@ case "${1:-}" in
 aidc refresh <name>
 
 Force an on-demand blocklist refresh for the session: the refresher sidecar
-re-pulls the upstream feeds, merges blocklist_additions, atomically rewrites
-/etc/squid/blocklist.txt, then signals squid to reload.
+re-pulls the upstream feeds, merges blocklist_additions, and atomically rewrites
+/etc/squid/blocklist.txt. Squid's lookup helper uses the new list at once; nothing
+reloads, and no connection drops.
 EOF
         exit 0 ;;
 esac

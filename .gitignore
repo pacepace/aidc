@@ -64,3 +64,9 @@ mcp/tests/scratch/
 
 # Prawduct plugin version marker (per-repo last-seen)
 .prawduct/.prawduct-version
+
+# Prawduct session files
+.prawduct/.test-report.xml
+.prawduct/.test-report.xml.scope.json
+.prawduct/.critic-review-dispatch.json
+.prawduct/.pr-review-dispatch.json

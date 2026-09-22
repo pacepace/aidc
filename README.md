@@ -15,7 +15,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
 - Per-project scratchpad (`/tmp/claude-<uid>/<encoded>/`) — the working files that go with those conversations (`scratchpad/` and `tasks/`), read-write at the identical path on both sides, so a session popped out to the host and back still finds them. Only this repo's subdirectory is bridged, never the whole scratchpad root — and it is a live read-write host path by design, since a one-way copy could not carry work back *in*. Skipped when your host uid isn't the container's `vscode` (1000), which currently includes macOS. See [tearing down](#tearing-down) for what stays behind.
-- `settings.json` — env vars, status line, editor mode.
+- `settings.json` — theme, model, env vars, plugins, hooks: **copied** into the session when it is created, not shared live. That file can carry hooks your host Claude Code runs, so a session must never be able to write it. A preference you change inside a session stays there; one you change on the host reaches sessions created afterwards. The status-line script `~/.claude/statusline-command.sh`, if your settings name it, is bridged read-only so the same line shows inside, with that session's own context, cost and limits.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
 - Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
 
@@ -138,7 +138,7 @@ Dev work happens inside the container. **Testing what you built** — pointing a
 aidc create my-feature --port 3000 --port 8080:80
 ```
 
-`--port N` shorthand publishes `localhost:N` → `dev:N`. `--port H:C` lets you remap. Repeatable. You can also list them in `.aidc/config.yaml`:
+`--port N` shorthand publishes `localhost:N` → `dev:N`. `--port H:C` lets you remap. Repeatable. You can also list them in your `~/.config/aidc/config.yaml` (a repo's `.aidc/config.yaml` needs `--trust-repo-config` for this; see [Config](#config)):
 
 ```yaml
 ports:
@@ -175,7 +175,7 @@ aidc create api --network webapp_default           # attach at create time
 ```
 
 ```yaml
-# or in .aidc/config.yaml
+# or in ~/.config/aidc/config.yaml (a repo's .aidc/config.yaml needs --trust-repo-config)
 networks:
   - webapp_default
 ```
@@ -221,6 +221,61 @@ leaves through the proxied path instead of silently rerouting through the networ
 attached. (That last part needs `gw_priority`, so declared attachments require Docker
 Compose 2.34+; `aidc create` checks and tells you if yours is older.)
 
+### Reaching a database on another network (ZeroTier, VPN, LAN)
+
+A proxied session has no route out, and squid only carries HTTP. When the session needs a
+postgres, a redis or an SSH host that **the host** can reach — over ZeroTier, a VPN, the
+office LAN — name that one destination:
+
+```yaml
+# ~/.config/aidc/config.yaml
+egress_tcp:
+  - db.internal.example:5432
+  - cache.internal.example:6379
+```
+
+```bash
+aidc create api --egress-tcp db.internal.example:5432     # same thing, per session
+aidc egress api add db.internal.example:5432              # a session that's already running
+aidc egress api ls
+aidc egress api rm db.internal.example:5432
+```
+
+Inside the session nothing changes about how you connect:
+
+```bash
+psql "postgresql://app@db.internal.example:5432/app?sslmode=require"
+```
+
+Each destination gets a small relay (`aidc/forwarder`, socat) that answers to that name on
+the session network and forwards to that one address and port. The name is resolved **on
+the host** when the relay is made, so overlay and split-horizon DNS work; if the address
+changes later, `rm` and `add` it again (or recreate). TLS is end to end — the relay never
+sees inside it, so `sslmode=verify-full` checks the real hostname as usual (if your server's
+certificate names that host). Every connection is logged to a file named after the host and port (e.g. `egress-db-internal-example-5432.log`) in
+the session's audit dir. A bare IP works too; the session then reaches it by the relay's
+name, which `aidc egress <s> ls` shows.
+
+| | `aidc restart` | `aidc upgrade` | `aidc kill` |
+|---|---|---|---|
+| declared (`--egress-tcp` / `egress_tcp:`) | survives | survives | removed; comes back on `create` |
+| live (`aidc egress … add`) | survives | survives | removed |
+
+What it opens, precisely: that address, those ports, nothing else — much narrower than
+`--network` or `--egress direct`. That traffic doesn't pass through squid, so the blocklist
+and taint detection don't see it; the connection log is the record. The relay refuses
+aidc-mcp's own address and port, and loopback.
+
+`egress_tcp` is operator-only: a repo's own `.aidc/config.yaml` can't open it (see
+[Config](#config)). A session created by an orchestrator through the MCP's `session_create`
+never trusts the repo's config either; the names in your own `egress_tcp:` are then resolved
+inside the aidc-mcp container, which uses the host's upstream DNS servers but not a per-link
+resolver (systemd-resolved routing a ZeroTier domain, say). Such a name may not resolve
+there, or may resolve to a different, public address than it does on the host. Check with
+`aidc egress <s> ls` (it shows the address each relay forwards to), and list the IP address
+instead when they differ. For a clustered database whose driver discovers other nodes (YugabyteDB
+smart drivers, Cassandra), list each node, or turn discovery off (`load_balance=false`).
+
 ### Egress is enforced, not requested
 
 The session bridge is a Docker **`internal`** network. Docker installs no NAT for
@@ -236,8 +291,9 @@ has to live where the agent can't reach. Now a privileged process that adds its
 own default route, enables `ip_forward`, and installs its own `MASQUERADE` still
 gets `Network is unreachable`.
 
-Only `squid`, `refresher` (fetches threat feeds) and `policy` (POSTs the taint
-webhook) sit on the egress network. `dev` and `audit` never do.
+Only `squid`, `refresher` (fetches threat feeds), `policy` (POSTs the taint
+webhook) and the one-target socat sidecars (port forwards, TCP egress relays) sit
+on the egress network. `dev` and `audit` never do.
 
 **Two deliberate ways out**, both visible:
 
@@ -246,12 +302,12 @@ aidc create myproj --egress direct     # restores the old NATed bridge
 ```
 
 ```yaml
-egress: direct                          # or in .aidc/config.yaml
+egress: direct                          # or in ~/.config/aidc/config.yaml
 ```
 
-Use it when a session needs reachability an attached network can't provide —
-ZeroTier/Tailscale hosts, direct DNS. `aidc create` tells you plainly that
-enforcement is off for that session.
+Use it only when a session needs reachability nothing narrower provides. To reach a
+few services over ZeroTier/Tailscale/a VPN, name them with `egress_tcp` instead (above):
+it keeps enforcement on. `aidc create` tells you plainly when enforcement is off.
 
 The other is attaching a network (below): it grants whatever that network grants,
 and most compose bridges are NATed, so attaching one restores general internet
@@ -276,7 +332,7 @@ By default every session resolves through Quad9 (`9.9.9.9`, `149.112.112.112`) �
 # CLI (order matters; first listed is tried first):
 aidc create myproj --dns 10.147.17.1 --dns 9.9.9.9
 
-# Or per-project / per-workspace in .aidc/config.yaml:
+# Or in ~/.config/aidc/config.yaml (a repo's .aidc/config.yaml needs --trust-repo-config):
 dns_servers:
   - 10.147.17.1     # ZeroTier-managed DNS
   - 9.9.9.9         # fall back to Quad9
@@ -372,6 +428,27 @@ aidc claude-token clear       # removes it; new sessions log in inside instead
 ```
 
 Trade-offs: running `claude setup-token` invalidates the host's current login once (`/login` on the host afterwards); the token is **inference-only**, so **Remote Control does not work** in sessions that use it, and `/login` inside such a session is ignored while the token is set; rotate yearly by re-running setup. Billing stays on your subscription. Existing sessions keep whatever they were created with; `aidc kill` + `aidc create` moves one onto the other path.
+
+### New package versions wait 14 days
+
+Inside a session, `pip install`, `uv add` / `uv pip install` and `npm install` skip any version
+published in the last 14 days. Most malicious releases, from a hijacked maintainer account or a
+typosquat, are found and pulled within days, so waiting two weeks keeps them out. It's a
+system-wide default, so a project's own `uv.toml`, `pip.conf` or `.npmrc` still sets its own
+rule. When you really need something newer, override it for that one command:
+
+```bash
+uv add somepkg --exclude-newer false
+pip install --uploaded-prior-to "$(date -u +%FT%TZ)" somepkg
+npm install --min-release-age=0 somepkg
+```
+
+Claude Code is exempt and stays current, and so are the Go, Rust and Python toolchains and
+Ubuntu's own packages (holding back security updates there would do more harm than good).
+The rule binds pip 25.3 or newer; the image checks every interpreter's pip at build. One gap:
+a venv created with Ubuntu's own `/usr/bin/python3 -m venv` starts with pip 25.1, which ignores
+the setting, until you `pip install -U pip` inside it. `python -m venv` (the pyenv Python on
+PATH) and `uv venv` are covered.
 
 ### Inside the session
 
@@ -532,12 +609,13 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 
 | Command | What it does |
 |---------|--------------|
-| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...] [--egress proxied\|direct]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. `--egress direct` disables enforced egress (see "Egress is enforced"). |
+| `aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--port H:C ...] [--dns IP ...] [--network NET ...] [--egress-tcp HOST:PORT ...] [--egress proxied\|direct] [--trust-repo-config]` | Start a session. ~30s. `--port` declares published ports baked into compose. `--dns` overrides Quad9 for sessions needing overlay-network resolution (applies to both container and squid). `--network` attaches the dev container to an existing docker bridge so it can reach another stack's services; repeatable, merges with the `networks:` config list. `--egress-tcp` lets the session reach one TCP destination the host can reach (see "Reaching a database on another network"). `--egress direct` disables enforced egress (see "Egress is enforced"). `--trust-repo-config` applies the sandbox-widening settings in the repo's own `.aidc/config.yaml` (see "Config"). |
 | `aidc list` | All sessions; status + taint flag. |
-| `aidc status <name>` | Component health, taint, declared + adhoc ports, attached networks, audit dir path. |
+| `aidc status <name>` | Component health, taint, declared + adhoc ports, TCP egress relays, attached networks, audit dir path. |
 | `aidc attach <name>` | `docker exec -it -u vscode` into tmux. |
 | `aidc proxy <name> {add\|rm\|ls\|clear}` | Manage adhoc host->container port forwards (not persisted across restart/kill). |
 | `aidc network <name> {add\|rm\|ls}` | Attach a running session's dev container to another docker bridge so it can reach that stack's services by name. Survives `restart`, not `upgrade`/`kill` — use `create --network` for permanent. Widens the sandbox: see "Reaching another stack's services". |
+| `aidc egress <name> {add\|rm\|ls\|clear}` | Let a running session reach a TCP `host:port` the host can reach (a database over ZeroTier). Survives `restart` and `upgrade`, not `kill`; use `create --egress-tcp` or `egress_tcp:` for permanent. |
 | `aidc logs <name> [--component dev\|squid\|refresher\|policy\|audit]` | Tail logs. |
 | `aidc refresh <name>` | Force a blocklist refresh. |
 | `aidc restart <name>` | Restart the dev container in place from its existing image (proxy stack stays; adhoc forwards do NOT survive). Does **not** pick up image rebuilds — use `upgrade` for that. |
@@ -573,6 +651,18 @@ Two layers, both YAML:
 ```
 
 Scalars override (later wins); lists concatenate-and-dedupe across all three.
+
+**A repo's or workspace's config can tighten the sandbox, never loosen it.** Those files are
+writable from inside the session they configure, so an agent could otherwise edit one and get
+a wider sandbox on the next `aidc create`. From a workspace or repo config, aidc applies
+`profile`, `claude_mode`, `claude_resume`, additions to `state_actor_tlds`,
+`blocklist_additions` and `container_only_paths`, and anything that only tightens
+(`egress: proxied`, `share_*: false`, `tld_taints: true`, a stricter `taint_response`).
+Anything that widens it (`egress: direct`, `networks`, `ports`, `egress_tcp`, `dns_servers`,
+`audit_dir`, `notify_webhook`, `share_*: true`, a softer `taint_response`) is listed by
+`aidc create` and ignored. Put those settings in your own `~/.config/aidc/config.yaml` or pass
+them as flags. If you wrote the repo's file yourself and want it applied as written, use
+`aidc create … --trust-repo-config`. `aidc config` shows what was set aside.
 
 ```yaml
 # example config.yaml
@@ -627,6 +717,12 @@ networks:                             # foreign docker bridges the dev container
                                       # taint detection. See "Reaching another stack's services".
   - webapp_default
 
+egress_tcp:                           # TCP destinations the session may reach through a relay,
+                                      # without a route out: a database over ZeroTier, a VPN, the LAN.
+                                      # Additive; same as `aidc create --egress-tcp`. Resolved on the
+                                      # host at create. See "Reaching a database on another network".
+  - db.internal.example:5432
+
 notify_webhook: ""                    # POSTed to on taint events
 
 # Only relevant if you use `aidc mcp`:
@@ -648,7 +744,7 @@ metallm:
 
 ## Taint
 
-A session is "tainted" the moment the proxy blocks a request to a known-malware domain. The policy sidecar handles this.
+A session is "tainted" the moment the proxy blocks a request to a known-malware domain, or to any subdomain of one. The policy sidecar handles this. The malware list refreshes every 6 hours and takes effect without restarting the proxy, so connections never drop for it.
 
 Three responses (`taint_response` config):
 
@@ -659,6 +755,11 @@ Three responses (`taint_response` config):
 Once tainted, **kill and recreate** is the only path. The session does not get "cleaned." Your committed work in the host repo is unaffected.
 
 ## MCP control plane (reference)
+
+**Compatibility:** the MCP interface follows aidc's version number. A release can add tools,
+fields or default-off settings; removing or changing an existing tool, field, callback or error
+code waits for a major version (v2.0) and is announced in the CHANGELOG. An orchestrator built
+against 1.x keeps working through every 1.x upgrade.
 
 When `aidc mcp` is running, an external AI orchestrator on your overlay network gets:
 

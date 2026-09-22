@@ -31,6 +31,7 @@ COPY --chown=584792:584792 --chmod=0644 blocklist.txt        /etc/squid/blocklis
 
 # Healthcheck script — used by docker-compose healthcheck.
 COPY --chmod=0755 healthcheck.sh /usr/local/bin/healthcheck.sh
+COPY --chmod=0755 aidc-blocklist-helper.pl /usr/local/bin/aidc-blocklist-helper
 
 # Entrypoint wrapper: applies per-session DNS override (AIDC_DNS_SERVERS env)
 # to squid.conf before chaining to the base image's entrypoint.

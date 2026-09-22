@@ -26,7 +26,7 @@ From `docs/design-04-proxy-stack.md`:
 
 > Taint action: write `/var/state/tainted` with timestamp + offending line. Then execute the configured taint response.
 
-From `docs/design-07-safety-model.md`:
+From `docs/security-model.md`:
 > When taint triggers, the policy sidecar atomically writes `/var/state/tainted`. The file contents (JSON): `tainted_at`, `trigger`, `domain`, `squid_log_line`.
 
 > Responses: `log` (flag only), `notify` (flag + FIFO/webhook/osascript alert), `freeze` (flag + `docker pause` on dev container).

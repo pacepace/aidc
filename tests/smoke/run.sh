@@ -32,7 +32,9 @@ START_TS=$(date +%s)
 mkdir -p "$TMP_REPO" "$AUDIT_DIR_OVERRIDE" "$TMP_REPO/.aidc"
 # Tell aidc create where to put audit data -- overrides the global config's
 # audit_dir. The smoke writes a per-project config so the override is picked
-# up via normal config merge (per-project beats global beats defaults).
+# up via normal config merge (per-project beats global beats defaults). A repo
+# config may not move the audit dir on its own (SEC-09): create is run with
+# --trust-repo-config, which is what that flag is for -- we wrote this file.
 cat > "$TMP_REPO/.aidc/config.yaml" <<EOF
 audit_dir: ${AUDIT_DIR_OVERRIDE}
 EOF
@@ -56,6 +58,9 @@ cleanup() {
     # false test cannot abort the trap under set -e and skip the rm -rf below.
     if [ -n "${SMOKE_NET:-}" ]; then
         docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${EGRESS_ECHO:-}" ]; then
+        docker rm -f "$EGRESS_ECHO" >/dev/null 2>&1 || true
     fi
 
     # git commit inside the dev container (uid 1000) leaves .git objects owned by
@@ -120,7 +125,18 @@ chmod -R a+rwX "$TMP_REPO"
 
 # --- step 1: create session ----------------------------------------------
 echo "[1/11] aidc create"
-"$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi 2>&1 | tee "$CREATE_OUT"
+# TCP egress (NET-15) needs a destination the HOST can reach and the session
+# cannot: a port published on this machine's own address. Found before create so
+# the relay can be declared; the server behind it starts after (step 5b), since the
+# relay only connects when the session does.
+EGRESS_HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}' | head -n1 || true)
+EGRESS_PORT=$((29000 + RANDOM % 1000))
+EGRESS_FLAGS=()
+if [ -n "$EGRESS_HOST_IP" ]; then
+    EGRESS_FLAGS=(--egress-tcp "${EGRESS_HOST_IP}:${EGRESS_PORT}")
+fi
+"$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi --trust-repo-config \
+    ${EGRESS_FLAGS[@]+"${EGRESS_FLAGS[@]}"} 2>&1 | tee "$CREATE_OUT"
 # Extract audit dir from the 'audit:   <path>' line in create output.
 AUDIT_DIR=$(grep -E '^[[:space:]]*audit:' "$CREATE_OUT" | head -n1 | awk '{print $2}')
 if [ -z "$AUDIT_DIR" ] || [ ! -d "$AUDIT_DIR" ]; then
@@ -165,7 +181,7 @@ assert "CLAUDE_CONFIG_DIR points Claude's state at the dev-home volume" \
     "dev_exec 'test \"\$CLAUDE_CONFIG_DIR\" = /home/vscode/.claude'"
 # Conversation history and memory stay the host's: the per-project directory
 # (transcripts for --continue, memory/) is bind-mounted read-write at the same
-# path Claude reads under CLAUDE_CONFIG_DIR, and settings.json is bridged too.
+# path Claude reads under CLAUDE_CONFIG_DIR. settings.json is copied, not shared.
 assert "host per-project memory dir is mounted read-write at Claude's projects path" \
     "docker inspect -f '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' aidc-${SESSION}-dev | tr ' ' '\\n' | grep -q '^/home/vscode/.claude/projects/.*=true$'"
 SMOKE_ENC=$(printf '%s' "$TMP_REPO" | tr '/.' '-')
@@ -183,6 +199,14 @@ if [ -f "$HOME/.claude.json" ]; then
     assert "seeded ~/.claude.json carries no account, key, token or MCP definition" \
         "dev_exec 'jq -e \"[keys[] | test(\\\"apikey|token|secret|credential|password|oauth|mcp\\\"; \\\"i\\\")] | any | not\" /home/vscode/.claude/.claude.json'"
 fi
+echo
+
+# settings.json is a copy installed on first start, never a mount: a session that
+# could write the host's copy could plant a hook the host's Claude Code runs.
+assert "settings.json is installed in the session (a copy, on the dev-home volume)" \
+    "dev_exec 'test -s /home/vscode/.claude/settings.json'"
+assert "and is not a mount of the host's file" \
+    "! docker inspect aidc-${SESSION}-dev --format '{{range .Mounts}}{{.Destination}} {{end}}' | grep -q '/home/vscode/.claude/settings.json'"
 echo
 
 # --- step 3: git asymmetry -----------------------------------------------
@@ -241,6 +265,137 @@ assert "aidc proxy clear with no forwards is idempotent" \
     "$AIDC proxy ${SESSION} clear"
 # Tidy: stop the in-container http.server so we don't leak it into later tests.
 dev_exec "pkill -f 'http.server ${PF_PORT}'" >/dev/null 2>&1 || true
+echo
+
+# --- step 5a: a repo's own config cannot widen the sandbox (SEC-09) -------
+# The smoke's repo config sets audit_dir, which create applied only because of
+# --trust-repo-config. Without the flag it is set aside and reported.
+echo "[5a/11] repo-config trust"
+# A refusal must stop the command (non-zero) AND say why: a bare `!` also passes on
+# a crash. Used by the steps below too.
+refused_with() {   # $1 = expected text; the rest = the aidc command
+    local want="$1" out rc=0
+    shift
+    out=$("$AIDC" "$@" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "$want"
+}
+# aidc-mcp's address:port as the config and the running container give it.
+smoke_mcp_target() {
+    # shellcheck source=/dev/null  # the libraries, in a subshell so nothing leaks
+    (. "$AIDC_ROOT/scripts/lib/common.sh"; . "$AIDC_ROOT/scripts/lib/config.sh"; aidc_mcp_deny_target)
+}
+assert "aidc config reports the repo's audit_dir as not applied" \
+    "(cd \"$TMP_REPO\" && \"$AIDC\" config) | grep -A5 'NOT applied' | grep -q 'audit_dir: ${AUDIT_DIR_OVERRIDE}'"
+# One create, without --trust-repo-config, that is refused before it builds anything:
+# its own output must carry the SEC-09 report and the egress_tcp refusal.
+# shellcheck disable=SC2034  # read inside the assert strings below, which eval it
+CREATE_REFUSED=$("$AIDC" create "${SESSION}-x" --repo "$TMP_REPO" --egress-tcp no-such-host.invalid:5432 2>&1 || true)
+assert "aidc create reports the repo's audit_dir as not applied" \
+    "printf '%s' \"\$CREATE_REFUSED\" | grep -A2 'NOT applied' | grep -q 'audit_dir: ${AUDIT_DIR_OVERRIDE}'"
+assert "aidc create refuses an egress_tcp name that does not resolve" \
+    "printf '%s' \"\$CREATE_REFUSED\" | grep -q 'no address to relay to'"
+assert "and leaves nothing behind" \
+    "! docker ps -a --format '{{.Names}}' | grep -q '^aidc-${SESSION}-x-'"
+echo
+
+# --- step 5b: TCP egress relay (NET-15) ---------------------------------
+# The session reaches exactly the declared host:port through its relay, the
+# connection is logged to the audit dir, and the same address on another port is
+# still unreachable. The unit job (tests/unit/test-egress-tcp.sh) covers parsing,
+# refusals and rendering; this is the Docker-facing half.
+echo "[5b/11] TCP egress relay"
+if [ -z "$EGRESS_HOST_IP" ]; then
+    echo "  SKIP: no host IPv4 address found (ip route get)"
+else
+    EGRESS_RELAY="aidc-${SESSION}-egress-$(printf '%s' "$EGRESS_HOST_IP" | tr '.' '-')"
+    EGRESS_ECHO="aidc-${SESSION}-smoke-echo"
+    EGRESS_PORT2=$((EGRESS_PORT + 1000))
+    docker run -d --name "$EGRESS_ECHO" -p "${EGRESS_PORT}:7777" -p "${EGRESS_PORT2}:7777" \
+        "aidc/forwarder:$(cat "$AIDC_ROOT/VERSION")" \
+        TCP-LISTEN:7777,fork,reuseaddr EXEC:cat >/dev/null
+    assert "the relay is running" \
+        "docker ps --format '{{.Names}}' | grep -qx '${EGRESS_RELAY}'"
+    ECHOED=""
+    for _ in $(seq 1 10); do
+        ECHOED=$(dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${EGRESS_RELAY}/${EGRESS_PORT}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true)
+        if [ "$ECHOED" = "aidc-egress" ]; then break; fi
+        sleep 0.5
+    done
+    assert "the session reaches the declared destination through the relay" \
+        "[ '${ECHOED}' = 'aidc-egress' ]"
+    assert "the connection is logged in the audit dir" \
+        "grep -q 'accepting connection' \"\$AUDIT_DIR\"/egress-*-${EGRESS_PORT}.log"
+    assert "the destination itself is still unreachable directly" \
+        "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_HOST_IP}/${EGRESS_PORT}\"'"
+    assert "the relay carries no other port" \
+        "! dev_exec 'timeout 3 bash -c \"exec 3<>/dev/tcp/${EGRESS_RELAY}/22\"'"
+fi
+echo
+
+# --- step 5c: live TCP egress relays (aidc egress) ----------------------
+# The live command, and the hostname path: the session reaches the relay under the
+# destination's own name (the alias that keeps TLS hostname checks passing). A name
+# that resolves on the host to the host's address is needed; <ip>.nip.io is public
+# DNS that answers with the address in the name. Skipped where it does not resolve.
+echo "[5c/11] live TCP egress relays"
+echo_via() {   # $1 = host, $2 = port: what comes back from the echo server
+    dev_exec "timeout 3 bash -c 'exec 3<>/dev/tcp/${1}/${2}; printf aidc-egress >&3; head -c 11 <&3'" 2>/dev/null || true
+}
+if [ -z "$EGRESS_HOST_IP" ]; then
+    echo "  SKIP: no host IPv4 address found (ip route get)"
+else
+    assert "a live relay for a host with a declared one is refused (one name, one relay)" \
+        "refused_with 'declared at create time' egress ${SESSION} add ${EGRESS_HOST_IP}:${EGRESS_PORT2}"
+    assert "removing a declared destination live is refused" \
+        "refused_with 'declared at create time' egress ${SESSION} rm ${EGRESS_HOST_IP}:${EGRESS_PORT}"
+    assert "a name that does not resolve is refused" \
+        "refused_with 'no address to relay to' egress ${SESSION} add no-such-host.invalid:5432"
+    assert "loopback is refused" \
+        "refused_with 'loopback' egress ${SESSION} add 127.0.0.1:5432"
+    assert "a session service name is refused" \
+        "refused_with 'already uses' egress ${SESSION} add squid:3128"
+    # aidc-mcp bound to one address: that address and port. Bound to every interface:
+    # its port on any address, so a documentation address (192.0.2.1, never routed)
+    # shows the refusal without colliding with the declared relay. Bound to loopback,
+    # nothing a relay could reach is listening, so there is nothing to refuse.
+    MCP_TARGET=$(smoke_mcp_target)
+    case "${MCP_TARGET%:*}" in
+        127.*) echo "  SKIP: aidc-mcp is bound to loopback; no relay could reach it" ;;
+        0.0.0.0) assert "aidc-mcp's port is refused on any address (it listens on all)" \
+                     "refused_with 'aidc-mcp' egress ${SESSION} add 192.0.2.1:${MCP_TARGET##*:}" ;;
+        *) assert "aidc-mcp's address and port are refused" \
+               "refused_with 'aidc-mcp' egress ${SESSION} add ${MCP_TARGET}" ;;
+    esac
+    NIP_HOST="${EGRESS_HOST_IP}.nip.io"
+    if [ "$(getent ahostsv4 "$NIP_HOST" 2>/dev/null | awk 'NR == 1 { print $1 }')" != "$EGRESS_HOST_IP" ]; then
+        echo "  SKIP: ${NIP_HOST} does not resolve here; live add by name not checked"
+    else
+        assert "aidc egress add relays a destination by name" \
+            "$AIDC egress ${SESSION} add ${NIP_HOST}:${EGRESS_PORT}"
+        assert "the session reaches it under the destination's own name" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ]"
+        assert "a second port on the same host is added" \
+            "$AIDC egress ${SESSION} add ${NIP_HOST}:${EGRESS_PORT2}"
+        assert "and both ports work" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ] && [ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT2})\" = aidc-egress ]"
+        assert "aidc egress ls lists the live relay's ports" \
+            "[ \"\$($AIDC egress ${SESSION} ls | grep -c '^adhoc .*${NIP_HOST}:')\" = 2 ]"
+        assert "aidc status lists relays" \
+            "$AIDC status ${SESSION} | grep -q '${NIP_HOST}:${EGRESS_PORT2}'"
+        assert "rm removes one port" \
+            "$AIDC egress ${SESSION} rm ${NIP_HOST}:${EGRESS_PORT2}"
+        assert "and keeps the other" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ] && [ -z \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT2})\" ]"
+    fi
+    # NET-15: relays are not tied to the dev container, so a restart keeps both kinds.
+    "$AIDC" restart "$SESSION" >/dev/null 2>&1 || true
+    assert "after aidc restart the declared relay still carries traffic" \
+        "[ \"\$(echo_via ${EGRESS_RELAY} ${EGRESS_PORT})\" = aidc-egress ]"
+    if [ -n "${NIP_HOST:-}" ] && $AIDC egress "$SESSION" ls 2>/dev/null | grep -q "^adhoc .*${NIP_HOST}:"; then
+        assert "and so does the live one" \
+            "[ \"\$(echo_via ${NIP_HOST} ${EGRESS_PORT})\" = aidc-egress ]"
+    fi
+fi
 echo
 
 # --- step 6: attached bridge networks (NET-13) ---------------------------
@@ -313,11 +468,11 @@ fi
 assert "add is idempotent" \
     "$AIDC network ${SESSION} add ${SMOKE_NET}"
 assert "refuses the host network" \
-    "! $AIDC network ${SESSION} add host"
+    "refused_with \"refusing to attach the 'host' network\" network ${SESSION} add host"
 assert "refuses docker's default bridge" \
-    "! $AIDC network ${SESSION} add bridge"
+    "refused_with \"default 'bridge' network\" network ${SESSION} add bridge"
 assert "refuses a nonexistent network" \
-    "! $AIDC network ${SESSION} add definitely-not-a-real-network"
+    "refused_with 'no such docker network' network ${SESSION} add definitely-not-a-real-network"
 assert "refuses to detach the session's own network" \
     "! $AIDC network ${SESSION} rm aidc-${SESSION}-net"
 assert "aidc network rm detaches it" \
@@ -370,43 +525,61 @@ assert "squid is still reachable from dev" \
 assert "egress to a TLD-blocked .cn domain returns 403 from squid" \
     "dev_exec 'curl -sS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://anything.cn' | grep -q 403"
 
-# Inject a known-bad domain into the blocklist and hot-reload Squid.
-# Use a resolvable hostname so squid actually logs a TCP_DENIED (the policy
-# sidecar tails that log and won't see entries for DNS failures). example.org
-# is RFC 2606 reserved and a stable, resolvable choice.
-MALWARE_DOMAIN="example.org"
-# The policy sidecar greps the on-disk blocklist file directly on each
-# TCP_DENIED -- no in-memory cache, no reload to wait for. The reload below is
-# the only thing that has to land before the curl below will be denied.
-#
-# Both commands are written against the squid 7.x Rock, which is chiselled and
-# unprivileged. Do NOT "simplify" either back to the old form:
-#   - `bash -c` does not exist in that image (no bash) -- use /bin/sh. Getting
-#     this wrong exits 127, and because the failure lands between step 6's last
-#     assert and step 7's banner it reads as a cleanup fault rather than a real
-#     regression. That cost a full 18-minute CI cycle to diagnose once already.
-#   - /etc/squid is root-owned while squid runs as UID 584792, so the append
-#     needs --user root.
-#   - the binary is `squid-gnutls`, not `squid`. Rather than depend on that name,
-#     reload by signalling PID 1 from the host, which is exactly what the
-#     refresher sidecar does in production (`kill -HUP 1`) and needs nothing
-#     inside the container at all.
-docker exec --user root "aidc-${SESSION}-squid" /bin/sh -c \
-    "echo '${MALWARE_DOMAIN}' >> /etc/squid/blocklist.txt"
-docker kill --signal=HUP "aidc-${SESSION}-squid" >/dev/null 2>&1
-# Retry the curl up to 30s. squid -k reconfigure on a ~1.3M-entry ACL
-# can briefly drop the listener while it ingests; we'd see "connection
-# refused" until it's stable. Once squid is back, the assertion passes.
-MALWARE_CODE="?"
-for _ in $(seq 1 30); do
-    MALWARE_CODE=$(dev_exec "curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code}' http://${MALWARE_DOMAIN}" 2>/dev/null || true)
-    if [ "$MALWARE_CODE" = "403" ]; then
-        break
-    fi
+# The refresher's own first download is still running for a while after create.
+# Wait for it: the refresh started below would race it, and so would the list
+# edit further down (a later rename would replace the edited list).
+for _ in $(seq 1 90); do
+    docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh OK' && break
     sleep 1
 done
-assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid" \
+# NET-16 / issue #34: a new blocklist must not cost a single connection. Squid used to
+# reload for every list and refused everything for ~20 s. Run a real refresh while
+# requests stream through the proxy, and count refusals.
+docker exec "aidc-${SESSION}-refresher" /usr/local/bin/refresh.sh >/dev/null 2>&1 &
+REFRESH_PID=$!
+REFUSED=0
+SENT=0
+while kill -0 "$REFRESH_PID" 2>/dev/null && [ "$SENT" -lt 120 ]; do
+    code=$(dev_exec "curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code}' http://example.com" 2>/dev/null || true)
+    SENT=$((SENT + 1))
+    [ "$code" = "200" ] || REFUSED=$((REFUSED + 1))
+    sleep 0.25
+done
+wait "$REFRESH_PID" 2>/dev/null || true
+echo "  (${SENT} requests during a blocklist refresh, ${REFUSED} failed)"
+assert "a blocklist refresh drops no connections (NET-16)" \
+    "[ '${SENT}' -gt 5 ] && [ '${REFUSED}' -eq 0 ]"
+
+# A domain from the downloaded feed itself must be denied too: that proves the list
+# as the real refresher wrote it is one the helper can search (byte order, lower
+# case), not only the one this test writes below. The squid image has no head;
+# perl reads line 1. Requested together with the others below: the FIRST denied
+# request taints the session and the freeze response pauses dev.
+FEED_DOMAIN=$(docker exec "aidc-${SESSION}-squid" perl -ne 'next if /^#/; chomp; print; exit' /etc/squid/blocklist.txt)
+
+# Put a known-bad domain on the list the way the refresher does: a sorted copy
+# renamed over the file, since squid's helper binary-searches it (an append would
+# land out of order and never be found). Nothing signals squid; the helper follows
+# the rename. example.org is RFC 2606 reserved and resolvable, so squid logs a
+# TCP_DENIED the policy sidecar can see. The squid image has no sort/cp (it is
+# chiselled), but it has perl, and /etc/squid needs --user root.
+MALWARE_DOMAIN="example.org"
+docker exec --user root "aidc-${SESSION}-squid" perl -e '
+    my ($f, $d) = @ARGV; open my $in, "<", $f or die; my %l = map { $_ => 1 } <$in>; close $in;
+    $l{"$d\n"} = 1; open my $out, ">", "$f.new" or die; print $out sort keys %l; close $out;
+    rename "$f.new", $f or die' /etc/squid/blocklist.txt "$MALWARE_DOMAIN"
+# All three requests in ONE exec: the first denied request taints the session, and
+# the freeze response pauses dev, so a later exec would land on a paused container.
+CODES=$(dev_exec "for h in ${MALWARE_DOMAIN} www.${MALWARE_DOMAIN} ${FEED_DOMAIN}; do curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code} ' http://\$h/; done" 2>/dev/null || true)
+MALWARE_CODE=$(printf '%s' "$CODES" | awk '{ print $1 }')
+SUB_CODE=$(printf '%s' "$CODES" | awk '{ print $2 }')
+FEED_CODE=$(printf '%s' "$CODES" | awk '{ print $3 }')
+assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid, with no reload" \
     "[ '$MALWARE_CODE' = '403' ]"
+assert "a subdomain of a listed domain is blocked too (www.${MALWARE_DOMAIN})" \
+    "[ '$SUB_CODE' = '403' ]"
+assert "a domain from the downloaded feed (${FEED_DOMAIN}) is denied" \
+    "[ -n '${FEED_DOMAIN}' ] && [ '$FEED_CODE' = '403' ]"
 echo
 
 # --- step 8: taint detection ---------------------------------------------
@@ -478,6 +651,12 @@ assert "squid container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-squid\""
 assert "policy container removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-policy\""
+assert "egress relay removed" \
+    "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egress-\""
+assert "live egress relays removed" \
+    "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egressx-\""
+assert "the session's networks are gone" \
+    "! docker network ls --format '{{.Name}}' | grep -q \"^aidc-${SESSION}-\""
 echo
 
 # --- step 11: audit dir populated after kill ------------------------------

@@ -23,6 +23,8 @@ trap '' PIPE
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/network.sh
 . "$AIDC_SCRIPTS/lib/network.sh"
+# shellcheck source=lib/egress.sh
+. "$AIDC_SCRIPTS/lib/egress.sh"
 
 case "${1:-}" in
     -h|--help)
@@ -113,6 +115,15 @@ if [ -n "$adhoc" ]; then
     done <<<"$adhoc"
 else
     printf '  adhoc: (none)\n'
+fi
+
+# TCP egress relays (NET-15): the only non-HTTP ways out of a proxied session.
+printf '\n-- tcp egress --\n'
+relays=$(aidc_egress_describe "$NAME")
+if [ -n "$relays" ]; then
+    printf '%s\n' "$relays" | sed 's/^/  /'
+else
+    printf '  (none)\n'
 fi
 
 # Egress posture (NET-14). Printed before attachments because it is the coarser

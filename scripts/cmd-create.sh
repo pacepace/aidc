@@ -27,6 +27,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/claude-state.sh"
 # shellcheck source=lib/network.sh
 . "$AIDC_SCRIPTS/lib/network.sh"
+# shellcheck source=lib/egress.sh
+. "$AIDC_SCRIPTS/lib/egress.sh"
 
 trap 'err "command failed at line $LINENO (exit=$?)"' ERR
 
@@ -41,6 +43,8 @@ PORT_FLAGS=()         # repeatable --port N or --port H:C (CLI-13)
 DNS_FLAGS=()          # repeatable --dns <ip>; overrides Quad9 + config dns_servers
 NETWORK_FLAGS=()      # repeatable --network <net>; merges with config networks: (NET-13)
 EGRESS_OVERRIDE=""    # "", "proxied", or "direct" -- empty defers to config (NET-14)
+EGRESS_TCP_FLAGS=()   # repeatable --egress-tcp host:port; merges with config egress_tcp: (NET-15)
+AIDC_TRUST_REPO_CONFIG=false  # --trust-repo-config: apply a repo's sandbox-widening settings (SEC-09)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,6 +78,11 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--egress requires a value (proxied|direct)"
             EGRESS_OVERRIDE="$2"; shift 2 ;;
         --egress=*) EGRESS_OVERRIDE="${1#--egress=}"; shift ;;
+        --egress-tcp)
+            [ $# -ge 2 ] || die "--egress-tcp requires a value (host:port)"
+            EGRESS_TCP_FLAGS+=("$2"); shift 2 ;;
+        --egress-tcp=*) EGRESS_TCP_FLAGS+=("${1#--egress-tcp=}"); shift ;;
+        --trust-repo-config) AIDC_TRUST_REPO_CONFIG=true; shift ;;
         -h|--help)
             cat <<'EOF'
 aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no-resume] [--port H:C ...]
@@ -117,6 +126,21 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                   from going around it. Use only when the session genuinely
                   needs direct reachability an attached --network can't give it
                   (overlay networks like ZeroTier/Tailscale, direct DNS).
+  --egress-tcp  let the session reach one TCP destination the host can reach
+                (a database over ZeroTier, a VPN, the LAN) without a route out.
+                host:port. Repeatable. Merges with the `egress_tcp:` list in
+                your config. The session connects to the same host:port it
+                would outside; a relay forwards to that one address and port
+                and logs every connection to the audit dir. The name is
+                resolved on this machine now; if its address changes,
+                recreate the session.
+                Example: --egress-tcp db.internal.example:5432
+  --trust-repo-config
+                apply the settings in the workspace's or repo's .aidc/config.yaml
+                that widen the sandbox (egress, networks, ports, egress_tcp,
+                dns_servers, audit_dir, notify_webhook, share_*, a softer
+                taint_response). Without it they are listed and ignored: that
+                file is writable from inside the session it configures.
 EOF
             exit 0 ;;
         --*) die "unknown flag: $1" ;;
@@ -177,7 +201,9 @@ fi
 # override; lists aggregate. The workspace path is passed only when --workspace
 # was given; otherwise it's the same as repo and load_config skips the
 # double-read.
+export AIDC_TRUST_REPO_CONFIG
 load_config "$REPO_PATH" "$WORKSPACE_PATH"
+aidc_report_repo_requests
 
 if [ -n "$PROFILE_OVERRIDE" ]; then
     AIDC_PROFILE="$PROFILE_OVERRIDE"
@@ -255,7 +281,7 @@ _net_list=$(printf '%s' "$_net_list" | _aidc_dedupe_lines)
 if [ -n "$_net_list" ]; then
     while IFS= read -r _net; do
         [ -z "$_net" ] && continue
-        aidc_assert_attachable "$NAME" "$_net"
+        aidc_assert_attachable "$NAME" "$_net" || exit 1
     done <<EOFNET
 ${_net_list}
 EOFNET
@@ -285,6 +311,45 @@ EOFNET
 fi
 unset _net_list _net
 export EXTNET_DECLARATIONS DEV_NETWORKS_BLOCK
+
+# ---- TCP egress relays (NET-15) ----------------------------------------------
+#
+# Sources merge, deduped: --egress-tcp flags, then `egress_tcp:` from config.
+# Parsed, resolved and checked HERE, before any image build: a typo or a name this
+# machine cannot resolve must cost a message, not a dev-base build. Rendered into
+# compose services further down, once the audit dir exists. See lib/egress.sh.
+_etcp_specs=""
+for _spec in ${EGRESS_TCP_FLAGS[@]+"${EGRESS_TCP_FLAGS[@]}"}; do
+    _etcp_specs="${_etcp_specs}${_spec}
+"
+done
+if [ -n "${AIDC_EGRESS_TCP:-}" ]; then
+    _etcp_specs="${_etcp_specs}${AIDC_EGRESS_TCP}
+"
+fi
+_etcp_specs=$(printf '%s' "$_etcp_specs" | _aidc_dedupe_lines)
+EGRESS_TCP_LINES=""   # "host port ip" per destination
+if [ -n "$_etcp_specs" ]; then
+    _etcp_deny=$(aidc_mcp_deny_target)
+    while IFS= read -r _spec; do
+        [ -z "$_spec" ] && continue
+        aidc_egress_parse "$_spec" || die "invalid --egress-tcp/egress_tcp entry: ${_spec}"
+        _ip=$(aidc_egress_resolve_explained "$AIDC_EGRESS_HOST") || \
+            die "egress_tcp: ${AIDC_EGRESS_HOST} has no address to relay to"
+        if _why=$(aidc_egress_refusal "$_ip" "$AIDC_EGRESS_PORT" "$_etcp_deny"); then
+            die "egress_tcp: refusing ${_spec}: ${_why}"
+        fi
+        EGRESS_TCP_LINES="${EGRESS_TCP_LINES}${AIDC_EGRESS_HOST} ${AIDC_EGRESS_PORT} ${_ip}
+"
+    done <<EOFETCP
+${_etcp_specs}
+EOFETCP
+    # The snapshot records what the session was actually given.
+    AIDC_EGRESS_TCP="$_etcp_specs"
+    export AIDC_EGRESS_TCP
+    unset _etcp_deny _ip _why
+fi
+unset _etcp_specs _spec
 
 # ---- audit dir + snapshot ----------------------------------------------------
 
@@ -324,12 +389,18 @@ jq -n \
 # all profiles) per the task shard's "Image naming convention" note.
 
 # ensure_image lives in lib/common.sh (inventory-driven; shared with cmd-mcp
-# and cmd-proxy). We build the proxy stack + dev-base eagerly here; mcp and
-# forwarder are lazy-built by their respective subcommands on first use.
+# and cmd-proxy). We build the proxy stack + dev-base eagerly here; mcp is built
+# by `aidc mcp`, and forwarder just below, only when this session needs it.
 for _role in squid refresher policy audit dev-base; do
     ensure_image "$_role"
 done
 unset _role
+# Declared port forwards and TCP egress relays are aidc/forwarder services in the
+# compose file, so compose needs the image before `up` (it would otherwise try to
+# pull it from a registry, where it does not exist).
+if [ "${#PORT_FLAGS[@]}" -gt 0 ] 2>/dev/null || [ -n "${AIDC_PORTS:-}" ] || [ -n "$EGRESS_TCP_LINES" ]; then
+    ensure_image forwarder
+fi
 
 # ---- Claude Code memory bridge -----------------------------------------------
 #
@@ -450,12 +521,40 @@ if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ]; then
 fi
 export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
 
-# Settings bridge. settings.json holds theme / output style / env.
+# Settings: a COPY of the host's ~/.claude/settings.json (theme, model, status line,
+# plugins, env, hooks), installed by user-main.sh on the session's first start, like
+# the onboarding seed below. Until 2026-09-22 the file was bind-mounted read-write,
+# so a session could write `hooks` into it and the HOST's Claude Code would run
+# them (review rev-20260922T015403Z-28cf6fcf). The cost: a preference changed inside
+# a session stays inside it, and a host change reaches only sessions created after it.
 CLAUDE_SETTINGS_MOUNT=""
 HOST_CLAUDE_SETTINGS="$(aidc_host_home)/.claude/settings.json"
 if [ -f "$HOST_CLAUDE_SETTINGS" ]; then
-    CLAUDE_SETTINGS_MOUNT="- ${HOST_CLAUDE_SETTINGS}:/home/vscode/.claude/settings.json:rw"
-    info "settings: bridged from host ~/.claude/settings.json"
+    if ( umask 0077; cp "$HOST_CLAUDE_SETTINGS" "${AUDIT_WRITE}/claude-settings-seed.json" ); then
+        info "settings: copied from host ~/.claude/settings.json (installed on first start; not shared live)"
+    else
+        rm -f "${AUDIT_WRITE}/claude-settings-seed.json"
+        info "settings: could not read host ~/.claude/settings.json (the session starts with Claude's defaults)"
+    fi
+    # The status line's script: the command runs inside the session too, and
+    # without the file the line stays empty. Only ~/.claude/statusline-command.sh
+    # is ever bridged (see aidc_statusline_scripts for why nothing else named in a
+    # file the session can write may become a mount). Read-only; the same path
+    # under the container's home.
+    while read -r _verdict _sl; do
+        [ -n "$_sl" ] || continue
+        if [ "$_verdict" = bridge ]; then
+            CLAUDE_SETTINGS_MOUNT="- $(aidc_host_home)/.claude/${_sl}:/home/vscode/.claude/${_sl}:ro"
+            info "settings: status line script ~/.claude/${_sl} bridged (read-only)"
+        else
+            info "settings: status line script ~/.claude/${_sl} NOT bridged (only"
+            info "  ~/.claude/statusline-command.sh is, as a plain file: settings.json is"
+            info "  writable from inside a session, so it cannot pick what gets mounted)"
+        fi
+    done <<EOFSL
+$(aidc_statusline_scripts "$HOST_CLAUDE_SETTINGS" "$(aidc_host_home)")
+EOFSL
+    unset _verdict _sl
 else
     info "settings: no host settings.json"
 fi
@@ -500,8 +599,8 @@ fi
 # the host's registry, could evict cache versions the host still uses, and would
 # poison installed_plugins.json with container paths. The host stays the single
 # writer; host updates flow in on the next container start. Enablement is handled
-# container-locally by the entrypoint (managed-settings.json) so it never leaks
-# onto the host's settings.json.
+# container-locally by the entrypoint (managed-settings.json), separate from the
+# session's settings.json copy.
 CLAUDE_PLUGINS_MOUNT=""
 CLAUDE_PLUGINS_MOUNT_ABS=""
 HOST_CLAUDE_PLUGINS="$(aidc_host_home)/.claude/plugins"
@@ -665,6 +764,24 @@ if [ -n "$_ports_yaml" ]; then
 fi
 unset _ports_seen _ports_yaml _ports_summary _spec
 export PORT_FORWARDER_SERVICES
+
+# ---- render TCP egress relays (NET-15) ---------------------------------------
+EGRESS_RELAY_SERVICES=""
+if [ -n "$EGRESS_TCP_LINES" ]; then
+    while read -r _host _ip _ports; do
+        [ -z "$_host" ] && continue
+        # shellcheck disable=SC2086  # _ports is a space-separated list, one arg each
+        EGRESS_RELAY_SERVICES="${EGRESS_RELAY_SERVICES}$(aidc_egress_render_service \
+            "$NAME" "$AUDIT_DIR" "$AIDC_VERSION_TAG" "$_host" "$_ip" $_ports)
+"
+        info "egress_tcp: $(aidc_egress_reach_as "$NAME" "$_host") port(s) ${_ports} -> ${_ip}"
+    done <<EOFREL
+$(printf '%s' "$EGRESS_TCP_LINES" | aidc_egress_group)
+EOFREL
+    info "  each connection is logged to ${AUDIT_DIR}/egress-*.log"
+    unset _host _ip _ports
+fi
+export EGRESS_RELAY_SERVICES
 
 # ---- per-session DNS (--dns flags / dns_servers config) ----------------------
 #

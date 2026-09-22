@@ -50,6 +50,20 @@ assert "files with content are never touched" \
 rm -f "$CFG/.credentials.json" "$HOMEDIR/.claude.json"
 echo
 
+echo "[1b/3] aidc_install_claude_settings_seed"
+SEEDS="$SCRATCH/seed"; mkdir -p "$SEEDS"
+printf '{"theme":"dark","hooks":{}}' > "$SEEDS/settings.json"
+assert "first start: the copy is installed" \
+    "aidc_install_claude_settings_seed '$CFG' '$SEEDS/settings.json' && cmp -s '$SEEDS/settings.json' '$CFG/settings.json'"
+assert "and is private to the user" \
+    "[ \"\$(stat -c %a '$CFG/settings.json')\" = 600 ]"
+printf '{"theme":"light"}' > "$CFG/settings.json"
+assert "a later start never overwrites what the session changed" \
+    "! aidc_install_claude_settings_seed '$CFG' '$SEEDS/settings.json' && grep -q light '$CFG/settings.json'"
+rm -f "$CFG/settings.json"
+assert "no seed: nothing installed, nothing created" \
+    "! aidc_install_claude_settings_seed '$CFG' '$SEEDS/missing.json' && [ ! -e '$CFG/settings.json' ]"
+
 echo "[2/3] aidc_install_claude_state_seed"
 SEED="$SCRATCH/claude-state-seed.json"
 assert "no seed file -> nothing to do (1)" \

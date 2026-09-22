@@ -135,33 +135,36 @@ aidc_network_driver() {
 # aidc_assert_attachable <session> <network>
 #
 # Every guard that must hold before a network is attached, in one place so the
-# adhoc and declarative paths cannot drift. Dies with an actionable message.
+# adhoc and declarative paths cannot drift. On a refusal it prints an actionable
+# message and returns 1; the caller exits. It does not call die: that lives in
+# another library, and a sourced library must not depend on it being loaded.
+_aidc_net_refuse() { printf '[aidc] error: %s\n' "$*" >&2; return 1; }
 aidc_assert_attachable() {
     local session="$1" name="$2" own driver
     own="$(aidc_session_network "$session")"
 
     aidc_valid_network_name "$name" || \
-        die "invalid network name: '${name}' (must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$)"
+        { _aidc_net_refuse "invalid network name: '${name}' (must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$)"; return 1; }
 
     if aidc_is_reserved_network "$name"; then
         case "$name" in
-            host) die "refusing to attach the 'host' network: it shares the host network namespace and defeats the sandbox entirely" ;;
-            none) die "refusing to attach the 'none' network: it carries no connectivity" ;;
-            *)    die "refusing to attach Docker's default 'bridge' network: it reaches every container started without an explicit network, on every port, and provides no DNS. Attach the specific compose network instead (docker network ls)" ;;
+            host) _aidc_net_refuse "refusing to attach the 'host' network: it shares the host network namespace and defeats the sandbox entirely"; return 1 ;;
+            none) _aidc_net_refuse "refusing to attach the 'none' network: it carries no connectivity"; return 1 ;;
+            *)    _aidc_net_refuse "refusing to attach Docker's default 'bridge' network: it reaches every container started without an explicit network, on every port, and provides no DNS. Attach the specific compose network instead (docker network ls)"; return 1 ;;
         esac
     fi
 
     [ "$name" != "$own" ] || \
-        die "'${name}' is this session's own network; it is attached already"
+        { _aidc_net_refuse "'${name}' is this session's own network; it is attached already"; return 1; }
 
     aidc_network_exists "$name" || \
-        die "no such docker network: '${name}' (list them with: docker network ls)"
+        { _aidc_net_refuse "no such docker network: '${name}' (list them with: docker network ls)"; return 1; }
 
     driver="$(aidc_network_driver "$name")"
     case "$driver" in
         bridge) ;;
-        "")     die "could not read the driver of network '${name}'" ;;
-        *)      die "network '${name}' uses the '${driver}' driver; only bridge networks are supported" ;;
+        "")     _aidc_net_refuse "could not read the driver of network '${name}'"; return 1 ;;
+        *)      _aidc_net_refuse "network '${name}' uses the '${driver}' driver; only bridge networks are supported"; return 1 ;;
     esac
 }
 

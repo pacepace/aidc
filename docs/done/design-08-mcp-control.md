@@ -154,7 +154,7 @@ aidc-mcp itself does not store conversation history, secrets, or credentials. It
 
 - CLI lifecycle: `docs/done/design-05-cli.md`
 - Per-session topology: `docs/done/design-04-proxy-stack.md`
-- Safety model + taint: `docs/done/design-07-safety-model.md`
+- Safety model + taint: `docs/security-model.md`
 - Tmux / human attach (parallel path): `docs/done/design-06-remote-control.md`
 - MCP spec: https://spec.modelcontextprotocol.io/
 - Claude Code MCP integration: https://code.claude.com/docs/en/mcp

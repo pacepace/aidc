@@ -1,8 +1,8 @@
-# Design 07 — Safety Model
+# Security model
 
 **What this covers.** The end-to-end threat model: what aidc protects against, how each defense works, and the **taint mechanism** that turns "the proxy saw something bad" into "this container is dead, throw it away." This doc is the place to look when asking "is X safe?" or "what happens when Y goes wrong?"
 
-**Requirements implemented:** SEC-01 through SEC-08. Cross-references most other design docs.
+**Requirements implemented:** SEC-01 through SEC-09, and the deliberate holes of NET-13 and NET-15. Cross-references most other design docs.
 
 ---
 
@@ -70,7 +70,7 @@ If a real secret (token, private key, credential) is already in the working tree
 
 ### Supply-chain attacks via package managers
 
-Claude installs `npm install`-style dependencies through the proxy. The proxy permits `registry.npmjs.org` and `pypi.org` and similar — those are not blocklisted. A malicious package on the official registry would pass the proxy. **Mitigation:** beyond aidc's scope. Usual ecosystem hygiene (lockfiles, package signatures, audit tools). aidc could in principle integrate with package-audit tools as a future feature, but doesn't in v1.
+Claude installs `npm install`-style dependencies through the proxy. The proxy permits `registry.npmjs.org` and `pypi.org` and similar — those are not blocklisted. A malicious package on the official registry would pass the proxy. **Mitigation:** partial. The dev image's uv, pip and npm skip any version published in the last 14 days (REL-09), which is when most malicious releases are found and pulled; one command can override it. A package that stays malicious past two weeks still passes, and so does anything installed another way (cargo, go, a curl script). Usual ecosystem hygiene (lockfiles, package signatures, audit tools) remains the project's job.
 
 ### Zero-day malware not yet on any feed
 
@@ -107,6 +107,46 @@ silently rerouting through the network you attached (`gw_priority`; see
 `bridge` (refused outright, along with `host` and `none`), and treat anything on an
 attached network as being inside the blast radius. `aidc status` lists current attachments
 for exactly this reason.
+
+### TCP destinations you name (NET-15)
+
+`egress_tcp:` in your config, `aidc create --egress-tcp host:port` and
+`aidc egress <session> add` let a proxied session reach a service the host can reach —
+a database over ZeroTier, a VPN, the LAN — without a route out. This is a far smaller
+hole than an attached network, and its size is exact:
+
+- **One address, the named ports.** The relay forwards to the address the name
+  resolved to on the host when the relay was made, on the ports listed. Nothing else on
+  that host or network is reachable through it.
+- **Not proxied, not taint-checked** — the same as an attached network. What is recorded
+  is each connection's source, destination and time, in a file in the audit dir named after
+  the host and port (e.g. `egress-db-internal-example-5432.log`), not its content.
+- **Whatever that service will serve the credentials the session holds is in reach.**
+- **Not bidirectional.** The relay publishes nothing; the destination cannot connect in.
+
+Refused: aidc-mcp's own address and port (MCP-12), and loopback.
+
+### Files the session can write that the host reads
+
+Anything a session can write and the host later *executes* is a way out. Two were closed
+on 2026-09-22: a repo's own `.aidc/config.yaml` (SEC-09, below) and `~/.claude/settings.json`,
+which was bind-mounted read-write into every session from v1.0.0 to v1.7.0. That file carries
+`hooks` your host Claude Code runs, so an agent could have added one; it is now copied in at
+create and never mounted. What remains shared read-write, on purpose, is this project's memory
+and transcripts (`~/.claude/projects/<encoded>/`): a session can edit its own memory, and could
+leave a symlink there that the host's Claude Code follows when it reads that dir. Narrower, and
+open: see the backlog.
+
+### A repo configuring its own sandbox (SEC-09)
+
+A `.aidc/config.yaml` in the repo or the workspace is writable from inside the session,
+so an agent can edit it and the next `aidc create` would read it. From those files aidc
+applies only settings that cannot widen the sandbox, and anything that only tightens it.
+The rest (`egress: direct`, `networks`, `ports`, `egress_tcp`, `dns_servers`, `audit_dir`
+— which the policy sidecar mounts read-write — `notify_webhook`, `share_*: true`, a
+softer `taint_response`) is listed by `aidc create` and ignored unless the operator passes
+`--trust-repo-config`. **Mitigation for the operator:** read that list before passing the
+flag; put settings you want in your own `~/.config/aidc/config.yaml`.
 
 ### Host network position attacks
 
@@ -178,7 +218,7 @@ Write the flag + immediately `docker pause aidc-<session>-dev`. Claude is frozen
 
 ### Configuration
 
-`taint_response` is set in `~/.config/aidc/config.yaml` (global default) or `<repo>/.aidc/config.yaml` (per-project override). Default if unset: `notify` (SEC-08).
+`taint_response` is set in `~/.config/aidc/config.yaml` (global default) or `<repo>/.aidc/config.yaml` (per-project override, which may only make it stricter: SEC-09). Default if unset: `freeze` (SEC-08).
 
 ```yaml
 taint_response: freeze

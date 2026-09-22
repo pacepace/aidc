@@ -13,7 +13,7 @@
 #
 # ---- this widens the sandbox -------------------------------------------------
 #
-# aidc's premise is a fully adversarial agent (docs/done/design-07-safety-model.md).
+# aidc's premise is a fully adversarial agent (docs/security-model.md).
 # Attaching a foreign bridge is a deliberate, and deliberately visible, hole in
 # that premise: every service on that network becomes reachable on every port,
 # and the traffic is invisible to squid's access log, so the taint detector
@@ -95,7 +95,7 @@ do_add() {
     local net="${1:-}"
     [ -n "$net" ] || die "add requires a network name (list them with: docker network ls)"
 
-    aidc_assert_attachable "$NAME" "$net"
+    aidc_assert_attachable "$NAME" "$net" || exit 1
 
     if aidc_container_networks "$DEV_CT" | grep -qx "$net"; then
         info "${DEV_CT} is already attached to ${net}"

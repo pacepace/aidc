@@ -20,6 +20,11 @@ case $? in
     0) log "claude state: seeded ${CLAUDE_CONFIG_DIR}/.claude.json from the host (first start)" ;;
     2) log "WARN: could not install the claude state seed; first launch will run onboarding" ;;
 esac
+aidc_install_claude_settings_seed "$CLAUDE_CONFIG_DIR" /var/aidc/audit/claude-settings-seed.json
+case $? in
+    0) log "claude settings: installed ${CLAUDE_CONFIG_DIR}/settings.json from the host's copy (first start)" ;;
+    2) log "WARN: could not install the host's settings.json copy; Claude starts with its defaults" ;;
+esac
 
 # Set up tmux session (idempotent).
 log "starting tmux session 'main'"

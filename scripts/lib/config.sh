@@ -52,6 +52,7 @@ aidc_config_defaults() {
     AIDC_DNS_SERVERS=""           # per-session DNS override; newline-separated IPs; empty = Quad9 default
     AIDC_NETWORKS=""              # foreign docker bridges to attach (NET-13); newline-separated
     AIDC_EGRESS="proxied"         # proxied|direct -- internal session bridge vs NATed (NET-14)
+    AIDC_EGRESS_TCP=""            # host:port TCP destinations relayed to the session (NET-15); newline-separated
 }
 
 # ---- default config template -------------------------------------------------
@@ -100,6 +101,13 @@ blocklist_additions: []
 # networks that do the job -- never Docker's default `bridge`.
 networks: []
 
+# TCP destinations the session may reach, host:port, without a route out: a
+# database over ZeroTier, a VPN or the LAN. Each gets a relay that answers to the
+# name inside the session and forwards to that one address and port, logging every
+# connection to the audit dir. Resolved on this machine at create. Same as
+# `aidc create --egress-tcp`. A repo's own .aidc/config.yaml cannot set this.
+egress_tcp: []
+
 notify_webhook: ""
 
 # Only relevant if you use `aidc mcp` (the control plane for AI orchestrators).
@@ -122,7 +130,9 @@ EOF
 
 # ---- yq vs fallback ----------------------------------------------------------
 
-_aidc_has_yq() { command -v yq >/dev/null 2>&1; }
+# AIDC_NO_YQ=1 forces the awk fallback, so the unit tests can run both parsers on
+# one machine (a defect in one of them hid behind the other once: see below).
+_aidc_has_yq() { [ "${AIDC_NO_YQ:-}" != 1 ] && command -v yq >/dev/null 2>&1; }
 
 # ---- scalar getter -----------------------------------------------------------
 #
@@ -133,9 +143,12 @@ _aidc_yaml_scalar() {
     local file="$1" key="$2"
     [ -f "$file" ] || { printf ''; return 0; }
     if _aidc_has_yq; then
-        # yq prints 'null' for missing keys; normalize to empty.
+        # yq prints 'null' for a missing key; normalize to empty. NOT `.key // ""`:
+        # yq's // treats false as "missing" too, so every `something: false`
+        # (tld_taints, claude_resume, share_*) was silently dropped wherever yq
+        # was installed, while the awk fallback read it. Found by CI 2026-09-22.
         local v
-        v=$(yq eval ".${key} // \"\"" "$file" 2>/dev/null || printf '')
+        v=$(yq eval ".${key}" "$file" 2>/dev/null || printf '')
         [ "$v" = "null" ] && v=""
         printf '%s' "$v"
         return 0
@@ -370,6 +383,84 @@ _aidc_expand_path() {
     esac
 }
 
+# ---- repo-config trust (SEC-09) ---------------------------------------------
+
+# How hard a taint response bites, for "a repo may only make it stricter".
+# Unknown values rank lowest, so they never count as a tightening.
+_aidc_taint_rank() {
+    case "$1" in
+        freeze) printf '3' ;;
+        notify) printf '2' ;;
+        log)    printf '1' ;;
+        *)      printf '0' ;;
+    esac
+}
+
+# Every config key load_config reads, one row each: key|kind|class|variable.
+#   kind   scalar | list | block (a nested mapping with its own loader)
+#   class  what a workspace/repo config may do with it (SEC-09):
+#          safe     applied as written: it cannot open a path out or reach the host
+#          tighten  applied only when the value tightens (_aidc_repo_tightens)
+#          operator never applied from there, only reported: global config and flags only
+#          global   not read from a repo config at all (block keys)
+# load_config reads ONLY the keys listed here, so a new key does nothing until it has
+# a row, and so a class. tests/unit/test-config-sources.sh fails on any key in the
+# shipped config template without one.
+_aidc_config_keys() {
+    cat <<'ROWS'
+profile|scalar|safe|AIDC_PROFILE
+claude_mode|scalar|safe|AIDC_CLAUDE_MODE
+claude_resume|scalar|safe|AIDC_CLAUDE_RESUME
+taint_response|scalar|tighten|AIDC_TAINT_RESPONSE
+tld_taints|scalar|tighten|AIDC_TLD_TAINTS
+share_memory|scalar|tighten|AIDC_SHARE_MEMORY
+share_plugins|scalar|tighten|AIDC_SHARE_PLUGINS
+share_scratchpad|scalar|tighten|AIDC_SHARE_SCRATCHPAD
+egress|scalar|tighten|AIDC_EGRESS
+audit_dir|scalar|operator|AIDC_AUDIT_DIR
+notify_webhook|scalar|operator|AIDC_NOTIFY_WEBHOOK
+state_actor_tlds|list|safe|AIDC_STATE_ACTOR_TLDS
+blocklist_additions|list|safe|AIDC_BLOCKLIST_ADDITIONS
+container_only_paths|list|safe|AIDC_CONTAINER_ONLY_PATHS
+ports|list|operator|AIDC_PORTS
+dns_servers|list|operator|AIDC_DNS_SERVERS
+networks|list|operator|AIDC_NETWORKS
+egress_tcp|list|operator|AIDC_EGRESS_TCP
+mcp|block|global|
+metallm|block|global|
+ROWS
+}
+
+# _aidc_repo_tightens <key> <value> <current>: does a repo's value only tighten?
+_aidc_repo_tightens() {
+    case "$1" in
+        taint_response) [ "$(_aidc_taint_rank "$2")" -ge "$(_aidc_taint_rank "$3")" ] ;;
+        tld_taints)     [ "$2" = "true" ] ;;
+        share_*)        [ "$2" = "false" ] ;;
+        egress)         [ "$2" = "proxied" ] ;;
+        *)              return 1 ;;
+    esac
+}
+
+# Record a setting a workspace/repo config asked for and did not get.
+_aidc_repo_request() {
+    AIDC_REPO_REQUESTED="${AIDC_REPO_REQUESTED}${1}: ${2}
+"
+}
+
+# The same, for each entry of a list (newline-separated $3) under key $2.
+_aidc_repo_request_list() {
+    local item
+    while IFS= read -r item; do
+        if [ -n "$item" ]; then
+            _aidc_repo_request "$1" "$2: $item"
+        fi
+    done <<EOF_REQ
+$3
+EOF_REQ
+    return 0
+}
+
 # ---- main entry --------------------------------------------------------------
 #
 # load_config [project_dir] [workspace_dir]
@@ -411,6 +502,7 @@ load_config() {
     # on the defaults because no config was found looks identical otherwise.
     AIDC_CONFIG_SOURCES=""
     export AIDC_CONFIG_SOURCES
+    AIDC_REPO_REQUESTED=""
 
     local f val
     for f in "$global_cfg" "$workspace_cfg" "$project_cfg"; do
@@ -419,45 +511,50 @@ load_config() {
 
         AIDC_CONFIG_SOURCES="${AIDC_CONFIG_SOURCES:+${AIDC_CONFIG_SOURCES} }${f}"
 
-        # Scalars: each non-empty value overrides.
-        val=$(_aidc_yaml_scalar "$f" "profile");         [ -n "$val" ] && AIDC_PROFILE="$val"
-        val=$(_aidc_yaml_scalar "$f" "taint_response");  [ -n "$val" ] && AIDC_TAINT_RESPONSE="$val"
-        val=$(_aidc_yaml_scalar "$f" "tld_taints");      [ -n "$val" ] && AIDC_TLD_TAINTS="$val"
-        val=$(_aidc_yaml_scalar "$f" "audit_dir");       [ -n "$val" ] && AIDC_AUDIT_DIR=$(_aidc_expand_path "$val")
-        val=$(_aidc_yaml_scalar "$f" "notify_webhook");  [ -n "$val" ] && AIDC_NOTIFY_WEBHOOK="$val"
-        val=$(_aidc_yaml_scalar "$f" "claude_mode");     [ -n "$val" ] && AIDC_CLAUDE_MODE="$val"
-        val=$(_aidc_yaml_scalar "$f" "claude_resume");   [ -n "$val" ] && AIDC_CLAUDE_RESUME="$val"
-        val=$(_aidc_yaml_scalar "$f" "share_memory");    [ -n "$val" ] && AIDC_SHARE_MEMORY="$val"
-        val=$(_aidc_yaml_scalar "$f" "share_plugins");   [ -n "$val" ] && AIDC_SHARE_PLUGINS="$val"
-        val=$(_aidc_yaml_scalar "$f" "share_scratchpad"); [ -n "$val" ] && AIDC_SHARE_SCRATCHPAD="$val"
-        val=$(_aidc_yaml_scalar "$f" "egress");          [ -n "$val" ] && AIDC_EGRESS="$val"
+        # A config file in the workspace or the repo is writable from inside the
+        # session, so an agent can edit it and the next `aidc create` would read it.
+        # From there (SEC-09) only settings that cannot widen the sandbox apply:
+        # anything that opens a path out, mounts a host directory, moves where aidc
+        # writes on the host, or softens the response to a taint is set aside in
+        # AIDC_REPO_REQUESTED for `aidc create` to show, and applies only with
+        # --trust-repo-config. A request that tightens (freeze over log, sharing
+        # turned off, proxied egress) always applies: refusing it helps no one.
+        local trusted=false
+        if [ "$f" = "$global_cfg" ] || [ "${AIDC_TRUST_REPO_CONFIG:-false}" = "true" ]; then
+            trusted=true
+        fi
 
-        # Lists: append to running aggregate, dedupe at the end.
-        local tlds adds ports cops dnss nets
-        tlds=$(_aidc_yaml_list "$f" "state_actor_tlds" || true)
-        adds=$(_aidc_yaml_list "$f" "blocklist_additions" || true)
-        ports=$(_aidc_yaml_list "$f" "ports" || true)
-        cops=$(_aidc_yaml_list "$f" "container_only_paths" || true)
-        dnss=$(_aidc_yaml_list "$f" "dns_servers" || true)
-        nets=$(_aidc_yaml_list "$f" "networks" || true)
-        if [ -n "$tlds" ]; then
-            AIDC_STATE_ACTOR_TLDS=$(printf '%s\n%s' "$AIDC_STATE_ACTOR_TLDS" "$tlds" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$adds" ]; then
-            AIDC_BLOCKLIST_ADDITIONS=$(printf '%s\n%s' "$AIDC_BLOCKLIST_ADDITIONS" "$adds" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$ports" ]; then
-            AIDC_PORTS=$(printf '%s\n%s' "$AIDC_PORTS" "$ports" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$cops" ]; then
-            AIDC_CONTAINER_ONLY_PATHS=$(printf '%s\n%s' "$AIDC_CONTAINER_ONLY_PATHS" "$cops" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$dnss" ]; then
-            AIDC_DNS_SERVERS=$(printf '%s\n%s' "$AIDC_DNS_SERVERS" "$dnss" | _aidc_dedupe_lines)
-        fi
-        if [ -n "$nets" ]; then
-            AIDC_NETWORKS=$(printf '%s\n%s' "$AIDC_NETWORKS" "$nets" | _aidc_dedupe_lines)
-        fi
+        local key kind class var cur
+        while IFS='|' read -r key kind class var; do
+            [ -n "$key" ] || continue
+            case "$kind" in
+                scalar)
+                    val=$(_aidc_yaml_scalar "$f" "$key")
+                    [ -n "$val" ] || continue
+                    cur="${!var}"
+                    if [ "$trusted" = true ] || [ "$class" = safe ] || \
+                       { [ "$class" = tighten ] && _aidc_repo_tightens "$key" "$val" "$cur"; }; then
+                        if [ "$key" = audit_dir ]; then val=$(_aidc_expand_path "$val"); fi
+                        printf -v "$var" '%s' "$val"
+                    else
+                        _aidc_repo_request "$f" "${key}: ${val}"
+                    fi
+                    ;;
+                list)
+                    val=$(_aidc_yaml_list "$f" "$key" || true)
+                    [ -n "$val" ] || continue
+                    if [ "$trusted" = true ] || [ "$class" = safe ]; then
+                        cur="${!var}"
+                        printf -v "$var" '%s' "$(printf '%s\n%s' "$cur" "$val" | _aidc_dedupe_lines)"
+                    else
+                        _aidc_repo_request_list "$f" "$key" "$val"
+                    fi
+                    ;;
+                *) : ;;   # block: a nested mapping, read from the global config by its own loader
+            esac
+        done <<EOF_KEYS
+$(_aidc_config_keys)
+EOF_KEYS
     done
 
     # Final dedupe pass on defaults-only paths too (idempotent under -e).
@@ -467,13 +564,14 @@ load_config() {
     AIDC_PORTS=$(printf '%s\n' "$AIDC_PORTS" | _aidc_dedupe_lines)
     AIDC_DNS_SERVERS=$(printf '%s\n' "$AIDC_DNS_SERVERS" | _aidc_dedupe_lines)
     AIDC_NETWORKS=$(printf '%s\n' "$AIDC_NETWORKS" | _aidc_dedupe_lines)
+    AIDC_EGRESS_TCP=$(printf '%s\n' "$AIDC_EGRESS_TCP" | _aidc_dedupe_lines)
 
     export AIDC_PROFILE AIDC_TAINT_RESPONSE AIDC_TLD_TAINTS AIDC_AUDIT_DIR \
            AIDC_STATE_ACTOR_TLDS AIDC_BLOCKLIST_ADDITIONS AIDC_NOTIFY_WEBHOOK \
            AIDC_CLAUDE_MODE AIDC_CLAUDE_RESUME AIDC_SHARE_MEMORY \
            AIDC_SHARE_PLUGINS AIDC_SHARE_SCRATCHPAD \
            AIDC_PORTS AIDC_CONTAINER_ONLY_PATHS AIDC_DNS_SERVERS AIDC_NETWORKS \
-           AIDC_EGRESS
+           AIDC_EGRESS AIDC_EGRESS_TCP AIDC_REPO_REQUESTED
 }
 
 # Emit the loaded config as YAML, for `aidc config` printing.
@@ -525,6 +623,27 @@ emit_loaded_config_yaml() {
     else
         printf '  []\n'
     fi
+    printf 'egress_tcp:\n'
+    if [ -n "$AIDC_EGRESS_TCP" ]; then
+        printf '%s\n' "$AIDC_EGRESS_TCP" | awk 'NF { printf "  - \"%s\"\n", $0 }'
+    else
+        printf '  []\n'
+    fi
+    if [ -n "${AIDC_REPO_REQUESTED:-}" ]; then
+        printf '# Asked for by a workspace/repo config and NOT applied (SEC-09);\n'
+        printf '# aidc create --trust-repo-config applies them:\n'
+        printf '%s' "$AIDC_REPO_REQUESTED" | awk 'NF { printf "#   %s\n", $0 }'
+    fi
+}
+
+# Tell the person creating a session what a workspace/repo config asked for and
+# did not get, and how to grant it. Silent when there is nothing to say.
+aidc_report_repo_requests() {
+    [ -n "${AIDC_REPO_REQUESTED:-}" ] || return 0
+    printf '[aidc] a workspace/repo config asked to widen the sandbox; NOT applied:\n' >&2
+    printf '%s' "$AIDC_REPO_REQUESTED" | awk 'NF { printf "[aidc]   %s\n", $0 }' >&2
+    printf '[aidc] that file is writable from inside a session. If you wrote it and want it,\n' >&2
+    printf '[aidc] recreate with --trust-repo-config, or move the settings to your own config.\n' >&2
 }
 
 # Read a single child key of a top-level YAML mapping.

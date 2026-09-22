@@ -13,6 +13,80 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-22
+
+### Added
+- **A proxied session can reach a TCP service the host can reach, and nothing else.** Name it —
+  `egress_tcp:` in `~/.config/aidc/config.yaml`, `aidc create --egress-tcp host:port`, or
+  `aidc egress <session> add host:port` on a running session — and a small relay answers to that
+  name on the session network and forwards to that one address and port. The session connects
+  exactly as it would outside (`psql "…@db.internal.example:5432/…?sslmode=require"`), TLS stays
+  end to end, and every connection is logged to a file named after the host and port (e.g. `egress-db-internal-example-5432.log`) in the audit dir. The
+  name is resolved on the host, so ZeroTier, VPN and split-horizon names work. Enforcement stays
+  on: this is the narrow alternative to `--egress direct` or attaching a network. Relays survive
+  `aidc restart` and `aidc upgrade`; `aidc status` and `aidc egress <s> ls` list them.
+
+- **Your Claude Code status line shows inside sessions.** `settings.json` was bridged, so the
+  session ran its `statusLine` command, but a script the command names under `~/.claude` existed
+  only on the host and the line stayed empty. `aidc create` now bridges that script read-only at
+  the same path.
+
+### Security
+- **A session can no longer plant a hook that runs on your machine.** `~/.claude/settings.json`
+  was bind-mounted read-write into every session, and that file carries `hooks` your host Claude
+  Code runs, so an agent could have added one. The file is now copied into the session when it is
+  created (preferences you change inside stay inside; host changes reach sessions created after).
+  The status-line script `~/.claude/statusline-command.sh` is bridged read-only, and only that
+  file. A session created before this release keeps its live mount through `aidc upgrade`;
+  `aidc kill` + `aidc create` closes it.
+- **A repo's own `.aidc/config.yaml` can no longer widen the sandbox.** That file (and a
+  workspace's) is writable from inside the session it configures, and aidc applied everything in
+  it: `egress: direct`, `networks`, `ports`, `dns_servers`, `audit_dir` (which the policy
+  container mounts read-write, so a repo could point it anywhere on the host), `notify_webhook`,
+  the `share_*` host mounts, and a softer `taint_response`. From those files aidc now applies only
+  settings that cannot widen the sandbox, plus anything that only tightens it; the rest is listed
+  by `aidc create` (and `aidc config`) and ignored. Move those settings to your own config, or
+  pass `aidc create --trust-repo-config` if you wrote the file and want it applied as written.
+
+- **The MCP server's Python dependencies are upgraded past ten published security advisories**
+  (anyio, cryptography, mcp, pydantic-settings, starlette, among them a critical TLS host-name
+  spoofing issue in anyio). Rebuild the image to pick them up: `aidc rebuild`, then restart
+  `aidc mcp`.
+- **New package versions wait 14 days, in aidc and inside sessions.** Most malicious releases (a
+  hijacked maintainer account, a typosquat) are found and pulled within days. The MCP server's
+  dependency lock never takes anything published in the last two weeks, and the dev image sets the
+  same rule as a system default for uv, pip and npm, so it also covers what the agent installs
+  inside a session. A project's own config still governs that project, and one command can
+  override it (`uv --exclude-newer false`, `pip --uploaded-prior-to <now>`,
+  `npm --min-release-age=0`). Claude Code is exempt and stays current; so are the Go, Rust and
+  Python toolchains and system packages. poetry and pipenv are now installed as uv tools. The
+  rule binds pip 25.3+; Ubuntu's own pip (25.1, which ignores it silently) is upgraded and the
+  build checks every interpreter. Needs `aidc rebuild` and `aidc upgrade <session>`.
+
+- **Subdomains of known-malware domains are blocked too.** Squid matched the list's domains
+  exactly, so `www.<listed-domain>` and every other subdomain went through, and the taint
+  detection, which only sees requests squid blocked, never saw them. A listed domain now blocks
+  its subdomains, as the feeds intend.
+
+### Fixed
+- **The proxy no longer drops every connection for ~20 seconds when the malware list refreshes**
+  ([#34](https://github.com/pacepace/aidc/issues/34)). Squid loaded the 2.7M-domain list itself,
+  so each new list (at session start and every 6 hours) needed a squid reload, and a reload is a
+  restart: any request in that window failed, Claude's own API calls included, and a malware
+  request in it could not taint the session. Squid now asks a small lookup helper that reads the
+  list on disk and picks up a new one the moment it lands, so squid never reloads for it. The
+  helper uses about 4 MB. Needs `aidc rebuild` and new sessions (`aidc kill` + `aidc create`),
+  since `aidc upgrade` keeps a session's proxy.
+- **`aidc create --port` works on a machine that has never run `aidc proxy`.** Declared port
+  forwards use the `aidc/forwarder` image, which only `aidc proxy` built; compose then tried to
+  pull it from a registry where it does not exist. `aidc create` now builds it when it is needed.
+- The safety-model doc gave `notify` as the default taint response; it is `freeze`.
+- **A `false` setting in config.yaml is no longer ignored on machines with `yq` installed.** The
+  yq-based reader used `.key // ""`, and yq treats `false` like a missing key, so `tld_taints:
+  false`, `claude_resume: false` and `share_*: false` silently kept their defaults wherever `yq`
+  was on PATH (the awk fallback read them correctly). The config unit tests now run under both
+  parsers.
+
 ## [1.7.0] - 2026-09-17
 
 ### Security
@@ -375,7 +449,7 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
   This is a deliberate, documented widening of the sandbox: traffic to an attached network
   does not pass through squid, so the blocklist does not apply and taint detection cannot see
-  it, and the attachment is bidirectional. `docs/done/design-07-safety-model.md` now sizes
+  it, and the attachment is bidirectional. `docs/security-model.md` now sizes
   that honestly, and both the CLI and the config template say so at the point of use.
   (NET-13, CLI-24, CLI-25)
 
@@ -1014,7 +1088,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/pacepace/aidc/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/pacepace/aidc/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/pacepace/aidc/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/pacepace/aidc/compare/v1.5.0...v1.5.1

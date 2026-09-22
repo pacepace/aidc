@@ -317,6 +317,15 @@ aidc_set_compose_dev_image() {
     mv -f "$tmp" "$file"
 }
 
+# aidc_session_audit_dir <session>: the session's audit dir on the HOST, read from
+# the audit container's mount rather than re-derived from config (the config can
+# have changed since the session was created). Empty when the container is gone.
+aidc_session_audit_dir() {
+    docker inspect "$(container_name "$1" audit)" \
+        --format '{{range .Mounts}}{{if eq .Destination "/var/aidc/audit"}}{{.Source}}{{end}}{{end}}' \
+        2>/dev/null || printf ''
+}
+
 # ---- adhoc port-forward sidecars --------------------------------------------
 #
 # `aidc proxy <session> add` launches one socat sidecar per forward, named

@@ -74,7 +74,6 @@ ${DNS_BLOCK}
   refresher:
     image: aidc/refresher:${AIDC_VERSION_TAG}
     container_name: aidc-${SESSION}-refresher
-    pid: "service:squid"           # shares PID namespace so kill -HUP 1 reaches squid
     networks:
       default: {}
       egress: {}          # fetches URLhaus / ThreatFox / HaGeZi feeds directly
@@ -187,7 +186,7 @@ ${DNS_BLOCK}
       - ${AUDIT_DIR}:/var/aidc/audit:ro     # transparency: Claude can see logs about it
       ${CLAUDE_MEMORY_MOUNT}                # per-project memory dir (optional; share_memory config)
       ${CLAUDE_SCRATCHPAD_MOUNT}            # per-project scratchpad + tasks (optional; share_scratchpad config)
-      ${CLAUDE_SETTINGS_MOUNT}              # settings.json (theme, output style, env)
+      ${CLAUDE_SETTINGS_MOUNT}              # the status-line script, read-only (settings.json itself is copied in at create)
       ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
       ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)
       ${TRANSCRIPT_MIRROR_MOUNT}           # design-09: in-container mirror copies transcripts here for MCP to read
@@ -202,3 +201,4 @@ ${OVERLAY_VOLUMES_MOUNTS}
     # which prints "[aidc-user-main] ready" once tmux is up. aidc create's
     # dev-wait watches for that marker to know the container is fully ready.
 ${PORT_FORWARDER_SERVICES}
+${EGRESS_RELAY_SERVICES}

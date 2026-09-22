@@ -96,6 +96,8 @@ aidc kill <session>
   it, so we capture it at create time.
 - Assertions test file presence and content patterns -- never log line
   counts -- because Squid logging is non-deterministic.
-- Squid blocklist hot-reload (`squid -k reconfigure`) is exercised as a
-  side-effect of injecting the malware test domain; this is the same path the
-  refresher sidecar uses.
+- A blocklist refresh is exercised for real (the refresher's own script, while
+  requests stream through the proxy) and must drop no connection: squid never
+  reloads for a new list, its lookup helper follows the file (NET-16). The malware
+  test domain is then added the way the refresher writes the file: a sorted copy
+  renamed over it.

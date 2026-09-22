@@ -6,8 +6,9 @@
 # Order matters:
 #   1. Pause the dev container -- freeze further outbound activity.
 #   2. Best-effort finalize the audit sidecar so meta.json gets killed_at.
-#   3. Remove adhoc port-forwarders: they are attached to the session's networks,
-#      and compose cannot remove a network something outside it still uses.
+#   3. Remove adhoc port-forwarders and live TCP egress relays: they are attached to
+#      the session's networks, and compose cannot remove a network something outside
+#      it still uses.
 #   4. `docker compose down -v` to remove containers, networks, anonymous
 #      volumes. Named volumes labelled aidc-* go too.
 #   5. Force-remove the dev container if it lingered (rare; defensive).
@@ -19,6 +20,8 @@ set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"
+# shellcheck source=lib/egress.sh
+. "$AIDC_SCRIPTS/lib/egress.sh"
 
 case "${1:-}" in
     -h|--help)
@@ -55,14 +58,8 @@ AUDIT_CT="$(container_name "$NAME" audit)"
 PROJECT="$(compose_project_name "$NAME")"
 COMPOSE_FILE="/tmp/aidc-${NAME}.yaml"
 
-# Recover the audit dir for the final message. The audit container has it
-# mounted at /var/aidc/audit; ask Docker rather than re-deriving from config.
-AUDIT_HOST=""
-if docker inspect "$AUDIT_CT" >/dev/null 2>&1; then
-    AUDIT_HOST=$(docker inspect "$AUDIT_CT" \
-        --format '{{range .Mounts}}{{if eq .Destination "/var/aidc/audit"}}{{.Source}}{{end}}{{end}}' \
-        2>/dev/null || printf '')
-fi
+# The audit dir, for the final message.
+AUDIT_HOST=$(aidc_session_audit_dir "$NAME")
 
 info "pausing $DEV"
 docker pause "$DEV" >/dev/null 2>&1 || true
@@ -75,6 +72,9 @@ docker exec "$AUDIT_CT" /usr/local/bin/finalize.sh >/dev/null 2>&1 || \
 # project, so compose-down doesn't touch them, and they are attached to the
 # session's networks, so they must go first or those networks survive the down.
 remove_adhoc_forwards "$NAME" "cleaning up adhoc port-forwards"
+# Live TCP egress relays (`aidc egress add`) are outside the project and on its
+# networks for the same reason.
+aidc_egress_remove_adhoc "$NAME" "cleaning up live TCP egress relays"
 
 # `docker compose down` needs the file we rendered at create time. If it's
 # gone (e.g. /tmp cleared), `-p $PROJECT` with no file still works for

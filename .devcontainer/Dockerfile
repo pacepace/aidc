@@ -51,6 +51,28 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Supply-chain cooldown (REL-09) -----------------------------------------
+# No package manager here takes a version published in the last 14 days. Most
+# malicious releases (a hijacked maintainer account, a typosquat) are found and
+# pulled within days; waiting two weeks lets that happen first. Each tool's own
+# setting, as a SYSTEM default, so it covers this build AND everything installed
+# inside a session (pip install, uv add, npm install), while a project's own config
+# can still set its own. One command that needs something newer overrides it:
+#   uv:  --exclude-newer false        pip: --uploaded-prior-to <now, ISO 8601>
+#   npm: --min-release-age=0
+# Not covered, on purpose: Claude Code (kept current), the Go/Rust/CPython
+# toolchains (straight from their makers), and apt packages (holding back distro
+# security updates does more harm than good).
+# npm's global config file lives under its prefix, which vscode moves into its home
+# below; NPM_CONFIG_GLOBALCONFIG pins it to /etc/npmrc for every user. It chooses
+# the file only; its settings keep global precedence (below project and user).
+ENV NPM_CONFIG_GLOBALCONFIG=/etc/npmrc
+RUN mkdir -p /etc/uv \
+    && printf 'exclude-newer = "14 days"\n' > /etc/uv/uv.toml \
+    && printf '[global]\nuploaded-prior-to = P14D\n' > /etc/pip.conf \
+    && printf 'min-release-age=14\n' > /etc/npmrc \
+    && chmod 0644 /etc/uv/uv.toml /etc/pip.conf /etc/npmrc
+
 # Node + npm (for JS-based tooling that profiles may need).
 # Uses NodeSource's distribution so we get the current ACTIVE LTS (24.x, the
 # "Krypton" line) on Ubuntu without waiting for Ubuntu's package to lag.
@@ -84,7 +106,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 
 # ---- Python ecosystem -------------------------------------------------------
 # Includes everything aidc users need to run tests: pyenv (version mgmt),
-# uv (Astral, modern), poetry, pipenv, pipx, plus:
+# uv (Astral, modern), poetry and pipenv (as uv tools), pipx, plus:
 #   - build deps for pyenv to compile any Python version
 #   - native libs for common wheel builds (psycopg2, lxml, Pillow, python-ldap)
 #   - postgresql-client (psql + pg_dump for tests that need to verify DB state)
@@ -163,18 +185,40 @@ RUN curl -fsSL https://astral.sh/uv/install.sh \
     | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh \
     && uv --version
 
-# poetry: official installer to a system location, then symlink onto PATH.
-# (Ubuntu 24.04's pipx doesn't support --global; using POETRY_HOME instead.)
-ENV POETRY_HOME=/opt/poetry
-RUN curl -sSL https://install.python-poetry.org | python3 - --yes \
-    && ln -s ${POETRY_HOME}/bin/poetry /usr/local/bin/poetry \
+# poetry and pipenv: uv tools in a system location, so they are on everyone's PATH
+# and were resolved under the cooldown above. Built against Ubuntu's own Python,
+# which ships in the image: the pyenv versions live on a volume shared across
+# sessions that can hold a different patch release, which would strand a tool built
+# against the image's copy; and a uv-downloaded Python would land in root's home,
+# where vscode cannot run it.
+RUN for tool in poetry pipenv; do \
+        UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+            uv tool install --python /usr/bin/python3 "$tool" || exit 1; \
+    done \
     && poetry config virtualenvs.in-project true \
-    && poetry --version
-
-# pipenv: another popular Python project tool. Installed via pipx into a
-# system path so it's available to vscode user.
-RUN PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install pipenv \
+    && poetry --version \
     && pipenv --version
+
+# The cooldown only binds a pip that knows `uploaded-prior-to` (pip 25.3+); an older
+# pip ignores the setting WITHOUT A WORD (measured: pip 25.1 downloads the newest
+# version under a config key it does not know). Ubuntu's python3-pip is 25.1, so it
+# is upgraded here, and the build then fails unless every interpreter's pip, and the
+# pip its venvs would seed (ensurepip), know the option. Floor: pip 25.3. Not
+# covered: a venv seeded from Ubuntu's /usr/bin/python3 (its ensurepip wheel stays
+# 25.1) until `pip install -U pip` inside it; the README says so.
+# --ignore-installed: apt's pip has no RECORD file, so pip cannot uninstall it; the new
+# one lands in /usr/local/lib/python3.*/dist-packages, which Debian puts first on
+# sys.path, and shadows it.
+RUN /usr/bin/python3 -m pip install --break-system-packages --ignore-installed --quiet 'pip>=25.3' \
+    && for py in /usr/bin/python3 /usr/local/pyenv/versions/*/bin/python; do \
+        "$py" -m pip install --help | grep -q -- --uploaded-prior-to \
+            || { echo "FATAL: $py has a pip that ignores the 14-day cooldown ($("$py" -m pip --version))" >&2; exit 1; }; \
+        case "$py" in /usr/local/pyenv/*) \
+            ver=$("$py" -m ensurepip --version | awk '{ print $2 }'); \
+            printf '25.3\n%s\n' "$ver" | sort -V -C \
+                || { echo "FATAL: venvs from $py would seed pip $ver, which ignores the cooldown" >&2; exit 1; } ;; \
+        esac; \
+    done
 
 # ---- Go ---------------------------------------------------------------------
 # NOT `apt-get install golang-go`. On the old 24.04 base that package was Go
@@ -304,7 +348,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && usermod -aG docker vscode \
     && mkdir -p /home/vscode/.claude \
     && chown -R vscode:vscode /home/vscode \
-    && chown -R vscode:vscode /usr/local/pyenv /usr/local/rustup /usr/local/cargo /opt/poetry /opt/pipx 2>/dev/null || true
+    && chown -R vscode:vscode /usr/local/pyenv /usr/local/rustup /usr/local/cargo /opt/uv-tools 2>/dev/null || true
 
 # User-owned npm global prefix. Without this, `npm install -g <anything>` as the
 # `vscode` user targets root-owned /usr/lib/node_modules and dies with EACCES --

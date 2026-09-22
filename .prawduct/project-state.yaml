@@ -138,22 +138,23 @@ design_decisions:
   # api_versioning_approach: { scheme, deprecation_policy, stability_tiers,
   #                            status: active|deferred, rationale, revisit_trigger (if deferred), date }
   api_versioning_approach:
-    scheme: none-internal-only
+    scheme: semver-on-aidc-version
     deprecation_policy: >-
-      The MCP tool surface and the callback payload have exactly one consumer (the
-      orchestrator, MetaLLM). A change to either is agreed with that side before it is
-      built and written into the design doc that owns the contract (docs/design-10
-      D5/D6) with the requirement it implements; fields are added, not repurposed, and a
-      consumer that ignores an added field still reads the payload correctly. The aidc
-      release itself is semver-tagged, which is what an operator pins.
+      Decided 2026-09-22 (Pace: "A"), superseding the 2026-09-17 "none-internal-only"
+      entry: adding a tool, a field or a default-off setting can ship in any release;
+      removing or changing an existing tool, field, callback or error code ships only
+      in a major release and is announced in the CHANGELOG. The single home for the
+      wording is .prawduct/artifacts/api-contract.md "Compatibility" (also in the
+      README's MCP section); the top-level api_versioning_decided key mirrors it for
+      the plugin's probe. A change is still agreed with the orchestrator side first
+      and written into docs/design-10 D5/D6.
     stability_tiers: null
     status: active
     rationale: >-
-      A published version number would suggest independent consumers that do not exist,
-      and the real safeguard has been agreement plus additive fields: the joint test on
-      2026-09-17 changed the payload twice (error_code, speaker, prompt_waiting) by
-      agreeing the shape with the metallm session first.
-    date: 2026-09-17
+      aidc is used by more than one person, so orchestrators built against 1.x must
+      keep working through every 1.x upgrade; agreement-plus-additive-fields stays the
+      working practice, the promise is what it now guarantees.
+    date: 2026-09-22
   # api_error_model_approach: { envelope (e.g. RFC-7807/problem+json), codes, status, rationale, date }
   api_error_model_approach:
     envelope: >-
@@ -335,6 +336,36 @@ build_state:
 #   - src/billing/
 #   - migrations/
 #   - src/api/contract.py
+
+# Declared 2026-09-21 (Pace: "yes"). Where a missed defect costs most:
+risk_surfaces:
+  # 1. The sandbox walls: a mistake here quietly lets the agent out.
+  - proxy/
+  - scripts/lib/network.sh
+  - scripts/lib/egress.sh
+  - scripts/lib/config.sh
+  - scripts/cmd-create.sh
+  - scripts/cmd-network.sh
+  - scripts/cmd-egress.sh
+  - scripts/cmd-proxy.sh
+  - .devcontainer/Dockerfile
+  - .devcontainer/entrypoint.sh
+  # 2. The control server: a mistake here lets someone on the network drive sessions.
+  #    Also the contract paths from boundary-patterns.md (a present key replaces them).
+  - mcp/src/aidc_mcp/auth.py
+  - mcp/src/aidc_mcp/scope.py
+  - mcp/src/aidc_mcp/server.py
+  - mcp/src/aidc_mcp/tools.py
+  - mcp/src/aidc_mcp/resources.py
+  - mcp/src/aidc_mcp/transcript.py
+  - scripts/cmd-mcp.sh
+  - .devcontainer/transcript-mirror.sh
+  # 3. Install and release: a mistake here ships to everyone.
+  - install.sh
+  - release/
+  - .github/workflows/
+  - mcp/pyproject.toml
+  - mcp/uv.lock
 
 # =============================================================================
 # RELEASE VERSION FILES (opt-in)
@@ -565,3 +596,6 @@ base_branch: develop
 # path is markdown-first and sets this later, at scrub/cutover.
 # `/prawduct:backlog` routes on this scalar.
 backlog_service_repo: pacepace/aidc
+
+# Decided 2026-09-22 (Pace: "A"). The MCP control plane follows aidc's version number.
+api_versioning_decided: "semver on the MCP interface: additions (a tool, a field, a default-off setting) in any release; removing or changing an existing tool, field, callback or error code only in a major release, announced in the CHANGELOG"

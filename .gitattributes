@@ -1,0 +1,2 @@
+# Every branch prepends its entry at the same place; keep both sides instead of conflicting.
+.prawduct/change-log.md merge=union

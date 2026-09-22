@@ -130,7 +130,9 @@ EOF
 
 # ---- yq vs fallback ----------------------------------------------------------
 
-_aidc_has_yq() { command -v yq >/dev/null 2>&1; }
+# AIDC_NO_YQ=1 forces the awk fallback, so the unit tests can run both parsers on
+# one machine (a defect in one of them hid behind the other once: see below).
+_aidc_has_yq() { [ "${AIDC_NO_YQ:-}" != 1 ] && command -v yq >/dev/null 2>&1; }
 
 # ---- scalar getter -----------------------------------------------------------
 #
@@ -141,9 +143,12 @@ _aidc_yaml_scalar() {
     local file="$1" key="$2"
     [ -f "$file" ] || { printf ''; return 0; }
     if _aidc_has_yq; then
-        # yq prints 'null' for missing keys; normalize to empty.
+        # yq prints 'null' for a missing key; normalize to empty. NOT `.key // ""`:
+        # yq's // treats false as "missing" too, so every `something: false`
+        # (tld_taints, claude_resume, share_*) was silently dropped wherever yq
+        # was installed, while the awk fallback read it. Found by CI 2026-09-22.
         local v
-        v=$(yq eval ".${key} // \"\"" "$file" 2>/dev/null || printf '')
+        v=$(yq eval ".${key}" "$file" 2>/dev/null || printf '')
         [ "$v" = "null" ] && v=""
         printf '%s' "$v"
         return 0

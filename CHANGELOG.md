@@ -81,6 +81,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   forwards use the `aidc/forwarder` image, which only `aidc proxy` built; compose then tried to
   pull it from a registry where it does not exist. `aidc create` now builds it when it is needed.
 - The safety-model doc gave `notify` as the default taint response; it is `freeze`.
+- **A `false` setting in config.yaml is no longer ignored on machines with `yq` installed.** The
+  yq-based reader used `.key // ""`, and yq treats `false` like a missing key, so `tld_taints:
+  false`, `claude_resume: false` and `share_*: false` silently kept their defaults wherever `yq`
+  was on PATH (the awk fallback read them correctly). The config unit tests now run under both
+  parsers.
 
 ## [1.7.0] - 2026-09-17
 

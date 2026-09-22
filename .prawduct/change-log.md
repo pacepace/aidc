@@ -35,19 +35,35 @@
      caught that either. -->
 
 
-## 2026-09-21: TCP egress relays and repo-config trust
+## 2026-09-21: v1.8.0 — TCP egress relays, repo-config trust, supply-chain cooldown, blocklist without reloads
 
 <!-- prawduct: scope=egress-tcp -->
 
 **Why:** a proxied session could not reach a database the host reaches over ZeroTier, a VPN or
-the LAN without removing isolation, and a repo's own `.aidc/config.yaml` (writable from inside the
-session) could widen its own sandbox.
+the LAN without removing isolation; a repo's own `.aidc/config.yaml` (writable from inside the
+session) could widen its own sandbox; ten dependency advisories were open with no rule against
+adopting a version published yesterday; squid refused every connection for ~20 s on each
+blocklist reload (#34) and let subdomains of listed domains through; and settings.json, mounted
+read-write, let a session plant hooks the host's Claude Code runs.
 
-**What:** Chunk A: SEC-09. One table classifies every config key; from a workspace or repo config,
-only safe or tightening values apply, and the rest are shown and need `--trust-repo-config`.
-Chunk B: NET-15 declared relays (`egress_tcp:`, `--egress-tcp`), one per host, forwarding only to
-the address resolved on the host and logging each connection. Chunk C: `aidc egress <s>
-add|rm|ls|clear`, relays in `aidc status`, cleanup by kill, and docs. Also: `aidc create` builds the
-forwarder image that declared `--port` forwards needed. Reviews rev-20260921T204623Z-fa131876 and
-rev-20260921T210529Z-fbc10ffb; smoke 81/81. Filed #34 (squid refuses connections for ~20 s on
-each blocklist reload).
+**What (Chunks A–F, all reviewed):**
+- A, SEC-09: one table classifies every config key; from a workspace or repo config only safe or
+  tightening values apply, the rest are shown and need `--trust-repo-config`.
+- B, NET-15: declared relays (`egress_tcp:`, `--egress-tcp`), one per host, forwarding only to the
+  address resolved on the host and logging each connection.
+- C: `aidc egress <s> add|rm|ls|clear`, relays in `aidc status`, cleanup by kill, docs.
+- D, REL-09: mcp/uv.lock past ten advisories under a 14-day cooldown; the dev image sets the same
+  rule as a system default for uv, pip and npm (inside sessions too); Ubuntu's pip 25.1, which
+  ignores it silently, is upgraded and every interpreter is checked at build. Claude Code exempt.
+- E, NET-16: squid asks aidc-blocklist-helper instead of loading the list; no reload, no outage
+  (fixes #34); subdomains of listed domains denied; the refresher publishes only a byte-sorted
+  list.
+- F: the host's status-line script bridged read-only (only that file); settings.json copied in at
+  create instead of mounted (CTR-13 amended). #35 filed for the memory-dir symlink case.
+- Records: risk_surfaces declared; six strategy-doc pointers; docs/security-model.md rename;
+  union-merge for this log; api_versioning_decided (semver, breaking only in a major); learnings
+  migrated to .claude/rules/learnings; VERSION bumped to v1.8.0.
+
+Reviews: rev-20260921T204623Z-fa131876, rev-20260921T211012Z-58345080,
+rev-20260922T015403Z-28cf6fcf and their verify passes (last: rev-20260922T032134Z-66b98d8b).
+Smoke 94/94 on rebuilt images; pytest 537; shell units 398.

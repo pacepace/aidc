@@ -13,7 +13,7 @@ branch: feature/egress-tcp
 ## Why
 
 A session cannot reach a TCP service the host can reach — Pace's case is YugabyteDB
-(`yuga.ranch.illuminati.org:5433`, Postgres wire, TLS) over ZeroTier — because a session's only way
+(`db.internal.example:5433`, Postgres wire, TLS) over ZeroTier — because a session's only way
 out is Squid, which carries HTTP. aidc is used by other people, so the answer must be general: a
 way for the operator to name the TCP endpoints a session may reach, with nothing about any one
 network built in.
@@ -29,8 +29,8 @@ sandbox. `egress_tcp` must not inherit that, and the existing keys should not ke
 
 - **Problem:** a session cannot reach a non-HTTP TCP service the host can reach; and repo-controlled
   config can weaken the sandbox.
-- **Success:** with `egress_tcp: [yuga.ranch.illuminati.org:5433]` in the operator's config,
-  `psql "postgresql://…@yuga.ranch.illuminati.org:5433/faidh_dev?sslmode=require"` works inside the
+- **Success:** with `egress_tcp: [db.internal.example:5433]` in the operator's config,
+  `psql "postgresql://…@db.internal.example:5433/app?sslmode=require"` works inside the
   session, nothing else opens, each connection is logged to the session audit dir. A repo config
   that sets a weakening key is listed at `aidc create` and ignored unless `--trust-repo-config`.
 - **Out of scope:** UDP; HTTP (Squid carries it); YugabyteDB smart-driver discovery (list each node,

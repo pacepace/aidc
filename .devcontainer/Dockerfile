@@ -199,6 +199,27 @@ RUN for tool in poetry pipenv; do \
     && poetry --version \
     && pipenv --version
 
+# The cooldown only binds a pip that knows `uploaded-prior-to` (pip 25.3+); an older
+# pip ignores the setting WITHOUT A WORD (measured: pip 25.1 downloads the newest
+# version under a config key it does not know). Ubuntu's python3-pip is 25.1, so it
+# is upgraded here, and the build then fails unless every interpreter's pip, and the
+# pip its venvs would seed (ensurepip), know the option. Floor: pip 25.3. Not
+# covered: a venv seeded from Ubuntu's /usr/bin/python3 (its ensurepip wheel stays
+# 25.1) until `pip install -U pip` inside it; the README says so.
+# --ignore-installed: apt's pip has no RECORD file, so pip cannot uninstall it; the new
+# one lands in /usr/local/lib/python3.*/dist-packages, which Debian puts first on
+# sys.path, and shadows it.
+RUN /usr/bin/python3 -m pip install --break-system-packages --ignore-installed --quiet 'pip>=25.3' \
+    && for py in /usr/bin/python3 /usr/local/pyenv/versions/*/bin/python; do \
+        "$py" -m pip install --help | grep -q -- --uploaded-prior-to \
+            || { echo "FATAL: $py has a pip that ignores the 14-day cooldown ($("$py" -m pip --version))" >&2; exit 1; }; \
+        case "$py" in /usr/local/pyenv/*) \
+            ver=$("$py" -m ensurepip --version | awk '{ print $2 }'); \
+            printf '25.3\n%s\n' "$ver" | sort -V -C \
+                || { echo "FATAL: venvs from $py would seed pip $ver, which ignores the cooldown" >&2; exit 1; } ;; \
+        esac; \
+    done
+
 # ---- Go ---------------------------------------------------------------------
 # NOT `apt-get install golang-go`. On the old 24.04 base that package was Go
 # 1.22 -- outside upstream's support window (Go patches only the two most recent

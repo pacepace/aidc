@@ -521,25 +521,40 @@ if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ]; then
 fi
 export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
 
-# Settings bridge. settings.json holds theme / output style / env.
+# Settings: a COPY of the host's ~/.claude/settings.json (theme, model, status line,
+# plugins, env, hooks), installed by user-main.sh on the session's first start, like
+# the onboarding seed below. Until 2026-09-22 the file was bind-mounted read-write,
+# so a session could write `hooks` into it and the HOST's Claude Code would run
+# them (review rev-20260922T015403Z-28cf6fcf). The cost: a preference changed inside
+# a session stays inside it, and a host change reaches only sessions created after it.
 CLAUDE_SETTINGS_MOUNT=""
 HOST_CLAUDE_SETTINGS="$(aidc_host_home)/.claude/settings.json"
 if [ -f "$HOST_CLAUDE_SETTINGS" ]; then
-    CLAUDE_SETTINGS_MOUNT="- ${HOST_CLAUDE_SETTINGS}:/home/vscode/.claude/settings.json:rw"
-    info "settings: bridged from host ~/.claude/settings.json"
-    # The status line's script, if settings.json names one under ~/.claude: the
-    # command runs inside the session too, and without the file it shows nothing.
-    # Read-only; the same path under the container's home. Extra mount lines need
-    # the placeholder's own indentation in the compose template.
-    while IFS= read -r _sl; do
+    if ( umask 0077; cp "$HOST_CLAUDE_SETTINGS" "${AUDIT_WRITE}/claude-settings-seed.json" ); then
+        info "settings: copied from host ~/.claude/settings.json (installed on first start; not shared live)"
+    else
+        rm -f "${AUDIT_WRITE}/claude-settings-seed.json"
+        info "settings: could not read host ~/.claude/settings.json (the session starts with Claude's defaults)"
+    fi
+    # The status line's script: the command runs inside the session too, and
+    # without the file the line stays empty. Only ~/.claude/statusline-command.sh
+    # is ever bridged (see aidc_statusline_scripts for why nothing else named in a
+    # file the session can write may become a mount). Read-only; the same path
+    # under the container's home.
+    while read -r _verdict _sl; do
         [ -n "$_sl" ] || continue
-        CLAUDE_SETTINGS_MOUNT="${CLAUDE_SETTINGS_MOUNT}
-      - $(aidc_host_home)/.claude/${_sl}:/home/vscode/.claude/${_sl}:ro"
-        info "settings: status line script ~/.claude/${_sl} bridged (read-only)"
+        if [ "$_verdict" = bridge ]; then
+            CLAUDE_SETTINGS_MOUNT="- $(aidc_host_home)/.claude/${_sl}:/home/vscode/.claude/${_sl}:ro"
+            info "settings: status line script ~/.claude/${_sl} bridged (read-only)"
+        else
+            info "settings: status line script ~/.claude/${_sl} NOT bridged (only"
+            info "  ~/.claude/statusline-command.sh is, as a plain file: settings.json is"
+            info "  writable from inside a session, so it cannot pick what gets mounted)"
+        fi
     done <<EOFSL
 $(aidc_statusline_scripts "$HOST_CLAUDE_SETTINGS" "$(aidc_host_home)")
 EOFSL
-    unset _sl
+    unset _verdict _sl
 else
     info "settings: no host settings.json"
 fi

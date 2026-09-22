@@ -82,9 +82,30 @@ eq "before the swap: not listed; after it: listed, and dropped entries are gone"
     sleep 1
     rm -f "$SCRATCH/blocklist.txt"
     printf '2 evil.example\n'
-} | perl "$HELPER" "$SCRATCH/blocklist.txt" > "$SCRATCH/gone.out"
+} | perl "$HELPER" "$SCRATCH/blocklist.txt" > "$SCRATCH/gone.out" 2> "$SCRATCH/gone.err"
 eq "a list removed mid-run: the open one keeps answering" "1 OK|2 OK" \
     "$(paste -sd'|' "$SCRATCH/gone.out")"
+eq "and says so once on stderr (squid relays it to cache.log)" "1" \
+    "$(grep -c 'is gone; still answering' "$SCRATCH/gone.err")"
+
+# A swapped-in list this user cannot read: the old one keeps answering, with a warning.
+# (root can read anything, so this case has nothing to show there.)
+if [ "$(id -u)" != 0 ]; then
+    printf '%s\n' evil.example > "$SCRATCH/blocklist.txt"
+    {
+        printf '1 evil.example\n'
+        sleep 1
+        printf '%s\n' other.example > "$SCRATCH/blocklist.txt.new"
+        chmod 000 "$SCRATCH/blocklist.txt.new"
+        mv -f "$SCRATCH/blocklist.txt.new" "$SCRATCH/blocklist.txt"
+        printf '2 evil.example\n3 evil.example\n'
+    } | perl "$HELPER" "$SCRATCH/blocklist.txt" > "$SCRATCH/unreadable.out" 2> "$SCRATCH/unreadable.err"
+    eq "an unreadable new list: the last readable one keeps answering" "1 OK|2 OK|3 OK" \
+        "$(paste -sd'|' "$SCRATCH/unreadable.out")"
+    eq "with one warning naming the file, not one per lookup" "1" \
+        "$(grep -c 'cannot open .*blocklist.txt: Permission denied; still answering' "$SCRATCH/unreadable.err")"
+    chmod 644 "$SCRATCH/blocklist.txt"
+fi
 
 echo "=== blocklist helper: no list fails closed ==="
 got=$(printf '7 evil.example\n' | perl "$HELPER" "$SCRATCH/does-not-exist.txt")
@@ -95,6 +116,8 @@ echo "=== the refresher writes what the helper needs ==="
 REFRESH="$AIDC_ROOT/proxy/refresher/refresh.sh"
 eq "the list is sorted in byte order (LC_ALL=C sort)" "1" "$(grep -c 'LC_ALL=C sort -u' "$REFRESH")"
 eq "and lower-cased before sorting" "1" "$(grep -c "tr '\[:upper:\]' '\[:lower:\]'" "$REFRESH")"
+eq "and refuses to publish a list that is not in byte order (the search would fail open)" "1" \
+    "$(grep -c 'LC_ALL=C sort -c "\$MERGED"' "$REFRESH")"
 eq "and squid is no longer signalled to reload" "0" "$(grep -cE '^[^#]*kill -HUP' "$REFRESH")"
 eq "the image's seed list, too, is in byte order" "sorted" \
     "$(LC_ALL=C sort -c "$AIDC_ROOT/proxy/squid/blocklist.txt" 2>/dev/null && echo sorted || echo unsorted)"

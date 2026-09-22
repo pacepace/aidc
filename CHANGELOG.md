@@ -30,6 +30,12 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   the same path.
 
 ### Security
+- **A session can no longer plant a hook that runs on your machine.** `~/.claude/settings.json`
+  was bind-mounted read-write into every session, and that file carries `hooks` your host Claude
+  Code runs, so an agent could have added one. The file is now copied into the session when it is
+  created (preferences you change inside stay inside; host changes reach sessions created after).
+  The status-line script `~/.claude/statusline-command.sh` is bridged read-only, and only that
+  file.
 - **A repo's own `.aidc/config.yaml` can no longer widen the sandbox.** That file (and a
   workspace's) is writable from inside the session it configures, and aidc applied everything in
   it: `egress: direct`, `networks`, `ports`, `dns_servers`, `audit_dir` (which the policy
@@ -50,8 +56,9 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   inside a session. A project's own config still governs that project, and one command can
   override it (`uv --exclude-newer false`, `pip --uploaded-prior-to <now>`,
   `npm --min-release-age=0`). Claude Code is exempt and stays current; so are the Go, Rust and
-  Python toolchains and system packages. poetry and pipenv are now installed as uv tools. Needs
-  `aidc rebuild` and `aidc upgrade <session>`.
+  Python toolchains and system packages. poetry and pipenv are now installed as uv tools. The
+  rule binds pip 25.3+; Ubuntu's own pip (25.1, which ignores it silently) is upgraded and the
+  build checks every interpreter. Needs `aidc rebuild` and `aidc upgrade <session>`.
 
 - **Subdomains of known-malware domains are blocked too.** Squid matched the list's domains
   exactly, so `www.<listed-domain>` and every other subdomain went through, and the taint

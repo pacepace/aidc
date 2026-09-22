@@ -181,7 +181,7 @@ assert "CLAUDE_CONFIG_DIR points Claude's state at the dev-home volume" \
     "dev_exec 'test \"\$CLAUDE_CONFIG_DIR\" = /home/vscode/.claude'"
 # Conversation history and memory stay the host's: the per-project directory
 # (transcripts for --continue, memory/) is bind-mounted read-write at the same
-# path Claude reads under CLAUDE_CONFIG_DIR, and settings.json is bridged too.
+# path Claude reads under CLAUDE_CONFIG_DIR. settings.json is copied, not shared.
 assert "host per-project memory dir is mounted read-write at Claude's projects path" \
     "docker inspect -f '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' aidc-${SESSION}-dev | tr ' ' '\\n' | grep -q '^/home/vscode/.claude/projects/.*=true$'"
 SMOKE_ENC=$(printf '%s' "$TMP_REPO" | tr '/.' '-')
@@ -199,6 +199,14 @@ if [ -f "$HOME/.claude.json" ]; then
     assert "seeded ~/.claude.json carries no account, key, token or MCP definition" \
         "dev_exec 'jq -e \"[keys[] | test(\\\"apikey|token|secret|credential|password|oauth|mcp\\\"; \\\"i\\\")] | any | not\" /home/vscode/.claude/.claude.json'"
 fi
+echo
+
+# settings.json is a copy installed on first start, never a mount: a session that
+# could write the host's copy could plant a hook the host's Claude Code runs.
+assert "settings.json is installed in the session (a copy, on the dev-home volume)" \
+    "dev_exec 'test -s /home/vscode/.claude/settings.json'"
+assert "and is not a mount of the host's file" \
+    "! docker inspect aidc-${SESSION}-dev --format '{{range .Mounts}}{{.Destination}} {{end}}' | grep -q '/home/vscode/.claude/settings.json'"
 echo
 
 # --- step 3: git asymmetry -----------------------------------------------
@@ -542,6 +550,13 @@ echo "  (${SENT} requests during a blocklist refresh, ${REFUSED} failed)"
 assert "a blocklist refresh drops no connections (NET-16)" \
     "[ '${SENT}' -gt 5 ] && [ '${REFUSED}' -eq 0 ]"
 
+# A domain from the downloaded feed itself must be denied too: that proves the list
+# as the real refresher wrote it is one the helper can search (byte order, lower
+# case), not only the one this test writes below. The squid image has no head;
+# perl reads line 1. Requested together with the others below: the FIRST denied
+# request taints the session and the freeze response pauses dev.
+FEED_DOMAIN=$(docker exec "aidc-${SESSION}-squid" perl -ne 'next if /^#/; chomp; print; exit' /etc/squid/blocklist.txt)
+
 # Put a known-bad domain on the list the way the refresher does: a sorted copy
 # renamed over the file, since squid's helper binary-searches it (an append would
 # land out of order and never be found). Nothing signals squid; the helper follows
@@ -553,15 +568,18 @@ docker exec --user root "aidc-${SESSION}-squid" perl -e '
     my ($f, $d) = @ARGV; open my $in, "<", $f or die; my %l = map { $_ => 1 } <$in>; close $in;
     $l{"$d\n"} = 1; open my $out, ">", "$f.new" or die; print $out sort keys %l; close $out;
     rename "$f.new", $f or die' /etc/squid/blocklist.txt "$MALWARE_DOMAIN"
-# Both requests in one exec: the first denied request taints the session, and the
-# freeze response pauses dev, so a second exec could land on a paused container.
-CODES=$(dev_exec "for h in ${MALWARE_DOMAIN} www.${MALWARE_DOMAIN}; do curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code} ' http://\$h; done" 2>/dev/null || true)
+# All three requests in ONE exec: the first denied request taints the session, and
+# the freeze response pauses dev, so a later exec would land on a paused container.
+CODES=$(dev_exec "for h in ${MALWARE_DOMAIN} www.${MALWARE_DOMAIN} ${FEED_DOMAIN}; do curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code} ' http://\$h/; done" 2>/dev/null || true)
 MALWARE_CODE=$(printf '%s' "$CODES" | awk '{ print $1 }')
 SUB_CODE=$(printf '%s' "$CODES" | awk '{ print $2 }')
+FEED_CODE=$(printf '%s' "$CODES" | awk '{ print $3 }')
 assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid, with no reload" \
     "[ '$MALWARE_CODE' = '403' ]"
 assert "a subdomain of a listed domain is blocked too (www.${MALWARE_DOMAIN})" \
     "[ '$SUB_CODE' = '403' ]"
+assert "a domain from the downloaded feed (${FEED_DOMAIN}) is denied" \
+    "[ -n '${FEED_DOMAIN}' ] && [ '$FEED_CODE' = '403' ]"
 echo
 
 # --- step 8: taint detection ---------------------------------------------

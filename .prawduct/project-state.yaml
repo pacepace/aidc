@@ -138,22 +138,23 @@ design_decisions:
   # api_versioning_approach: { scheme, deprecation_policy, stability_tiers,
   #                            status: active|deferred, rationale, revisit_trigger (if deferred), date }
   api_versioning_approach:
-    scheme: none-internal-only
+    scheme: semver-on-aidc-version
     deprecation_policy: >-
-      The MCP tool surface and the callback payload have exactly one consumer (the
-      orchestrator, MetaLLM). A change to either is agreed with that side before it is
-      built and written into the design doc that owns the contract (docs/design-10
-      D5/D6) with the requirement it implements; fields are added, not repurposed, and a
-      consumer that ignores an added field still reads the payload correctly. The aidc
-      release itself is semver-tagged, which is what an operator pins.
+      Decided 2026-09-22 (Pace: "A"), superseding the 2026-09-17 "none-internal-only"
+      entry: adding a tool, a field or a default-off setting can ship in any release;
+      removing or changing an existing tool, field, callback or error code ships only
+      in a major release and is announced in the CHANGELOG. The single home for the
+      wording is .prawduct/artifacts/api-contract.md "Compatibility" (also in the
+      README's MCP section); the top-level api_versioning_decided key mirrors it for
+      the plugin's probe. A change is still agreed with the orchestrator side first
+      and written into docs/design-10 D5/D6.
     stability_tiers: null
     status: active
     rationale: >-
-      A published version number would suggest independent consumers that do not exist,
-      and the real safeguard has been agreement plus additive fields: the joint test on
-      2026-09-17 changed the payload twice (error_code, speaker, prompt_waiting) by
-      agreeing the shape with the metallm session first.
-    date: 2026-09-17
+      aidc is used by more than one person, so orchestrators built against 1.x must
+      keep working through every 1.x upgrade; agreement-plus-additive-fields stays the
+      working practice, the promise is what it now guarantees.
+    date: 2026-09-22
   # api_error_model_approach: { envelope (e.g. RFC-7807/problem+json), codes, status, rationale, date }
   api_error_model_approach:
     envelope: >-

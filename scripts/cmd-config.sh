@@ -71,12 +71,7 @@ EOF
         if ! session_exists "$ARG"; then
             die "no such session: $ARG"
         fi
-        AUDIT_CT="$(container_name "$ARG" audit)"
-        # The audit container mounts the host audit dir at /var/aidc/audit;
-        # `docker inspect` recovers the host path.
-        host_audit=$(docker inspect "$AUDIT_CT" \
-            --format '{{range .Mounts}}{{if eq .Destination "/var/aidc/audit"}}{{.Source}}{{end}}{{end}}' \
-            2>/dev/null || printf '')
+        host_audit=$(aidc_session_audit_dir "$ARG")
         snap=""
         if [ -n "$host_audit" ] && [ -f "${host_audit}/config-snapshot.yaml" ]; then
             snap="${host_audit}/config-snapshot.yaml"

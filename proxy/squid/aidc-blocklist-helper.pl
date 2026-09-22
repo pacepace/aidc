@@ -36,11 +36,28 @@ my ($fh, $dev, $ino);
 # Open the list, or the new one if the refresher has swapped it (an atomic rename
 # gives it a new inode). The open handle keeps the old file readable until then, so a
 # failed re-open leaves the last good list in service.
+# A swap that cannot be followed (a list written with a mode this user cannot read,
+# a missing file) keeps the old handle in service and says so ONCE per failed file
+# on stderr, which squid relays to cache.log: silently serving a stale list would
+# look exactly like a current one.
+my $warned = '';
 sub current_list {
     my @st = stat $list;
-    if (@st && !(defined $ino && $st[0] == $dev && $st[1] == $ino)) {
+    if (!@st) {
+        if ($fh && $warned ne "missing") {
+            warn "aidc-blocklist-helper: $list is gone; still answering from the last list read\n";
+            $warned = "missing";
+        }
+        return $fh;
+    }
+    if (!(defined $ino && $st[0] == $dev && $st[1] == $ino)) {
         if (open my $new, '<', $list) {
             ($fh, $dev, $ino) = ($new, $st[0], $st[1]);
+            $warned = '';
+        } elsif ($warned ne "$st[0]:$st[1]") {
+            warn "aidc-blocklist-helper: cannot open $list: $!"
+                . ($fh ? "; still answering from the last list read\n" : "\n");
+            $warned = "$st[0]:$st[1]";
         }
     }
     return $fh;

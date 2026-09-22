@@ -38,21 +38,44 @@ S="$H/.claude/settings.json"
 with() { printf '{"statusLine":{"type":"command","command":%s}}' "$1" > "$S"; aidc_statusline_scripts "$S" "$H" | paste -sd, -; }
 
 echo "=== status-line script bridge ==="
-eq 'the usual form, $HOME/.claude/<script>' "statusline-command.sh" \
+eq 'the conventional script, $HOME/.claude/statusline-command.sh' "bridge statusline-command.sh" \
     "$(with '"bash $HOME/.claude/statusline-command.sh"')"
-eq 'the ~ form' "statusline-command.sh" "$(with '"~/.claude/statusline-command.sh"')"
-eq 'an absolute host path, and a quoted one' "statusline-command.sh" \
+eq 'the ~ form' "bridge statusline-command.sh" "$(with '"~/.claude/statusline-command.sh"')"
+eq 'an absolute host path, and a quoted one' "bridge statusline-command.sh" \
     "$(with "\"bash '$H/.claude/statusline-command.sh'\"")"
-eq 'two scripts, in a subdirectory too' "statusline-command.sh,bin/helper.py" \
-    "$(with '"bash $HOME/.claude/statusline-command.sh | python3 ${HOME}/.claude/bin/helper.py"')"
-eq 'a script that does not exist is not bridged' "" "$(with '"bash $HOME/.claude/missing.sh"')"
-eq 'a path that escapes ~/.claude is not bridged' "" "$(with '"bash $HOME/.claude/../.ssh/id_rsa"')"
-eq 'a script outside ~/.claude is not bridged (it is not ours to mount)' "" \
-    "$(with '"bash /usr/local/bin/statusline"')"
+eq 'a script that does not exist is not bridged' "skip statusline-command.sh" \
+    "$(rm -f "$H/.claude/statusline-command.sh"; with '"bash $HOME/.claude/statusline-command.sh"'; : > "$H/.claude/statusline-command.sh")"
+
+# settings.json is writable from inside a session, so what it names must never choose
+# a mount: a host secret, a history file, another project's memory, a planted symlink.
+: > "$H/.claude/.credentials.json"; : > "$H/.claude/history.jsonl"
+mkdir -p "$H/.claude/projects/-other"; : > "$H/.claude/projects/-other/x.sh"
+eq 'the host credentials file is never bridged' "skip .credentials.json" \
+    "$(with '"bash $HOME/.claude/.credentials.json"')"
+eq 'nor the history, nor a file in a project memory dir (writable by a session)' \
+    "skip history.jsonl,skip projects/-other/x.sh" \
+    "$(with '"cat $HOME/.claude/history.jsonl; bash ~/.claude/projects/-other/x.sh"')"
+eq 'nor any other script, even a real one' "skip bin/helper.py" "$(with '"python3 ${HOME}/.claude/bin/helper.py"')"
+eq 'a path that escapes ~/.claude' "skip ../.ssh/id_rsa" "$(with '"bash $HOME/.claude/../.ssh/id_rsa"')"
+ln -sf "$H/.claude/.credentials.json" "$H/.claude/link.sh"
+mv "$H/.claude/statusline-command.sh" "$H/.claude/real.sh"; ln -s "$H/.claude/real.sh" "$H/.claude/statusline-command.sh"
+eq 'the conventional name as a symlink is not bridged (docker would mount the target)' \
+    "skip statusline-command.sh" "$(with '"bash $HOME/.claude/statusline-command.sh"')"
+rm "$H/.claude/statusline-command.sh"; mv "$H/.claude/real.sh" "$H/.claude/statusline-command.sh"
+eq 'a script outside ~/.claude is not ours to mount' "" "$(with '"bash /usr/local/bin/statusline"')"
 eq 'a command with no script' "" "$(with '"echo hi"')"
 printf '{"theme":"dark"}' > "$S"
 eq 'no status line at all' "" "$(aidc_statusline_scripts "$S" "$H" | paste -sd, -)"
 eq 'no settings file at all' "" "$(aidc_statusline_scripts "$SCRATCH/nope.json" "$H" | paste -sd, -)"
+
+# settings.json itself is never mounted: a session could write hooks into it that the
+# host's Claude Code runs. It is copied in at create.
+eq "aidc create no longer mounts settings.json" "0" \
+    "$(grep -c 'settings.json:/home/vscode/.claude/settings.json' "$AIDC_ROOT/scripts/cmd-create.sh")"
+eq "and copies it next to the onboarding seed instead" "1" \
+    "$(grep -c 'cp "$HOST_CLAUDE_SETTINGS" "${AUDIT_WRITE}/claude-settings-seed.json"' "$AIDC_ROOT/scripts/cmd-create.sh")"
+eq "which the session installs on first start" "1" \
+    "$(grep -c 'aidc_install_claude_settings_seed "$CLAUDE_CONFIG_DIR" /var/aidc/audit/claude-settings-seed.json' "$AIDC_ROOT/.devcontainer/user-main.sh")"
 
 # aidc create must use it, and mount read-only.
 eq "aidc create bridges what it finds, read-only" "1" \

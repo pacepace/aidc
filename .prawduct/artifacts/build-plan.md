@@ -138,14 +138,20 @@ Pace: "look into it" then "build it" (2026-09-22), riding the same PR.
 ### Chunk F: the host's Claude Code status line inside sessions
 Pace asked mid-build 2026-09-22 ("do it now"). settings.json was bridged, so the session ran its
 statusLine command, but the script it names under ~/.claude was host-only. `aidc create` now
-mounts that script read-only at the same path (aidc_statusline_scripts in lib/claude-state.sh;
-only files under ~/.claude, never a path that escapes). Unit test + live check.
+mounts that script read-only at the same path (aidc_statusline_scripts in lib/claude-state.sh).
+- [DECISION: only `~/.claude/statusline-command.sh` is ever bridged, as a regular non-symlinked
+  file. The first cut bridged whatever settings.json named under ~/.claude; the cumulative review
+  (rev-20260922T015403Z-28cf6fcf) showed that settings.json is rw-mounted into sessions, so an
+  agent could name the host's .credentials.json, history, another project's memory, or a symlink
+  planted in its own memory dir, and the operator's next create would mount it. CTR-13 amended.]
+- The same finding shows a PRE-EXISTING hole: settings.json rw-mounted means an agent can add a
+  `hooks` entry that the HOST's Claude Code runs. Raised to Pace 2026-09-22 as a decision.
 
 ## Status
 
 - [x] Chunk A: repo-config trust (SEC-09) — built, unit-tested; reviewed with the cumulative Critic
 - [x] Chunk B: egress_tcp at create (NET-15) — reviewed: rev-20260921T204623Z-fa131876, verified rev-20260921T210529Z-fbc10ffb
 - [x] Chunk C: `aidc egress` and docs — same reviews; smoke 81/81 at dcce369
-- [ ] Chunk D: dependency advisories and the 14-day supply-chain cooldown (REL-09)
-- [ ] Chunk E: blocklist without reloads (NET-16, issue #34)
-- [ ] Chunk F: the host's Claude Code status line inside sessions
+- [x] Chunk D: dependency advisories and the 14-day supply-chain cooldown (REL-09) — reviewed rev-20260922T015403Z-28cf6fcf
+- [x] Chunk E: blocklist without reloads (NET-16, issue #34) — same review; smoke 91/91
+- [x] Chunk F: the host's Claude Code status line inside sessions — same review; rebuilt on its blocking finding

@@ -635,10 +635,10 @@ emit_loaded_config_yaml() {
 # did not get, and how to grant it. Silent when there is nothing to say.
 aidc_report_repo_requests() {
     [ -n "${AIDC_REPO_REQUESTED:-}" ] || return 0
-    printf 'aidc: a workspace/repo config asked to widen the sandbox; NOT applied:\n' >&2
-    printf '%s' "$AIDC_REPO_REQUESTED" | awk 'NF { printf "aidc:   %s\n", $0 }' >&2
-    printf 'aidc: that file is writable from inside a session. If you wrote it and want it,\n' >&2
-    printf 'aidc: recreate with --trust-repo-config, or move the settings to your own config.\n' >&2
+    printf '[aidc] a workspace/repo config asked to widen the sandbox; NOT applied:\n' >&2
+    printf '%s' "$AIDC_REPO_REQUESTED" | awk 'NF { printf "[aidc]   %s\n", $0 }' >&2
+    printf '[aidc] that file is writable from inside a session. If you wrote it and want it,\n' >&2
+    printf '[aidc] recreate with --trust-repo-config, or move the settings to your own config.\n' >&2
 }
 
 # Read a single child key of a top-level YAML mapping.

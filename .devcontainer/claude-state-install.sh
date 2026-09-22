@@ -36,6 +36,19 @@ aidc_clear_mount_placeholders() {
 # aidc_install_claude_state_seed <config-dir> <seed-file>
 # Returns 0 when the seed was installed, 1 when there was nothing to do (a
 # .claude.json already exists, or there is no seed), 2 when the install failed.
+# aidc_install_claude_settings_seed <config-dir> <seed>
+# The host's settings.json, copied in at create and installed on the FIRST start
+# only (a later start would overwrite what Claude changed in the session). It is
+# not bind-mounted: that file carries `hooks`, which the HOST's Claude Code runs,
+# so a session that could write it could run a command on the host (CTR-13).
+# Returns 1 when there is nothing to do (already installed, or no seed).
+aidc_install_claude_settings_seed() {
+    local config_dir="$1" seed="$2"
+    [ ! -e "${config_dir}/settings.json" ] && [ -s "$seed" ] || return 1
+    mkdir -p "$config_dir" \
+        && ( umask 0077; cp "$seed" "${config_dir}/settings.json" ) || return 2
+}
+
 aidc_install_claude_state_seed() {
     local config_dir="$1" seed="$2"
     [ ! -e "${config_dir}/.claude.json" ] && [ -s "$seed" ] || return 1

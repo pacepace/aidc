@@ -157,6 +157,15 @@ if [[ "$total" -eq 0 ]]; then
     exit 1
 fi
 
+# ---- sortedness guard (NET-16) ------------------------------------------------
+# Squid's helper finds a domain by binary search, which is only correct on a
+# byte-sorted file: an unsorted list would fail OPEN, silently. The sort above
+# should make this impossible; a guard is cheap and refuses to publish otherwise.
+if ! LC_ALL=C sort -c "$MERGED" 2>/dev/null; then
+    log "merged list is not in byte order — refusing to publish it (squid's lookup would miss entries)"
+    exit 1
+fi
+
 # ---- atomic write -------------------------------------------------------------
 mkdir -p "$SQUID_DIR"
 cp "$MERGED" "$TARGET_NEW"

@@ -126,6 +126,17 @@ hole than an attached network, and its size is exact:
 
 Refused: aidc-mcp's own address and port (MCP-12), and loopback.
 
+### Files the session can write that the host reads
+
+Anything a session can write and the host later *executes* is a way out. Two were closed
+on 2026-09-22: a repo's own `.aidc/config.yaml` (SEC-09, below) and `~/.claude/settings.json`,
+which was bind-mounted read-write into every session from v1.0.0 to v1.7.0. That file carries
+`hooks` your host Claude Code runs, so an agent could have added one; it is now copied in at
+create and never mounted. What remains shared read-write, on purpose, is this project's memory
+and transcripts (`~/.claude/projects/<encoded>/`): a session can edit its own memory, and could
+leave a symlink there that the host's Claude Code follows when it reads that dir. Narrower, and
+open: see the backlog.
+
 ### A repo configuring its own sandbox (SEC-09)
 
 A `.aidc/config.yaml` in the repo or the workspace is writable from inside the session,

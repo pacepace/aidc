@@ -72,11 +72,7 @@ relay_for_host() {
 }
 
 # The session's audit dir on the host, where relays log.
-session_audit_dir() {
-    docker inspect "$(container_name "$NAME" audit)" \
-        --format '{{range .Mounts}}{{if eq .Destination "/var/aidc/audit"}}{{.Source}}{{end}}{{end}}' \
-        2>/dev/null || printf ''
-}
+session_audit_dir() { aidc_session_audit_dir "$NAME"; }
 
 # Replace the live relay for a host with one on the given ports (none: just remove).
 # Recreating drops that host's open connections, which is why add and rm say so.
@@ -177,8 +173,6 @@ do_ls() {
         printf 'no TCP egress relays for session %s\n' "$NAME"
         return 0
     fi
-    set +e
-    set +o pipefail
     printf '%-9s  %-40s  %s\n' "KIND" "REACH AS" "FORWARDS TO"
     printf '%s\n' "$lines"
 }

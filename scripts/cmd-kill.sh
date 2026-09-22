@@ -58,14 +58,8 @@ AUDIT_CT="$(container_name "$NAME" audit)"
 PROJECT="$(compose_project_name "$NAME")"
 COMPOSE_FILE="/tmp/aidc-${NAME}.yaml"
 
-# Recover the audit dir for the final message. The audit container has it
-# mounted at /var/aidc/audit; ask Docker rather than re-deriving from config.
-AUDIT_HOST=""
-if docker inspect "$AUDIT_CT" >/dev/null 2>&1; then
-    AUDIT_HOST=$(docker inspect "$AUDIT_CT" \
-        --format '{{range .Mounts}}{{if eq .Destination "/var/aidc/audit"}}{{.Source}}{{end}}{{end}}' \
-        2>/dev/null || printf '')
-fi
+# The audit dir, for the final message.
+AUDIT_HOST=$(aidc_session_audit_dir "$NAME")
 
 info "pausing $DEV"
 docker pause "$DEV" >/dev/null 2>&1 || true

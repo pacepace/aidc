@@ -15,7 +15,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
 - Per-project scratchpad (`/tmp/claude-<uid>/<encoded>/`) — the working files that go with those conversations (`scratchpad/` and `tasks/`), read-write at the identical path on both sides, so a session popped out to the host and back still finds them. Only this repo's subdirectory is bridged, never the whole scratchpad root — and it is a live read-write host path by design, since a one-way copy could not carry work back *in*. Skipped when your host uid isn't the container's `vscode` (1000), which currently includes macOS. See [tearing down](#tearing-down) for what stays behind.
-- `settings.json` — env vars, status line, editor mode. A status-line script it names under `~/.claude` is bridged too (read-only), so the same line shows inside the session, with that session's own context, cost and limits.
+- `settings.json` — theme, model, env vars, plugins, hooks: **copied** into the session when it is created, not shared live. That file can carry hooks your host Claude Code runs, so a session must never be able to write it. A preference you change inside a session stays there; one you change on the host reaches sessions created afterwards. The status-line script `~/.claude/statusline-command.sh`, if your settings name it, is bridged read-only so the same line shows inside, with that session's own context, cost and limits.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
 - Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
 
@@ -445,6 +445,10 @@ npm install --min-release-age=0 somepkg
 
 Claude Code is exempt and stays current, and so are the Go, Rust and Python toolchains and
 Ubuntu's own packages (holding back security updates there would do more harm than good).
+The rule binds pip 25.3 or newer; the image checks every interpreter's pip at build. One gap:
+a venv created with Ubuntu's own `/usr/bin/python3 -m venv` starts with pip 25.1, which ignores
+the setting, until you `pip install -U pip` inside it. `python -m venv` (the pyenv Python on
+PATH) and `uv venv` are covered.
 
 ### Inside the session
 

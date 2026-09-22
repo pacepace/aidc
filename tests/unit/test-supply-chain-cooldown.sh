@@ -41,6 +41,8 @@ check "dev image: pip waits 14 days (/etc/pip.conf)" \
     "$(grep -q "uploaded-prior-to = P14D" "$DF" && grep -q "> /etc/pip.conf" "$DF" && echo yes || echo no)"
 check "dev image: npm waits 14 days (/etc/npmrc, pinned as npm's global config)" \
     "$(grep -q "min-release-age=14" "$DF" && grep -q "^ENV NPM_CONFIG_GLOBALCONFIG=/etc/npmrc" "$DF" && echo yes || echo no)"
+check "dev image: every interpreter's pip is checked for the option at build (pip 25.3 floor)" \
+    "$(grep -q 'grep -q -- --uploaded-prior-to' "$DF" && grep -q "\-\-ignore-installed --quiet 'pip>=25.3'" "$DF" && echo yes || echo no)"
 # The settings must exist before the first package-manager install in the build.
 first_install=$(grep -nE "npm install|pip install|pipx install|uv tool install|uv pip" "$DF" \
     | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1)

@@ -46,9 +46,9 @@ fi
 #
 # cmd-create.sh bind-mounts ~/.claude/plugins read-only, which lets Claude
 # Code RESOLVE the plugins — but a resolved plugin still won't LOAD unless it's
-# enabled. We can't enable via ~/.claude/settings.json: that file is bridged
-# read-write from the host, so writing enabledPlugins there would leak this
-# container's enablement back onto the host. Instead we write
+# enabled. Not via ~/.claude/settings.json: that file is the session's copy of the
+# host's, installed on first start, and enablement written there would be lost
+# if the copy were ever re-seeded and would drift from the host's. Instead we write
 # /etc/claude-code/managed-settings.json — a container-local settings scope that
 # merges on top of the bridged user settings and is never mounted from the host.
 #

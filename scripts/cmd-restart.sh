@@ -11,9 +11,8 @@
 # Use when:
 #   - Claude got into a weird state
 #   - You want a fresh shell + restarted dockerd inside the dev container
-#   - You changed settings.json on the host and want the container to re-read it
-#     (the container's own ~/.claude.json and login live on the dev-home volume
-#     and survive a restart untouched)
+#   The container's own ~/.claude.json, its settings.json copy and its login live
+#   on the dev-home volume and survive a restart untouched.
 #
 # Use `aidc kill` + `aidc create` instead when you want a fresh image (after
 # rebuilding it) or when you want to drop the dev-home volume entirely.

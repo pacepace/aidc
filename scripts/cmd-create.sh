@@ -599,8 +599,8 @@ fi
 # the host's registry, could evict cache versions the host still uses, and would
 # poison installed_plugins.json with container paths. The host stays the single
 # writer; host updates flow in on the next container start. Enablement is handled
-# container-locally by the entrypoint (managed-settings.json) so it never leaks
-# onto the host's settings.json.
+# container-locally by the entrypoint (managed-settings.json), separate from the
+# session's settings.json copy.
 CLAUDE_PLUGINS_MOUNT=""
 CLAUDE_PLUGINS_MOUNT_ABS=""
 HOST_CLAUDE_PLUGINS="$(aidc_host_home)/.claude/plugins"

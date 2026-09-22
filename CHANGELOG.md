@@ -24,6 +24,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   on: this is the narrow alternative to `--egress direct` or attaching a network. Relays survive
   `aidc restart` and `aidc upgrade`; `aidc status` and `aidc egress <s> ls` list them.
 
+- **Your Claude Code status line shows inside sessions.** `settings.json` was bridged, so the
+  session ran its `statusLine` command, but a script the command names under `~/.claude` existed
+  only on the host and the line stayed empty. `aidc create` now bridges that script read-only at
+  the same path.
+
 ### Security
 - **A repo's own `.aidc/config.yaml` can no longer widen the sandbox.** That file (and a
   workspace's) is writable from inside the session it configures, and aidc applied everything in

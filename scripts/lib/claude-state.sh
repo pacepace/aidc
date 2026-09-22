@@ -42,3 +42,35 @@ aidc_claude_state_seed() {
                          else {} end)))
     ' "$src"
 }
+
+# aidc_statusline_scripts <settings.json> <host-home>
+# The status line's script(s), for the settings bridge. settings.json is mounted
+# into the session, so its statusLine command runs there too, but a script it
+# names under ~/.claude exists only on the host and the line shows nothing.
+# Prints, one per line, the path relative to ~/.claude of each regular file the
+# command names as $HOME/.claude/..., ~/.claude/... or <host-home>/.claude/...;
+# the caller mounts each read-only at the same place under the container's home.
+# Prints nothing (and succeeds) without a settings file, a status line, or jq.
+aidc_statusline_scripts() {
+    local settings="$1" home="$2" cmd token rel
+    [ -f "$settings" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    cmd=$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null) || return 0
+    [ -n "$cmd" ] || return 0
+    for token in $cmd; do
+        token="${token#\"}"; token="${token%\"}"; token="${token#\'}"; token="${token%\'}"
+        # The patterns are the literal text a settings.json carries, not expansions
+        # (a bare ~ or $HOME in a pattern would expand to THIS machine's home).
+        # shellcheck disable=SC2016,SC2088
+        case "$token" in
+            '$HOME/.claude/'*)     rel="${token#'$HOME/.claude/'}" ;;
+            '${HOME}/.claude/'*)   rel="${token#'${HOME}/.claude/'}" ;;
+            '~/.claude/'*)         rel="${token#'~/.claude/'}" ;;
+            "${home}/.claude/"*)   rel="${token#"${home}"/.claude/}" ;;
+            *) continue ;;
+        esac
+        case "$rel" in ''|*..*) continue ;; esac
+        [ -f "${home}/.claude/${rel}" ] && printf '%s\n' "$rel"
+    done
+    return 0
+}

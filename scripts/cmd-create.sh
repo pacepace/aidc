@@ -527,6 +527,19 @@ HOST_CLAUDE_SETTINGS="$(aidc_host_home)/.claude/settings.json"
 if [ -f "$HOST_CLAUDE_SETTINGS" ]; then
     CLAUDE_SETTINGS_MOUNT="- ${HOST_CLAUDE_SETTINGS}:/home/vscode/.claude/settings.json:rw"
     info "settings: bridged from host ~/.claude/settings.json"
+    # The status line's script, if settings.json names one under ~/.claude: the
+    # command runs inside the session too, and without the file it shows nothing.
+    # Read-only; the same path under the container's home. Extra mount lines need
+    # the placeholder's own indentation in the compose template.
+    while IFS= read -r _sl; do
+        [ -n "$_sl" ] || continue
+        CLAUDE_SETTINGS_MOUNT="${CLAUDE_SETTINGS_MOUNT}
+      - $(aidc_host_home)/.claude/${_sl}:/home/vscode/.claude/${_sl}:ro"
+        info "settings: status line script ~/.claude/${_sl} bridged (read-only)"
+    done <<EOFSL
+$(aidc_statusline_scripts "$HOST_CLAUDE_SETTINGS" "$(aidc_host_home)")
+EOFSL
+    unset _sl
 else
     info "settings: no host settings.json"
 fi

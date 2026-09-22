@@ -15,7 +15,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 
 - Per-project memory (`~/.claude/projects/<encoded>/`) — your conversations and memory follow the repo, read-write, the same directory the host uses.
 - Per-project scratchpad (`/tmp/claude-<uid>/<encoded>/`) — the working files that go with those conversations (`scratchpad/` and `tasks/`), read-write at the identical path on both sides, so a session popped out to the host and back still finds them. Only this repo's subdirectory is bridged, never the whole scratchpad root — and it is a live read-write host path by design, since a one-way copy could not carry work back *in*. Skipped when your host uid isn't the container's `vscode` (1000), which currently includes macOS. See [tearing down](#tearing-down) for what stays behind.
-- `settings.json` — env vars, status line, editor mode.
+- `settings.json` — env vars, status line, editor mode. A status-line script it names under `~/.claude` is bridged too (read-only), so the same line shows inside the session, with that session's own context, cost and limits.
 - Plugins (`~/.claude/plugins/`, read-only) — what you have installed resolves and is enabled inside.
 - Onboarding state, seeded once from `~/.claude.json` — theme, output style, and this project's trust and allowed-tools entry, so the first launch goes straight to the login prompt. Your account, API keys, MCP server definitions, and prompt history are never copied.
 

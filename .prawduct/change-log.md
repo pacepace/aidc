@@ -60,10 +60,14 @@ read-write, let a session plant hooks the host's Claude Code runs.
   list.
 - F: the host's status-line script bridged read-only (only that file); settings.json copied in at
   create instead of mounted (CTR-13 amended). #35 filed for the memory-dir symlink case.
+- Found by CI on the PR (480dba0): the yq-based config reader dropped every `false` value
+  (`.key // ""`; yq treats false as missing) on any machine with yq, so `tld_taints: false`,
+  `claude_resume: false` and `share_*: false` were silently ignored there. Fixed; the config unit
+  tests now run every case under both parsers (AIDC_NO_YQ=1 hides yq).
 - Records: risk_surfaces declared; six strategy-doc pointers; docs/security-model.md rename;
   union-merge for this log; api_versioning_decided (semver, breaking only in a major); learnings
   migrated to .claude/rules/learnings; VERSION bumped to v1.8.0.
 
 Reviews: rev-20260921T204623Z-fa131876, rev-20260921T211012Z-58345080,
-rev-20260922T015403Z-28cf6fcf and their verify passes (last: rev-20260922T032134Z-66b98d8b).
-Smoke 94/94 on rebuilt images; pytest 537; shell units 398.
+rev-20260922T015403Z-28cf6fcf and their verify passes (last: rev-20260922T033833Z-b89bd5db).
+Smoke 94/94 on rebuilt images; pytest 537; shell units 435 (both config parsers).

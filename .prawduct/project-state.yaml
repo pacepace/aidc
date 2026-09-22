@@ -595,3 +595,6 @@ base_branch: develop
 # path is markdown-first and sets this later, at scrub/cutover.
 # `/prawduct:backlog` routes on this scalar.
 backlog_service_repo: pacepace/aidc
+
+# Decided 2026-09-22 (Pace: "A"). The MCP control plane follows aidc's version number.
+api_versioning_decided: "semver on the MCP interface: additions (a tool, a field, a default-off setting) in any release; removing or changing an existing tool, field, callback or error code only in a major release, announced in the CHANGELOG"

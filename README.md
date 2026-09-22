@@ -752,6 +752,11 @@ Once tainted, **kill and recreate** is the only path. The session does not get "
 
 ## MCP control plane (reference)
 
+**Compatibility:** the MCP interface follows aidc's version number. A release can add tools,
+fields or default-off settings; removing or changing an existing tool, field, callback or error
+code waits for a major version (v2.0) and is announced in the CHANGELOG. An orchestrator built
+against 1.x keeps working through every 1.x upgrade.
+
 When `aidc mcp` is running, an external AI orchestrator on your overlay network gets:
 
 **Tools** (function calls): `session_create` (only with `mcp.session_create: true`, see the config above), `session_list`, `session_status`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `file_get`, `file_put`, `audit_get`, `taint_mark`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP.)

@@ -122,9 +122,30 @@ Added 2026-09-21 at Pace's request, riding the same PR ("those fixes ride in wit
 - Tests: unit test pins every setting; a test image build proves each tool refuses a <14-day version.
 - Done when: tests pass, the image builds, behaviour is verified in it, and the cumulative Critic runs.
 
+### Chunk E: blocklist without reloads (NET-16, issue #34)
+Pace: "look into it" then "build it" (2026-09-22), riding the same PR.
+- Squid looked the list up itself and had to reload for every new list; a reload is a restart, and
+  squid refused all connections for ~20 s (startup and every 6 h). It also matched listed domains
+  exactly, so subdomains of malware domains were allowed.
+- Squid asks `aidc-blocklist-helper` (external_acl_type; Perl, core Search::Dict binary search on
+  the byte-sorted file, ~4 MB, ~0.2 ms per new domain, cached by squid). It re-opens the file when
+  the refresher swaps it; it walks parent domains; no list means BH (fail closed).
+- The refresher sorts in byte order, lower-cases, and no longer signals squid.
+- Tests: helper unit test (exact, subdomain, case, swap, missing list, protocol); smoke hammers the
+  proxy through a real refresh with zero refusals, and a subdomain of a listed domain is blocked.
+- Done when: tests pass, smoke green, cumulative Critic.
+
+### Chunk F: the host's Claude Code status line inside sessions
+Pace asked mid-build 2026-09-22 ("do it now"). settings.json was bridged, so the session ran its
+statusLine command, but the script it names under ~/.claude was host-only. `aidc create` now
+mounts that script read-only at the same path (aidc_statusline_scripts in lib/claude-state.sh;
+only files under ~/.claude, never a path that escapes). Unit test + live check.
+
 ## Status
 
 - [x] Chunk A: repo-config trust (SEC-09) — built, unit-tested; reviewed with the cumulative Critic
 - [x] Chunk B: egress_tcp at create (NET-15) — reviewed: rev-20260921T204623Z-fa131876, verified rev-20260921T210529Z-fbc10ffb
 - [x] Chunk C: `aidc egress` and docs — same reviews; smoke 81/81 at dcce369
 - [ ] Chunk D: dependency advisories and the 14-day supply-chain cooldown (REL-09)
+- [ ] Chunk E: blocklist without reloads (NET-16, issue #34)
+- [ ] Chunk F: the host's Claude Code status line inside sessions

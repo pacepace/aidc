@@ -490,19 +490,6 @@ echo "[7/11] proxy enforcement"
 # only honor lowercase). Without this, assertions can pass for the wrong
 # reason -- e.g. DNS failure -- and we never exercise squid at all.
 PROXY="http://aidc-proxy:3128"
-# The refresher's first blocklist load ends in `kill -HUP` to squid, and squid
-# refuses connections for the ~20 s it takes to reload a multi-million-entry list.
-# These checks fail in a millisecond, so all of them can land inside that window
-# (and the malware request below then never reaches squid, so nothing taints).
-# Wait for the first load and the reload to finish: this step tests enforcement,
-# not availability during a reload.
-for _ in $(seq 1 90); do
-    if docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh OK' \
-            && dev_exec "curl -fsS --max-time 5 -x ${PROXY} -o /dev/null http://example.com" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
 assert "egress to example.com via proxy returns 200" \
     "dev_exec 'curl -fsS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://example.com' | grep -q 200"
 
@@ -530,43 +517,51 @@ assert "squid is still reachable from dev" \
 assert "egress to a TLD-blocked .cn domain returns 403 from squid" \
     "dev_exec 'curl -sS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://anything.cn' | grep -q 403"
 
-# Inject a known-bad domain into the blocklist and hot-reload Squid.
-# Use a resolvable hostname so squid actually logs a TCP_DENIED (the policy
-# sidecar tails that log and won't see entries for DNS failures). example.org
-# is RFC 2606 reserved and a stable, resolvable choice.
-MALWARE_DOMAIN="example.org"
-# The policy sidecar greps the on-disk blocklist file directly on each
-# TCP_DENIED -- no in-memory cache, no reload to wait for. The reload below is
-# the only thing that has to land before the curl below will be denied.
-#
-# Both commands are written against the squid 7.x Rock, which is chiselled and
-# unprivileged. Do NOT "simplify" either back to the old form:
-#   - `bash -c` does not exist in that image (no bash) -- use /bin/sh. Getting
-#     this wrong exits 127, and because the failure lands between step 6's last
-#     assert and step 7's banner it reads as a cleanup fault rather than a real
-#     regression. That cost a full 18-minute CI cycle to diagnose once already.
-#   - /etc/squid is root-owned while squid runs as UID 584792, so the append
-#     needs --user root.
-#   - the binary is `squid-gnutls`, not `squid`. Rather than depend on that name,
-#     reload by signalling PID 1 from the host, which is exactly what the
-#     refresher sidecar does in production (`kill -HUP 1`) and needs nothing
-#     inside the container at all.
-docker exec --user root "aidc-${SESSION}-squid" /bin/sh -c \
-    "echo '${MALWARE_DOMAIN}' >> /etc/squid/blocklist.txt"
-docker kill --signal=HUP "aidc-${SESSION}-squid" >/dev/null 2>&1
-# Retry the curl up to 30s. squid -k reconfigure on a ~1.3M-entry ACL
-# can briefly drop the listener while it ingests; we'd see "connection
-# refused" until it's stable. Once squid is back, the assertion passes.
-MALWARE_CODE="?"
-for _ in $(seq 1 30); do
-    MALWARE_CODE=$(dev_exec "curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code}' http://${MALWARE_DOMAIN}" 2>/dev/null || true)
-    if [ "$MALWARE_CODE" = "403" ]; then
-        break
-    fi
+# The refresher's own first download is still running for a while after create.
+# Wait for it: the refresh started below would race it, and so would the list
+# edit further down (a later rename would replace the edited list).
+for _ in $(seq 1 90); do
+    docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh OK' && break
     sleep 1
 done
-assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid" \
+# NET-16 / issue #34: a new blocklist must not cost a single connection. Squid used to
+# reload for every list and refused everything for ~20 s. Run a real refresh while
+# requests stream through the proxy, and count refusals.
+docker exec "aidc-${SESSION}-refresher" /usr/local/bin/refresh.sh >/dev/null 2>&1 &
+REFRESH_PID=$!
+REFUSED=0
+SENT=0
+while kill -0 "$REFRESH_PID" 2>/dev/null && [ "$SENT" -lt 120 ]; do
+    code=$(dev_exec "curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code}' http://example.com" 2>/dev/null || true)
+    SENT=$((SENT + 1))
+    [ "$code" = "200" ] || REFUSED=$((REFUSED + 1))
+    sleep 0.25
+done
+wait "$REFRESH_PID" 2>/dev/null || true
+echo "  (${SENT} requests during a blocklist refresh, ${REFUSED} failed)"
+assert "a blocklist refresh drops no connections (NET-16)" \
+    "[ '${SENT}' -gt 5 ] && [ '${REFUSED}' -eq 0 ]"
+
+# Put a known-bad domain on the list the way the refresher does: a sorted copy
+# renamed over the file, since squid's helper binary-searches it (an append would
+# land out of order and never be found). Nothing signals squid; the helper follows
+# the rename. example.org is RFC 2606 reserved and resolvable, so squid logs a
+# TCP_DENIED the policy sidecar can see. The squid image has no sort/cp (it is
+# chiselled), but it has perl, and /etc/squid needs --user root.
+MALWARE_DOMAIN="example.org"
+docker exec --user root "aidc-${SESSION}-squid" perl -e '
+    my ($f, $d) = @ARGV; open my $in, "<", $f or die; my %l = map { $_ => 1 } <$in>; close $in;
+    $l{"$d\n"} = 1; open my $out, ">", "$f.new" or die; print $out sort keys %l; close $out;
+    rename "$f.new", $f or die' /etc/squid/blocklist.txt "$MALWARE_DOMAIN"
+# Both requests in one exec: the first denied request taints the session, and the
+# freeze response pauses dev, so a second exec could land on a paused container.
+CODES=$(dev_exec "for h in ${MALWARE_DOMAIN} www.${MALWARE_DOMAIN}; do curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code} ' http://\$h; done" 2>/dev/null || true)
+MALWARE_CODE=$(printf '%s' "$CODES" | awk '{ print $1 }')
+SUB_CODE=$(printf '%s' "$CODES" | awk '{ print $2 }')
+assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid, with no reload" \
     "[ '$MALWARE_CODE' = '403' ]"
+assert "a subdomain of a listed domain is blocked too (www.${MALWARE_DOMAIN})" \
+    "[ '$SUB_CODE' = '403' ]"
 echo
 
 # --- step 8: taint detection ---------------------------------------------

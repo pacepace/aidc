@@ -70,7 +70,7 @@ If a real secret (token, private key, credential) is already in the working tree
 
 ### Supply-chain attacks via package managers
 
-Claude installs `npm install`-style dependencies through the proxy. The proxy permits `registry.npmjs.org` and `pypi.org` and similar — those are not blocklisted. A malicious package on the official registry would pass the proxy. **Mitigation:** beyond aidc's scope. Usual ecosystem hygiene (lockfiles, package signatures, audit tools). aidc could in principle integrate with package-audit tools as a future feature, but doesn't in v1.
+Claude installs `npm install`-style dependencies through the proxy. The proxy permits `registry.npmjs.org` and `pypi.org` and similar — those are not blocklisted. A malicious package on the official registry would pass the proxy. **Mitigation:** partial. The dev image's uv, pip and npm skip any version published in the last 14 days (REL-09), which is when most malicious releases are found and pulled; one command can override it. A package that stays malicious past two weeks still passes, and so does anything installed another way (cargo, go, a curl script). Usual ecosystem hygiene (lockfiles, package signatures, audit tools) remains the project's job.
 
 ### Zero-day malware not yet on any feed
 

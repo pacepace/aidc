@@ -74,7 +74,6 @@ ${DNS_BLOCK}
   refresher:
     image: aidc/refresher:${AIDC_VERSION_TAG}
     container_name: aidc-${SESSION}-refresher
-    pid: "service:squid"           # shares PID namespace so kill -HUP 1 reaches squid
     networks:
       default: {}
       egress: {}          # fetches URLhaus / ThreatFox / HaGeZi feeds directly

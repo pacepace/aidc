@@ -740,7 +740,7 @@ metallm:
 
 ## Taint
 
-A session is "tainted" the moment the proxy blocks a request to a known-malware domain. The policy sidecar handles this.
+A session is "tainted" the moment the proxy blocks a request to a known-malware domain, or to any subdomain of one. The policy sidecar handles this. The malware list refreshes every 6 hours and takes effect without restarting the proxy, so connections never drop for it.
 
 Three responses (`taint_response` config):
 

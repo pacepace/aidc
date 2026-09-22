@@ -5,7 +5,7 @@
 #
 # Invokes the refresher sidecar's one-shot refresh.sh, which re-pulls the
 # upstream feeds, merges with per-project blocklist_additions, and atomically
-# rewrites /etc/squid/blocklist.txt then signals squid (kill -HUP 1).
+# rewrites /etc/squid/blocklist.txt. Squid picks it up without a reload (NET-16).
 
 set -euo pipefail
 

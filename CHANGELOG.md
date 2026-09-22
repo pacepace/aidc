@@ -48,7 +48,20 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   Python toolchains and system packages. poetry and pipenv are now installed as uv tools. Needs
   `aidc rebuild` and `aidc upgrade <session>`.
 
+- **Subdomains of known-malware domains are blocked too.** Squid matched the list's domains
+  exactly, so `www.<listed-domain>` and every other subdomain went through, and the taint
+  detection, which only sees requests squid blocked, never saw them. A listed domain now blocks
+  its subdomains, as the feeds intend.
+
 ### Fixed
+- **The proxy no longer drops every connection for ~20 seconds when the malware list refreshes**
+  ([#34](https://github.com/pacepace/aidc/issues/34)). Squid loaded the 2.7M-domain list itself,
+  so each new list (at session start and every 6 hours) needed a squid reload, and a reload is a
+  restart: any request in that window failed, Claude's own API calls included, and a malware
+  request in it could not taint the session. Squid now asks a small lookup helper that reads the
+  list on disk and picks up a new one the moment it lands, so squid never reloads for it. The
+  helper uses about 4 MB. Needs `aidc rebuild` and new sessions (`aidc kill` + `aidc create`),
+  since `aidc upgrade` keeps a session's proxy.
 - **`aidc create --port` works on a machine that has never run `aidc proxy`.** Declared port
   forwards use the `aidc/forwarder` image, which only `aidc proxy` built; compose then tried to
   pull it from a registry where it does not exist. `aidc create` now builds it when it is needed.

@@ -138,11 +138,14 @@ additions_n=$(wc -l < "$ADDITIONS_OUT" | tr -d ' ')
 
 # ---- merge / dedupe / sort ----------------------------------------------------
 MERGED="${WORK}/merged.domains"
+# Lower-case and sorted in BYTE order: squid's blocklist helper finds a domain by
+# binary search on this file (NET-16), which is only correct in that order.
 cat "$URLHAUS_OUT" "$THREATFOX_OUT" "$HAGEZI_OUT" "$ADDITIONS_OUT" \
     | sed -e 's/[[:space:]]//g' \
     | grep -v '^$' \
     | grep -v '^#' \
-    | sort -u > "$MERGED" || true
+    | tr '[:upper:]' '[:lower:]' \
+    | LC_ALL=C sort -u > "$MERGED" || true
 
 total=$(wc -l < "$MERGED" | tr -d ' ')
 
@@ -164,15 +167,7 @@ took=$(( end_ts - start_ts ))
 
 echo "refreshed: ${total} entries from urlhaus=${urlhaus_n} threatfox=${threatfox_n} hagezi=${hagezi_n} additions=${additions_n} (took ${took}s)"
 
-# ---- signal Squid -------------------------------------------------------------
-# PID 1 in this container is the Squid master process because the compose
-# template sets `pid: service:squid`. If the signal fails (Squid not yet up,
-# different PID semantics, running standalone for tests), log but exit 0 —
-# the refresh itself succeeded.
-if kill -HUP 1 2>/dev/null; then
-    log "signalled squid (kill -HUP 1)"
-else
-    log "could not signal pid 1 (Squid may not be up yet, or running standalone)"
-fi
+# No signal to squid: its blocklist helper sees the new file on its next lookup
+# (NET-16). Reloading squid for it was a restart that refused connections for ~20 s.
 
 exit 0

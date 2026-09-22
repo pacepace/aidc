@@ -70,7 +70,7 @@ The full config is the implementation's job; the design constraints are:
 - Listen on port `3128`
 - `dns_nameservers 9.9.9.9 149.112.112.112`
 - ACL: `acl bad_tld dstdomain` reading from `/etc/squid/state-actor-tlds.txt` (our policy file)
-- ACL: `acl malware_domains dstdomain` reading from `/etc/squid/blocklist.txt` (refresher-managed)
+- ACL: `acl malware_domains external aidc_blocklist`: a lookup helper (`proxy/squid/aidc-blocklist-helper.pl`) reads the refresher-managed `/etc/squid/blocklist.txt`, parent domains included (NET-16; until 2026-09-22 this was `dstdomain` on the file, exact match only)
 - `http_access deny malware_domains`
 - `http_access deny bad_tld`  (note: configurable per devcontainer whether bad_tld also taints; default is log+block, no taint)
 - `http_access allow all`
@@ -147,7 +147,7 @@ All sidecars live in the same Docker Compose stack as Squid. They share named vo
 
 **Normalization:** Each feed has its own format. The refresh script reads each, strips comments and IPs, deduplicates, sorts, writes to `/etc/squid/blocklist.txt.new`, validates non-empty, then `mv` atomic-renames to `/etc/squid/blocklist.txt`. Squid never sees a partial write.
 
-**Signaling Squid:** Compose configures the refresher with `pid: "service:squid"`. The refresher sends `kill -HUP 1` (Squid's PID 1 in the shared namespace) which Squid interprets as "reread config and ACLs." No Docker socket exposure required.
+**Signaling Squid:** none (NET-16). Squid's blocklist helper re-opens the list when the refresher's atomic rename replaces it. Until 2026-09-22 the refresher shared squid's PID namespace and sent `kill -HUP 1`; a squid reload is a restart, and with ~2.7M entries it refused every connection for ~20 s (issue #34).
 
 **Failure semantics (NET-11):** If a feed is unreachable, the refresher logs the failure and keeps the previous blocklist in place. It does NOT crash and does NOT empty the blocklist on partial failure. If all three feeds fail, the previous list keeps serving. The audit aggregator captures the refresher's logs so refresh failures are visible after the fact.
 

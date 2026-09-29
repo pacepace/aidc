@@ -84,6 +84,11 @@ assert_eq "exited, tainted session row" "beta Exited (0) 2 hours ago python 2026
 echo "test: no sessions"
 out=$(run_list PS_OUT='')
 assert_eq "empty message" "No active aidc sessions." "$out"
+# An empty label query falls back to finding older sessions by container name;
+# that query must stay just as narrow.
+assert_eq "fallback name query ran" "1" "$(grep '^ps ' "$SCRATCH/docker.log" | grep -c 'name=')"
+assert_eq "no ps query names Size or the whole record" "0" \
+    "$(grep '^ps ' "$SCRATCH/docker.log" | grep -cE 'Size|json|(^| )(-s|--size)( |$)')"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

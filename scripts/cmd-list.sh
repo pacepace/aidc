@@ -22,7 +22,6 @@ require_docker
 #   - The labels were applied at create time (aidc.role=dev, aidc.session=X);
 #     prefer this when present.
 #   - Fall back to name pattern aidc-*-dev for older sessions.
-
 #
 # Ask `docker ps` for exactly the columns used. `{{json .}}` includes Size, and
 # filling that in makes the daemon sum every container's writable layer on disk:

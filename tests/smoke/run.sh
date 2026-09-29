@@ -251,8 +251,29 @@ dockerd_driver() {   # [docker run args...] -- [shell run before the start scrip
             printf ' %s' \"\$(docker info --format '{{.Driver}}')\"
         fi" 2>/dev/null
 }
-assert "a fuse-overlayfs that cannot mount falls back to vfs, and records it" \
+assert "a fuse-overlayfs that fails its test mount means vfs from the start" \
     "[ \"\$(dockerd_driver -v \"$SCRATCH/broken-fuse-overlayfs:/usr/bin/fuse-overlayfs:ro\")\" = vfs/vfs ]"
+# A dockerd that never answers on fuse-overlayfs and ignores SIGTERM: the start times
+# out, and the vfs daemon must not start until that one is gone (two daemons contend
+# for the same pidfile and runtime state). The stand-in shadows the real dockerd on
+# PATH and notes if it is asked to start while the hung one is still alive.
+cat > "$SCRATCH/slow-dockerd" <<'SLOW'
+#!/bin/sh
+case "$*" in
+    *--storage-driver=fuse-overlayfs*)
+        echo $$ > /tmp/slow-dockerd.pid
+        trap '' TERM
+        while :; do sleep 1; done ;;
+esac
+if [ -f /tmp/slow-dockerd.pid ] && kill -0 "$(cat /tmp/slow-dockerd.pid)" 2>/dev/null; then
+    touch /tmp/started-while-old-alive
+fi
+exec /usr/bin/dockerd "$@"
+SLOW
+chmod +x "$SCRATCH/slow-dockerd"
+assert "a fuse-overlayfs start that times out falls back to vfs only once the old dockerd is gone" \
+    "[ \"\$(dockerd_driver -v \"$SCRATCH/slow-dockerd:/usr/local/sbin/dockerd:ro\" -- \
+        'trap \"[ ! -e /tmp/started-while-old-alive ] || echo overlap\" EXIT')\" = vfs/vfs ]"
 assert "the recorded driver wins over a fresh choice" \
     "[ \"\$(dockerd_driver -- 'mkdir -p /var/lib/docker && printf vfs > /var/lib/docker/.aidc-storage-driver')\" = vfs/vfs ]"
 assert "a restart comes back up on the same driver" \

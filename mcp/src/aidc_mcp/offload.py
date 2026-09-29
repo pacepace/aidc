@@ -29,4 +29,5 @@ def off_loop(fn: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         return await asyncio.to_thread(fn, *args, **kwargs)
+    wrapper.runs_off_loop = True  # type: ignore[attr-defined]  # read by test_offload
     return wrapper

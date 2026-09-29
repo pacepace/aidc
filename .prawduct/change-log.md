@@ -55,12 +55,16 @@ server for its duration: 60s+ while `aidc list` was slow (fixed in v1.8.1), and 
   other synchronous tool touching loop-owned module state; `log_event` holds a lock.)
 - `tests/test_offload.py`: through FastMCP's own `call_tool`/`read_resource`, a blocking call that
   only the loop can release must finish quickly; a registry-derived check fails any synchronous
-  tool or resource added later. Shown failing with session_list back on the loop and with
-  session_status calling the CLI inline. Tests that called these functions synchronously now
+  tool or resource added later; and every off_loop body, followed through the tools helpers it
+  calls, touches none of tools' module-level dicts, lists or sets (the state the loop owns).
+  Shown failing with session_list back on the loop, with session_status calling the CLI inline,
+  and with session_exec reading `_pending_sends`. Tests that called these functions synchronously now
   await them, as FastMCP does; no assertion changed.
 - Carried from v1.8.1's review: `start_dockerd` waits for a timed-out dockerd to exit before the
-  vfs fallback; smoke runs the image's start script in throwaway containers for the fallback, the
-  recorded marker, a restart, pre-marker vfs storage and the override; entrypoint.sh no longer
+  vfs fallback; smoke runs the image's start script in throwaway containers for a failed test
+  mount, a start that times out (a stand-in dockerd that ignores SIGTERM; fails on the v1.8.1
+  image, which started the vfs daemon while it was alive), the recorded marker, a restart,
+  pre-marker vfs storage and the override; entrypoint.sh no longer
   claims overlay2.
 - Carried from v1.8.0: `mcp_load_settings` uses `_aidc_has_yq` and reads `.mcp.<key>` without
   `// ""`, which drops false.

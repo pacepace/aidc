@@ -230,6 +230,37 @@ assert "inner docker ps does NOT show host containers" \
 # vfs would store a full copy of every layer; see .devcontainer/dockerd-start.sh.
 assert "inner docker stores layer diffs (fuse-overlayfs), not full copies" \
     "[ \"\$(dev_exec 'docker info --format {{.Driver}}')\" = fuse-overlayfs ]"
+
+# The rest of the driver choice in .devcontainer/dockerd-start.sh, each branch in a
+# throwaway container from the session's own dev image, running the image's own copy
+# of the script. Prints the driver dockerd came up on and the one it recorded.
+DEV_IMAGE=$(docker inspect -f '{{.Config.Image}}' "aidc-${SESSION}-dev")
+printf '#!/bin/sh\nexit 1\n' > "$SCRATCH/broken-fuse-overlayfs"
+chmod +x "$SCRATCH/broken-fuse-overlayfs"
+dockerd_driver() {   # [docker run args...] -- [shell run before the start script]
+    local args=() pre=""
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do args+=("$1"); shift; done
+    [ "${1:-}" = "--" ] && { shift; pre="${1:-}"; }
+    docker run --rm --privileged "${args[@]}" --entrypoint bash "$DEV_IMAGE" -c "
+        ${pre}
+        /usr/local/bin/aidc-dockerd-start.sh --no-watchdog >/dev/null 2>&1 || exit 1
+        printf '%s/%s' \"\$(docker info --format '{{.Driver}}')\" \"\$(cat /var/lib/docker/.aidc-storage-driver)\"
+        if [ -n \"\${RESTART:-}\" ]; then
+            pkill -x dockerd; while pgrep -x dockerd >/dev/null; do sleep 0.2; done
+            /usr/local/bin/aidc-dockerd-start.sh --no-watchdog >/dev/null 2>&1 || exit 1
+            printf ' %s' \"\$(docker info --format '{{.Driver}}')\"
+        fi" 2>/dev/null
+}
+assert "a fuse-overlayfs that cannot mount falls back to vfs, and records it" \
+    "[ \"\$(dockerd_driver -v \"$SCRATCH/broken-fuse-overlayfs:/usr/bin/fuse-overlayfs:ro\")\" = vfs/vfs ]"
+assert "the recorded driver wins over a fresh choice" \
+    "[ \"\$(dockerd_driver -- 'mkdir -p /var/lib/docker && printf vfs > /var/lib/docker/.aidc-storage-driver')\" = vfs/vfs ]"
+assert "a restart comes back up on the same driver" \
+    "[ \"\$(dockerd_driver -e RESTART=1)\" = 'fuse-overlayfs/fuse-overlayfs fuse-overlayfs' ]"
+assert "storage from before the marker stays on vfs" \
+    "[ \"\$(dockerd_driver -- 'mkdir -p /var/lib/docker/vfs/dir/x')\" = vfs/vfs ]"
+assert "AIDC_DOCKER_STORAGE_DRIVER overrides the choice" \
+    "[ \"\$(dockerd_driver -e AIDC_DOCKER_STORAGE_DRIVER=vfs)\" = vfs/vfs ]"
 echo
 
 # --- step 5: port forwarding (CLI-13/14/15) ------------------------------

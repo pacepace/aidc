@@ -169,7 +169,15 @@ start_dockerd() {
         sleep 0.5
         waited=$((waited + 1))
     done
+    # Wait for it to exit: a second dockerd started while this one still holds
+    # its pidfile and data-root lock fails to start.
     kill "$pid" 2>/dev/null || true
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ $waited -lt 20 ]; do
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
     return 1
 }
 

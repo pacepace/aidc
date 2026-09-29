@@ -4,7 +4,7 @@
 # Starts the inner Docker daemon (DinD) before handing off to the container's
 # CMD (tmux + tail). The compose template runs this container with
 # `privileged: true`, which is what dockerd needs to set up its bridge,
-# manage iptables, and use overlay2 storage.
+# manage iptables, and mount its storage (fuse-overlayfs needs /dev/fuse).
 #
 # We start dockerd as a child here rather than in post-create.sh because:
 #   1. dockerd must be running before any Claude-driven `docker build/run`

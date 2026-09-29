@@ -34,6 +34,7 @@ from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
 from aidc_mcp.audit import log_event
 from aidc_mcp.auth import _load_token
+from aidc_mcp.offload import off_loop
 from aidc_mcp.resources import parse_audit_dir
 
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
@@ -2496,6 +2497,7 @@ def register(app: Any) -> None:
     # --- session_list ---------------------------------------------------
 
     @app.tool()
+    @off_loop
     def session_list() -> dict[str, Any]:
         """Return a list of running aidc sessions with status + taint."""
         log_event("tool_call", tool="session_list")
@@ -2508,7 +2510,7 @@ def register(app: Any) -> None:
 
     @app.tool()
     @_scoped
-    def session_status(name: str) -> dict[str, Any]:
+    async def session_status(name: str) -> dict[str, Any]:
         """Status for one session: health, taint, audit dir.
 
         Call before resuming a paused or idle session. Confirms alive and untainted.
@@ -2516,7 +2518,9 @@ def register(app: Any) -> None:
         pasted, and why each one waits.
         """
         log_event("tool_call", tool="session_status", session=name)
-        result = _run_cli(["status", name])
+        # The CLI call runs in a thread; the send queue below is read back here on
+        # the event loop, the only thread that changes it.
+        result = await asyncio.to_thread(_run_cli, ["status", name])
         if result["exit"] != 0:
             return _envelope_err(result["stderr"] or "status failed", result, code="cli_failed")
         # Prompts sent to the session and not pasted yet, each with why it waits.
@@ -2552,6 +2556,7 @@ def register(app: Any) -> None:
     # --- session_exec ---------------------------------------------------
 
     @app.tool()
+    @off_loop
     @_scoped
     def session_exec(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, Any]:
         """Run a shell command in the session container YOURSELF. Returns stdout, stderr, exit code.
@@ -3208,6 +3213,7 @@ def register(app: Any) -> None:
     # --- file_get -------------------------------------------------------
 
     @app.tool()
+    @off_loop
     @_scoped
     def file_get(name: str, path: str) -> dict[str, Any]:
         """Read a raw file from the session's mounted repo YOURSELF. Path must be
@@ -3236,6 +3242,7 @@ def register(app: Any) -> None:
     # --- file_put -------------------------------------------------------
 
     @app.tool()
+    @off_loop
     @_scoped
     def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str, Any]:
         """Write content to a file inside the session. Subject to the
@@ -3258,6 +3265,7 @@ def register(app: Any) -> None:
     # --- audit_get ------------------------------------------------------
 
     @app.tool()
+    @off_loop
     @_scoped
     def audit_get(name: str, since: str | None = None, kind: str | None = None) -> dict[str, Any]:
         """Read audit events for a session. since: ISO8601 lower bound;
@@ -3293,6 +3301,7 @@ def register(app: Any) -> None:
     # --- taint_mark -----------------------------------------------------
 
     @app.tool()
+    @off_loop
     @_scoped
     def taint_mark(name: str, reason: str) -> dict[str, Any]:
         """Policy signal — do not call this. Set by the system when a container

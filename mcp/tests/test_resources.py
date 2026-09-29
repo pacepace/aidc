@@ -64,56 +64,56 @@ class TestAuditFileTraversalGuard:
         monkeypatch.setattr(resources, "_run", lambda args: f"audit: {audit}\n")
         return audit
 
-    def test_reads_file_inside_audit_dir(self, tmp_path, monkeypatch):
+    async def test_reads_file_inside_audit_dir(self, tmp_path, monkeypatch):
         audit = self._setup(tmp_path, monkeypatch)
         (audit / "events.log").write_text("hello", encoding="utf-8")
-        out = json.loads(_fn(AUDIT_FILE)("proj", "events.log"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "events.log"))
         assert out["content"] == "hello"
         assert out["path"].endswith("/audit/events.log")
 
-    def test_rejects_parent_traversal(self, tmp_path, monkeypatch):
+    async def test_rejects_parent_traversal(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         (tmp_path / "secret").write_text("TOPSECRET", encoding="utf-8")
-        out = json.loads(_fn(AUDIT_FILE)("proj", "../secret"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "../secret"))
         assert out == {"error": "path traversal denied"}
 
-    def test_rejects_deep_traversal(self, tmp_path, monkeypatch):
+    async def test_rejects_deep_traversal(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
-        out = json.loads(_fn(AUDIT_FILE)("proj", "../../../../etc/passwd"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "../../../../etc/passwd"))
         assert out["error"] == "path traversal denied"
 
-    def test_missing_file_inside_dir(self, tmp_path, monkeypatch):
+    async def test_missing_file_inside_dir(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
-        out = json.loads(_fn(AUDIT_FILE)("proj", "nope.log"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "nope.log"))
         assert out["error"] == "file not found"
 
-    def test_binary_file_reports_placeholder(self, tmp_path, monkeypatch):
+    async def test_binary_file_reports_placeholder(self, tmp_path, monkeypatch):
         audit = self._setup(tmp_path, monkeypatch)
         (audit / "blob.bin").write_bytes(b"\xff\xfe\x00")
-        out = json.loads(_fn(AUDIT_FILE)("proj", "blob.bin"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "blob.bin"))
         assert "binary" in out["content"]
 
-    def test_no_audit_dir(self, tmp_path, monkeypatch):
+    async def test_no_audit_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(resources, "_run", lambda args: "health: ok\n")
-        out = json.loads(_fn(AUDIT_FILE)("proj", "events.log"))
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "events.log"))
         assert out["error"] == "audit dir not found"
 
 
 class TestAuditListing:
-    def test_lists_files(self, tmp_path, monkeypatch):
+    async def test_lists_files(self, tmp_path, monkeypatch):
         audit = tmp_path / "audit"
         audit.mkdir()
         (audit / "a.log").write_text("x", encoding="utf-8")
         (audit / "sub").mkdir()
         monkeypatch.setattr(resources, "_run", lambda args: f"audit: {audit}\n")
-        out = json.loads(_fn(AUDIT_LIST)("proj"))
+        out = json.loads(await _fn(AUDIT_LIST)("proj"))
         names = {f["name"]: f for f in out["files"]}
         assert names["a.log"]["size"] == 1 and names["a.log"]["is_dir"] is False
         assert names["sub"]["is_dir"] is True
 
-    def test_missing_dir(self, tmp_path, monkeypatch):
+    async def test_missing_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(resources, "_run", lambda args: "no audit here")
-        out = json.loads(_fn(AUDIT_LIST)("proj"))
+        out = json.loads(await _fn(AUDIT_LIST)("proj"))
         assert out["error"] == "audit dir not found"
 
 

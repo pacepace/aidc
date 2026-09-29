@@ -190,24 +190,24 @@ class TestSessionCreate:
 # --- session_list / status / kill (thin _run_cli wrappers) -------------------
 
 class TestSimpleCliTools:
-    def test_list_happy(self, monkeypatch):
+    async def test_list_happy(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "proj running", "stderr": ""})
-        res = _tool("session_list")()
+        res = await _tool("session_list")()
         assert res["ok"] is True and res["data"]["raw"] == "proj running"
 
-    def test_list_failure(self, monkeypatch):
+    async def test_list_failure(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 2, "stdout": "", "stderr": "docker down"})
-        res = _tool("session_list")()
+        res = await _tool("session_list")()
         assert res["ok"] is False and res["error"] == "docker down"
 
-    def test_status_happy(self, monkeypatch):
+    async def test_status_happy(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "health=ok", "stderr": ""})
-        res = _tool("session_status")(name="proj")
+        res = await _tool("session_status")(name="proj")
         assert res["ok"] is True and "health=ok" in res["data"]["raw"]
 
-    def test_status_failure(self, monkeypatch):
+    async def test_status_failure(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "no such session"})
-        res = _tool("session_status")(name="ghost")
+        res = await _tool("session_status")(name="ghost")
         assert res["ok"] is False and res["error"] == "no such session"
 
     def test_kill_not_advertised(self):
@@ -225,25 +225,25 @@ class TestSimpleCliTools:
 # --- session_exec ------------------------------------------------------------
 
 class TestSessionExec:
-    def test_happy(self, monkeypatch):
+    async def test_happy(self, monkeypatch):
         rec = []
         _patch_sync_run(monkeypatch, FakeCompleted(0, stdout="hi", stderr=""), record=rec)
-        res = _tool("session_exec")(name="proj", cmd="echo hi")
+        res = await _tool("session_exec")(name="proj", cmd="echo hi")
         assert res["ok"] is True
         assert res["data"] == {"stdout": "hi", "stderr": "", "exit": 0}
         # Runs inside the session's dev container as vscode.
         argv = rec[0][0]
         assert argv[:5] == ["docker", "exec", "-u", "vscode", "aidc-proj-dev"]
 
-    def test_nonzero_exit_is_still_ok_envelope(self, monkeypatch):
+    async def test_nonzero_exit_is_still_ok_envelope(self, monkeypatch):
         # A failing command is a successful tool call that reports exit!=0.
         _patch_sync_run(monkeypatch, FakeCompleted(3, stdout="", stderr="nope"))
-        res = _tool("session_exec")(name="proj", cmd="false")
+        res = await _tool("session_exec")(name="proj", cmd="false")
         assert res["ok"] is True and res["data"]["exit"] == 3
 
-    def test_timeout(self, monkeypatch):
+    async def test_timeout(self, monkeypatch):
         _patch_sync_run(monkeypatch, subprocess.TimeoutExpired(cmd="x", timeout=60))
-        res = _tool("session_exec")(name="proj", cmd="sleep 999", timeout_seconds=60)
+        res = await _tool("session_exec")(name="proj", cmd="sleep 999", timeout_seconds=60)
         assert res["ok"] is False and "timeout" in res["error"]
 
 
@@ -313,21 +313,21 @@ class TestSessionRun:
 # --- file_get ----------------------------------------------------------------
 
 class TestFileGet:
-    def test_happy_utf8(self, monkeypatch):
+    async def test_happy_utf8(self, monkeypatch):
         _patch_sync_run(monkeypatch, FakeCompleted(0, stdout=b"hello world"))
-        res = _tool("file_get")(name="proj", path="/repo/a.txt")
+        res = await _tool("file_get")(name="proj", path="/repo/a.txt")
         assert res["ok"] is True
         assert res["data"] == {"path": "/repo/a.txt", "encoding": "utf-8", "content": "hello world"}
 
-    def test_missing_file(self, monkeypatch):
+    async def test_missing_file(self, monkeypatch):
         _patch_sync_run(monkeypatch, FakeCompleted(1, stdout=b"", stderr=b"No such file"))
-        res = _tool("file_get")(name="proj", path="/repo/nope")
+        res = await _tool("file_get")(name="proj", path="/repo/nope")
         assert res["ok"] is False and "No such file" in res["error"]
 
-    def test_binary_falls_back_to_base64(self, monkeypatch):
+    async def test_binary_falls_back_to_base64(self, monkeypatch):
         blob = b"\xff\xfe\x00\x01"
         _patch_sync_run(monkeypatch, FakeCompleted(0, stdout=blob))
-        res = _tool("file_get")(name="proj", path="/repo/x.bin")
+        res = await _tool("file_get")(name="proj", path="/repo/x.bin")
         assert res["ok"] is True and res["data"]["encoding"] == "base64"
         assert base64.b64decode(res["data"]["content"]) == blob
 
@@ -335,16 +335,16 @@ class TestFileGet:
 # --- file_put ----------------------------------------------------------------
 
 class TestFilePut:
-    def test_happy(self, monkeypatch):
+    async def test_happy(self, monkeypatch):
         rec = []
         _patch_sync_run(monkeypatch, FakeCompleted(0), record=rec)
-        res = _tool("file_put")(name="proj", path="/repo/a.txt", content="data")
+        res = await _tool("file_put")(name="proj", path="/repo/a.txt", content="data")
         assert res["ok"] is True and res["data"] == {"path": "/repo/a.txt", "bytes": 4}
         assert rec[0][1]["input"] == b"data"  # content streamed via stdin
 
-    def test_failure(self, monkeypatch):
+    async def test_failure(self, monkeypatch):
         _patch_sync_run(monkeypatch, FakeCompleted(1, stderr=b"permission denied"))
-        res = _tool("file_put")(name="proj", path="/repo/a.txt", content="x")
+        res = await _tool("file_put")(name="proj", path="/repo/a.txt", content="x")
         assert res["ok"] is False and "permission denied" in res["error"]
 
 
@@ -362,52 +362,52 @@ class TestAuditGet:
         )
         return d
 
-    def test_session_not_found(self, monkeypatch):
+    async def test_session_not_found(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "x"})
-        res = _tool("audit_get")(name="ghost")
+        res = await _tool("audit_get")(name="ghost")
         assert res["ok"] is False and res["error"] == "session not found"
 
-    def test_audit_dir_not_found(self, monkeypatch):
+    async def test_audit_dir_not_found(self, monkeypatch):
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "health=ok\n", "stderr": ""})
-        res = _tool("audit_get")(name="proj")
+        res = await _tool("audit_get")(name="proj")
         assert res["ok"] is False and res["error"] == "audit dir not found"
 
-    def test_happy_parses_and_skips_garbage(self, monkeypatch, tmp_path):
+    async def test_happy_parses_and_skips_garbage(self, monkeypatch, tmp_path):
         d = self._events_file(tmp_path)
         _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
-        res = _tool("audit_get")(name="proj")
+        res = await _tool("audit_get")(name="proj")
         assert res["ok"] is True
         assert [e["trigger"] for e in res["data"]["events"]] == ["taint", "auth"]
 
-    def test_since_filter(self, monkeypatch, tmp_path):
+    async def test_since_filter(self, monkeypatch, tmp_path):
         d = self._events_file(tmp_path)
         _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
-        res = _tool("audit_get")(name="proj", since="2026-01-15T00:00:00Z")
+        res = await _tool("audit_get")(name="proj", since="2026-01-15T00:00:00Z")
         assert [e["trigger"] for e in res["data"]["events"]] == ["auth"]
 
-    def test_kind_filter(self, monkeypatch, tmp_path):
+    async def test_kind_filter(self, monkeypatch, tmp_path):
         d = self._events_file(tmp_path)
         _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
-        res = _tool("audit_get")(name="proj", kind="taint")
+        res = await _tool("audit_get")(name="proj", kind="taint")
         assert [e["trigger"] for e in res["data"]["events"]] == ["taint"]
 
 
 # --- taint_mark --------------------------------------------------------------
 
 class TestTaintMark:
-    def test_happy(self, monkeypatch):
+    async def test_happy(self, monkeypatch):
         rec = []
         _patch_sync_run(monkeypatch, FakeCompleted(0, stdout="", stderr=""), record=rec)
-        res = _tool("taint_mark")(name="proj", reason="evil.example")
+        res = await _tool("taint_mark")(name="proj", reason="evil.example")
         assert res["ok"] is True and res["data"] == {"name": "proj", "reason": "evil.example"}
         # Writes into the session's POLICY container, and the payload carries the reason.
         argv = rec[0][0]
         assert "aidc-proj-policy" in argv
         assert any("evil.example" in a for a in argv)
 
-    def test_failure(self, monkeypatch):
+    async def test_failure(self, monkeypatch):
         _patch_sync_run(monkeypatch, FakeCompleted(1, stdout="", stderr="write failed"))
-        res = _tool("taint_mark")(name="proj", reason="x")
+        res = await _tool("taint_mark")(name="proj", reason="x")
         assert res["ok"] is False and res["error"] == "write failed"
 
 

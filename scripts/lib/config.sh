@@ -696,10 +696,11 @@ mcp_load_settings() {
     [ -n "$cfg" ] || return 0
 
     local b="" p="" c=""
-    if command -v yq >/dev/null 2>&1; then
-        b=$(yq eval '.mcp.bind_address // ""' "$cfg" 2>/dev/null || printf '')
-        p=$(yq eval '.mcp.port // ""' "$cfg" 2>/dev/null || printf '')
-        c=$(yq eval '.mcp.session_create // ""' "$cfg" 2>/dev/null || printf '')
+    if _aidc_has_yq; then
+        # Not `// ""`: yq's // treats false as missing (see _aidc_yaml_scalar).
+        b=$(yq eval '.mcp.bind_address' "$cfg" 2>/dev/null || printf '')
+        p=$(yq eval '.mcp.port' "$cfg" 2>/dev/null || printf '')
+        c=$(yq eval '.mcp.session_create' "$cfg" 2>/dev/null || printf '')
         [ "$b" = "null" ] && b=""
         [ "$p" = "null" ] && p=""
         [ "$c" = "null" ] && c=""

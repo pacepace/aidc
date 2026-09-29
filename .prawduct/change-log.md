@@ -35,7 +35,7 @@
      caught that either. -->
 
 
-## 2026-09-29: v1.8.1 — aidc list answers in under a second
+## 2026-09-29: v1.8.1 — aidc list answers in under a second; inner Docker stores diffs, not copies
 
 <!-- prawduct: scope=list-speed -->
 
@@ -49,9 +49,19 @@ without jq. Measured on this host: 2m14s before, 0.3s after, same output. `tests
 fails if any `docker ps` query in the listing names Size, `--size` or the whole JSON record.
 Also: the v1.8.0 plan archived and its entry marked released.
 
+**Inner Docker storage.** The sessions were that large because the inner dockerd used `vfs`,
+which stores every layer as a full copy (faidh: 85 GB under /var/lib/docker/vfs while its own
+`docker system df` counted about 20 GB). `dockerd-start.sh` now picks `fuse-overlayfs` after one
+real test mount on the filesystem dockerd will use (dockerd itself accepts the driver whenever
+the binary exists and fails only at the first layer), falls back to `vfs`, and records the driver
+that started so the watchdog's restarts keep it; storage from before the marker is `vfs`.
+Readiness is now "the daemon answers" rather than "the socket exists". Measured on this ZFS host
+with the same image and four containers: vfs 6.5 GB of files, fuse-overlayfs 0.6 GB. Kernel
+overlay2 was not an option: it cannot stack on the outer container's overlayfs or on ZFS 2.1.
+DKR-03 is unchanged: the storage stays inside the container. Smoke asserts the driver.
+
 **Not in this release:** CLI-calling MCP tools still run on the server's event loop, so any
-slow CLI call stalls transcript watchers and callbacks while it runs; and why sessions'
-writable layers grow so large. Both follow in the next change.
+slow CLI call stalls transcript watchers and callbacks while it runs. That follows next.
 
 ## 2026-09-21: v1.8.0 — TCP egress relays, repo-config trust, supply-chain cooldown, blocklist without reloads
 

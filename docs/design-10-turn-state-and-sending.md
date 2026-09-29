@@ -430,7 +430,9 @@ Both are read from one `capture-pane -e` of the `claude` window (with escape seq
 attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
 
 - **The input box** is the region between the last two full-width `─` rules near the bottom of
-  the pane; the status row sits directly below the second rule.
+  the pane; the status row sits directly below the second rule. From 2.1.284 the top rule of a
+  named session carries its name (`──── metallm ─`), so a rule may hold one label set off by
+  spaces.
 - **Its first row** starts with the glyph `❯` followed by a no-break space (`❯\xa0`). Earlier
   prompts in the scrollback also start with `❯` but are drawn on a background colour
   (`\x1b[48;5;237m`), so they do not match.

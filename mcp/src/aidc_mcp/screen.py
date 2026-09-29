@@ -12,7 +12,8 @@ only for:
     in the transcript, but Claude Code puts the prompt back in the box.
 
 Layout measured on Claude Code 2.1.270 and 2.1.274 (docs/design-10-turn-state-and-sending.md):
-the input box is the region between the last two full-width `─` rules, its first row
+the input box is the region between the last two full-width `─` rules (the top one may
+carry the session's name, measured on 2.1.284), its first row
 starts with `❯` and a no-break space, placeholder text is drawn dim (SGR 2), and the
 status row sits right below the second rule. Everything here fails closed: a screen
 without the input box is "not at prompt" (a known dialog) or "unrecognized", and both
@@ -41,6 +42,7 @@ _DIALOG_HINTS = ("Enter to confirm", "Esc to cancel")
 # below it. More trailing rows than this means the rules belong to something else.
 _MAX_ROWS_BELOW_BOX = 4
 
+_RULE_RE = re.compile(f"({_RULE_CHAR}+)(?: [^{_RULE_CHAR}]+ ({_RULE_CHAR}+))?")
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 _OTHER_ESCAPE_RE = re.compile(r"\x1b(?:\[[\x20-\x3f]*[\x40-\x7e]|\][^\x07\x1b]*(?:\x07|\x1b\\)|.)")
 
@@ -100,6 +102,13 @@ def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
     return out, dim
 
 
+def _is_rule(text: str) -> bool:
+    """A full-width `─` rule, which may carry one label set off by spaces: Claude Code
+    2.1.284 draws a named session's name into the box's top rule (`──── metallm ─`)."""
+    m = _RULE_RE.fullmatch(text.strip())
+    return m is not None and len(m.group(1)) + len(m.group(2) or "") >= _RULE_MIN_LEN
+
+
 def classify(ansi: str) -> ScreenState:
     """Classify a `tmux capture-pane -p -e -J` capture of the claude window."""
     rows: list[list[tuple[str, bool]]] = []
@@ -112,8 +121,7 @@ def classify(ansi: str) -> ScreenState:
         plain.pop()
         rows.pop()
 
-    rules = [i for i, text in enumerate(plain)
-             if len(text.strip()) >= _RULE_MIN_LEN and set(text.strip()) == {_RULE_CHAR}]
+    rules = [i for i, text in enumerate(plain) if _is_rule(text)]
     dialog = any(hint in text for text in plain for hint in _DIALOG_HINTS)
     no_box = ScreenState(NOT_AT_PROMPT if dialog else UNRECOGNIZED, False)
     if len(rules) < 2 or len(plain) - 1 - rules[-1] > _MAX_ROWS_BELOW_BOX:

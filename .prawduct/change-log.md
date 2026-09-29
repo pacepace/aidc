@@ -35,9 +35,28 @@
      caught that either. -->
 
 
+## 2026-09-29: v1.8.3 — a labelled box rule still bounds Claude's input box
+
+<!-- prawduct: scope=screen-labelled-rule -->
+
+**Why:** live on metallm, 2026-09-29: an orchestrator's `session_send` waited in the queue as
+`screen_unrecognized` while the session sat idle. Claude Code 2.1.284 draws a named session's name
+into the input box's top rule (`──── metallm ─`); `screen.classify` accepted only rules made of
+nothing but `─`, found one rule, and read the screen as "no box". Typed prompts were unaffected
+(they skip the check), so it looked like a black hole only for orchestrator sends.
+
+**What:** `_is_rule` accepts a run of `─` carrying one label set off by spaces, with at least the
+old minimum of rule characters. Fixture: that screen, captured live, conversation text replaced.
+Tests: the fixture reads EMPTY; labels at the start, middle and end bound the box; lines with too
+little rule, two labels, or an unspaced label do not. Hot-patched into the running aidc-mcp to
+release the stuck prompt before the release (it pasted at 04:55:55).
+
+Also: `metallm.send_speaker` turned off in the operator's config (not a code change) so replies to
+prompts typed at the terminal wake the orchestrator again.
+
 ## 2026-09-29: v1.8.2 — blocking MCP tools run off the event loop
 
-<!-- prawduct: scope=mcp-blocking-tools -->
+<!-- prawduct: scope=mcp-blocking-tools | release=v1.8.2 -->
 
 **Why:** FastMCP calls a synchronous tool or resource inline on the server's one event loop
 (mcp/server/fastmcp/utilities/func_metadata.py; FunctionResource.read), which also runs every

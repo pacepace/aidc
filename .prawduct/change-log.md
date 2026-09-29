@@ -35,9 +35,27 @@
      caught that either. -->
 
 
+## 2026-09-29: v1.8.1 — aidc list answers in under a second
+
+<!-- prawduct: scope=list-speed -->
+
+**Why:** `aidc list` took over two minutes with two sessions, and the MCP's `session_list` failed
+at its 60s timeout (the `aidc://sessions` resource returned empty at 30s). The listing asked
+`docker ps` for `{{json .}}`, whose Size column makes the daemon sum each dev container's writable
+layer; these ones hold 69 GB and 82 GB.
+
+**What:** `cmd-list.sh` asks `docker ps` for the name and status columns only, and reads them
+without jq. Measured on this host: 2m14s before, 0.3s after, same output. `tests/unit/test-list.sh`
+fails if any `docker ps` query in the listing names Size, `--size` or the whole JSON record.
+Also: the v1.8.0 plan archived and its entry marked released.
+
+**Not in this release:** CLI-calling MCP tools still run on the server's event loop, so any
+slow CLI call stalls transcript watchers and callbacks while it runs; and why sessions'
+writable layers grow so large. Both follow in the next change.
+
 ## 2026-09-21: v1.8.0 — TCP egress relays, repo-config trust, supply-chain cooldown, blocklist without reloads
 
-<!-- prawduct: scope=egress-tcp -->
+<!-- prawduct: scope=egress-tcp | release=v1.8.0 -->
 
 **Why:** a proxied session could not reach a database the host reaches over ZeroTier, a VPN or
 the LAN without removing isolation; a repo's own `.aidc/config.yaml` (writable from inside the

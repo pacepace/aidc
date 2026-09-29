@@ -20,8 +20,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # ---- watchdog spawner ------------------------------------------------------
-# Self-healing supervisor for dockerd. dockerd can die mid-session (OOM, vfs
-# disk exhaustion, iptables conflict, etc.) and leave the container alive
+# Self-healing supervisor for dockerd. dockerd can die mid-session (OOM, disk
+# exhaustion, iptables conflict, etc.) and leave the container alive
 # with no daemon -- every `docker` call inside then fails. Spawn a small
 # backgrounded loop that probes liveness every 15s and re-invokes this
 # script's start logic when dockerd is unresponsive.
@@ -90,30 +90,108 @@ fi
 # start with "Unable to get the TempDir under /var/run/docker..." style errors.
 rm -f /var/run/docker.pid
 
-# Storage driver: see entrypoint.sh for the long explanation. vfs is the
-# safest default — works on every kernel and every outer storage stack.
-STORAGE_DRIVER="${AIDC_DOCKER_STORAGE_DRIVER:-vfs}"
-log "starting inner dockerd (logs: /var/log/aidc/dockerd.log, storage driver: ${STORAGE_DRIVER})"
+# Storage driver. The inner /var/lib/docker sits on the outer container's own
+# filesystem (DKR-03), which is overlayfs or ZFS depending on the host, and the
+# kernel's overlay2 cannot stack on either. vfs works everywhere but stores every
+# layer of every image and container as a full copy: a session running a
+# compose stack reached 70-85 GB that way. fuse-overlayfs does the layering in
+# userspace, works on any backing filesystem, and stores only each layer's
+# changes (about a tenth of vfs for the same images). It needs /dev/fuse, which
+# the privileged container has; without it, or if dockerd will not start on it,
+# vfs is the fallback.
+#
+# Storage already on disk keeps the driver that wrote it: this script also runs
+# as the watchdog's restart, and a daemon started on a different driver would
+# not see the images and containers the session already has.
+# The driver that started successfully is recorded in DRIVER_MARKER.
+# AIDC_DOCKER_STORAGE_DRIVER overrides the choice and is never second-guessed.
+DRIVER_MARKER=/var/lib/docker/.aidc-storage-driver
+choose_storage_driver() {
+    if [ -n "${AIDC_DOCKER_STORAGE_DRIVER:-}" ]; then
+        printf '%s' "$AIDC_DOCKER_STORAGE_DRIVER"
+        return
+    fi
+    if [ -s "$DRIVER_MARKER" ]; then
+        cat "$DRIVER_MARKER"
+        return
+    fi
+    # Storage from before the marker existed was always vfs.
+    if [ -n "$(ls -A /var/lib/docker/vfs 2>/dev/null)" ]; then
+        printf 'vfs'
+        return
+    fi
+    if fuse_overlay_works; then
+        printf 'fuse-overlayfs'
+    else
+        printf 'vfs'
+    fi
+}
 
-nohup dockerd \
-    --host=unix:///var/run/docker.sock \
-    --storage-driver="${STORAGE_DRIVER}" \
-    > /var/log/aidc/dockerd.log 2>&1 &
+# dockerd accepts fuse-overlayfs as long as the binary exists and fails only at
+# the first layer it mounts, so try one real mount, on the filesystem dockerd
+# will use, before choosing it.
+fuse_overlay_works() {
+    command -v fuse-overlayfs >/dev/null 2>&1 && [ -c /dev/fuse ] || return 1
+    local t ok=1
+    mkdir -p /var/lib/docker
+    t=$(mktemp -d /var/lib/docker/.aidc-fuse-probe.XXXXXX) || return 1
+    mkdir -p "$t/lower" "$t/upper" "$t/work" "$t/merged"
+    echo probe > "$t/lower/f"
+    if fuse-overlayfs -o "lowerdir=$t/lower,upperdir=$t/upper,workdir=$t/work" "$t/merged" 2>/dev/null; then
+        if [ "$(cat "$t/merged/f" 2>/dev/null)" = probe ] && echo w > "$t/merged/g" 2>/dev/null \
+                && [ -f "$t/upper/g" ]; then
+            ok=0
+        fi
+        fusermount3 -u "$t/merged" 2>/dev/null || fusermount -u "$t/merged" 2>/dev/null \
+            || umount "$t/merged" 2>/dev/null || true
+    fi
+    rm -rf "$t"
+    return $ok
+}
 
-# Wait up to ~15s for the socket to appear.
-waited=0
-while [ ! -S /var/run/docker.sock ] && [ $waited -lt 30 ]; do
-    sleep 0.5
-    waited=$((waited + 1))
-done
+# Start dockerd on one driver and wait up to ~15s for it to answer. The socket
+# file alone is not enough: dockerd creates it before initialising storage, so a
+# driver that fails leaves a socket behind a daemon that has already exited.
+start_dockerd() {
+    local driver="$1"
+    log "starting inner dockerd (logs: /var/log/aidc/dockerd.log, storage driver: ${driver})"
+    rm -f /var/run/docker.sock /var/run/docker.pid
+    nohup dockerd \
+        --host=unix:///var/run/docker.sock \
+        --storage-driver="${driver}" \
+        >> /var/log/aidc/dockerd.log 2>&1 &
+    local pid=$! waited=0
+    while [ $waited -lt 30 ]; do
+        if docker -H unix:///var/run/docker.sock version >/dev/null 2>&1; then
+            return 0
+        fi
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    kill "$pid" 2>/dev/null || true
+    return 1
+}
 
-if [ -S /var/run/docker.sock ]; then
+: > /var/log/aidc/dockerd.log
+STORAGE_DRIVER=$(choose_storage_driver)
+if ! start_dockerd "$STORAGE_DRIVER"; then
+    if [ "$STORAGE_DRIVER" = "fuse-overlayfs" ] && [ -z "${AIDC_DOCKER_STORAGE_DRIVER:-}" ] \
+            && [ ! -s "$DRIVER_MARKER" ]; then
+        log "WARN: dockerd did not start on fuse-overlayfs; falling back to vfs (full copy per layer)"
+        STORAGE_DRIVER=vfs
+        start_dockerd vfs || true
+    fi
+fi
+
+if docker -H unix:///var/run/docker.sock version >/dev/null 2>&1; then
     # Make the socket usable from `docker` group (vscode is a member).
     chgrp docker /var/run/docker.sock 2>/dev/null || true
     chmod g+rw   /var/run/docker.sock 2>/dev/null || true
-    log "inner dockerd ready"
+    printf '%s' "$STORAGE_DRIVER" > "$DRIVER_MARKER"
+    log "inner dockerd ready (storage driver: ${STORAGE_DRIVER})"
 else
-    log "WARN: inner dockerd did not produce a socket within 15s; check /var/log/aidc/dockerd.log"
+    log "WARN: inner dockerd did not answer within 15s; check /var/log/aidc/dockerd.log"
     exit 1
 fi
 

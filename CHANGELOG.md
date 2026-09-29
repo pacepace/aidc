@@ -13,6 +13,22 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-09-29
+
+### Fixed
+- **`aidc list` and the MCP's `session_list` answer in under a second again.** The listing asked
+  Docker for every column, including each container's size on disk, and Docker measured the
+  sessions' files to answer. With two large sessions `aidc list` took over two minutes, and
+  `session_list` failed with "timeout after 60s". It now asks only for the name and status.
+
+### Changed
+- **Docker inside a session uses about a tenth of the disk.** The session's own Docker stored
+  every layer of every image and container as a full copy (the `vfs` driver), so a session
+  running a compose stack grew to 70-85 GB. New sessions use `fuse-overlayfs`, which stores only
+  what each layer changes, and fall back to `vfs` only where fuse does not work. An existing
+  session switches when its dev container is recreated (`aidc upgrade`, or `aidc kill` +
+  `aidc create`); either way its inner Docker starts with empty storage and re-pulls images.
+
 ## [1.8.0] - 2026-09-22
 
 ### Added
@@ -1088,7 +1104,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/pacepace/aidc/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/pacepace/aidc/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/pacepace/aidc/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/pacepace/aidc/compare/v1.5.1...v1.6.0

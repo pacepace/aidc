@@ -227,6 +227,9 @@ assert "inner docker daemon works" \
     "dev_exec 'docker version'"
 assert "inner docker ps does NOT show host containers" \
     "! dev_exec 'docker ps --format \"{{.Names}}\" | grep -q aidc-${SESSION}-squid'"
+# vfs would store a full copy of every layer; see .devcontainer/dockerd-start.sh.
+assert "inner docker stores layer diffs (fuse-overlayfs), not full copies" \
+    "[ \"\$(dev_exec 'docker info --format {{.Driver}}')\" = fuse-overlayfs ]"
 echo
 
 # --- step 5: port forwarding (CLI-13/14/15) ------------------------------

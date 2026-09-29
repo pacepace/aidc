@@ -13,6 +13,19 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-09-29
+
+### Fixed
+- **A slow tool call no longer freezes the MCP server.** The MCP's simpler tools
+  (`session_list`, `session_status`, `session_exec`, `file_get`, `file_put`, `audit_get`,
+  `taint_mark`) and its resources ran on the server's single event loop, so while one waited on
+  the aidc CLI or a command in the session, nothing else ran: reply callbacks, transcript
+  watchers and every other client's calls waited too, up to `session_exec`'s full timeout. They
+  now run in worker threads.
+- **Docker inside a session recovers cleanly when fuse-overlayfs is slow to start.** The fallback
+  to `vfs` started a second daemon before the first had exited, which could fail and leave the
+  session without Docker until the watchdog retried.
+
 ## [1.8.1] - 2026-09-29
 
 ### Fixed
@@ -1104,7 +1117,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.2...HEAD
+[1.8.2]: https://github.com/pacepace/aidc/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/pacepace/aidc/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/pacepace/aidc/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/pacepace/aidc/compare/v1.6.0...v1.7.0

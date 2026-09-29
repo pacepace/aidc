@@ -35,9 +35,39 @@
      caught that either. -->
 
 
+## 2026-09-29: v1.8.2 — blocking MCP tools run off the event loop
+
+<!-- prawduct: scope=mcp-blocking-tools -->
+
+**Why:** FastMCP calls a synchronous tool or resource inline on the server's one event loop
+(mcp/server/fastmcp/utilities/func_metadata.py; FunctionResource.read), which also runs every
+transcript watcher, reply callback and other client's call. Seven tools and all five resources
+were synchronous and wait on subprocesses (the aidc CLI, `docker exec`), so each call froze the
+server for its duration: 60s+ while `aidc list` was slow (fixed in v1.8.1), and up to
+`session_exec`'s timeout in general.
+
+**What:**
+- `aidc_mcp/offload.py`: `off_loop` wraps a synchronous body as a coroutine function that runs it
+  via `asyncio.to_thread`, keeping the signature FastMCP reads. Applied to session_list,
+  session_exec, file_get, file_put, audit_get, taint_mark and every resource.
+- `session_status` is async instead: its CLI call runs in a thread and the send-queue snapshot is
+  read back on the loop, the only thread that mutates `_pending_sends`. (An AST sweep found no
+  other synchronous tool touching loop-owned module state; `log_event` holds a lock.)
+- `tests/test_offload.py`: through FastMCP's own `call_tool`/`read_resource`, a blocking call that
+  only the loop can release must finish quickly; a registry-derived check fails any synchronous
+  tool or resource added later. Shown failing with session_list back on the loop and with
+  session_status calling the CLI inline. Tests that called these functions synchronously now
+  await them, as FastMCP does; no assertion changed.
+- Carried from v1.8.1's review: `start_dockerd` waits for a timed-out dockerd to exit before the
+  vfs fallback; smoke runs the image's start script in throwaway containers for the fallback, the
+  recorded marker, a restart, pre-marker vfs storage and the override; entrypoint.sh no longer
+  claims overlay2.
+- Carried from v1.8.0: `mcp_load_settings` uses `_aidc_has_yq` and reads `.mcp.<key>` without
+  `// ""`, which drops false.
+
 ## 2026-09-29: v1.8.1 — aidc list answers in under a second; inner Docker stores diffs, not copies
 
-<!-- prawduct: scope=list-speed -->
+<!-- prawduct: scope=list-speed | release=v1.8.1 -->
 
 **Why:** `aidc list` took over two minutes with two sessions, and the MCP's `session_list` failed
 at its 60s timeout (the `aidc://sessions` resource returned empty at 30s). The listing asked

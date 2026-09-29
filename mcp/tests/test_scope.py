@@ -126,38 +126,38 @@ async def test_session_create_is_refused_when_scoped(monkeypatch, forbid_side_ef
     assert result["error_code"] == "create_not_allowed"
 
 
-def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
+async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     raw = ("SESSION   STATUS   PROFILE\n"
            "jointtest Up 1 min multi\n"
            "metallm   Up 2 days multi\n")
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": raw, "stderr": ""})
-    out = app._tool_manager._tools["session_list"].fn()["data"]["raw"]
+    out = (await app._tool_manager._tools["session_list"].fn())["data"]["raw"]
     assert out == "SESSION   STATUS   PROFILE\njointtest Up 1 min multi\n"
 
 
-def test_in_scope_calls_go_through(app, monkeypatch):
+async def test_in_scope_calls_go_through(app, monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "status ok", "stderr": ""})
-    res = app._tool_manager._tools["session_status"].fn(name="jointtest")
+    res = await app._tool_manager._tools["session_status"].fn(name="jointtest")
     assert res["ok"] is True
 
 
-def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
+async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(resources, "_run", lambda args: "SESSION X\nmetallm Up\njointtest Up\n")
     a = FastMCP("r")
     resources.register(a)
     fns = {str(t.uri_template): t.fn for t in a._resource_manager._templates.values()}
     fns.update({str(r.uri): r.fn for r in a._resource_manager._resources.values()})
-    assert "outside" in json.loads(fns["aidc://sessions/{name}/status"](name="metallm"))["error"]
-    assert "outside" in json.loads(fns["aidc://sessions/{name}/audit"](name="metallm"))["error"]
+    assert "outside" in json.loads(await fns["aidc://sessions/{name}/status"](name="metallm"))["error"]
+    assert "outside" in json.loads(await fns["aidc://sessions/{name}/audit"](name="metallm"))["error"]
     assert "outside" in json.loads(
-        fns["aidc://sessions/{name}/audit/{filename}"](name="metallm", filename="a"))["error"]
-    assert "error" in json.loads(fns["aidc://config"]())
-    assert json.loads(fns["aidc://sessions"]())["raw"] == "SESSION X\njointtest Up\n"
+        await fns["aidc://sessions/{name}/audit/{filename}"](name="metallm", filename="a"))["error"]
+    assert "error" in json.loads(await fns["aidc://config"]())
+    assert json.loads(await fns["aidc://sessions"]())["raw"] == "SESSION X\njointtest Up\n"
 
 
 async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):

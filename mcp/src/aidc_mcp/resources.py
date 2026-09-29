@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from aidc_mcp import scope
+from aidc_mcp.offload import off_loop
 
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
 
@@ -48,11 +49,13 @@ def register(app: Any) -> None:
     """Attach every resource to the given FastMCP app."""
 
     @app.resource("aidc://sessions")
+    @off_loop
     def list_all_sessions() -> str:
         """Live list of all aidc sessions on this host."""
         return json.dumps({"raw": scope.filter_list(_run(["list"]))})
 
     @app.resource("aidc://config")
+    @off_loop
     def show_global_config() -> str:
         """Effective global aidc config (merged defaults + ~/.config/aidc/config.yaml)."""
         if scope.allowed_sessions() is not None:
@@ -60,6 +63,7 @@ def register(app: Any) -> None:
         return json.dumps({"raw": _run(["config", "global"])})
 
     @app.resource("aidc://sessions/{name}/status")
+    @off_loop
     def session_status_resource(name: str) -> str:
         """Live status for one named session."""
         if (why := scope.refusal(name)) is not None:
@@ -67,6 +71,7 @@ def register(app: Any) -> None:
         return json.dumps({"raw": _run(["status", name])})
 
     @app.resource("aidc://sessions/{name}/audit")
+    @off_loop
     def session_audit_listing(name: str) -> str:
         """File listing of the session's audit dir."""
         if (why := scope.refusal(name)) is not None:
@@ -83,6 +88,7 @@ def register(app: Any) -> None:
         return json.dumps({"audit_dir": str(audit_dir), "files": files})
 
     @app.resource("aidc://sessions/{name}/audit/{filename}")
+    @off_loop
     def session_audit_file(name: str, filename: str) -> str:
         """Contents of a specific file in the session's audit dir."""
         if (why := scope.refusal(name)) is not None:

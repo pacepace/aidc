@@ -613,7 +613,7 @@ async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeyp
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("x" * 300, "2026-09-17T02:00:00Z", 2, "paste_failing")]
 
-    res = status(name="proj")
+    res = await status(name="proj")
 
     [entry] = res["data"]["send_queue"]
     assert entry["prompt_preview"] == "x" * 120

@@ -17,16 +17,20 @@ trap '' PIPE
 . "$AIDC_SCRIPTS/lib/common.sh"
 
 require_docker
-require_cmd jq
 
 # We discover sessions by their dev container. Two possibilities:
 #   - The labels were applied at create time (aidc.role=dev, aidc.session=X);
 #     prefer this when present.
 #   - Fall back to name pattern aidc-*-dev for older sessions.
-
-PRIMARY=$(docker ps -a --filter 'label=aidc.role=dev' --format '{{json .}}' 2>/dev/null || printf '')
+#
+# Ask `docker ps` for exactly the columns used. `{{json .}}` includes Size, and
+# filling that in makes the daemon sum every container's writable layer on disk:
+# about a minute per 70 GB dev container, which pushed `aidc list` past the MCP
+# server's 60s timeout.
+PS_FORMAT='{{.Names}}\t{{.Status}}'
+PRIMARY=$(docker ps -a --filter 'label=aidc.role=dev' --format "$PS_FORMAT" 2>/dev/null || printf '')
 if [ -z "$PRIMARY" ]; then
-    PRIMARY=$(docker ps -a --filter 'name=^aidc-.*-dev$' --format '{{json .}}' 2>/dev/null || printf '')
+    PRIMARY=$(docker ps -a --filter 'name=^aidc-.*-dev$' --format "$PS_FORMAT" 2>/dev/null || printf '')
 fi
 
 if [ -z "$PRIMARY" ]; then
@@ -42,12 +46,9 @@ set +o pipefail
 
 printf '%-20s %-15s %-10s %-25s %s\n' "SESSION" "STATUS" "PROFILE" "STARTED" "TAINTED"
 
-# Each line is a JSON object. Read line-by-line (bash 3.2 has no mapfile).
-while IFS= read -r line; do
-    [ -z "$line" ] && continue
-
-    ct_name=$(printf '%s' "$line" | jq -r '.Names // .Name // ""')
-    status=$(printf '%s'   "$line" | jq -r '.Status // ""')
+# Each line is "<name><TAB><status>". Read line-by-line (bash 3.2 has no mapfile).
+while IFS="$(printf '\t')" read -r ct_name status; do
+    [ -z "$ct_name" ] && continue
     # Strip aidc- prefix and -dev suffix to recover the session name.
     session=${ct_name#aidc-}
     session=${session%-dev}

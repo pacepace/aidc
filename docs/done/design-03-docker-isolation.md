@@ -85,7 +85,7 @@ The trade-off is: yes, `--privileged` weakens the isolation between the containe
 
 The inner `dockerd` has its own:
 
-- Storage driver (overlay2) with storage rooted at `/var/lib/docker` **inside** the outer container, not on the host (DKR-03). When the outer container dies, all inner images, containers, and volumes die with it.
+- Storage rooted at `/var/lib/docker` **inside** the outer container, not on the host (DKR-03). When the outer container dies, all inner images, containers, and volumes die with it. The storage driver is `fuse-overlayfs`, which keeps only each layer's changes: kernel `overlay2` cannot stack on the outer container's filesystem (overlayfs, or ZFS before 2.2). `vfs`, which copies every layer in full, is the fallback when fuse is unavailable; a session running a compose stack reached 70-85 GB on it. `AIDC_DOCKER_STORAGE_DRIVER` overrides the choice (`.devcontainer/dockerd-start.sh`).
 - Image cache, independent from the host's image cache. First builds inside a fresh aidc session re-pull base images. (This is acceptable; the proxy stack permits Docker Hub.)
 - Network bridge. Inner containers get inner-bridge IPs, totally separate from host docker networks.
 

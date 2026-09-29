@@ -3,7 +3,13 @@ artifact: build-plan
 version: 1
 scope: egress-tcp
 branch: feature/egress-tcp
+lifecycle: completed
+archived: 2026-09-29
+released_in: v1.8.0
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — egress_tcp and repo-config trust
 

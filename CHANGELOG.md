@@ -13,6 +13,15 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-09-29
+
+### Fixed
+- **Messages an orchestrator sends reach a session whose Claude has a name again.** Claude Code
+  2.1.284 draws the session's name into the border of its input box. aidc no longer recognised
+  the box, so every `session_send` to that session waited in the queue and never pasted, while
+  prompts typed at the terminal went through. The waiting messages paste as soon as aidc-mcp
+  runs this version; none are lost.
+
 ## [1.8.2] - 2026-09-29
 
 ### Fixed
@@ -1117,7 +1126,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.3...HEAD
+[1.8.3]: https://github.com/pacepace/aidc/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/pacepace/aidc/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/pacepace/aidc/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/pacepace/aidc/compare/v1.7.0...v1.8.0

@@ -44,6 +44,33 @@ def test_real_captures(name, expected):
     assert classify(_screen(name)) == expected
 
 
+def test_a_rule_carrying_the_session_name_still_bounds_the_box():
+    """Claude Code 2.1.284 draws a named session's name into the box's top rule
+    (`──── metallm ─`). Read as "no box", every orchestrator prompt to the session
+    waited in the queue as screen_unrecognized (live, 2026-09-29)."""
+    screen = (SCREENS / "claude-2.1.284-idle-empty-session-name-in-rule.ansi").read_text()
+    assert classify(screen) == ScreenState(EMPTY, working=False)
+
+
+@pytest.mark.parametrize("rule", [
+    "─" * 30 + " metallm ─",
+    "─" * 30 + " a longer name ─" + "─" * 5,
+    "── label " + "─" * 30,
+])
+def test_labelled_rules_bound_the_box(rule):
+    assert classify(f"{rule}\n❯\xa0typed\n{RULE}\n  status\n") == ScreenState(
+        HAS_TEXT, working=False, typed="typed")
+
+
+@pytest.mark.parametrize("line", [
+    "─" * 10 + " not a rule, too little rule " + "─" * 5,   # under the minimum run
+    "─" * 20 + " two " + "─" * 5 + " labels " + "─" * 5,      # more than one label
+    "─" * 20 + "x" + "─" * 5,                                 # label not set off by spaces
+])
+def test_lines_that_only_look_like_labelled_rules_are_not_rules(line):
+    assert classify(f"{line}\n❯\xa0typed\n{RULE}\n  status\n").input_box == UNRECOGNIZED
+
+
 @pytest.mark.parametrize("name, typed", [
     ("typed-unsent", None),   # checked only for being non-empty below
     ("typed-multiline", "line one\nline two"),

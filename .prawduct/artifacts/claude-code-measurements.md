@@ -24,6 +24,7 @@ both transcripts are in this session's scratchpad `measure/`. Transcripts: `4fee
 | T9 | `turn_duration` presence | After every allowed stop observed: 5 of 5 (T1, T4, T8, the thinking turn, the first-launch turn) | — |
 | T10 | Rotation | `/exit` then relaunching without `--continue` started a new `<sessionId>.jsonl` on the first prompt | d0837af9 |
 | T11 | API error | Not produced; would need breaking the session's network. Existing design-09 handling stays | — |
+| T12 | A local slash command (`/clear`, `/model`, `/login`), measured 2026-10-08 over the host's transcripts, Claude Code 2.1.222 to 2.1.287 | `user` `isMeta` `<local-command-caveat>` → `user` line opening `<command-name>/x</command-name>` (no `promptId`) → `user` `<local-command-stdout>` for a command that prints, or `system` `local_command` for one that does not (`/clear`, `/compact`). No assistant reply. A skill's command (`/run`) opens `<command-message>`, carries `promptId`, has neither mark, and Claude answers it | host transcripts |
 
 Notes:
 - The 20s `sleep` in T6 was run as a background shell (status row showed `1 shell`), so its

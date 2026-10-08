@@ -663,29 +663,35 @@ async def _wait_for_turn_end(container: str, name: str, timeout: float) -> str:
 
 
 def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -> bool:
-    """Whether the transcript shows a pasted prompt arrived — and, when it arrived as a
-    queued message, give its send record back.
+    """Whether the transcript shows a pasted prompt arrived — and, when no turn will
+    ever claim it, give its send record back.
 
     Claude Code records a prompt pasted while it is working only as a `queue-operation`
-    and answers it inside the running turn, so it never becomes a prompt line and no
-    turn can claim it. Its record would then wait out its 24 h, where the same words
-    typed by a person would match it and be delivered as the orchestrator's own prompt.
-    Both watchers of a pasted prompt (the free check and _watch_for_echo) come through
-    here, because either can be the one that sees it first.
+    and answers it inside the running turn, so it never becomes a prompt line. A local
+    slash command (/clear, /model) arrives as a prompt line, but Claude Code runs it
+    itself and no turn opens for it. Either way no turn can claim the prompt, and its
+    record would wait out its 24 h, where the same words typed by a person would match
+    it and be delivered as the orchestrator's own prompt. Both watchers of a pasted
+    prompt (the free check and _watch_for_echo) come through here, because either can
+    be the one that sees it first.
     """
     index = ts.prompt_index_since(objs, text, sent_at)
     if index is None:
         return False
     if objs[index].get("type") == "queue-operation":
-        try:
-            consumed = ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
-        except OSError as exc:
-            log_event("session_send_record_release_failed", session=session,
-                      error_type=type(exc).__name__, error=repr(exc))
-        else:
-            if consumed:
-                log_event("session_send_queued_by_claude", session=session,
-                          prompt_len=len(text))
+        event = "session_send_queued_by_claude"
+    elif ts.is_local_command(objs, index):
+        event = "session_send_ran_as_local_command"
+    else:
+        return True
+    try:
+        consumed = ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
+    except OSError as exc:
+        log_event("session_send_record_release_failed", session=session,
+                  error_type=type(exc).__name__, error=repr(exc))
+    else:
+        if consumed:
+            log_event(event, session=session, prompt_len=len(text))
     return True
 
 

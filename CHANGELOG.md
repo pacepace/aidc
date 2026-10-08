@@ -13,6 +13,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **A prompt sent after `/clear` is pasted as soon as Claude is free.** aidc read a local slash
+  command (`/clear`, `/model`, `/login`) as a prompt that opened a turn, and since Claude never
+  replies to one, the turn looked unfinished. Every prompt queued behind a `/clear` then waited
+  as `claude_busy` until the transcript had been quiet for 10 minutes, or longer while anything
+  else wrote to it. A local command now opens no turn, and its send record is released when it
+  arrives.
+
 ## [1.8.3] - 2026-09-29
 
 ### Fixed

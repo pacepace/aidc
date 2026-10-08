@@ -352,9 +352,22 @@ Two questions are kept apart, because they have different callers:
 
 1. The transcript's tail (`transcript.log_shows_turn_in_progress`) says **not working** for a
    finished turn, an interrupt marker, an API error, a turn waiting on an interactive-input
-   tool, a local command's output (`/login`, `!` bash mode), or an empty transcript. It says
-   **working** for a prompt with no reply, a tool call or result, an unanswered Stop-hook
-   pushback, or a reply whose Stop hooks have not reported yet.
+   tool, a local command or its output (`/clear`, `/login`, `!` bash mode), or an empty
+   transcript. It says **working** for a prompt with no reply, a tool call or result, an
+   unanswered Stop-hook pushback, or a reply whose Stop hooks have not reported yet.
+
+   **A local command opens no turn.** Claude Code runs `/clear`, `/model`, `/login` itself and
+   Claude never replies, yet the command is written as an ordinary `user` line, the same shape
+   as a skill's command, which Claude does answer. Its neighbours tell them apart (measured on
+   Claude Code 2.1.222 to 2.1.287): a local command comes right after the isMeta
+   `<local-command-caveat>` line, and one that prints nothing to the conversation (`/clear`) is
+   followed by a `system` / `local_command` line. Either mark makes it local
+   (`transcript.is_local_command`), and every reader (`log_shows_turn_in_progress`,
+   `unanswered_prompt_turn`, `extract_completed_turns`) treats it as it treats a local
+   command's output: no turn, no unanswered prompt, no prompt on the next turn. Until
+   2026-10-08 a command line counted as a prompt, so after a pasted `/clear` the turn read as
+   running until the transcript had been quiet for `_LOG_STALL_S`, and every prompt queued
+   behind it waited as `claude_busy`.
 2. A turn the transcript shows in progress is **working** while the transcript has been quiet
    for less than 6 s (the mirror copies about every 2 s).
 3. A reply still waiting on its Stop hooks stays **working** until 120 s of quiet
@@ -394,7 +407,9 @@ transcript still shows the previous finished turn. `_inject` marks the session b
 (`sent_prompt_not_in_log`) and starts `_watch_for_echo`, which clears the mark once the transcript
 shows the prompt: a `user` line with the same text (or, for a slash command, its rendered
 `/name args`), or a `queue-operation` enqueue with that text when it was pasted into a running
-turn. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
+turn. A pasted local command (`/clear`) shows as its command line and counts as arrived. When
+the prompt arrived as a queued message or as a local command, no turn will ever claim it, so
+`_prompt_arrived` gives its send record back there. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
 logged, whether or not anything checks the session again.
 
 [DECISION: a prompt that never shows in the transcript is logged, not re-sent | a paste whose
@@ -412,8 +427,8 @@ status row shows Claude working, and the report is kept, with its session instan
 `watcher-state/<session>.interrupt-reported`: the
 watcher's watermark is past the prompt by then, so after a restart nothing would report it again,
 and a session remembered only in memory read busy for good (found in the joint test, when a
-queued prompt waited behind an interrupt reported before a restart). A tail made of a local command's output or a background task's notification is
-never reported; a slash command with no output (a skill Claude was about to run) is.
+queued prompt waited behind an interrupt reported before a restart). A tail made of a local command, its output, or a background task's notification is
+never reported; a slash command with no local-command mark (a skill Claude was about to run) is.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 

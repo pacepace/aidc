@@ -35,6 +35,27 @@
      caught that either. -->
 
 
+## 2026-10-08: a local command opens no turn
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: a session was sent `/clear`, then a prompt that queued behind it. 14
+minutes later the prompt still waited as `claude_busy` (`status_row_unproven`) while Claude sat
+at an empty input box. `_session_state` read the turn as running because
+`log_shows_turn_in_progress` took the `/clear` command line for a prompt with no reply, and
+`unanswered_prompt_turn` returned `('/clear',)`. Claude never replies to a local command, so the
+turn read as running until the transcript went quiet for `_LOG_STALL_S`.
+
+**What:** `transcript.is_local_command` tells a local command from a skill's command by its
+neighbours: the isMeta `<local-command-caveat>` line before it, or the `system` /
+`local_command` line after it (measured across Claude Code 2.1.222 to 2.1.287 in the host's
+transcripts: every local command had the caveat; no skill command had either mark).
+`_ends_without_reply` (a local command or its output) is the one rule the three readers use: no
+turn in progress, no unanswered prompt, no prompt on the next turn. `prompt_index_since` is
+unchanged, so a pasted `/clear` still clears the echo hold; `_prompt_arrived` now gives a local
+command's send record back, as it does for a queued prompt, since no turn will claim it.
+Tests use the live transcript's lines; nine mutants each fail on a test's own assertion.
+
 ## 2026-09-29: v1.8.3 — a labelled box rule still bounds Claude's input box
 
 <!-- prawduct: scope=screen-labelled-rule -->

@@ -1518,6 +1518,55 @@ class TestTerminalPromptAttribution:
         assert rec.turns[0].text == "The task finished."
         assert rec.turns[0].prompt_origin == ""
 
+    async def test_a_continuation_answers_whoever_prompted_its_turn(self, tmp_path):
+        """A reply with no prompt of its own continues the last prompted turn.
+
+        Delivered with no origin, a night of continuations of turns the person
+        typed (2026-10-08) read to the orchestrator as replies to its own prompts."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        note = {"type": "user", "uuid": "u2", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "check the build"), _assistant("a1", "Checking."),
+        ])
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "check the build"), _assistant("a1", "Checking."),
+            note, _assistant("a2", "The build passed."),
+        ])
+        await _drain(base, state, rec)
+        assert [t.prompt_origin for t in rec.turns] == ["terminal", "terminal"]
+        # It carries the origin, not the note: its prompt was quoted once already.
+        assert rec.turns[1].text == "The build passed."
+
+    async def test_a_continuation_of_the_orchestrators_turn_is_the_orchestrators(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "run the suite")
+        note = {"type": "user", "uuid": "u2", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "run the suite"), _assistant("a1", "Running."),
+            note, _assistant("a2", "412 passed."),
+        ])
+        await _drain(base, state, rec)
+        assert [t.prompt_origin for t in rec.turns] == ["orchestrator", "orchestrator"]
+
+    async def test_the_next_prompted_turn_replaces_the_carried_origin(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "run the suite")
+        note = {"type": "user", "uuid": "u3", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "what changed?"), _assistant("a1", "Two files."),
+            _typed("u2", "run the suite"), _assistant("a2", "Running."),
+            note, _assistant("a3", "412 passed."),
+        ])
+        await _drain(base, state, rec)
+        assert [t.prompt_origin for t in rec.turns] == ["terminal", "orchestrator", "orchestrator"]
+
     async def test_empty_turn_still_consumes_its_record_entry(self, tmp_path):
         base, state, rec, seed = await self._seeded(tmp_path)
         ts.record_sent_prompt(state, "sess", "just run it")

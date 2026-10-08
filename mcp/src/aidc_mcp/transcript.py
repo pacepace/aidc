@@ -1241,6 +1241,35 @@ def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> Non
     os.replace(tmp, path)
 
 
+def prompt_origin_path(base_dir: Path, session: str) -> Path:
+    """Per-session, like the send record: whose prompt the session's last
+    prompted turn answered."""
+    return Path(base_dir) / f"{slug(session)}.prompt-origin.json"
+
+
+def record_prompt_origin(base_dir: Path, session: str, origin: str, *, now_fn=time.time) -> None:
+    """Remember whose prompt ``session``'s latest prompted turn answered
+    ("terminal" or "orchestrator"), so a continuation of that turn can say so.
+    Atomic write (temp + rename), matching save_watermark."""
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = prompt_origin_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"origin": origin, "at": now_fn()}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def last_prompt_origin(base_dir: Path, session: str) -> str:
+    """Whose prompt ``session``'s latest prompted turn answered, or "" when none
+    is on record. A missing or corrupt file is "" (never raises)."""
+    try:
+        data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return ""
+    origin = data.get("origin") if isinstance(data, dict) else None
+    return origin if origin in ("terminal", "orchestrator") else ""
+
+
 # --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
 #
 # Prompts accepted for a session and not yet pasted. A persisted format locks in a

@@ -795,6 +795,25 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...], state_dir: Path) -
     return typed
 
 
+def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, state_dir: Path) -> str:
+    """Whose prompt a turn answers, carried across the turn's continuations.
+
+    A prompted turn's origin is recorded for its session. A turn with no prompt
+    of its own -- a continuation past the read window, a task notification, an
+    auto-continue -- is the same piece of work, so it answers the same party and
+    takes the recorded origin. Delivered as "", a night of continuations of turns
+    a person typed (2026-10-08) read to the orchestrator as replies to its own
+    prompts. A record that cannot be written leaves the origin as computed."""
+    if turn.prompts:
+        try:
+            ts.record_prompt_origin(state_dir, session, origin)
+        except OSError as exc:
+            log_event("transcript_origin_record_failed", session=session,
+                      error_type=type(exc).__name__, error=repr(exc))
+        return origin
+    return ts.last_prompt_origin(state_dir, session)
+
+
 async def _inject(container: str, text: str, window: str, *, session: str) -> bool:
     """Paste one prompt into the window and press Enter. True when it went in.
 
@@ -2046,11 +2065,13 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         terminal_prompts = (
             [] if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
         )
+        origin = "terminal" if terminal_prompts else "orchestrator" if turn.prompts else ""
+        if not already_delivered:
+            origin = _carry_prompt_origin(session, turn, origin, state_dir)
         outgoing = dataclasses.replace(
             turn,
             text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
-            prompt_origin=("terminal" if terminal_prompts
-                           else "orchestrator" if turn.prompts else ""),
+            prompt_origin=origin,
             speaker=("human" if turn.prompts and len(terminal_prompts) == len(turn.prompts)
                      else "agent"),
         )

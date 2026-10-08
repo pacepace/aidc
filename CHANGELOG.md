@@ -20,6 +20,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   as `claude_busy` until the transcript had been quiet for 10 minutes, or longer while anything
   else wrote to it. A local command now opens no turn, and its send record is released when it
   arrives.
+- **`session_send` says which conversation gets the reply.** A session has one webhook, and its
+  replies go to the conversation that opened it. A send from any other conversation was told the
+  reply would come back to it, and waited for one that went elsewhere. The return now names the
+  conversation the reply goes to (`watched_conversation_id`) and says that `session_unwatch` then
+  `session_watch` move the replies.
 
 ## [1.8.3] - 2026-09-29
 

@@ -2800,7 +2800,8 @@ def register(app: Any) -> None:
         The reply arrives via webhook (auto-started here), NOT in this tool's return —
         this call returns only a send-confirmation. Newlines become spaces. One webhook
         per session: if a session is already being watched, the reply is delivered to the
-        conversation that first opened the watcher.
+        conversation that first opened the watcher, the return says which one
+        (`watched_conversation_id`), and session_unwatch then session_watch moves it here.
 
         SENDING WHILE THE AGENT IS BUSY IS SAFE. A dev-agent turn can run for many
         minutes; if one is in flight (or someone is typing in the session, or Claude is
@@ -2910,7 +2911,24 @@ def register(app: Any) -> None:
         log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
                   no_watch_reason=no_watch_reason, queued_depth=queued_depth)
         waiting_why = _WAITING_EXPLAINED.get(wait_reason, wait_reason)
-        if watching and queued_depth:
+        # One webhook per session: a caller that did not open it does not get the
+        # reply. Saying "delivered to this conversation" then is false, and the
+        # caller waits for a reply that goes elsewhere (live 2026-10-08: a project's
+        # brief and every reply to it went to the conversation that sent a stray
+        # task first).
+        watched = _watched_conversation(name) if watching else ""
+        elsewhere = bool(conversation_id and watched and watched != conversation_id)
+        if elsewhere:
+            delivery = (
+                (f"Queued — held because {waiting_why}. It will be pasted automatically "
+                 f"as soon as the session is free ({queued_depth} waiting, this one "
+                 "last). Do NOT re-send it. " if queued_depth else "Sent. ")
+                + "Claude's reply will NOT come to this conversation: it goes to "
+                f"conversation {watched}, which opened this session's webhook first "
+                "(one webhook per session). To move the replies here, call "
+                "session_unwatch and then session_watch for this session."
+            )
+        elif watching and queued_depth:
             delivery = (
                 f"Queued — held because {waiting_why}. It will be pasted automatically "
                 f"as soon as the session is free ({queued_depth} "
@@ -2943,6 +2961,7 @@ def register(app: Any) -> None:
             {"status": "queued" if queued_depth else "sent", "session": name,
              "queued_behind": max(0, queued_depth - 1),
              **({"waiting_reason": wait_reason} if queued_depth else {}),
+             **({"watched_conversation_id": watched} if watched else {}),
              "window": _SESSION_WINDOW, "delivery": delivery}
         )
 

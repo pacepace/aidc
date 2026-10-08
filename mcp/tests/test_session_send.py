@@ -135,6 +135,55 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     assert tools._sent_awaiting_echo["proj"][0] == "line one line two"
 
 
+async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring):
+    """One webhook per session: a send from conversation B to a session conversation A
+    watches must not say the reply comes to B (live 2026-10-08: a project's brief was
+    told so while every reply went to A). It names A and how to move the webhook."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-b")
+
+    assert res["ok"] is True
+    assert res["data"]["status"] == "sent"
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    delivery = res["data"]["delivery"]
+    assert "will NOT come to this conversation" in delivery
+    assert "conversation c-a" in delivery
+    assert "session_unwatch and then session_watch" in delivery
+    assert "delivered to this conversation" not in delivery
+
+
+async def test_a_queued_send_from_another_conversation_says_where_the_reply_goes(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    wiring.idle_ok = "claude_busy"
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-b")
+
+    assert res["data"]["status"] == "queued"
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    delivery = res["data"]["delivery"]
+    assert "will NOT come to this conversation" in delivery
+    assert "Do NOT re-send it" in delivery
+    assert "conversation c-a" in delivery
+    assert "the reply to THIS prompt arrives" not in delivery
+
+
+async def test_a_send_from_the_watching_conversation_says_it_comes_here(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-a")
+
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    assert "delivered to this conversation" in res["data"]["delivery"]
+    assert "will NOT come" not in res["data"]["delivery"]
+
+
 async def test_sent_warns_when_no_webhook_open(wiring):
     """No conversation_id and no existing watcher -> still sends, but the return
     says plainly that the reply will not be auto-delivered (never silently dropped)."""

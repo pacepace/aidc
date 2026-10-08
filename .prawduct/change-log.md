@@ -35,6 +35,22 @@
      caught that either. -->
 
 
+## 2026-10-08: session_send names the conversation a reply goes to
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: a session was first sent a stray task from metallm conversation A,
+which opened its webhook. A project's brief was later sent from conversation B, and
+`session_send` told B "Claude's reply will be delivered to this conversation". Every reply,
+including the session's final `READY: <branch>`, went to A. One webhook per session is the
+design; the false sentence was the defect.
+
+**What:** when `conversation_id` differs from `_watched_conversation(name)`, the `delivery`
+text says the reply goes to that conversation and that `session_unwatch` then `session_watch`
+move it; the result carries `watched_conversation_id` whenever a webhook is open. The
+one-webhook design is unchanged. Three tests (sent, queued, same conversation); two mutants
+(the check forced off, the key dropped) each fail on a test's own assertion.
+
 ## 2026-10-08: a local command opens no turn
 
 <!-- prawduct: scope=local-command-opens-no-turn -->

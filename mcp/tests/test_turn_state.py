@@ -153,6 +153,14 @@ class TestCheckFree:
         assert await session.check() == "input_has_text"
         assert tools._last_free_verdict["proj"][1] == "prompt_restored"
 
+    async def test_a_wrapped_prompt_put_back_in_the_box_is_a_stop(self, session):
+        """The box shows what was pasted, never Claude Code's paste wrapper."""
+        wrapped = f'\n\n<pasted_content id="fab9">\n{RESTORED}\n</pasted_content id="fab9">\n'
+        session.write([*FINISHED, _typed("u1", wrapped)], age=10.0)
+        session.screen = _screen("esc-before-output-sent-prompt-restored")
+        assert await session.check() == "input_has_text"
+        assert tools._last_free_verdict["proj"][1] == "prompt_restored"
+
     async def test_other_text_in_the_box_is_not_proof_of_a_stop(self, session):
         session.write([*FINISHED, _typed("u1", "a different prompt")], age=10.0)
         session.screen = _screen("esc-before-output-sent-prompt-restored")
@@ -271,6 +279,18 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u1", "next task", when=ISO_NOW)], age=1.0)
         assert await session.check() == "claude_busy"           # now busy by the log
         assert "proj" not in tools._sent_awaiting_echo
+
+    async def test_a_paste_claude_code_wrapped_clears_the_echo_hold(self, session):
+        """Claude Code 2.1.277+ may transcribe a paste inside a <pasted_content> wrapper
+        (live 2026-10-08); the hold must still see the prompt arrive."""
+        sent = "New project on saoirsesaur/sandbox. Work in a git worktree."
+        session.write(FINISHED)
+        tools._sent_awaiting_echo["proj"] = (sent, NOW - 3)
+        wrapped = f'\n\n<pasted_content id="fab9">\n{sent}\n</pasted_content id="fab9">\n'
+        session.write([*FINISHED, _typed("u1", wrapped, when=ISO_NOW)], age=1.0)
+        assert await session.check() == "claude_busy"           # busy by the log
+        assert "proj" not in tools._sent_awaiting_echo
+        assert tools._last_free_verdict["proj"][1] == "log_growing"
 
     async def test_prompt_queued_behind_a_running_turn_counts_as_arrived(self, session):
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",

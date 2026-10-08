@@ -1256,6 +1256,60 @@ class TestUnansweredPromptTurn:
         assert unanswered_prompt_turn([p]) is None
 
 
+# What Claude Code 2.1.284 wrote for an 844-character prompt the MCP pasted (live
+# transcript, 2026-10-08): the prompt wrapped whole, the id repeated on the closing tag.
+PASTED = ("New project on saoirsesaur/sandbox. Work in a git worktree: create a branch, "
+          "build the change, run the tests, and reply READY with the branch name when done.")
+
+
+def _wrapped(text, opening="fab9", closing="fab9"):
+    return (f'\n\n<pasted_content id="{opening}">\n' + text
+            + f'\n</pasted_content id="{closing}">\n')
+
+
+class TestPasteWrapper:
+    def test_a_wrapped_paste_consumes_its_send_record(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", PASTED)
+        prompt = human_prompt_text(_typed("u1", _wrapped(PASTED)))
+        assert prompt == PASTED
+        assert consume_sent_prompt(tmp_path, "s", prompt) is True
+
+    def test_a_wrapped_line_matches_the_record_even_unread(self, tmp_path):
+        """The fingerprint itself sees through the wrapper, so a caller holding the raw
+        transcript text matches too."""
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", _wrapped(PASTED)) is True
+
+    def test_an_unwrapped_prompt_still_matches(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert human_prompt_text(_typed("u1", PASTED)) == PASTED
+        assert consume_sent_prompt(tmp_path, "s", PASTED) is True
+
+    def test_a_tag_inside_a_prompt_is_left_alone(self, tmp_path):
+        """A person who types words and then pastes gets the wrapper mid-prompt; the
+        prompt is theirs as written, and the pasted part alone is not it."""
+        text = "From the log: " + _wrapped(PASTED, "d7cf", "d7cf").rstrip()
+        assert human_prompt_text(_typed("u1", text)) == text
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", text) is False
+
+    def test_mismatched_ids_are_not_stripped(self, tmp_path):
+        text = _wrapped(PASTED, "fab9", "0000")
+        assert human_prompt_text(_typed("u1", text)) == text.strip()
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", text) is False
+
+    def test_a_queued_wrapped_paste_counts_as_arrived(self):
+        """A queue-operation carries the wrapper without its leading newlines."""
+        content = f'<pasted_content id="9af4">\n{PASTED}\n</pasted_content id="9af4">'
+        objs = [_queued(content, "2026-09-17T01:51:42.000Z")]
+        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+
+    def test_a_wrapped_user_line_counts_as_arrived(self):
+        objs = [_at(_typed("u1", _wrapped(PASTED)), "2026-09-17T01:51:41.000Z")]
+        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+
+
 class TestPromptSeenSince:
     SENT = 1_789_609_900.0   # 2026-09-17T01:51:40Z
 

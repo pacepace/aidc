@@ -1454,6 +1454,35 @@ class TestTerminalPromptAttribution:
         # The record entry was consumed by the match.
         assert ts.consume_sent_prompt(state, "sess", "fix the failing test") is False
 
+    async def test_orchestrator_prompt_claude_code_wrapped_is_delivered_bare(self, tmp_path):
+        """Live 2026-10-08: Claude Code transcribed the MCP's 844-character paste inside
+        a <pasted_content> wrapper, the record did not match, and the reply went out
+        under the terminal note as the person's."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        sent = ("New project on saoirsesaur/sandbox. Work in a git worktree: create a "
+                "branch, build the change, and reply READY when done.")
+        ts.record_sent_prompt(state, "sess", sent)
+        wrapped = f'\n\n<pasted_content id="fab9">\n{sent}\n</pasted_content id="fab9">\n'
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", wrapped), _assistant("a1", "Started."),
+        ])
+        await _drain(base, state, rec)
+        assert [t.text for t in rec.turns] == ["Started."]
+        assert rec.turns[0].prompt_origin == "orchestrator"
+        assert rec.turns[0].speaker != "human"
+        assert ts.sent_prompts_remaining(state, "sess") == 0
+
+    async def test_a_wrapped_paste_typed_at_the_terminal_is_quoted_without_tags(
+            self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        wrapped = '\n\n<pasted_content id="3074">\nhttps://example.test/hook\n</pasted_content id="3074">\n'
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", wrapped), _assistant("a1", "Saved."),
+        ])
+        await _drain(base, state, rec)
+        assert rec.turns[0].text == ts.render_delivery("Saved.", ["https://example.test/hook"])
+        assert rec.turns[0].prompt_origin == "terminal"
+
     async def test_record_entry_is_consumed_once(self, tmp_path):
         """The orchestrator sends 'next' once; the person then types 'next' too.
         Only the first is the orchestrator's."""

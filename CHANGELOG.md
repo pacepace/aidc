@@ -25,6 +25,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   reply would come back to it, and waited for one that went elsewhere. The return now names the
   conversation the reply goes to (`watched_conversation_id`) and says that `session_unwatch` then
   `session_watch` move the replies.
+- **A long prompt sent by the MCP is no longer delivered as if a person typed it.** Claude Code
+  (2.1.277 on) can transcribe a paste inside a `<pasted_content>` wrapper, and aidc compared that
+  wrapped text with what it had sent. It found no match, so Claude's reply arrived under the note
+  "the user typed the following prompt directly into the session's terminal". aidc now ignores
+  the wrapper when it encloses the whole prompt.
 
 ## [1.8.3] - 2026-09-29
 

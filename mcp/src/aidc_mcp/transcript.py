@@ -293,6 +293,21 @@ _OPENS_WITH_TAG_RE = re.compile(r"^<[A-Za-z][\w-]*>")
 # The interrupt marker is not always accompanied by interruptedMessageId (the
 # tool-use variant "[Request interrupted by user for tool use]" is not).
 _INTERRUPT_PREFIX = "[Request interrupted by user"
+# Claude Code (2.1.277 on) transcribes some pasted input wrapped whole as
+# `\n\n<pasted_content id="fab9">\n<the text>\n</pasted_content id="fab9">\n`, the
+# id repeated on the closing tag; a queued paste's `queue-operation` content carries
+# the same wrapper without the leading newlines. Only a wrapper around the WHOLE
+# line is Claude Code's: a prompt that quotes a paste after typed words, or merely
+# mentions the tag, is the person's text and stays as it is.
+_PASTE_WRAPPER_RE = re.compile(
+    r'\s*<pasted_content id="([^"\n]+)">\n?(.*?)\n?</pasted_content id="\1">\s*',
+    re.DOTALL)
+
+
+def unwrap_paste(text: str) -> str:
+    """``text`` without Claude Code's paste wrapper, when one encloses all of it."""
+    m = _PASTE_WRAPPER_RE.fullmatch(text)
+    return m.group(2) if m else text
 
 
 def human_prompt_text(obj: dict) -> str:
@@ -313,6 +328,8 @@ def human_prompt_text(obj: dict) -> str:
       - the "[Request interrupted by user ...]" markers, with or without an
         interruptedMessageId.
     A typed slash command is rendered compactly as ``/name args``.
+    A paste Claude Code wrapped whole in ``<pasted_content>`` (unwrap_paste) is
+    returned without the wrapper: it is what was sent or typed.
 
     Absent provenance fields are otherwise treated as "typed" so older
     transcripts (and fixtures) still attribute plain prompts to the person. The
@@ -341,7 +358,7 @@ def human_prompt_text(obj: dict) -> str:
         args_m = _COMMAND_ARGS_RE.search(text)
         args = args_m.group(1).strip() if args_m else ""
         return f"{m.group(1).strip()} {args}".strip()
-    return text
+    return unwrap_paste(text).strip()
 
 
 # The wrapper tags that open a slash command's own line. The command may be answered
@@ -1173,10 +1190,13 @@ _SENT_PROMPTS_TTL_S = 24 * 3600.0
 
 
 def normalize_prompt(text: str) -> str:
-    """Whitespace-insensitive form of a prompt: the paste path already folds
-    newlines to spaces and Claude Code trims, so runs of whitespace are the only
-    expected difference between what was sent and what was transcribed."""
-    return " ".join(text.split())
+    """The form in which a transcribed prompt is compared with sent text. The paste
+    path folds newlines to spaces and Claude Code trims, and it may wrap a paste in
+    `<pasted_content>` tags (unwrap_paste); runs of whitespace and that wrapper are
+    the expected differences between what was sent and what was transcribed. Every
+    comparison of the two goes through here: the send record's fingerprint, the
+    echo hold (prompt_index_since) and, via human_prompt_text, a turn's prompts."""
+    return " ".join(unwrap_paste(text).split())
 
 
 def prompt_fingerprint(text: str) -> str:

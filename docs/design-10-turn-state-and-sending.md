@@ -407,7 +407,9 @@ transcript still shows the previous finished turn. `_inject` marks the session b
 (`sent_prompt_not_in_log`) and starts `_watch_for_echo`, which clears the mark once the transcript
 shows the prompt: a `user` line with the same text (or, for a slash command, its rendered
 `/name args`), or a `queue-operation` enqueue with that text when it was pasted into a running
-turn. A pasted local command (`/clear`) shows as its command line and counts as arrived. When
+turn. "The same text" ignores whitespace and a `<pasted_content id="X">` wrapper Claude Code
+puts around a whole paste (measurement T13); `normalize_prompt` applies both rules, and the send
+record's fingerprint, this hold and `prompt_restored` all compare through it. A pasted local command (`/clear`) shows as its command line and counts as arrived. When
 the prompt arrived as a queued message or as a local command, no turn will ever claim it, so
 `_prompt_arrived` gives its send record back there. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
 logged, whether or not anything checks the session again.

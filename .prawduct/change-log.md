@@ -35,6 +35,25 @@
      caught that either. -->
 
 
+## 2026-10-08: a pasted prompt Claude Code wrapped is still the orchestrator's
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: the MCP pasted an 844-character project brief, and Claude Code
+2.1.284 transcribed it as `\n\n<pasted_content id="fab9">\n<brief>\n</pasted_content id="fab9">\n`.
+`normalize_prompt` folded only whitespace, so its fingerprint differed from the send record's,
+`consume_sent_prompt` found nothing, and the reply went out under `TERMINAL_PROMPT_NOTE` with
+`prompt_origin="terminal"` and `speaker="human"`.
+
+**What:** `transcript.unwrap_paste` removes one wrapper that encloses the whole text, with
+matching ids. `normalize_prompt` calls it, so the send record, the echo hold
+(`prompt_index_since`, queued or not) and `_prompt_arrived` compare through it, and
+`human_prompt_text` returns the unwrapped text, so a turn's prompts, `prompt_restored`'s
+`same_text` and the terminal note's quote never carry the tags. A wrapper mid-prompt (typed
+words, then a paste) or with mismatched ids is left alone. Measured over the host's transcripts
+(claude-code-measurements T13): wrapping starts at 2.1.277 with no visible length threshold.
+Six mutants each fail on a test's own assertion.
+
 ## 2026-10-08: session_send names the conversation a reply goes to
 
 <!-- prawduct: scope=local-command-opens-no-turn -->

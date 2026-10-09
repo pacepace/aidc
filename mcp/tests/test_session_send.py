@@ -721,6 +721,28 @@ async def test_queued_send_records_only_once_injected(wiring):
     assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")
 
 
+async def test_a_send_for_a_person_records_who_it_was_for(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+
+    await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by=" u-1 ")
+
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "run the tests") == "u-1"
+
+
+async def test_a_queued_send_for_a_person_keeps_who_it_was_for(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+
+    await send(name="proj", prompt="later", conversation_id="c1", sent_by="u-1")
+    assert tools._pending_sends["proj"][0].sent_by == "u-1"
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later") == "u-1"
+
+
 async def test_inject_is_the_single_recording_point(wiring):
     """Every paste path goes through _inject, and _inject records on success —
     so no caller can forget to (the record is what keeps a reply from being

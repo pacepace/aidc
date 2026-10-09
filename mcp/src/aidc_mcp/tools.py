@@ -50,6 +50,10 @@ _CONV_ID_DESC = (
     "reason about it."
 )
 _PROMPT_DESC = "The prompt / message text to send to the session."
+_SENT_BY_DESC = (
+    "Set by the orchestrator when the prompt is a person's, not its own: who sent it. "
+    "Leave this unset."
+)
 # Config file lives in the same directory as the token file (both on the
 # aidc-config volume, mounted at /aidc-config/ in the container).
 # Override AIDC_MCP_TOKEN_FILE to relocate both simultaneously.
@@ -765,38 +769,48 @@ def _write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) 
                   error_type=type(exc).__name__)
 
 
-def _record_sent(name: str, text: str) -> None:
-    """Remember a prompt the MCP just injected into `name`'s pane, so the drain can
-    tell it apart from one a person typed at the terminal (see
-    ts.record_sent_prompt). Best-effort: a failure to persist must not fail the
-    send that already landed — it degrades to that one reply carrying a
-    terminal-typed note it should not have, which the audit line explains."""
+def _record_sent(name: str, text: str, sent_by: str = "") -> None:
+    """Remember a prompt the MCP just injected into `name`'s pane, and who it was
+    sent for, so the drain can tell it apart from one a person typed at the
+    terminal (see ts.record_sent_prompt). Best-effort: a failure to persist must
+    not fail the send that already landed — it degrades to that one reply carrying
+    a terminal-typed note it should not have, which the audit line explains."""
     try:
-        ts.record_sent_prompt(_WATCHER_STATE_DIR, name, text)
+        ts.record_sent_prompt(_WATCHER_STATE_DIR, name, text, sent_by=sent_by)
     except OSError as exc:
         log_event("session_send_record_failed", session=name, prompt_len=len(text),
                   error_type=type(exc).__name__, error=repr(exc))
 
 
-def _terminal_prompts(session: str, prompts: tuple[str, ...], state_dir: Path) -> list[str]:
+def _terminal_prompts(session: str, prompts: tuple[str, ...],
+                      state_dir: Path) -> tuple[list[str], str]:
     """The subset of a turn's opening prompts that a PERSON typed at the terminal:
     every prompt that does not match one the MCP itself injected (each match
-    consumes its record entry). A record that cannot be updated counts the prompt
-    as the MCP's own — an orchestrator prompt mislabelled as the person's is the
-    confusion this exists to remove, so it is the side never to err on."""
+    consumes its record entry); and who the injected ones were sent for, the
+    last one's ``sent_by`` that names anyone ("" when every one was the caller's
+    own). A record that cannot be updated counts the prompt as the MCP's own — an
+    orchestrator prompt mislabelled as the person's is the confusion this exists
+    to remove, so it is the side never to err on."""
     typed: list[str] = []
+    sent_by = ""
     for prompt in prompts:
         try:
-            if not ts.consume_sent_prompt(state_dir, session, prompt):
-                typed.append(prompt)
+            by = ts.take_sent_prompt(state_dir, session, prompt)
         except OSError as exc:
             log_event("transcript_sent_record_failed", session=session,
                       error_type=type(exc).__name__, error=repr(exc))
-    return typed
+            continue
+        if by is None:
+            typed.append(prompt)
+        elif by:
+            sent_by = by
+    return typed, sent_by
 
 
-def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, state_dir: Path) -> str:
-    """Whose prompt a turn answers, carried across the turn's continuations.
+def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
+                         state_dir: Path) -> tuple[str, str]:
+    """Whose prompt a turn answers, and who sent it when a person did, carried
+    across the turn's continuations.
 
     A prompted turn's origin is recorded for its session. A turn with no prompt
     of its own -- a continuation past the read window, a task notification, an
@@ -806,26 +820,28 @@ def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, state_dir: Pa
     prompts. A record that cannot be written leaves the origin as computed."""
     if turn.prompts:
         try:
-            ts.record_prompt_origin(state_dir, session, origin)
+            ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by)
         except OSError as exc:
             log_event("transcript_origin_record_failed", session=session,
                       error_type=type(exc).__name__, error=repr(exc))
-        return origin
+        return origin, sent_by
     return ts.last_prompt_origin(state_dir, session)
 
 
-async def _inject(container: str, text: str, window: str, *, session: str) -> bool:
+async def _inject(container: str, text: str, window: str, *, session: str,
+                  sent_by: str = "") -> bool:
     """Paste one prompt into the window and press Enter. True when it went in.
 
     The ONLY way a prompt reaches the pane, so it is also the only place the send
     record is written: a paste that landed is recorded here, on success, for
-    `session` — the drain tells the orchestrator's prompts from a person's by that
+    `session`, with the person it was sent for (`sent_by`, "" for the caller's
+    own) — the drain tells the orchestrator's prompts from a person's by that
     record alone, so a paste path that skipped it would ship a reply falsely
     framed as answering something the person typed."""
     if not await _load_and_paste(container, text, window):
         return False
     await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
-    _record_sent(session, text)
+    _record_sent(session, text, sent_by)
     # Until the transcript shows this prompt, a follow-up's free check must read the
     # session as busy: the mirrored transcript lags the paste by a couple of seconds,
     # and in that gap it still shows the previous, finished turn.
@@ -989,7 +1005,8 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                 if not queue:
                     return
                 head = queue[0]
-                if await _inject(container, head.text, _SESSION_WINDOW, session=name):
+                if await _inject(container, head.text, _SESSION_WINDOW, session=name,
+                                 sent_by=head.sent_by):
                     queue.pop(0)
                     _drainer_failures.pop(name, None)
                     await _show_waiting_on_input(container, name, False)
@@ -1051,7 +1068,8 @@ def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
 
 
 async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
-                        conversation_id: str = "", paste_attempts: int = 0) -> int:
+                        conversation_id: str = "", paste_attempts: int = 0,
+                        sent_by: str = "") -> int:
     """Queue a prompt for pasting when the session frees up; returns queue depth.
 
     Returns 0 when the queue is at _PENDING_MAX_DEPTH and the prompt was refused.
@@ -1067,7 +1085,7 @@ async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
     queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts.now_iso(),
                                  paste_attempts=paste_attempts,
                                  conversation_id=conversation_id,
-                                 session_instance=instance))
+                                 session_instance=instance, sent_by=sent_by))
     await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
     _spawn_drainer(container, name)
     return len(queue)
@@ -1480,9 +1498,12 @@ async def _post_turn(
                 # conversation cannot tell whose reply arrived.
                 # ``prompt_origin`` says whose prompt this turn answers: "terminal"
                 # (a person typed it at the session's pane — the content then opens
-                # with that prompt), "orchestrator" (a prompt this MCP injected),
-                # or "" (unknown: a continuation, or a prompt Claude Code
-                # synthesized). Informational; the content already reads right.
+                # with that prompt), "person" (this MCP injected it for the person
+                # session_send's ``sent_by`` named, which comes back as
+                # ``sent_by``), "orchestrator" (a prompt this MCP injected for the
+                # caller), or "" (unknown: a prompt Claude Code synthesized with no
+                # prompted turn before it). Informational; the content already
+                # reads right.
                 # ``interrupted`` is true when the person pressed Esc and cut the turn
                 # off. It is not a failure, so ``ok`` stays true; the content opens
                 # with a note saying so, which is all a receiver that ignores the
@@ -1492,6 +1513,7 @@ async def _post_turn(
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
                       "session": session, "prompt_origin": turn.prompt_origin,
                       "interrupted": turn.interrupted,
+                      **({"sent_by": turn.sent_by} if turn.sent_by else {}),
                       **({"error_code": turn.error_code} if turn.error_code else {}),
                       **({"speaker": turn.speaker}
                          if turn.speaker and _metallm_send_speaker() else {})},
@@ -2062,16 +2084,21 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         deliverable = turn.interrupted or not turn.is_empty
         fingerprint = ts.delivery_fingerprint(turn) if deliverable else ""
         already_delivered = bool(fingerprint) and fingerprint in delivered_fps
-        terminal_prompts = (
-            [] if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
+        terminal_prompts, sent_by = (
+            ([], "") if already_delivered else _terminal_prompts(session, turn.prompts, state_dir)
         )
-        origin = "terminal" if terminal_prompts else "orchestrator" if turn.prompts else ""
+        # A prompt typed at the terminal outranks one sent for a person: the content
+        # then quotes it, and only one origin goes with the reply.
+        origin = ("terminal" if terminal_prompts else "person" if sent_by
+                  else "orchestrator" if turn.prompts else "")
+        sent_by = sent_by if origin == "person" else ""
         if not already_delivered:
-            origin = _carry_prompt_origin(session, turn, origin, state_dir)
+            origin, sent_by = _carry_prompt_origin(session, turn, origin, sent_by, state_dir)
         outgoing = dataclasses.replace(
             turn,
             text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
             prompt_origin=origin,
+            sent_by=sent_by,
             speaker=("human" if turn.prompts and len(terminal_prompts) == len(turn.prompts)
                      else "agent"),
         )
@@ -2801,6 +2828,7 @@ def register(app: Any) -> None:
         name: Annotated[str, Field(description=_NAME_DESC)],
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
+        sent_by: Annotated[str | None, Field(description=_SENT_BY_DESC)] = None,
     ) -> dict[str, Any]:
         """Ask the live Claude agent running in a session a question, or hand it a task —
         and get its reply back. The agent has the project loaded in its context, so to
@@ -2838,7 +2866,12 @@ def register(app: Any) -> None:
             name: the aidc session to talk to (see the open-webhook list below).
             prompt: the message to send.
         """
-        log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt))
+        # Who the prompt is for: the reply comes back with prompt_origin "person"
+        # and this, so the orchestrator answers it as that person's and not as a
+        # report on its own prompt.
+        sent_by = (sent_by or "").strip()
+        log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
+                  sent_by=sent_by)
         container = f"aidc-{name}-dev"
         if (await _session_instance(name))[0] == SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
@@ -2901,7 +2934,7 @@ def register(app: Any) -> None:
                            else await _wait_until_free(container, name,
                                                        timeout=_SEND_FREE_WAIT_S))
             if not wait_reason and not await _inject(container, sanitized, _SESSION_WINDOW,
-                                                     session=name):
+                                                     session=name, sent_by=sent_by):
                 # A paste that did not land is a fact about one attempt, not about the
                 # session: queue it, and the drainer retries with backoff.
                 wait_reason = "paste_failing"
@@ -2912,7 +2945,7 @@ def register(app: Any) -> None:
                 queued_depth = await _enqueue_send(
                     name, container, sanitized, wait_reason,
                     conversation_id=conversation_id or _watched_conversation(name),
-                    paste_attempts=attempts)
+                    paste_attempts=attempts, sent_by=sent_by)
                 if queued_depth == 0:
                     log_event("tool_call", tool="session_send_failed", session=name,
                               prompt_len=len(prompt), reason="queue_full",

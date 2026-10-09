@@ -738,6 +738,24 @@ class TestPostTurnInstrumentation:
                              ts.Turn("a1", "hi", prompt_origin="terminal"),
                              attempt=0, session="faidh")
         assert captured["prompt_origin"] == "terminal"
+        assert "sent_by" not in captured
+
+    async def test_payload_says_who_a_persons_prompt_came_from(self):
+        captured = {}
+
+        async def ok_post(url, **kw):
+            captured.update(kw.get("json") or {})
+            return MagicMock(is_success=True, status_code=202, text="")
+
+        with (
+            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("aidc_mcp.tools.log_event"),
+        ):
+            await _post_turn("http://cb", "conv",
+                             ts.Turn("a1", "hi", prompt_origin="person", sent_by="u-1"),
+                             attempt=0, session="faidh")
+        assert (captured["prompt_origin"], captured["sent_by"]) == ("person", "u-1")
 
     async def test_failed_post_logs_type_and_nonempty_repr(self):
         async def boom(*a, **kw):
@@ -1567,6 +1585,57 @@ class TestTerminalPromptAttribution:
         await _drain(base, state, rec)
         assert [t.prompt_origin for t in rec.turns] == ["terminal", "orchestrator", "orchestrator"]
 
+    async def test_a_prompt_sent_for_a_person_is_answered_to_that_person(self, tmp_path):
+        """Sent through session_send for a person in the conversation: the reply
+        answers them, not the orchestrator, and says who they are."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "run the tests", sent_by="u-1")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "run the tests"), _assistant("a1", "412 passed."),
+        ])
+        await _drain(base, state, rec)
+        assert [(t.text, t.prompt_origin, t.sent_by) for t in rec.turns] == [
+            ("412 passed.", "person", "u-1")]
+
+    async def test_a_continuation_of_a_persons_turn_is_still_theirs(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "run the suite", sent_by="u-1")
+        note = {"type": "user", "uuid": "u2", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "run the suite"), _assistant("a1", "Running."),
+            note, _assistant("a2", "412 passed."),
+        ])
+        await _drain(base, state, rec)
+        assert [(t.prompt_origin, t.sent_by) for t in rec.turns] == [("person", "u-1"), ("person", "u-1")]
+
+    async def test_the_orchestrators_next_prompt_is_not_the_persons(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "run the suite", sent_by="u-1")
+        ts.record_sent_prompt(state, "sess", "now push")
+        note = {"type": "user", "uuid": "u3", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "run the suite"), _assistant("a1", "412 passed."),
+            _typed("u2", "now push"), _assistant("a2", "Pushed."),
+            note, _assistant("a3", "CI is green."),
+        ])
+        await _drain(base, state, rec)
+        assert [(t.prompt_origin, t.sent_by) for t in rec.turns] == [
+            ("person", "u-1"), ("orchestrator", ""), ("orchestrator", "")]
+
+    async def test_a_prompt_typed_at_the_terminal_outranks_a_persons(self, tmp_path):
+        base, state, rec, seed = await self._seeded(tmp_path)
+        ts.record_sent_prompt(state, "sess", "queued ask", sent_by="u-1")
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "/login"), _typed("u2", "queued ask"), _assistant("a1", "done"),
+        ])
+        await _drain(base, state, rec)
+        assert (rec.turns[0].prompt_origin, rec.turns[0].sent_by) == ("terminal", "")
+        assert rec.turns[0].text == ts.render_delivery("done", ["/login"])
+
     async def test_empty_turn_still_consumes_its_record_entry(self, tmp_path):
         base, state, rec, seed = await self._seeded(tmp_path)
         ts.record_sent_prompt(state, "sess", "just run it")
@@ -1642,7 +1711,7 @@ class TestTerminalPromptAttribution:
         updated the prompt is treated as the MCP's own (no note)."""
         base, state, rec, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
-        with patch("aidc_mcp.tools.ts.consume_sent_prompt", side_effect=OSError("ro")):
+        with patch("aidc_mcp.tools.ts.take_sent_prompt", side_effect=OSError("ro")):
             await _drain(base, state, rec)
         assert rec.turns[0].text == "R"
         assert rec.turns[0].prompt_origin == "orchestrator"

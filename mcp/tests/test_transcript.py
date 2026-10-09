@@ -5,6 +5,8 @@ message lines (type user/assistant) with .uuid, .message.{role,content,stop_reas
 content blocks of type text/thinking/tool_use, and the
 isSidechain/isCompactSummary/isVisibleInTranscriptOnly skip flags.
 """
+import json
+import time
 from pathlib import Path
 
 from aidc_mcp.transcript import (
@@ -28,6 +30,7 @@ from aidc_mcp.transcript import (
     log_shows_turn_in_progress,
     objs_after_uuid,
     parse_jsonl,
+    prompt_fingerprint,
     prompt_seen_since,
     record_sent_prompt,
     remove_watch,
@@ -827,6 +830,21 @@ class TestSentPromptRecord:
         record_sent_prompt(tmp_path, "s", "x")   # recovers by rewriting
         assert consume_sent_prompt(tmp_path, "s", "x") is True
 
+    def test_a_prompt_sent_for_a_person_is_taken_with_who_sent_it(self, tmp_path):
+        from aidc_mcp.transcript import take_sent_prompt
+        record_sent_prompt(tmp_path, "s", "run the tests", sent_by="u-1")
+        record_sent_prompt(tmp_path, "s", "and push")
+        assert take_sent_prompt(tmp_path, "s", "run the tests") == "u-1"
+        assert take_sent_prompt(tmp_path, "s", "and push") == ""
+        assert take_sent_prompt(tmp_path, "s", "and push") is None
+
+    def test_an_entry_written_before_senders_is_the_callers_own(self, tmp_path):
+        from aidc_mcp.transcript import take_sent_prompt
+        sent_prompts_path(tmp_path, "s").parent.mkdir(parents=True, exist_ok=True)
+        sent_prompts_path(tmp_path, "s").write_text(
+            json.dumps([{"fp": prompt_fingerprint("old"), "at": time.time()}]))
+        assert take_sent_prompt(tmp_path, "s", "old") == ""
+
     def test_path_neutralizes_traversal(self, tmp_path):
         p = sent_prompts_path(tmp_path, "../../etc/passwd")
         assert p.parent == Path(tmp_path) and p.name.endswith(".sent-prompts.json")
@@ -1480,6 +1498,11 @@ class TestPersistedSendQueue:
         save_send_queue(tmp_path, "proj", prompts)
         queues, unreadable = load_send_queues(tmp_path)
         assert queues == {"proj": prompts} and unreadable == []
+
+    def test_a_queued_prompt_keeps_who_it_was_sent_for(self, tmp_path):
+        save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t", sent_by="u-1"), QueuedPrompt("y", "t")])
+        queues, _ = load_send_queues(tmp_path)
+        assert [q.sent_by for q in queues["proj"]] == ["u-1", ""]
 
     def test_empty_queue_removes_the_file(self, tmp_path):
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])

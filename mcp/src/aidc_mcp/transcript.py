@@ -91,9 +91,14 @@ class Turn:
     # were typed at the terminal by a person (consume_sent_prompt, in the drain).
     prompts: tuple[str, ...] = ()
     # Set by the watcher at delivery time: "terminal" when at least one prompt
-    # was typed at the terminal (the delivered content then carries it),
-    # "orchestrator" when every prompt was one the MCP injected, "" when unknown.
+    # was typed at the terminal (the delivered content then carries it), "person"
+    # when the MCP injected it for a person named by session_send's ``sent_by``,
+    # "orchestrator" when every prompt was one the MCP injected for the caller
+    # itself, "" when unknown.
     prompt_origin: str = ""
+    # Who a "person" prompt came from: session_send's ``sent_by``, as the caller
+    # gave it. Empty for every other origin.
+    sent_by: str = ""
     # True when the person pressed Esc and cut the turn off; `text` is then what
     # Claude had written up to that point, possibly nothing.
     interrupted: bool = False
@@ -1210,8 +1215,9 @@ def sent_prompts_path(base_dir: Path, session: str) -> Path:
 
 
 def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
-    """Entries as ``[{"fp": <sha256>, "at": <epoch>}]``, expired ones dropped.
-    A missing or corrupt file is an empty record (never raises)."""
+    """Entries as ``[{"fp": <sha256>, "at": <epoch>, "by": <sent_by>}]``, expired
+    ones dropped; "by" is "" for the caller's own prompt and for an entry written
+    before it existed. A missing or corrupt file is an empty record (never raises)."""
     try:
         data = json.loads(sent_prompts_path(base_dir, session).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -1227,7 +1233,8 @@ def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
         except (TypeError, ValueError):
             continue
         if now - at <= _SENT_PROMPTS_TTL_S:
-            out.append({"fp": e["fp"], "at": at})
+            by = e.get("by")
+            out.append({"fp": e["fp"], "at": at, "by": by if isinstance(by, str) else ""})
     return out
 
 
@@ -1247,27 +1254,36 @@ def prompt_origin_path(base_dir: Path, session: str) -> Path:
     return Path(base_dir) / f"{slug(session)}.prompt-origin.json"
 
 
-def record_prompt_origin(base_dir: Path, session: str, origin: str, *, now_fn=time.time) -> None:
-    """Remember whose prompt ``session``'s latest prompted turn answered
-    ("terminal" or "orchestrator"), so a continuation of that turn can say so.
-    Atomic write (temp + rename), matching save_watermark."""
+#: The origins a turn's prompt can have (``Turn.prompt_origin``), "" aside.
+PROMPT_ORIGINS = ("terminal", "person", "orchestrator")
+
+
+def record_prompt_origin(base_dir: Path, session: str, origin: str, *, sent_by: str = "",
+                         now_fn=time.time) -> None:
+    """Remember whose prompt ``session``'s latest prompted turn answered (one of
+    PROMPT_ORIGINS, and for "person" who sent it), so a continuation of that turn
+    can say so. Atomic write (temp + rename), matching save_watermark."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     path = prompt_origin_path(base, session)
     tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps({"origin": origin, "at": now_fn()}), encoding="utf-8")
+    tmp.write_text(json.dumps({"origin": origin, "sent_by": sent_by, "at": now_fn()}),
+                   encoding="utf-8")
     os.replace(tmp, path)
 
 
-def last_prompt_origin(base_dir: Path, session: str) -> str:
-    """Whose prompt ``session``'s latest prompted turn answered, or "" when none
-    is on record. A missing or corrupt file is "" (never raises)."""
+def last_prompt_origin(base_dir: Path, session: str) -> tuple[str, str]:
+    """Whose prompt ``session``'s latest prompted turn answered, and who sent it
+    when that was a person: ("", "") when none is on record. A missing or corrupt
+    file is ("", "") (never raises)."""
     try:
         data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return ""
-    origin = data.get("origin") if isinstance(data, dict) else None
-    return origin if origin in ("terminal", "orchestrator") else ""
+        return "", ""
+    if not isinstance(data, dict) or data.get("origin") not in PROMPT_ORIGINS:
+        return "", ""
+    sent_by = data.get("sent_by") if data["origin"] == "person" else ""
+    return data["origin"], sent_by if isinstance(sent_by, str) else ""
 
 
 # --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
@@ -1294,6 +1310,9 @@ class QueuedPrompt:
     # True once its conversation has been told the prompt is still waiting, so it is
     # told once, across restarts too.
     waiting_notified: bool = False
+    # session_send's ``sent_by``: the person the caller sent it for, "" for the
+    # caller's own prompt. Recorded with the paste, so the reply says whose it is.
+    sent_by: str = ""
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
@@ -1331,7 +1350,8 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     waiting_reason=str(e.get("waiting_reason", "")),
                                     conversation_id=str(e.get("conversation_id", "")),
                                     session_instance=str(e.get("session_instance", "")),
-                                    waiting_notified=e.get("waiting_notified") is True)
+                                    waiting_notified=e.get("waiting_notified") is True,
+                                    sent_by=str(e.get("sent_by", "")))
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
@@ -1393,14 +1413,15 @@ def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
     return watches, unreadable
 
 
-def record_sent_prompt(base_dir: Path, session: str, text: str, *,
+def record_sent_prompt(base_dir: Path, session: str, text: str, *, sent_by: str = "",
                        now_fn=time.time) -> None:
-    """Remember that the MCP injected ``text`` into ``session``'s pane. Call only
-    after the paste succeeded, so a prompt that never reached Claude is not on
-    record to mis-claim a person's identical words later."""
+    """Remember that the MCP injected ``text`` into ``session``'s pane, for the
+    person ``sent_by`` names ("" when it is the caller's own). Call only after the
+    paste succeeded, so a prompt that never reached Claude is not on record to
+    mis-claim a person's identical words later."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
-    entries.append({"fp": prompt_fingerprint(text), "at": now})
+    entries.append({"fp": prompt_fingerprint(text), "at": now, "by": sent_by})
     del entries[:-_SENT_PROMPTS_MAX]
     _save_sent_prompts(base_dir, session, entries)
 
@@ -1412,12 +1433,14 @@ def sent_prompts_remaining(base_dir: Path, session: str, *, now_fn=time.time) ->
     return len(_load_sent_prompts(base_dir, session, now_fn()))
 
 
-def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
-                        now_fn=time.time) -> bool:
-    """True — and the entry is removed — when ``text`` matches a prompt the MCP
-    injected into ``session``. Removes ONE entry per call so the orchestrator
-    sending the same words twice ("continue") is matched twice, and a person
-    typing those words a third time is not."""
+def take_sent_prompt(base_dir: Path, session: str, text: str, *,
+                     now_fn=time.time) -> str | None:
+    """Who sent ``text`` when it matches a prompt the MCP injected into
+    ``session`` (its ``sent_by``, "" for the caller's own), the entry then
+    removed; None when it matches none, so a person typed it at the terminal.
+    Removes ONE entry per call so the orchestrator sending the same words twice
+    ("continue") is matched twice, and a person typing those words a third time
+    is not."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
     fp = prompt_fingerprint(text)
@@ -1425,8 +1448,15 @@ def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
         if e["fp"] == fp:
             del entries[i]
             _save_sent_prompts(base_dir, session, entries)
-            return True
-    return False
+            return e["by"]
+    return None
+
+
+def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
+                        now_fn=time.time) -> bool:
+    """True — and the entry is removed — when ``text`` matches a prompt the MCP
+    injected into ``session`` (take_sent_prompt, whoever it was sent for)."""
+    return take_sent_prompt(base_dir, session, text, now_fn=now_fn) is not None
 
 
 # Delivered-content framing for a reply whose prompt was typed at the terminal.

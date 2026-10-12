@@ -14,6 +14,15 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ## [Unreleased]
 
 ### Fixed
+- **aidc-mcp no longer burns a core while a large session is watched.** The watcher polls every
+  two seconds, and on every poll with nothing new it read and parsed the session's whole
+  transcript and every earlier transcript beside it, to see whether Claude had moved to a new
+  file. With one watch on a session holding 668 MB of transcripts the server ran at about 85%
+  of a core, around the clock, and each pass held every tool call for about twelve seconds. A
+  transcript is now parsed once: an unchanged file is not opened again, and a file that grew has
+  only its new lines parsed, after the part already parsed is checked by its hash. Measured on a
+  copy of that session: 82% of a core idle and 20% while the transcript grew, before; 1% and 4%
+  after. The first poll after the server starts still reads every file once.
 - **A prompt sent after `/clear` is pasted as soon as Claude is free.** aidc read a local slash
   command (`/clear`, `/model`, `/login`) as a prompt that opened a turn, and since Claude never
   replies to one, the turn looked unfinished. Every prompt queued behind a `/clear` then waited

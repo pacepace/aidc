@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -148,6 +149,140 @@ def parse_jsonl(data: str) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
     return out
+
+
+# ---- reading a transcript without parsing it again -----------------------------
+#
+# The watcher polls every two seconds, and a transcript grows to tens of megabytes
+# (120 MB seen). Reading and parsing all of it on every poll, and every sibling
+# file beside it, kept the server at about 85% of a core for as long as one large
+# session was watched, with every tool call waiting behind a pass that took twelve
+# seconds (measured 2026-10-12). What is parsed is kept, keyed by the file's inode,
+# size and modification time:
+#
+#   - an unchanged file is not opened;
+#   - a file that grew is read, the part already parsed is checked by its hash, and
+#     only the new lines are parsed;
+#   - anything else (shrunk, rewritten, a different file under the name) is parsed
+#     from the start, as before.
+#
+# The mirror replaces a changed file by rename and leaves an unchanged one alone
+# (.devcontainer/transcript-mirror.sh), so an unchanged stamp is unchanged content,
+# with one exception: a file written twice inside one tick of the filesystem's
+# clock, to the same size, keeps its stamp. So a stamp is believed only once the
+# file was at least _STAMP_SETTLE_NS old when it was read; until then the bytes are
+# read again and checked by their hash (no parsing when they match).
+
+_STAMP_SETTLE_NS = 2_000_000_000
+
+_Stamp = tuple[int, int, int]
+
+
+@dataclass
+class _ParsedTranscript:
+    stamp: _Stamp
+    #: the file was old enough when read for its stamp alone to mean "unchanged"
+    settled: bool
+    #: bytes through the last newline, parsed into ``objs``, and their hash
+    consumed: int
+    digest: bytes
+    objs: list[dict]
+    #: what the last line without a newline parsed to (a write in progress): parsed
+    #: again on every read, never kept as part of ``objs``
+    tail: list[dict]
+    #: len(text.encode("utf-8")) of the whole file as read_text would decode it
+    encoded_len: int
+    consumed_encoded_len: int
+
+
+_parsed: dict[Path, _ParsedTranscript] = {}
+_newest_ts: dict[Path, tuple[_Stamp, bool, str]] = {}
+_read_lock = threading.Lock()
+
+
+def _stamp_of(st: os.stat_result) -> _Stamp:
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _settled(stamp: _Stamp) -> bool:
+    return time.time_ns() - stamp[2] > _STAMP_SETTLE_NS
+
+
+def _as_read_text(raw: bytes | memoryview) -> str:
+    """``raw`` as ``Path.read_text(encoding="utf-8", errors="replace")`` returns it,
+    universal newlines included."""
+    return str(raw, "utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_transcript(path: Path) -> tuple[list[dict], int]:
+    """The transcript's objects and its length in bytes as decoded text: exactly what
+    ``parse_jsonl(path.read_text(encoding="utf-8", errors="replace"))`` and the
+    encoded length of that text give, without parsing again what was parsed before.
+
+    Raises OSError as ``read_text`` does. The list is the caller's own.
+    One file is kept per directory: a session reads one transcript at a time.
+    """
+    path = Path(path)
+    with _read_lock:
+        kept = _parsed.get(path)
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            if kept is not None and kept.stamp == stamp and kept.settled:
+                return [*kept.objs, *kept.tail], kept.encoded_len
+            settled = _settled(stamp)
+            raw = memoryview(fh.read())
+        # What was parsed before is kept only if the file still starts with exactly
+        # those bytes: growth alone does not show that (a rewrite can be longer).
+        objs, start, encoded, hasher = [], 0, 0, hashlib.blake2b()
+        if kept is not None and len(raw) >= kept.consumed:
+            prefix = hashlib.blake2b(raw[:kept.consumed])
+            if prefix.digest() == kept.digest:
+                objs, start, encoded = kept.objs, kept.consumed, kept.consumed_encoded_len
+                hasher = prefix
+        end = raw.obj.rfind(b"\n") + 1  # type: ignore[attr-defined]
+        if end > start:
+            text = _as_read_text(raw[start:end])
+            objs.extend(parse_jsonl(text))
+            encoded += len(text.encode("utf-8"))
+            hasher.update(raw[start:end])
+        else:
+            end = start
+        tail_text = _as_read_text(raw[end:])
+        tail = parse_jsonl(tail_text)
+        entry = _ParsedTranscript(
+            stamp=stamp, settled=settled, consumed=end, digest=hasher.digest(), objs=objs,
+            tail=tail, encoded_len=encoded + len(tail_text.encode("utf-8")),
+            consumed_encoded_len=encoded)
+        for other in [p for p in _parsed if p.parent == path.parent and p != path]:
+            del _parsed[other]
+        _parsed[path] = entry
+        return [*objs, *tail], entry.encoded_len
+
+
+def newest_message_ts_of(path: Path) -> str:
+    """``newest_message_ts`` of the transcript at ``path``, read once per version of
+    the file. Raises OSError as ``read_text`` does."""
+    path = Path(path)
+    with _read_lock:
+        kept = _newest_ts.get(path)
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            if kept is not None and kept[0] == stamp and kept[1]:
+                return kept[2]
+            settled = _settled(stamp)
+            raw = fh.read()
+        newest = newest_message_ts(parse_jsonl(_as_read_text(raw)))
+        _newest_ts[path] = (stamp, settled, newest)
+        return newest
+
+
+def forget_transcripts(transcript_dir: Path) -> None:
+    """Drop everything kept for the transcripts in ``transcript_dir``."""
+    d = Path(transcript_dir)
+    with _read_lock:
+        for kept in (_parsed, _newest_ts):
+            for path in [p for p in kept if p.parent == d]:
+                del kept[path]
 
 
 def _is_skippable(obj: dict) -> bool:
@@ -1534,8 +1669,7 @@ def session_transcripts(transcript_dir: Path,
 
     def newest(path: Path) -> str:
         try:
-            return newest_message_ts(parse_jsonl(path.read_text(encoding="utf-8",
-                                                               errors="replace")))
+            return newest_message_ts_of(path)
         except OSError:
             return ""
 

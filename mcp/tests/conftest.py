@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from aidc_mcp import tools
+from aidc_mcp import transcript as ts
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +39,8 @@ async def clean_session_watchers():
         tools._drainer_failures.clear()
         tools._queue_loaded.clear()
         tools._session_instances.clear()
+        ts._parsed.clear()
+        ts._newest_ts.clear()
 
     _reset()
     yield

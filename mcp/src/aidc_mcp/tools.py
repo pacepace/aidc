@@ -507,11 +507,11 @@ def _session_transcript(name: str) -> tuple[list[dict], float, str]:
     if active is None:
         return [], 0.0, "none"
     try:
-        data = active.read_text(encoding="utf-8", errors="replace")
+        objs, _ = ts.read_transcript(active)
         mtime = active.stat().st_mtime
     except OSError:
         return [], 0.0, "unreadable"
-    return ts.parse_jsonl(data), mtime, "ok"
+    return objs, mtime, "ok"
 
 
 def _turn_verdict(name: str, objs: list[dict], quiet: float,
@@ -1447,6 +1447,7 @@ def _evict_session_state(name: str) -> None:
         _consumed_idle_counts.pop(key, None)
     for key in [k for k in _drain_locks if k[0] == name]:
         _drain_locks.pop(key, None)
+    ts.forget_transcripts(Path(_TRANSCRIPTS_BASE) / name)
 
 
 # Non-2xx statuses worth retrying: transient server-side or rate-limit
@@ -1730,7 +1731,7 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     :returns: True when it rotated the watermark forward; False otherwise.
     """
     d = Path(transcripts_base) / session
-    best_stem, best_ts, best_data = sid, ts.newest_message_ts(pinned_objs), None
+    best, best_ts = None, ts.newest_message_ts(pinned_objs)
     try:
         candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
     except OSError:
@@ -1738,15 +1739,17 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     for p in candidates:
         if p.stem == sid:
             continue
+        # Every sibling, every poll: read once per version of the file, never again
+        # while it is unchanged (ts.newest_message_ts_of). Parsing them all each time
+        # was nearly all of the server's CPU while a large session was watched.
         try:
-            data = p.read_text(encoding="utf-8", errors="replace")
+            cand_ts = ts.newest_message_ts_of(p)
         except OSError:
             continue
-        cand_ts = ts.newest_message_ts(ts.parse_jsonl(data))
         if cand_ts and cand_ts > best_ts:
-            best_stem, best_ts, best_data = p.stem, cand_ts, data
+            best, best_ts = p, cand_ts
 
-    if best_stem == sid or best_data is None:
+    if best is None:
         _consumed_idle_counts.pop(key, None)   # no newer session — keep waiting
         return False
 
@@ -1755,6 +1758,11 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     if n < _STALE_PIN_RECOVER_POLLS:
         return False
 
+    try:
+        best_data = best.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    best_stem = best.stem
     mark = ts.load_watermark(state_dir, session, conversation_id)
     seen = ts.seen_until(pinned_objs, mark)
     mark.session_id = best_stem
@@ -1881,11 +1889,9 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         return
     sid = active.stem
     try:
-        data = active.read_text(encoding="utf-8", errors="replace")
+        objs, end_offset = ts.read_transcript(active)
     except OSError:
         return
-    objs = ts.parse_jsonl(data)
-    end_offset = len(data.encode("utf-8"))
     key = (session, conversation_id)
 
     if mark.session_id != sid and mark.session_id:

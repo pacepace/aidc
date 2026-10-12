@@ -29,7 +29,7 @@ import httpx
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
-from aidc_mcp import scope
+from aidc_mcp import scope, session_mcp
 from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
 from aidc_mcp.audit import log_event
@@ -2439,7 +2439,8 @@ ERROR_CODES = frozenset({
     "command_failed",      # a command inside the session failed (file_get, claude, ...)
     "timeout",             # a command inside the session ran out of time
     "claude_not_running",  # a synchronous path that needs Claude running
-    "session_not_ready",   # session_run: the session did not become free in time
+    "session_not_ready",   # session_run: the session did not become free in time;
+                           # session_mcp_set: its first start has not finished
     "paste_failed",        # a paste into the session did not land
     "turn_not_finished",   # session_run: a turn did not finish in time
     "no_reply",            # session_resend: nothing completed to resend
@@ -2447,6 +2448,57 @@ ERROR_CODES = frozenset({
     "not_found",           # a file or directory the call reads is missing
     "path_not_allowed",    # session_create: a path outside what the operator exposed
 })
+
+# What a session's Claude is told about the MCP server it was handed, by when it can
+# use it. A running Claude Code loads its servers when it starts; a token is read again
+# whenever a call is refused, so a new token for a server it already has needs nothing.
+_MCP_LIVE = ("Claude in the session reads the new token when the server next refuses the old "
+             "one, or when it next connects: no restart is needed.")
+_MCP_ON_START = "Claude is not running in the session; it loads the server when it starts."
+_MCP_NEEDS_RESTART = ("Claude was already running in the session, and it loads its MCP servers "
+                      "when it starts: the server is there after Claude restarts in the session "
+                      "('aidc restart {name}'). Later tokens for this server need no restart.")
+
+
+def _session_mcp_refusal(exc: session_mcp.SessionMcpError) -> dict[str, Any]:
+    """The failure envelope for a server that was not handed over. Each code is written
+    out: the set of codes is a contract (ERROR_CODES), checked from this file's source."""
+    said = str(exc)
+    if exc.code == "invalid_argument":
+        return _envelope_err(said, code="invalid_argument")
+    if exc.code == "not_configured":
+        return _envelope_err(said, code="not_configured")
+    if exc.code == "no_such_session":
+        return _envelope_err(said, code="no_such_session")
+    if exc.code == "session_not_ready":
+        return _envelope_err(said, code="session_not_ready")
+    if exc.code == "timeout":
+        return _envelope_err(said, code="timeout")
+    return _envelope_err(said, code="command_failed")
+
+
+async def _hand_session_mcp(name: str, server: str, path: str, bearer: str) -> dict[str, Any]:
+    """Write the MCP server into the session's Claude state (session_mcp.hand) and say
+    when its Claude can use it. An envelope; the token is in neither it nor the log."""
+    try:
+        handed = await asyncio.to_thread(
+            session_mcp.hand, name, server=server, path=path, bearer=bearer,
+            base_url=_metallm_callback_url())
+    except session_mcp.SessionMcpError as exc:
+        # Nothing the caller gave is logged on a refusal: an argument in the wrong
+        # place could be the token.
+        log_event("tool_call", tool="session_mcp_set", session=name, ok=False,
+                  error_code=exc.code)
+        return _session_mcp_refusal(exc)
+    running = await _is_claude_running(f"aidc-{name}-dev")
+    needs_restart = handed.entry == session_mcp.ENTRY_ADDED and running
+    applies = (_MCP_NEEDS_RESTART.format(name=name) if needs_restart
+               else _MCP_LIVE if running else _MCP_ON_START)
+    log_event("tool_call", tool="session_mcp_set", session=name, server=handed.server,
+              url=handed.url, entry=handed.entry, needs_claude_restart=needs_restart)
+    return _envelope_ok({"session": name, "server": handed.server, "url": handed.url,
+                         "entry": handed.entry, "needs_claude_restart": needs_restart,
+                         "applies": applies})
 
 
 def _envelope_err(error: str, data: Any = None, *, code: str) -> dict[str, Any]:
@@ -2497,6 +2549,9 @@ def register(app: Any) -> None:
         profile: str = "multi",
         repo: str = "",
         workspace: str | None = None,
+        mcp_server: str = "",
+        mcp_path: str = "",
+        mcp_bearer: str = "",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Create and start an aidc session. ~30s. Streams progress.
@@ -2509,7 +2564,19 @@ def register(app: Any) -> None:
             profile: python|node|go|rust|multi (default: multi)
             repo: absolute host path to mount (required)
             workspace: optional parent dir for sibling-repo access
+            mcp_server: optional. With mcp_path and mcp_bearer: an MCP server on your
+                own API for the session's Claude, as session_mcp_set gives one.
+            mcp_path: that server's path on your API.
+            mcp_bearer: the token the session's Claude sends to it.
         """
+        wants_mcp = bool(mcp_server or mcp_path or mcp_bearer)
+        if wants_mcp:
+            # Checked before anything is created: a session made and then refused its
+            # server would be a session the caller has to find out about and remove.
+            try:
+                session_mcp.check(mcp_server, mcp_path, mcp_bearer, _metallm_callback_url())
+            except session_mcp.SessionMcpError as exc:
+                return _session_mcp_refusal(exc)
         if (why := scope.create_refusal()) is not None:
             log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
             return _envelope_err(why, code="create_not_allowed")
@@ -2546,13 +2613,48 @@ def register(app: Any) -> None:
             result = await _run_cli_streaming(args, ctx, phases)
         else:
             result = _run_cli(args, timeout=300.0)
-        if result["exit"] == 0:
-            return _envelope_ok({"name": name, "log": result["stdout"]})
-        return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
-                             code="cli_failed")
+        if result["exit"] != 0:
+            return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
+                                 code="cli_failed")
+        created: dict[str, Any] = {"name": name, "log": result["stdout"]}
+        if wants_mcp:
+            # After the create, never before: the session's first start installs its
+            # Claude state from a seed with every mcpServers entry stripped, and the
+            # server is written into the installed state.
+            created["mcp"] = await _hand_session_mcp(name, mcp_server, mcp_path, mcp_bearer)
+        return _envelope_ok(created)
 
     if scope.session_create_enabled():
         app.tool()(session_create)
+
+    # --- session_mcp_set --------------------------------------------------
+
+    @app.tool()
+    @_scoped
+    async def session_mcp_set(
+        name: Annotated[str, Field(description=_NAME_DESC)],
+        server: Annotated[str, Field(description=(
+            "What the session's Claude calls the server: a short lowercase name."))],
+        path: Annotated[str, Field(description=(
+            "The server's path on your own API, such as /api/v1/mcp. This server adds the host."))],
+        bearer: Annotated[str, Field(description=(
+            "The token the session's Claude sends to the server. Kept in the session only."))],
+    ) -> dict[str, Any]:
+        """Give a session's Claude one HTTP MCP server on your own API, or replace its token.
+
+        Use it to let the Claude in a session read from you or ask you things while it
+        works. Call it again with a new token whenever the token changes; the session
+        keeps the server across restarts, and loses it only when the session is removed.
+        The result says whether Claude can use the server now or must restart first
+        (needs_claude_restart). The token is never returned or logged.
+
+        Args:
+            name: the aidc session.
+            server: the server's name in the session.
+            path: the server's path on your API.
+            bearer: the token for it.
+        """
+        return await _hand_session_mcp(name, server, path, bearer)
 
     # --- session_list ---------------------------------------------------
 

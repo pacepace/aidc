@@ -586,6 +586,15 @@ metallm:
 
 **`session_unwatch(name)`** — closes the webhook for a session, stopping automatic delivery. No-op if nothing is being watched.
 
+**`session_mcp_set(name, server, path, bearer)`** — gives the session's Claude one HTTP MCP server on the orchestrator's own API, so the Claude working in the session can read from the orchestrator or ask it things. `path` is a path on that API; aidc adds the host from `metallm.callback_url`, so a caller cannot point a session anywhere else. `bearer` is the token Claude sends. Call it again whenever the token changes.
+
+- **Where it goes.** Under the session's Claude config directory, on its dev-home volume: the token in `aidc-mcp/<server>.bearer` (mode 0600), a helper `aidc-mcp/headers.sh` that prints it as an `Authorization` header, and one entry in `.claude.json` (`mcpServers.<server>`: the URL and the helper, no token). The entry is written into the installed state, after the first start has installed the seed that strips every `mcpServers` entry; a session still starting is refused (`session_not_ready`).
+- **When Claude can use it.** Claude Code loads its MCP servers when it starts and runs the helper on each connection and again when a call is refused (401 or 403). So a new token for a server the session already has needs no restart, and a server the session did not have is there after Claude restarts (`aidc restart <name>`). The result says which (`needs_claude_restart`).
+- **Restart, resume, upgrade.** The files are on the dev-home volume, so `aidc restart`, `aidc upgrade` and Claude's own `--continue` keep them. `aidc kill` removes them with the volume: hand the server again to a session created anew.
+- **The token.** It reaches the container on the exec's standard input. It is never in a command line, the audit log, a tool result, the session's audit directory or `.claude.json`. Anything that can run commands in the session (`session_exec`, `file_get`, the session's own Claude) can read the file, as it must for Claude to use it.
+
+`session_create` takes the same three as `mcp_server`, `mcp_path` and `mcp_bearer`, and hands the server once the session is created.
+
 `session_send` drives the interactive Claude in the `claude` window (window 0) — the same session `aidc attach` drops you into. Attach to watch in real-time:
 
 ```bash

@@ -137,6 +137,16 @@ and transcripts (`~/.claude/projects/<encoded>/`): a session can edit its own me
 leave a symlink there that the host's Claude Code follows when it reads that dir. Narrower, and
 open: see the backlog.
 
+### A token an orchestrator hands a session (MCP-39)
+
+`session_mcp_set` gives a session's Claude an MCP server on the orchestrator's API and a bearer
+token for it. The token is the session's to use, so it is readable inside the session: by its
+Claude, and by anything that runs commands there. It is kept out of everything else: the command
+line that delivers it (it goes in on standard input), the audit log, every tool result, the
+session's audit directory and `.claude.json`. The orchestrator decides what the token can reach
+and for how long; aidc only carries it. The server's host is `metallm.callback_url`, never the
+caller's choice, and the session's egress policy still decides whether the session can reach it.
+
 ### A repo configuring its own sandbox (SEC-09)
 
 A `.aidc/config.yaml` in the repo or the workspace is writable from inside the session,

@@ -13,6 +13,18 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Added
+- **An orchestrator can give a session's Claude an MCP server on its own API.** `session_mcp_set`
+  takes a session, a server name, a path and a bearer token, and writes one HTTP MCP server into
+  the session's Claude state: the token in a file of its own (mode 0600), a helper that prints it
+  as the `Authorization` header, and an entry in `.claude.json` that holds no token. The host is
+  `metallm.callback_url`; a caller gives only the path. The entry is written after the first
+  start has installed the seed that strips `mcpServers`, and it stays through `aidc restart`,
+  `aidc upgrade` and `--continue`. A new token for a server the session already has is read by a
+  running Claude with no restart; a server it did not have is there after Claude restarts, and
+  the result says which. The token is never in a command line, the audit log or a tool result.
+  `session_create` takes the same as `mcp_server`, `mcp_path` and `mcp_bearer`.
+
 ### Fixed
 - **aidc-mcp no longer burns a core while a large session is watched.** The watcher polls every
   two seconds, and on every poll with nothing new it read and parsed the session's whole

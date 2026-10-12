@@ -10,7 +10,7 @@ from aidc_mcp import resources, scope, tools
 
 NAMED_TOOLS = ["session_status", "session_exec", "session_invoke", "session_invoke_async",
                "session_send", "session_watch", "session_resend", "session_unwatch",
-               "file_get", "file_put", "audit_get", "taint_mark"]
+               "file_get", "file_put", "audit_get", "taint_mark", "session_mcp_set"]
 
 CALLS = {
     "session_status": {},
@@ -25,6 +25,7 @@ CALLS = {
     "file_put": {"path": "/tmp/x", "content": "x"},
     "audit_get": {},
     "taint_mark": {"reason": "r"},
+    "session_mcp_set": {"server": "project", "path": "/mcp", "bearer": "t"},
 }
 
 

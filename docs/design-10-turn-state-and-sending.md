@@ -269,7 +269,7 @@ missing a code or uses one outside the set:
 | `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
 | `command_failed` | a command inside the session failed | tell the person |
 | `timeout` | a command inside the session ran out of time | tell the person |
-| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste) | tell the person |
+| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste); `session_not_ready` also from `session_mcp_set` on a session whose first start has not finished | tell the person |
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
 | `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |

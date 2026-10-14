@@ -2,8 +2,30 @@ import asyncio
 
 import pytest
 
-from aidc_mcp import tools
+from aidc_mcp import session_facts, tools
 from aidc_mcp import transcript as ts
+
+
+async def no_docker(*args, timeout=20.0):
+    """What docker says about a session that has nothing to tell: no taint flag, no
+    events, no audit mount, no dev container. A test that needs a fact patches
+    session_facts.run_docker itself."""
+    return session_facts.DockerResult(1, b"", b"cat: No such file or directory")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker_for_facts(monkeypatch):
+    """session_facts asks docker for a session's taint, audit dir and repository on
+    most calls. No test reaches a real docker through it."""
+    monkeypatch.setattr(session_facts, "run_docker", no_docker)
+
+
+@pytest.fixture
+def idle_session(monkeypatch):
+    """A session whose coding agent is not running: _session_state without docker."""
+    async def state(container, name):
+        return tools.SessionState(False, None, tools.TURN_IDLE, "claude_not_running")
+    monkeypatch.setattr(tools, "_session_state", state)
 
 
 @pytest.fixture(autouse=True)

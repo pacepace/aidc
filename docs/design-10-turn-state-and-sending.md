@@ -273,8 +273,10 @@ missing a code or uses one outside the set:
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
 | `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |
+| `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry |
+| `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call |
 
-`session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every other condition, a failed paste included, queues the prompt. The
+`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope` or `tainted`. Every other condition, a failed paste included, queues the prompt. The
 metallm side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 

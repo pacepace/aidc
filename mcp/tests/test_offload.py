@@ -63,7 +63,7 @@ async def test_session_list_does_not_stall_the_loop(monkeypatch):
     assert elapsed < STALL / 2
 
 
-async def test_session_status_does_not_stall_the_loop(monkeypatch):
+async def test_session_status_does_not_stall_the_loop(monkeypatch, idle_session):
     app = _app()
 
     async def call(release):

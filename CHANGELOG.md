@@ -14,6 +14,51 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ## [Unreleased]
 
 ### Added
+- **What a session is doing, as typed fields.** `session_status` gains `working`, `turn`, `why`,
+  `working_on`, `claude_running`, `last_reply_at`, `repo`, `branch`, `head`, `tainted`
+  (`{at, trigger, domain}` or null), `audit_dir` and `watched_conversation_id`, beside `raw` and
+  `send_queue`. `session_list` gains `sessions`: one record per session (name, status, profile,
+  started, tainted, repo, branch, claude_running, working, watched_conversation_id, queue_depth),
+  built from docker rather than the CLI's table; `raw` stays. Container health is not activity.
+- **`session_transcript(name, last_n, since_uuid)`.** A session's completed turns as prompt and
+  reply text: never tool calls, tool results or thinking. Each turn has its uuid and time; the
+  prompt is cut at 2,000 characters, the reply at 6,000, the whole result at 30,000; `earlier`,
+  `later` and `next_since_uuid` page through. Known secret shapes are redacted.
+- **Read-only repository tools.** `repo_status`, `repo_diff`, `repo_log`, `repo_branches`,
+  `file_list` and `file_search` run inside the session's dev container as its user, with fixed
+  argument lists: `--end-of-options` before every ref, a pattern only as `-e`'s value, every path
+  after `--` with `--literal-pathspecs`, `core.fsmonitor=false`, no pager, `--no-ext-diff
+  --no-textconv`, a timeout inside the container and a byte cap (a diff at 200,000 bytes; `cut`
+  says so).
+- **`session_interrupt(name)`** stops the coding agent mid-turn (Esc) and says what it was
+  working on and the state of the working tree; with nothing running it does nothing and says so.
+- **`session_queue_cancel(name, position)`** takes back sent prompts that were never pasted (one,
+  or all), keeps each in the send dead-letter dir, and says what is running.
+- **`session_send` returns `reply_goes`**: `here`, `elsewhere` (another conversation holds the
+  session's webhook) or `nowhere` (no webhook), the field form of its `delivery` sentence.
+- **The tool list is published** as `mcp/published-tools.json` (name, description, input schema),
+  generated from the code (`uv run python scripts/publish_tools.py`) and held to it by a test.
+- **Error codes `tainted` and `outside_repo`** (design 10, D6).
+
+### Changed
+- **A tainted session takes no more work.** `session_send`, `session_resend`, `session_invoke`,
+  `session_invoke_async`, `session_exec` and `file_put` refuse it with `error_code: "tainted"` and
+  `data.tainted`, in one place that covers every client. A prompt queued before the taint is held
+  with `waiting_reason: session_tainted` and never pasted.
+- **`file_get` is confined to the session's repository.** It was `cat` on any path the container
+  user could read. The path is now resolved inside the container: a path outside the repository,
+  or a symlink in it that points out, is refused with `outside_repo`. It takes `offset` and `limit`
+  (100,000 bytes by default, 200,000 at most) and returns `size`, `returned`, `more` and
+  `next_offset`; `path` is the resolved path.
+- **`audit_get` works.** It looked for an `audit:` line `aidc status` never printed and failed
+  every call. It reads the policy sidecar's events directly, returns the typed `audit_dir`,
+  `count`, and the newest 500 events with `cut`.
+
+### Removed
+- **`taint_mark` is no longer an MCP tool.** Taint is the policy sidecar's finding about where a
+  session went; an orchestrator marking it was not a policy signal. The flag is still written by the
+  policy sidecar, and by hand if a person wants one.
+
 - **An orchestrator can give a session's Claude an MCP server on its own API.** `session_mcp_set`
   takes a session, a server name, a path and a bearer token, and writes one HTTP MCP server into
   the session's Claude state: the token in a file of its own (mode 0600), a helper that prints it

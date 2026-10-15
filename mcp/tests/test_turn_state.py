@@ -7,11 +7,13 @@ progress that has gone quiet) the status row's working text. The Docker/tmux bou
 is patched; the transcript is a real file under a temp mirror dir, and the screens
 are real captures from Claude Code 2.1.27x.
 """
+import asyncio
 import json
 import os
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
@@ -707,3 +709,52 @@ class TestInterruptedBeforeOutputDelivery:
         assert turn.text == ts.render_delivery("", [], interrupted=True)
         assert ts.consume_sent_prompt(self.state, "sess", "refactor the parser") is False
         assert tools._interrupt_reported("sess", "u1")
+
+
+class TestQueuedPromptOnTheAgentListScreen:
+    """Live 2026-10-15: on Claude Code 2.1.300, with a background agent listed under
+    the status rows, a prompt sent to an idle session waited as screen_unrecognized
+    with no paste attempted. Driven through session_send, its drainer and the real
+    free check; only docker and tmux are patched."""
+
+    async def test_the_queued_prompt_is_pasted_once_the_turn_ends(self, session,
+                                                                  monkeypatch):
+        real_sleep = asyncio.sleep
+        pasted = []
+
+        async def load_paste(container, text, window):
+            pasted.append(text)
+            return True
+
+        async def tmux_exec(container, args):
+            return 0
+
+        async def no_wait(seconds):
+            await real_sleep(0)
+
+        class Watching:
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
+        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
+        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        app = FastMCP("t")
+        tools.register(app)
+        send = app._tool_manager._tools["session_send"].fn
+        tools._session_watchers["proj"] = Watching()
+
+        session.screen = (SCREENS / "claude-2.1.300-idle-agent-panel.ansi").read_text()
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)
+        res = await send(name="proj", prompt="please fix the other bugs",
+                         conversation_id="c1")
+        assert res["data"]["status"] == "queued"
+        assert res["data"]["waiting_reason"] == "claude_busy"
+
+        session.write([*FINISHED], age=100.0)
+        for _ in range(200):
+            await real_sleep(0)
+            if "proj" not in tools._pending_sends:
+                break
+        assert pasted == ["please fix the other bugs"]
+        assert tools._last_free_verdict["proj"] == ("", "log_finished")

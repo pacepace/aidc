@@ -11,11 +11,12 @@ only for:
     progress that has gone quiet: an Esc before Claude writes anything leaves no marker
     in the transcript, but Claude Code puts the prompt back in the box.
 
-Layout measured on Claude Code 2.1.270 and 2.1.274 (docs/design-10-turn-state-and-sending.md):
-the input box is the region between the last two full-width `─` rules (the top one may
-carry the session's name, measured on 2.1.284), its first row
-starts with `❯` and a no-break space, placeholder text is drawn dim (SGR 2), and the
-status row sits right below the second rule. Everything here fails closed: a screen
+Layout measured on Claude Code 2.1.270, 2.1.274 and 2.1.300
+(docs/design-10-turn-state-and-sending.md): the input box is the region between the
+last two full-width `─` rules (the top one may carry the session's name, measured on
+2.1.284), its first row starts with `❯` and a no-break space, placeholder text is drawn
+dim (SGR 2), and the status row sits right below the second rule; from 2.1.300 a list of
+running background agents may follow the status rows. Everything here fails closed: a screen
 without the input box is "not at prompt" (a known dialog) or "unrecognized", and both
 hold prompts rather than typing blind.
 """
@@ -41,6 +42,11 @@ _DIALOG_HINTS = ("Enter to confirm", "Esc to cancel")
 # The live box's second rule is the last rule on screen, with only the status row(s)
 # below it. More trailing rows than this means the rules belong to something else.
 _MAX_ROWS_BELOW_BOX = 4
+# Claude Code 2.1.300 lists background agents under the status rows while any run: a
+# blank row, then one row per agent (`  ● main`, `  ◯ general-purpose  <activity>`).
+# The list grows with the agents, so it is set aside before the rows below the box
+# are counted. Only the glyphs measured are accepted; another one fails closed.
+_AGENT_ROW_RE = re.compile("  [●◯] \\S")
 
 _RULE_RE = re.compile(f"({_RULE_CHAR}+)(?: [^{_RULE_CHAR}]+ ({_RULE_CHAR}+))?")
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
@@ -109,6 +115,17 @@ def _is_rule(text: str) -> bool:
     return m is not None and len(m.group(1)) + len(m.group(2) or "") >= _RULE_MIN_LEN
 
 
+def _agent_list_start(plain: list[str]) -> int:
+    """Where the background-agent list under the status rows begins (its blank
+    separator row), or len(plain) when the screen does not end with one."""
+    start = len(plain)
+    while start > 0 and _AGENT_ROW_RE.match(plain[start - 1]):
+        start -= 1
+    if start == len(plain) or start == 0 or plain[start - 1].strip():
+        return len(plain)
+    return start - 1
+
+
 def classify(ansi: str) -> ScreenState:
     """Classify a `tmux capture-pane -p -e -J` capture of the claude window."""
     rows: list[list[tuple[str, bool]]] = []
@@ -124,10 +141,11 @@ def classify(ansi: str) -> ScreenState:
     rules = [i for i, text in enumerate(plain) if _is_rule(text)]
     dialog = any(hint in text for text in plain for hint in _DIALOG_HINTS)
     no_box = ScreenState(NOT_AT_PROMPT if dialog else UNRECOGNIZED, False)
-    if len(rules) < 2 or len(plain) - 1 - rules[-1] > _MAX_ROWS_BELOW_BOX:
+    end = _agent_list_start(plain)
+    if len(rules) < 2 or end - 1 - rules[-1] > _MAX_ROWS_BELOW_BOX:
         return no_box
     top, bottom = rules[-2], rules[-1]
-    working = any(_WORKING_TEXT in text for text in plain[bottom + 1:])
+    working = any(_WORKING_TEXT in text for text in plain[bottom + 1:end])
     box = rows[top + 1:bottom]
     if not box or not plain[top + 1].startswith(_BOX_GLYPH):
         return ScreenState(no_box.input_box, working)

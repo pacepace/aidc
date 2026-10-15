@@ -143,6 +143,46 @@ def test_working_is_read_from_the_status_row_only():
     assert classify(text).working is False
 
 
+def test_the_background_agent_list_under_the_status_rows_still_has_the_box():
+    """Claude Code 2.1.300 lists running background agents under the status rows.
+    Read as "no box", an orchestrator prompt waited in the queue as
+    screen_unrecognized with no paste attempted (live, 2026-10-15)."""
+    screen = (SCREENS / "claude-2.1.300-idle-agent-panel.ansi").read_text()
+    assert classify(screen) == ScreenState(EMPTY, working=False)
+
+
+def _with_agents(rows, status="  ⏵⏵ bypass permissions on · ← for agents"):
+    return "\n".join(["some reply text", "", RULE, "❯\xa0typed", RULE,
+                      "  metallm · ctx 64%", status, "", *rows, ""])
+
+
+def test_any_number_of_listed_agents_is_set_aside():
+    agents = ["  ● main", *[f"  ◯ general-purpose  task {i}" for i in range(8)]]
+    assert classify(_with_agents(agents)) == ScreenState(HAS_TEXT, working=False,
+                                                         typed="typed")
+
+
+def test_working_is_read_from_the_status_row_not_the_agent_list():
+    agents = ["  ● main", "  ◯ general-purpose  press esc to interrupt it"]
+    assert classify(_with_agents(agents)).working is False
+    busy = _with_agents(agents, status="  ⏵⏵ bypass permissions on · esc to interrupt")
+    assert classify(busy).working is True
+
+
+@pytest.mark.parametrize("rows", [
+    ["  ● main", "  ✻ unknown glyph  task", "  ◯ general-purpose  task"],  # unmeasured glyph
+    ["  ● main", "shell output", "  ◯ general-purpose  task"],             # not agent rows
+])
+def test_trailing_rows_that_are_not_an_agent_list_fail_closed(rows):
+    assert classify(_with_agents(rows)).input_box == UNRECOGNIZED
+
+
+def test_agent_rows_without_the_blank_separator_are_counted_as_rows():
+    text = "\n".join([RULE, "❯\xa0", RULE, "  status", "  ⏵⏵ bypass",
+                      "  ● main", "  ◯ a", "  ◯ b", ""])
+    assert classify(text).input_box == UNRECOGNIZED
+
+
 def test_rules_far_above_the_bottom_are_not_the_box():
     lines = [RULE, "❯\xa0", RULE] + [f"shell output {i}" for i in range(10)]
     assert classify("\n".join(lines)).input_box == UNRECOGNIZED

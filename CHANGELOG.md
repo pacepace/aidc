@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-10-15
+
 ### Fixed
 - **Playwright's Chromium could not launch in a session.** The dev image lacked the system
   libraries and fonts Chromium needs, so `npx playwright install chromium` downloaded the
@@ -1230,7 +1232,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.1...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.2...HEAD
+[1.9.2]: https://github.com/pacepace/aidc/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/pacepace/aidc/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/pacepace/aidc/compare/v1.8.3...v1.9.0
 [1.8.3]: https://github.com/pacepace/aidc/compare/v1.8.2...v1.8.3

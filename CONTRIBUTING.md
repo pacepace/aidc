@@ -85,7 +85,7 @@ developer machine where the image is already cached, so it belongs there. `.gith
 smoke.yml` is retained for `workflow_call` only, in case a self-hosted runner is ever added.
 
 CI still gates every push and PR on the cheap checks: shellcheck, the Homebrew formula-template
-lint, the shell unit tests, and the MCP suite (pytest + ruff + mypy on Python 3.12 and 3.14).
+lint, the shell unit tests, and the MCP suite (pytest + ruff + mypy on Python 3.14, the version the server ships on).
 
 ## Governance
 

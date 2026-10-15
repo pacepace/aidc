@@ -2,7 +2,7 @@
 name = "aidc-mcp"
 version = "1.8.3"
 description = "aidc control plane: MCP server exposing aidc CLI as tools + resources"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "mcp[cli]>=1.2,<2",
     "httpx>=0.27",

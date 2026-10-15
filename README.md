@@ -492,6 +492,11 @@ PATH) and `uv venv` are covered.
 
 If you ever lose track: **Ctrl-b ?** opens tmux's own keybind list.
 
+**Browser checks.** The image carries the system libraries and fonts Playwright's Chromium
+needs, so `npx playwright install chromium` (cached in `~/.cache/ms-playwright`) is all a
+project has to do; no `sudo npx playwright install-deps`. Firefox and WebKit need more, which
+`sudo npx playwright install-deps firefox` (or `webkit`) adds in the session.
+
 ### Watching it
 
 ```bash

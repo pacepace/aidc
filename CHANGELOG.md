@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-15
+
 ### Fixed
 - **Prompts held as `screen_unrecognized` on Claude Code 2.1.300.** While background agents run,
   Claude Code lists them under the status rows (`● main`, `◯ general-purpose …`). The screen
@@ -1220,7 +1222,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.1...HEAD
+[1.9.1]: https://github.com/pacepace/aidc/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/pacepace/aidc/compare/v1.8.3...v1.9.0
 [1.8.3]: https://github.com/pacepace/aidc/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/pacepace/aidc/compare/v1.8.1...v1.8.2

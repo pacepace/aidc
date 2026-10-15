@@ -5,6 +5,8 @@ message lines (type user/assistant) with .uuid, .message.{role,content,stop_reas
 content blocks of type text/thinking/tool_use, and the
 isSidechain/isCompactSummary/isVisibleInTranscriptOnly skip flags.
 """
+import json
+import time
 from pathlib import Path
 
 from aidc_mcp.transcript import (
@@ -21,12 +23,14 @@ from aidc_mcp.transcript import (
     ends_on_turn_end,
     extract_completed_turns,
     human_prompt_text,
+    is_local_command,
     load_send_queues,
     load_watches,
     load_watermark,
     log_shows_turn_in_progress,
     objs_after_uuid,
     parse_jsonl,
+    prompt_fingerprint,
     prompt_seen_since,
     record_sent_prompt,
     remove_watch,
@@ -826,6 +830,21 @@ class TestSentPromptRecord:
         record_sent_prompt(tmp_path, "s", "x")   # recovers by rewriting
         assert consume_sent_prompt(tmp_path, "s", "x") is True
 
+    def test_a_prompt_sent_for_a_person_is_taken_with_who_sent_it(self, tmp_path):
+        from aidc_mcp.transcript import take_sent_prompt
+        record_sent_prompt(tmp_path, "s", "run the tests", sent_by="u-1")
+        record_sent_prompt(tmp_path, "s", "and push")
+        assert take_sent_prompt(tmp_path, "s", "run the tests") == "u-1"
+        assert take_sent_prompt(tmp_path, "s", "and push") == ""
+        assert take_sent_prompt(tmp_path, "s", "and push") is None
+
+    def test_an_entry_written_before_senders_is_the_callers_own(self, tmp_path):
+        from aidc_mcp.transcript import take_sent_prompt
+        sent_prompts_path(tmp_path, "s").parent.mkdir(parents=True, exist_ok=True)
+        sent_prompts_path(tmp_path, "s").write_text(
+            json.dumps([{"fp": prompt_fingerprint("old"), "at": time.time()}]))
+        assert take_sent_prompt(tmp_path, "s", "old") == ""
+
     def test_path_neutralizes_traversal(self, tmp_path):
         p = sent_prompts_path(tmp_path, "../../etc/passwd")
         assert p.parent == Path(tmp_path) and p.name.endswith(".sent-prompts.json")
@@ -1255,6 +1274,60 @@ class TestUnansweredPromptTurn:
         assert unanswered_prompt_turn([p]) is None
 
 
+# What Claude Code 2.1.284 wrote for an 844-character prompt the MCP pasted (live
+# transcript, 2026-10-08): the prompt wrapped whole, the id repeated on the closing tag.
+PASTED = ("New project on saoirsesaur/sandbox. Work in a git worktree: create a branch, "
+          "build the change, run the tests, and reply READY with the branch name when done.")
+
+
+def _wrapped(text, opening="fab9", closing="fab9"):
+    return (f'\n\n<pasted_content id="{opening}">\n' + text
+            + f'\n</pasted_content id="{closing}">\n')
+
+
+class TestPasteWrapper:
+    def test_a_wrapped_paste_consumes_its_send_record(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", PASTED)
+        prompt = human_prompt_text(_typed("u1", _wrapped(PASTED)))
+        assert prompt == PASTED
+        assert consume_sent_prompt(tmp_path, "s", prompt) is True
+
+    def test_a_wrapped_line_matches_the_record_even_unread(self, tmp_path):
+        """The fingerprint itself sees through the wrapper, so a caller holding the raw
+        transcript text matches too."""
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", _wrapped(PASTED)) is True
+
+    def test_an_unwrapped_prompt_still_matches(self, tmp_path):
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert human_prompt_text(_typed("u1", PASTED)) == PASTED
+        assert consume_sent_prompt(tmp_path, "s", PASTED) is True
+
+    def test_a_tag_inside_a_prompt_is_left_alone(self, tmp_path):
+        """A person who types words and then pastes gets the wrapper mid-prompt; the
+        prompt is theirs as written, and the pasted part alone is not it."""
+        text = "From the log: " + _wrapped(PASTED, "d7cf", "d7cf").rstrip()
+        assert human_prompt_text(_typed("u1", text)) == text
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", text) is False
+
+    def test_mismatched_ids_are_not_stripped(self, tmp_path):
+        text = _wrapped(PASTED, "fab9", "0000")
+        assert human_prompt_text(_typed("u1", text)) == text.strip()
+        record_sent_prompt(tmp_path, "s", PASTED)
+        assert consume_sent_prompt(tmp_path, "s", text) is False
+
+    def test_a_queued_wrapped_paste_counts_as_arrived(self):
+        """A queue-operation carries the wrapper without its leading newlines."""
+        content = f'<pasted_content id="9af4">\n{PASTED}\n</pasted_content id="9af4">'
+        objs = [_queued(content, "2026-09-17T01:51:42.000Z")]
+        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+
+    def test_a_wrapped_user_line_counts_as_arrived(self):
+        objs = [_at(_typed("u1", _wrapped(PASTED)), "2026-09-17T01:51:41.000Z")]
+        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+
+
 class TestPromptSeenSince:
     SENT = 1_789_609_900.0   # 2026-09-17T01:51:40Z
 
@@ -1329,6 +1402,93 @@ class TestLocalCommandsAcrossReaders:
         assert prompt_seen_since(objs, "/review src", TestPromptSeenSince.SENT) is True
 
 
+# The lines Claude Code 2.1.28x writes for a `/clear` pasted into a session, copied
+# from a live transcript (2026-10-08) in which the next prompt then waited 14 minutes:
+# aidc read the command as a prompt that opened a turn nothing ever answered.
+def _cleared_transcript():
+    return [
+        {"type": "mode", "mode": "default"},
+        {"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}},
+        {"type": "attachment", "uuid": "at1", "attachment": {"type": "hook_success"}},
+        {"type": "user", "uuid": "cv1", "isMeta": True,
+         "timestamp": "2026-09-17T01:51:41.000Z",
+         "message": {"role": "user", "content":
+                     "<local-command-caveat>Caveat: The messages below were generated by "
+                     "the user while running local commands. DO NOT respond to these "
+                     "messages or otherwise consider them in your response unless the "
+                     "user explicitly asks you to.</local-command-caveat>"}},
+        {"type": "user", "uuid": "cl1", "timestamp": "2026-09-17T01:51:41.000Z",
+         "message": {"role": "user", "content":
+                     "<command-name>/clear</command-name>\n"
+                     "            <command-message>clear</command-message>\n"
+                     "            <command-args></command-args>"}},
+        {"type": "system", "subtype": "local_command", "uuid": "lc1",
+         "timestamp": "2026-09-17T01:51:41.000Z",
+         "content": "<local-command-stdout></local-command-stdout>", "level": "info"},
+    ]
+
+
+class TestClearOpensNoTurn:
+    """A local command (/clear) is run by Claude Code itself; Claude never replies, so
+    it must not read as a turn in progress or as a prompt nobody answered."""
+
+    def test_the_clear_line_is_a_local_command(self):
+        objs = _cleared_transcript()
+        assert [i for i in range(len(objs)) if is_local_command(objs, i)] == [4]
+
+    def test_after_a_clear_no_turn_is_in_progress(self):
+        assert log_shows_turn_in_progress(_cleared_transcript()) is False
+
+    def test_after_a_clear_there_is_no_unanswered_prompt(self):
+        assert unanswered_prompt_turn(_cleared_transcript()) is None
+
+    def test_either_mark_alone_makes_it_local(self):
+        """The caveat before it and the local_command line after it are each enough:
+        the first is written before the command runs, the second after."""
+        objs = _cleared_transcript()
+        without_system = objs[:-1]
+        without_caveat = [*objs[:3], *objs[4:]]
+        assert log_shows_turn_in_progress(without_system) is False
+        assert unanswered_prompt_turn(without_system) is None
+        assert log_shows_turn_in_progress(without_caveat) is False
+        assert unanswered_prompt_turn(without_caveat) is None
+
+    def test_a_prompt_after_the_clear_still_opens_a_turn(self):
+        objs = [*_cleared_transcript(), _typed("u1", "next task")]
+        assert log_shows_turn_in_progress(objs) is True
+        assert unanswered_prompt_turn(objs) == Turn(
+            "u1", "", prompts=("next task",), interrupted=True)
+
+    def test_the_turn_after_a_clear_carries_only_its_own_prompt(self):
+        objs = [*_cleared_transcript(), _typed("u1", "next task"),
+                _assistant("a1", [_text("Done.")], "end_turn")]
+        assert extract_completed_turns(objs) == [
+            Turn("a1", "Done.", prompts=("next task",))]
+
+    def test_a_clear_after_a_reply_closes_that_turn(self):
+        objs = [_typed("u0", "q"), _assistant("a0", [_text("A.")], "end_turn"),
+                *_cleared_transcript()]
+        assert extract_completed_turns(objs) == [Turn("a0", "A.", prompts=("q",))]
+
+    def test_a_pasted_clear_counts_as_arrived(self):
+        """The send path holds a session busy until its pasted prompt shows in the
+        transcript; a /clear must still show, or every send behind it waits 30 s."""
+        assert prompt_seen_since(_cleared_transcript(), "/clear",
+                                 TestPromptSeenSince.SENT) is True
+
+    def test_a_skill_command_is_still_a_request_to_claude(self):
+        """A slash command with neither local-command mark is one Claude answers."""
+        objs = [*TestLocalCommandsAcrossReaders.DONE,
+                {"type": "user", "uuid": "s1", "timestamp": "2026-09-17T01:51:41.000Z",
+                 "message": {"role": "user",
+                             "content": "<command-message>run</command-message>\n"
+                                        "<command-name>/run</command-name>"}}]
+        assert is_local_command(objs, len(objs) - 1) is False
+        assert log_shows_turn_in_progress(objs) is True
+        assert unanswered_prompt_turn(objs) == Turn(
+            "s1", "", prompts=("/run",), interrupted=True)
+
+
 class TestPersistedSendQueue:
     def test_roundtrip_keeps_order_and_fields(self, tmp_path):
         prompts = [QueuedPrompt("first", "2026-09-17T02:00:00Z", 0, "claude_busy",
@@ -1338,6 +1498,11 @@ class TestPersistedSendQueue:
         save_send_queue(tmp_path, "proj", prompts)
         queues, unreadable = load_send_queues(tmp_path)
         assert queues == {"proj": prompts} and unreadable == []
+
+    def test_a_queued_prompt_keeps_who_it_was_sent_for(self, tmp_path):
+        save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t", sent_by="u-1"), QueuedPrompt("y", "t")])
+        queues, _ = load_send_queues(tmp_path)
+        assert [q.sent_by for q in queues["proj"]] == ["u-1", ""]
 
     def test_empty_queue_removes_the_file(self, tmp_path):
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])

@@ -23,6 +23,10 @@ docs/design-09-callback-delivery.md):
     2.1.270/2.1.274; see docs/design-10-turn-state-and-sending.md).
   - Esc after Claude has written anything writes a "[Request interrupted by
     user" line; Esc before that writes nothing at all.
+  - A local slash command (/clear, /model, /login) is written as a plain user line
+    like a skill's command, but Claude never replies to it. It follows an isMeta
+    <local-command-caveat> line, and /clear is followed by a system local_command
+    line (measured on 2.1.222 to 2.1.287; see is_local_command).
   - Every Claude run writes its OWN file: `--continue` starts a new one and leaves
     the old in place (measured on 2.1.274, design-10 D8). A per-file byte offset +
     terminal-uuid is still a sound exactly-once key WITHIN a file; across files the
@@ -36,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -87,9 +92,14 @@ class Turn:
     # were typed at the terminal by a person (consume_sent_prompt, in the drain).
     prompts: tuple[str, ...] = ()
     # Set by the watcher at delivery time: "terminal" when at least one prompt
-    # was typed at the terminal (the delivered content then carries it),
-    # "orchestrator" when every prompt was one the MCP injected, "" when unknown.
+    # was typed at the terminal (the delivered content then carries it), "person"
+    # when the MCP injected it for a person named by session_send's ``sent_by``,
+    # "orchestrator" when every prompt was one the MCP injected for the caller
+    # itself, "" when unknown.
     prompt_origin: str = ""
+    # Who a "person" prompt came from: session_send's ``sent_by``, as the caller
+    # gave it. Empty for every other origin.
+    sent_by: str = ""
     # True when the person pressed Esc and cut the turn off; `text` is then what
     # Claude had written up to that point, possibly nothing.
     interrupted: bool = False
@@ -139,6 +149,140 @@ def parse_jsonl(data: str) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
     return out
+
+
+# ---- reading a transcript without parsing it again -----------------------------
+#
+# The watcher polls every two seconds, and a transcript grows to tens of megabytes
+# (120 MB seen). Reading and parsing all of it on every poll, and every sibling
+# file beside it, kept the server at about 85% of a core for as long as one large
+# session was watched, with every tool call waiting behind a pass that took twelve
+# seconds (measured 2026-10-12). What is parsed is kept, keyed by the file's inode,
+# size and modification time:
+#
+#   - an unchanged file is not opened;
+#   - a file that grew is read, the part already parsed is checked by its hash, and
+#     only the new lines are parsed;
+#   - anything else (shrunk, rewritten, a different file under the name) is parsed
+#     from the start, as before.
+#
+# The mirror replaces a changed file by rename and leaves an unchanged one alone
+# (.devcontainer/transcript-mirror.sh), so an unchanged stamp is unchanged content,
+# with one exception: a file written twice inside one tick of the filesystem's
+# clock, to the same size, keeps its stamp. So a stamp is believed only once the
+# file was at least _STAMP_SETTLE_NS old when it was read; until then the bytes are
+# read again and checked by their hash (no parsing when they match).
+
+_STAMP_SETTLE_NS = 2_000_000_000
+
+_Stamp = tuple[int, int, int]
+
+
+@dataclass
+class _ParsedTranscript:
+    stamp: _Stamp
+    #: the file was old enough when read for its stamp alone to mean "unchanged"
+    settled: bool
+    #: bytes through the last newline, parsed into ``objs``, and their hash
+    consumed: int
+    digest: bytes
+    objs: list[dict]
+    #: what the last line without a newline parsed to (a write in progress): parsed
+    #: again on every read, never kept as part of ``objs``
+    tail: list[dict]
+    #: len(text.encode("utf-8")) of the whole file as read_text would decode it
+    encoded_len: int
+    consumed_encoded_len: int
+
+
+_parsed: dict[Path, _ParsedTranscript] = {}
+_newest_ts: dict[Path, tuple[_Stamp, bool, str]] = {}
+_read_lock = threading.Lock()
+
+
+def _stamp_of(st: os.stat_result) -> _Stamp:
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _settled(stamp: _Stamp) -> bool:
+    return time.time_ns() - stamp[2] > _STAMP_SETTLE_NS
+
+
+def _as_read_text(raw: bytes | memoryview) -> str:
+    """``raw`` as ``Path.read_text(encoding="utf-8", errors="replace")`` returns it,
+    universal newlines included."""
+    return str(raw, "utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_transcript(path: Path) -> tuple[list[dict], int]:
+    """The transcript's objects and its length in bytes as decoded text: exactly what
+    ``parse_jsonl(path.read_text(encoding="utf-8", errors="replace"))`` and the
+    encoded length of that text give, without parsing again what was parsed before.
+
+    Raises OSError as ``read_text`` does. The list is the caller's own.
+    One file is kept per directory: a session reads one transcript at a time.
+    """
+    path = Path(path)
+    with _read_lock:
+        kept = _parsed.get(path)
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            if kept is not None and kept.stamp == stamp and kept.settled:
+                return [*kept.objs, *kept.tail], kept.encoded_len
+            settled = _settled(stamp)
+            raw = memoryview(fh.read())
+        # What was parsed before is kept only if the file still starts with exactly
+        # those bytes: growth alone does not show that (a rewrite can be longer).
+        objs, start, encoded, hasher = [], 0, 0, hashlib.blake2b()
+        if kept is not None and len(raw) >= kept.consumed:
+            prefix = hashlib.blake2b(raw[:kept.consumed])
+            if prefix.digest() == kept.digest:
+                objs, start, encoded = kept.objs, kept.consumed, kept.consumed_encoded_len
+                hasher = prefix
+        end = raw.obj.rfind(b"\n") + 1  # type: ignore[attr-defined]
+        if end > start:
+            text = _as_read_text(raw[start:end])
+            objs.extend(parse_jsonl(text))
+            encoded += len(text.encode("utf-8"))
+            hasher.update(raw[start:end])
+        else:
+            end = start
+        tail_text = _as_read_text(raw[end:])
+        tail = parse_jsonl(tail_text)
+        entry = _ParsedTranscript(
+            stamp=stamp, settled=settled, consumed=end, digest=hasher.digest(), objs=objs,
+            tail=tail, encoded_len=encoded + len(tail_text.encode("utf-8")),
+            consumed_encoded_len=encoded)
+        for other in [p for p in _parsed if p.parent == path.parent and p != path]:
+            del _parsed[other]
+        _parsed[path] = entry
+        return [*objs, *tail], entry.encoded_len
+
+
+def newest_message_ts_of(path: Path) -> str:
+    """``newest_message_ts`` of the transcript at ``path``, read once per version of
+    the file. Raises OSError as ``read_text`` does."""
+    path = Path(path)
+    with _read_lock:
+        kept = _newest_ts.get(path)
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            if kept is not None and kept[0] == stamp and kept[1]:
+                return kept[2]
+            settled = _settled(stamp)
+            raw = fh.read()
+        newest = newest_message_ts(parse_jsonl(_as_read_text(raw)))
+        _newest_ts[path] = (stamp, settled, newest)
+        return newest
+
+
+def forget_transcripts(transcript_dir: Path) -> None:
+    """Drop everything kept for the transcripts in ``transcript_dir``."""
+    d = Path(transcript_dir)
+    with _read_lock:
+        for kept in (_parsed, _newest_ts):
+            for path in [p for p in kept if p.parent == d]:
+                del kept[path]
 
 
 def _is_skippable(obj: dict) -> bool:
@@ -289,6 +433,21 @@ _OPENS_WITH_TAG_RE = re.compile(r"^<[A-Za-z][\w-]*>")
 # The interrupt marker is not always accompanied by interruptedMessageId (the
 # tool-use variant "[Request interrupted by user for tool use]" is not).
 _INTERRUPT_PREFIX = "[Request interrupted by user"
+# Claude Code (2.1.277 on) transcribes some pasted input wrapped whole as
+# `\n\n<pasted_content id="fab9">\n<the text>\n</pasted_content id="fab9">\n`, the
+# id repeated on the closing tag; a queued paste's `queue-operation` content carries
+# the same wrapper without the leading newlines. Only a wrapper around the WHOLE
+# line is Claude Code's: a prompt that quotes a paste after typed words, or merely
+# mentions the tag, is the person's text and stays as it is.
+_PASTE_WRAPPER_RE = re.compile(
+    r'\s*<pasted_content id="([^"\n]+)">\n?(.*?)\n?</pasted_content id="\1">\s*',
+    re.DOTALL)
+
+
+def unwrap_paste(text: str) -> str:
+    """``text`` without Claude Code's paste wrapper, when one encloses all of it."""
+    m = _PASTE_WRAPPER_RE.fullmatch(text)
+    return m.group(2) if m else text
 
 
 def human_prompt_text(obj: dict) -> str:
@@ -309,6 +468,8 @@ def human_prompt_text(obj: dict) -> str:
       - the "[Request interrupted by user ...]" markers, with or without an
         interruptedMessageId.
     A typed slash command is rendered compactly as ``/name args``.
+    A paste Claude Code wrapped whole in ``<pasted_content>`` (unwrap_paste) is
+    returned without the wrapper: it is what was sent or typed.
 
     Absent provenance fields are otherwise treated as "typed" so older
     transcripts (and fixtures) still attribute plain prompts to the person. The
@@ -337,12 +498,13 @@ def human_prompt_text(obj: dict) -> str:
         args_m = _COMMAND_ARGS_RE.search(text)
         args = args_m.group(1).strip() if args_m else ""
         return f"{m.group(1).strip()} {args}".strip()
-    return text
+    return unwrap_paste(text).strip()
 
 
 # The wrapper tags that open a slash command's own line. The command may be answered
-# by Claude (a skill, a custom command) or run locally (/login, /model); either way the
-# line is the person's request. Any other opening tag is output Claude Code wrote.
+# by Claude (a skill, a custom command) or run locally (/clear, /login, /model); either
+# way a person typed it. The line alone does not say which: its neighbours do
+# (is_local_command). Any other opening tag is output Claude Code wrote.
 _COMMAND_TAGS = ("<command-name>", "<command-message>")
 
 
@@ -354,6 +516,66 @@ def _is_local_output(obj: dict) -> bool:
     msg = raw_msg if isinstance(raw_msg, dict) else {}
     text = _text_of(msg).strip()
     return bool(_OPENS_WITH_TAG_RE.match(text)) and not text.startswith(_COMMAND_TAGS)
+
+
+# Claude Code writes this isMeta line just before a slash command it runs itself (/clear,
+# /model, /login): "the messages below were generated by the user while running local
+# commands". A slash command Claude answers (a skill) has no caveat before it.
+_LOCAL_COMMAND_CAVEAT = "<local-command-caveat>"
+# The system line Claude Code writes after a local command that prints nothing to the
+# conversation (/clear, /compact).
+_LOCAL_COMMAND = "local_command"
+
+
+def _is_local_command_caveat(obj: dict) -> bool:
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    return bool(obj.get("isMeta")) and _text_of(msg).lstrip().startswith(_LOCAL_COMMAND_CAVEAT)
+
+
+def _neighbour(objs: list[dict], index: int, step: int) -> dict | None:
+    """The nearest user, assistant or system line before (step -1) or after (step 1)
+    objs[index]. Lines of other types (mode, attachment, file-history-snapshot) and
+    sidechain lines are passed over."""
+    i = index + step
+    while 0 <= i < len(objs):
+        obj = objs[i]
+        if obj.get("type") in ("user", "assistant", "system") and not _is_skippable(obj):
+            return obj
+        i += step
+    return None
+
+
+def is_local_command(objs: list[dict], index: int) -> bool:
+    """True when objs[index] is a slash command Claude Code ran itself (/clear, /model,
+    /login): a prompt that arrives but that Claude never answers.
+
+    The command's own line does not say; its neighbours do. Measured on Claude Code
+    2.1.222 to 2.1.287: a local command's line comes right after the isMeta
+    local-command caveat, and one that prints nothing to the conversation (/clear) is
+    followed by a `system` / `local_command` line. Either marks it. A skill's command
+    line has neither and stays a request to Claude.
+    """
+    obj = objs[index]
+    if obj.get("type") != "user" or obj.get("isMeta"):
+        return False
+    raw_msg = obj.get("message")
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
+    if not _text_of(msg).lstrip().startswith(_COMMAND_TAGS):
+        return False
+    before = _neighbour(objs, index, -1)
+    if before is not None and _is_local_command_caveat(before):
+        return True
+    after = _neighbour(objs, index, 1)
+    return (after is not None and after.get("type") == "system"
+            and _system_subtype(after) == _LOCAL_COMMAND)
+
+
+def _ends_without_reply(objs: list[dict], index: int) -> bool:
+    """The one rule every reader uses for a user line Claude never replies to: a local
+    command or its output. Such a line opens no turn and is no one's unanswered prompt.
+    """
+    return _is_local_output(objs[index]) or is_local_command(objs, index)
 
 
 def _is_interrupt_marker(obj: dict) -> bool:
@@ -536,7 +758,7 @@ def extract_completed_turns(objs: list[dict],
         withdrawn_uuid = ""
         late_pushback = False
 
-    for obj in objs:
+    for index, obj in enumerate(objs):
         # `type` is attacker-influenced; an unhashable value would raise on the
         # `not in` membership test. A non-str type is not a message line anyway.
         otype = obj.get("type")
@@ -577,6 +799,10 @@ def extract_completed_turns(objs: list[dict],
                     flush()
                 elif _is_system_sourced_prompt(obj):
                     prompts = []
+                # A local command or its output is nobody's request to Claude: it
+                # closes a reply before it, and adds no prompt to the next turn.
+                if _ends_without_reply(objs, index):
+                    continue
                 typed = human_prompt_text(obj)
                 if typed:
                     prompts.append(typed)
@@ -682,15 +908,16 @@ def log_shows_turn_in_progress(objs: list[dict]) -> bool:
     prompt with no reply yet, a tool call or tool result, a Stop-hook pushback
     Claude has not answered, or a reply whose Stop hooks have not reported yet (in a
     transcript that writes stop records). Not busy: a finished turn, an interrupt, an
-    API error, a turn waiting on an interactive-input tool, a local command's output
-    (/login, `!` bash mode), or nothing at all.
+    API error, a turn waiting on an interactive-input tool, a local command or its
+    output (/clear, /login, `!` bash mode), or nothing at all.
 
     A transcript cannot show an Esc pressed before Claude wrote anything: it still
     reads as busy. The caller resolves that case from the screen.
     """
     stop_records = None
     after_summary = False
-    for obj in reversed(objs):
+    for index in range(len(objs) - 1, -1, -1):
+        obj = objs[index]
         otype = obj.get("type")
         if not isinstance(otype, str) or _is_skippable(obj):
             continue
@@ -710,7 +937,7 @@ def log_shows_turn_in_progress(objs: list[dict]) -> bool:
                 continue
             if after_summary:
                 return False
-            if _is_interrupt_marker(obj) or _is_local_output(obj):
+            if _is_interrupt_marker(obj) or _ends_without_reply(objs, index):
                 return False
             return True   # a prompt awaiting a reply, or a tool result mid-turn
         if otype == "assistant":
@@ -737,11 +964,13 @@ def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
     row); this only builds the turn to deliver. A tail whose only prompt was raised
     by Claude Code itself (a background task's notification) returns None: nobody
     asked, so nobody is waiting to hear it was cut off. Neither does a local command
-    and its output (/login, `!` bash mode), which Claude never replies to. A slash
-    command with no output after it is a request to Claude (a skill), and counts.
+    or its output (/clear, /login, `!` bash mode), which Claude never replies to. A
+    slash command with no local-command mark around it is a request to Claude (a
+    skill), and counts.
     """
     collected: list[dict] = []
-    for obj in reversed(objs):
+    for index in range(len(objs) - 1, -1, -1):
+        obj = objs[index]
         otype = obj.get("type")
         if not isinstance(otype, str) or _is_skippable(obj):
             continue
@@ -753,9 +982,9 @@ def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
             continue
         if _is_interrupt_marker(obj) or not _is_real_user_prompt(obj):
             break
-        if _is_local_output(obj):
-            # A local command's output (/login, `!` bash mode): Claude never answers
-            # those, so nothing before it is waiting on Claude.
+        if _ends_without_reply(objs, index):
+            # A local command or its output (/clear, /login, `!` bash mode): Claude
+            # never answers those, so nothing before it is waiting on Claude.
             break
         collected.append(obj)
         if _is_system_sourced_prompt(obj):
@@ -1101,10 +1330,13 @@ _SENT_PROMPTS_TTL_S = 24 * 3600.0
 
 
 def normalize_prompt(text: str) -> str:
-    """Whitespace-insensitive form of a prompt: the paste path already folds
-    newlines to spaces and Claude Code trims, so runs of whitespace are the only
-    expected difference between what was sent and what was transcribed."""
-    return " ".join(text.split())
+    """The form in which a transcribed prompt is compared with sent text. The paste
+    path folds newlines to spaces and Claude Code trims, and it may wrap a paste in
+    `<pasted_content>` tags (unwrap_paste); runs of whitespace and that wrapper are
+    the expected differences between what was sent and what was transcribed. Every
+    comparison of the two goes through here: the send record's fingerprint, the
+    echo hold (prompt_index_since) and, via human_prompt_text, a turn's prompts."""
+    return " ".join(unwrap_paste(text).split())
 
 
 def prompt_fingerprint(text: str) -> str:
@@ -1118,8 +1350,9 @@ def sent_prompts_path(base_dir: Path, session: str) -> Path:
 
 
 def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
-    """Entries as ``[{"fp": <sha256>, "at": <epoch>}]``, expired ones dropped.
-    A missing or corrupt file is an empty record (never raises)."""
+    """Entries as ``[{"fp": <sha256>, "at": <epoch>, "by": <sent_by>}]``, expired
+    ones dropped; "by" is "" for the caller's own prompt and for an entry written
+    before it existed. A missing or corrupt file is an empty record (never raises)."""
     try:
         data = json.loads(sent_prompts_path(base_dir, session).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -1135,7 +1368,8 @@ def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
         except (TypeError, ValueError):
             continue
         if now - at <= _SENT_PROMPTS_TTL_S:
-            out.append({"fp": e["fp"], "at": at})
+            by = e.get("by")
+            out.append({"fp": e["fp"], "at": at, "by": by if isinstance(by, str) else ""})
     return out
 
 
@@ -1147,6 +1381,44 @@ def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> Non
     tmp = path.with_suffix(path.suffix + ".new")
     tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def prompt_origin_path(base_dir: Path, session: str) -> Path:
+    """Per-session, like the send record: whose prompt the session's last
+    prompted turn answered."""
+    return Path(base_dir) / f"{slug(session)}.prompt-origin.json"
+
+
+#: The origins a turn's prompt can have (``Turn.prompt_origin``), "" aside.
+PROMPT_ORIGINS = ("terminal", "person", "orchestrator")
+
+
+def record_prompt_origin(base_dir: Path, session: str, origin: str, *, sent_by: str = "",
+                         now_fn=time.time) -> None:
+    """Remember whose prompt ``session``'s latest prompted turn answered (one of
+    PROMPT_ORIGINS, and for "person" who sent it), so a continuation of that turn
+    can say so. Atomic write (temp + rename), matching save_watermark."""
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = prompt_origin_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps({"origin": origin, "sent_by": sent_by, "at": now_fn()}),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def last_prompt_origin(base_dir: Path, session: str) -> tuple[str, str]:
+    """Whose prompt ``session``'s latest prompted turn answered, and who sent it
+    when that was a person: ("", "") when none is on record. A missing or corrupt
+    file is ("", "") (never raises)."""
+    try:
+        data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "", ""
+    if not isinstance(data, dict) or data.get("origin") not in PROMPT_ORIGINS:
+        return "", ""
+    sent_by = data.get("sent_by") if data["origin"] == "person" else ""
+    return data["origin"], sent_by if isinstance(sent_by, str) else ""
 
 
 # --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
@@ -1173,6 +1445,9 @@ class QueuedPrompt:
     # True once its conversation has been told the prompt is still waiting, so it is
     # told once, across restarts too.
     waiting_notified: bool = False
+    # session_send's ``sent_by``: the person the caller sent it for, "" for the
+    # caller's own prompt. Recorded with the paste, so the reply says whose it is.
+    sent_by: str = ""
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
@@ -1210,7 +1485,8 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     waiting_reason=str(e.get("waiting_reason", "")),
                                     conversation_id=str(e.get("conversation_id", "")),
                                     session_instance=str(e.get("session_instance", "")),
-                                    waiting_notified=e.get("waiting_notified") is True)
+                                    waiting_notified=e.get("waiting_notified") is True,
+                                    sent_by=str(e.get("sent_by", "")))
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
@@ -1272,14 +1548,15 @@ def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
     return watches, unreadable
 
 
-def record_sent_prompt(base_dir: Path, session: str, text: str, *,
+def record_sent_prompt(base_dir: Path, session: str, text: str, *, sent_by: str = "",
                        now_fn=time.time) -> None:
-    """Remember that the MCP injected ``text`` into ``session``'s pane. Call only
-    after the paste succeeded, so a prompt that never reached Claude is not on
-    record to mis-claim a person's identical words later."""
+    """Remember that the MCP injected ``text`` into ``session``'s pane, for the
+    person ``sent_by`` names ("" when it is the caller's own). Call only after the
+    paste succeeded, so a prompt that never reached Claude is not on record to
+    mis-claim a person's identical words later."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
-    entries.append({"fp": prompt_fingerprint(text), "at": now})
+    entries.append({"fp": prompt_fingerprint(text), "at": now, "by": sent_by})
     del entries[:-_SENT_PROMPTS_MAX]
     _save_sent_prompts(base_dir, session, entries)
 
@@ -1291,12 +1568,14 @@ def sent_prompts_remaining(base_dir: Path, session: str, *, now_fn=time.time) ->
     return len(_load_sent_prompts(base_dir, session, now_fn()))
 
 
-def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
-                        now_fn=time.time) -> bool:
-    """True — and the entry is removed — when ``text`` matches a prompt the MCP
-    injected into ``session``. Removes ONE entry per call so the orchestrator
-    sending the same words twice ("continue") is matched twice, and a person
-    typing those words a third time is not."""
+def take_sent_prompt(base_dir: Path, session: str, text: str, *,
+                     now_fn=time.time) -> str | None:
+    """Who sent ``text`` when it matches a prompt the MCP injected into
+    ``session`` (its ``sent_by``, "" for the caller's own), the entry then
+    removed; None when it matches none, so a person typed it at the terminal.
+    Removes ONE entry per call so the orchestrator sending the same words twice
+    ("continue") is matched twice, and a person typing those words a third time
+    is not."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
     fp = prompt_fingerprint(text)
@@ -1304,8 +1583,15 @@ def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
         if e["fp"] == fp:
             del entries[i]
             _save_sent_prompts(base_dir, session, entries)
-            return True
-    return False
+            return e["by"]
+    return None
+
+
+def consume_sent_prompt(base_dir: Path, session: str, text: str, *,
+                        now_fn=time.time) -> bool:
+    """True — and the entry is removed — when ``text`` matches a prompt the MCP
+    injected into ``session`` (take_sent_prompt, whoever it was sent for)."""
+    return take_sent_prompt(base_dir, session, text, now_fn=now_fn) is not None
 
 
 # Delivered-content framing for a reply whose prompt was typed at the terminal.
@@ -1383,8 +1669,7 @@ def session_transcripts(transcript_dir: Path,
 
     def newest(path: Path) -> str:
         try:
-            return newest_message_ts(parse_jsonl(path.read_text(encoding="utf-8",
-                                                               errors="replace")))
+            return newest_message_ts_of(path)
         except OSError:
             return ""
 

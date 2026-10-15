@@ -35,6 +35,62 @@
      caught that either. -->
 
 
+## 2026-10-08: a pasted prompt Claude Code wrapped is still the orchestrator's
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: the MCP pasted an 844-character project brief, and Claude Code
+2.1.284 transcribed it as `\n\n<pasted_content id="fab9">\n<brief>\n</pasted_content id="fab9">\n`.
+`normalize_prompt` folded only whitespace, so its fingerprint differed from the send record's,
+`consume_sent_prompt` found nothing, and the reply went out under `TERMINAL_PROMPT_NOTE` with
+`prompt_origin="terminal"` and `speaker="human"`.
+
+**What:** `transcript.unwrap_paste` removes one wrapper that encloses the whole text, with
+matching ids. `normalize_prompt` calls it, so the send record, the echo hold
+(`prompt_index_since`, queued or not) and `_prompt_arrived` compare through it, and
+`human_prompt_text` returns the unwrapped text, so a turn's prompts, `prompt_restored`'s
+`same_text` and the terminal note's quote never carry the tags. A wrapper mid-prompt (typed
+words, then a paste) or with mismatched ids is left alone. Measured over the host's transcripts
+(claude-code-measurements T13): wrapping starts at 2.1.277 with no visible length threshold.
+Six mutants each fail on a test's own assertion.
+
+## 2026-10-08: session_send names the conversation a reply goes to
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: a session was first sent a stray task from metallm conversation A,
+which opened its webhook. A project's brief was later sent from conversation B, and
+`session_send` told B "Claude's reply will be delivered to this conversation". Every reply,
+including the session's final `READY: <branch>`, went to A. One webhook per session is the
+design; the false sentence was the defect.
+
+**What:** when `conversation_id` differs from `_watched_conversation(name)`, the `delivery`
+text says the reply goes to that conversation and that `session_unwatch` then `session_watch`
+move it; the result carries `watched_conversation_id` whenever a webhook is open. The
+one-webhook design is unchanged. Three tests (sent, queued, same conversation); two mutants
+(the check forced off, the key dropped) each fail on a test's own assertion.
+
+## 2026-10-08: a local command opens no turn
+
+<!-- prawduct: scope=local-command-opens-no-turn -->
+
+**Why:** live, 2026-10-08: a session was sent `/clear`, then a prompt that queued behind it. 14
+minutes later the prompt still waited as `claude_busy` (`status_row_unproven`) while Claude sat
+at an empty input box. `_session_state` read the turn as running because
+`log_shows_turn_in_progress` took the `/clear` command line for a prompt with no reply, and
+`unanswered_prompt_turn` returned `('/clear',)`. Claude never replies to a local command, so the
+turn read as running until the transcript went quiet for `_LOG_STALL_S`.
+
+**What:** `transcript.is_local_command` tells a local command from a skill's command by its
+neighbours: the isMeta `<local-command-caveat>` line before it, or the `system` /
+`local_command` line after it (measured across Claude Code 2.1.222 to 2.1.287 in the host's
+transcripts: every local command had the caveat; no skill command had either mark).
+`_ends_without_reply` (a local command or its output) is the one rule the three readers use: no
+turn in progress, no unanswered prompt, no prompt on the next turn. `prompt_index_since` is
+unchanged, so a pasted `/clear` still clears the echo hold; `_prompt_arrived` now gives a local
+command's send record back, as it does for a queued prompt, since no turn will claim it.
+Tests use the live transcript's lines; nine mutants each fail on a test's own assertion.
+
 ## 2026-09-29: v1.8.3 — a labelled box rule still bounds Claude's input box
 
 <!-- prawduct: scope=screen-labelled-rule -->

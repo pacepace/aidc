@@ -83,15 +83,11 @@ jobs:
         working-directory: mcp
     strategy:
       fail-fast: false
-      # Both ends of the supported range, because they mean different things:
-      #   3.12 -- the floor mcp/pyproject.toml declares (requires-python = ">=3.12").
-      #           Without it, a 3.13+-only construct would merge while we still
-      #           advertise 3.12 support.
-      #   3.14 -- what mcp/Dockerfile actually ships. This is the one that has to
-      #           be green for the released control-plane image to be trustworthy.
-      # Bump the upper entry whenever the Dockerfile's base image moves.
+      # The one Python the server runs on: what mcp/Dockerfile ships and what
+      # mcp/pyproject.toml requires (requires-python = ">=3.14"). Move all three
+      # together when the Dockerfile's base image moves.
       matrix:
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up uv + Python ${{ matrix.python-version }}

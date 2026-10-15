@@ -135,6 +135,55 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     assert tools._sent_awaiting_echo["proj"][0] == "line one line two"
 
 
+async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring):
+    """One webhook per session: a send from conversation B to a session conversation A
+    watches must not say the reply comes to B (live 2026-10-08: a project's brief was
+    told so while every reply went to A). It names A and how to move the webhook."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-b")
+
+    assert res["ok"] is True
+    assert res["data"]["status"] == "sent"
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    delivery = res["data"]["delivery"]
+    assert "will NOT come to this conversation" in delivery
+    assert "conversation c-a" in delivery
+    assert "session_unwatch and then session_watch" in delivery
+    assert "delivered to this conversation" not in delivery
+
+
+async def test_a_queued_send_from_another_conversation_says_where_the_reply_goes(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    wiring.idle_ok = "claude_busy"
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-b")
+
+    assert res["data"]["status"] == "queued"
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    delivery = res["data"]["delivery"]
+    assert "will NOT come to this conversation" in delivery
+    assert "Do NOT re-send it" in delivery
+    assert "conversation c-a" in delivery
+    assert "the reply to THIS prompt arrives" not in delivery
+
+
+async def test_a_send_from_the_watching_conversation_says_it_comes_here(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+
+    res = await send(name="proj", prompt="hello", conversation_id="c-a")
+
+    assert res["data"]["watched_conversation_id"] == "c-a"
+    assert "delivered to this conversation" in res["data"]["delivery"]
+    assert "will NOT come" not in res["data"]["delivery"]
+
+
 async def test_sent_warns_when_no_webhook_open(wiring):
     """No conversation_id and no existing watcher -> still sends, but the return
     says plainly that the reply will not be auto-delivered (never silently dropped)."""
@@ -672,6 +721,28 @@ async def test_queued_send_records_only_once_injected(wiring):
     assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")
 
 
+async def test_a_send_for_a_person_records_who_it_was_for(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+
+    await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by=" u-1 ")
+
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "run the tests") == "u-1"
+
+
+async def test_a_queued_send_for_a_person_keeps_who_it_was_for(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+
+    await send(name="proj", prompt="later", conversation_id="c1", sent_by="u-1")
+    assert tools._pending_sends["proj"][0].sent_by == "u-1"
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later") == "u-1"
+
+
 async def test_inject_is_the_single_recording_point(wiring):
     """Every paste path goes through _inject, and _inject records on success —
     so no caller can forget to (the record is what keeps a reply from being
@@ -788,3 +859,73 @@ async def test_resume_remembers_the_notice_is_showing_so_it_is_cleared(wiring):
     assert [text for _, text, _ in wiring.paste_calls] == ["waiting"]
     options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
     assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]
+
+
+# --- reply_goes: where the reply goes, as a field ------------------------------
+
+async def test_reply_goes_here_when_this_conversation_watches(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c1", "http://cb")
+    res = await send(name="proj", prompt="hello", conversation_id="c1")
+    assert res["data"]["reply_goes"] == "here"
+
+
+async def test_reply_goes_elsewhere_when_another_conversation_watches(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    res = await send(name="proj", prompt="hello", conversation_id="c-b")
+    assert res["data"]["reply_goes"] == "elsewhere"
+
+
+async def test_reply_goes_nowhere_without_a_webhook(wiring, monkeypatch):
+    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "")
+    app, send = _make_send()
+    res = await send(name="proj", prompt="hello", conversation_id="c1")
+    assert res["data"]["reply_goes"] == "nowhere"
+
+
+# --- a queued prompt is never pasted into a session tainted meanwhile -----------
+
+def _taint_switch(monkeypatch):
+    """Patch the policy sidecar's answer; flip `state["tainted"]` to taint the session."""
+    from aidc_mcp import session_facts as sf
+    state = {"tainted": False}
+
+    async def run(*args, timeout=20.0):
+        if sf.TAINT_FILE in args and state["tainted"]:
+            return sf.DockerResult(
+                0, b'{"tainted_at":"2026-10-14T09:00:00Z","trigger":"blocklist",'
+                   b'"domain":"evil.example","squid_log_line":"x"}', b"")
+        return sf.DockerResult(1, b"", b"cat: No such file or directory")
+    monkeypatch.setattr(sf, "run_docker", run)
+    return state
+
+
+async def test_the_drainer_holds_a_prompt_once_the_session_is_tainted(wiring, monkeypatch):
+    taint = _taint_switch(monkeypatch)
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    res = await send(name="proj", prompt="do the thing", conversation_id="c1")
+    assert res["data"]["status"] == "queued"
+    taint["tainted"] = True
+    wiring.idle_ok = True
+    for _ in range(50):
+        await _REAL_SLEEP(0)
+    assert wiring.paste_calls == []
+    assert tools._pending_sends["proj"][0].waiting_reason == "session_tainted"
+    assert "session_tainted" in tools._WAITING_EXPLAINED
+
+
+async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, monkeypatch):
+    """The other side of the hold: with no taint flag the queued prompt goes in."""
+    _taint_switch(monkeypatch)
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = "claude_busy"
+    await send(name="proj", prompt="do the thing", conversation_id="c1")
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert [c[1] for c in wiring.paste_calls] == ["do the thing"]

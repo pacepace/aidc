@@ -8,7 +8,6 @@ the tool bodies are pinned without a real Docker session.
 session_send has its own file (test_session_send.py); this covers the rest.
 """
 import asyncio
-import base64
 import subprocess
 
 import pytest
@@ -200,7 +199,7 @@ class TestSimpleCliTools:
         res = await _tool("session_list")()
         assert res["ok"] is False and res["error"] == "docker down"
 
-    async def test_status_happy(self, monkeypatch):
+    async def test_status_happy(self, monkeypatch, idle_session):
         _patch_cli(monkeypatch, {"exit": 0, "stdout": "health=ok", "stderr": ""})
         res = await _tool("session_status")(name="proj")
         assert res["ok"] is True and "health=ok" in res["data"]["raw"]
@@ -311,25 +310,33 @@ class TestSessionRun:
 
 
 # --- file_get ----------------------------------------------------------------
+# Its confinement and windows are tested against real files in test_repo.py; here,
+# only that the tool runs in the session's container and maps refusals to codes.
 
 class TestFileGet:
-    async def test_happy_utf8(self, monkeypatch):
-        _patch_sync_run(monkeypatch, FakeCompleted(0, stdout=b"hello world"))
-        res = await _tool("file_get")(name="proj", path="/repo/a.txt")
+    async def test_runs_the_reader_in_the_dev_container_as_vscode(self, monkeypatch):
+        from aidc_mcp import repo, session_facts
+
+        async def repo_path(name):
+            return "/repo"
+        monkeypatch.setattr(session_facts, "repo_path", repo_path)
+        seen = []
+
+        async def run(argv, *, cwd, cap, timeout=40):
+            seen.append(argv)
+            return repo.Ran(0, b"/repo/a.txt\n11\nhello world", "", False)
+        monkeypatch.setattr(repo, "run_capped", run)
+        res = await _tool("file_get")(name="proj", path="a.txt")
         assert res["ok"] is True
-        assert res["data"] == {"path": "/repo/a.txt", "encoding": "utf-8", "content": "hello world"}
+        assert res["data"]["content"] == "hello world" and res["data"]["path"] == "/repo/a.txt"
+        assert seen[0][:5] == ["docker", "exec", "-u", "vscode", "-w"]
+        assert "aidc-proj-dev" in seen[0]
+        # the caller's path is an argument of the fixed script, never part of it
+        assert seen[0][-4:] == ["/repo", "a.txt", "0", "100000"]
 
-    async def test_missing_file(self, monkeypatch):
-        _patch_sync_run(monkeypatch, FakeCompleted(1, stdout=b"", stderr=b"No such file"))
-        res = await _tool("file_get")(name="proj", path="/repo/nope")
-        assert res["ok"] is False and "No such file" in res["error"]
-
-    async def test_binary_falls_back_to_base64(self, monkeypatch):
-        blob = b"\xff\xfe\x00\x01"
-        _patch_sync_run(monkeypatch, FakeCompleted(0, stdout=blob))
-        res = await _tool("file_get")(name="proj", path="/repo/x.bin")
-        assert res["ok"] is True and res["data"]["encoding"] == "base64"
-        assert base64.b64decode(res["data"]["content"]) == blob
+    async def test_no_dev_container_is_no_such_session(self):
+        res = await _tool("file_get")(name="ghost", path="a.txt")
+        assert res["ok"] is False and res["error_code"] == "no_such_session"
 
 
 # --- file_put ----------------------------------------------------------------
@@ -350,65 +357,77 @@ class TestFilePut:
 
 # --- audit_get ---------------------------------------------------------------
 
+def _docker_answers(monkeypatch, answers):
+    """session_facts.run_docker answering by the docker subcommand's target."""
+    from aidc_mcp import session_facts
+
+    async def run(*args, timeout=20.0):
+        for key, result in answers.items():
+            if key in args:
+                return result
+        return session_facts.DockerResult(1, b"", b"No such file or directory")
+    monkeypatch.setattr(session_facts, "run_docker", run)
+
+
 class TestAuditGet:
-    def _events_file(self, tmp_path):
-        d = tmp_path / "audit"
-        d.mkdir()
-        (d / "policy-events.log").write_text(
-            '{"at":"2026-01-01T00:00:00Z","trigger":"taint","outcome":"block"}\n'
-            "not-json-garbage\n"
-            '{"at":"2026-02-01T00:00:00Z","trigger":"auth","outcome":"reject"}\n',
-            encoding="utf-8",
-        )
-        return d
+    EVENTS = (b'{"at":"2026-01-01T00:00:00Z","trigger":"blocklist","outcome":"tainted"}\n'
+              b"not-json-garbage\n"
+              b'{"at":"2026-02-01T00:00:00Z","trigger":"tld","outcome":"logged"}\n')
 
-    async def test_session_not_found(self, monkeypatch):
-        _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "x"})
-        res = await _tool("audit_get")(name="ghost")
-        assert res["ok"] is False and res["error"] == "session not found"
+    def _events(self, monkeypatch, events=EVENTS):
+        from aidc_mcp import session_facts as sf
+        _docker_answers(monkeypatch, {
+            sf.POLICY_EVENTS_FILE: sf.DockerResult(0, events, b""),
+            "aidc-proj-audit": sf.DockerResult(0, b"/home/u/.local/state/aidc/audit/proj\n", b""),
+        })
 
-    async def test_audit_dir_not_found(self, monkeypatch):
-        _patch_cli(monkeypatch, {"exit": 0, "stdout": "health=ok\n", "stderr": ""})
-        res = await _tool("audit_get")(name="proj")
-        assert res["ok"] is False and res["error"] == "audit dir not found"
-
-    async def test_happy_parses_and_skips_garbage(self, monkeypatch, tmp_path):
-        d = self._events_file(tmp_path)
-        _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
+    async def test_reads_the_policy_sidecars_events_and_the_typed_audit_dir(self, monkeypatch):
+        self._events(monkeypatch)
         res = await _tool("audit_get")(name="proj")
         assert res["ok"] is True
-        assert [e["trigger"] for e in res["data"]["events"]] == ["taint", "auth"]
+        assert [e["trigger"] for e in res["data"]["events"]] == ["blocklist", "tld"]
+        assert res["data"]["audit_dir"] == "/home/u/.local/state/aidc/audit/proj"
+        assert res["data"]["count"] == 2 and res["data"]["cut"] is False
 
-    async def test_since_filter(self, monkeypatch, tmp_path):
-        d = self._events_file(tmp_path)
-        _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
+    async def test_no_events_logged_yet_is_none(self):
+        res = await _tool("audit_get")(name="proj")
+        assert res["ok"] is True and res["data"]["events"] == [] and res["data"]["count"] == 0
+
+    async def test_no_such_session(self, monkeypatch):
+        from aidc_mcp import session_facts as sf
+        _docker_answers(monkeypatch, {sf.POLICY_EVENTS_FILE: sf.DockerResult(
+            1, b"", b"Error response from daemon: No such container: aidc-ghost-policy")})
+        res = await _tool("audit_get")(name="ghost")
+        assert res["ok"] is False and res["error_code"] == "no_such_session"
+
+    async def test_since_filter(self, monkeypatch):
+        self._events(monkeypatch)
         res = await _tool("audit_get")(name="proj", since="2026-01-15T00:00:00Z")
-        assert [e["trigger"] for e in res["data"]["events"]] == ["auth"]
+        assert [e["trigger"] for e in res["data"]["events"]] == ["tld"]
 
-    async def test_kind_filter(self, monkeypatch, tmp_path):
-        d = self._events_file(tmp_path)
-        _patch_cli(monkeypatch, {"exit": 0, "stdout": f"audit: {d}\n", "stderr": ""})
-        res = await _tool("audit_get")(name="proj", kind="taint")
-        assert [e["trigger"] for e in res["data"]["events"]] == ["taint"]
+    async def test_kind_filter(self, monkeypatch):
+        self._events(monkeypatch)
+        res = await _tool("audit_get")(name="proj", kind="tainted")
+        assert [e["trigger"] for e in res["data"]["events"]] == ["blocklist"]
+
+    async def test_keeps_the_newest_500(self, monkeypatch):
+        many = b"".join(b'{"at":"2026-01-01T00:00:%02dZ","trigger":"t%d","outcome":"logged"}\n'
+                        % (i % 60, i) for i in range(600))
+        self._events(monkeypatch, many)
+        res = await _tool("audit_get")(name="proj")
+        assert res["data"]["count"] == 600 and res["data"]["cut"] is True
+        assert len(res["data"]["events"]) == 500 and res["data"]["events"][-1]["trigger"] == "t599"
 
 
 # --- taint_mark --------------------------------------------------------------
 
 class TestTaintMark:
-    async def test_happy(self, monkeypatch):
-        rec = []
-        _patch_sync_run(monkeypatch, FakeCompleted(0, stdout="", stderr=""), record=rec)
-        res = await _tool("taint_mark")(name="proj", reason="evil.example")
-        assert res["ok"] is True and res["data"] == {"name": "proj", "reason": "evil.example"}
-        # Writes into the session's POLICY container, and the payload carries the reason.
-        argv = rec[0][0]
-        assert "aidc-proj-policy" in argv
-        assert any("evil.example" in a for a in argv)
-
-    async def test_failure(self, monkeypatch):
-        _patch_sync_run(monkeypatch, FakeCompleted(1, stdout="", stderr="write failed"))
-        res = await _tool("taint_mark")(name="proj", reason="x")
-        assert res["ok"] is False and res["error"] == "write failed"
+    def test_not_advertised(self):
+        """Taint is the policy sidecar's finding about where a session went; an MCP
+        client marking it is not a policy signal, so the tool is not offered."""
+        app = FastMCP("t")
+        tools.register(app)
+        assert "taint_mark" not in app._tool_manager._tools
 
 
 # --- session_watch / session_unwatch -----------------------------------------

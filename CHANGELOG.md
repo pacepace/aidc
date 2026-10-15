@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-15
+
 ### Added
 - **What a session is doing, as typed fields.** `session_status` gains `working`, `turn`, `why`,
   `working_on`, `claude_running`, `last_reply_at`, `repo`, `branch`, `head`, `tainted`
@@ -39,6 +41,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 - **The tool list is published** as `mcp/published-tools.json` (name, description, input schema),
   generated from the code (`uv run python scripts/publish_tools.py`) and held to it by a test.
 - **Error codes `tainted` and `outside_repo`** (design 10, D6).
+- **An orchestrator can give a session's Claude an MCP server on its own API.** `session_mcp_set`
+  takes a session, a server name, a path and a bearer token, and writes one HTTP MCP server into
+  the session's Claude state: the token in a file of its own (mode 0600), a helper that prints it
+  as the `Authorization` header, and an entry in `.claude.json` that holds no token. The host is
+  `metallm.callback_url`; a caller gives only the path. The entry is written after the first
+  start has installed the seed that strips `mcpServers`, and it stays through `aidc restart`,
+  `aidc upgrade` and `--continue`. A new token for a server the session already has is read by a
+  running Claude with no restart; a server it did not have is there after Claude restarts, and
+  the result says which. The token is never in a command line, the audit log or a tool result.
+  `session_create` takes the same as `mcp_server`, `mcp_path` and `mcp_bearer`.
 
 ### Changed
 - **A tainted session takes no more work.** `session_send`, `session_resend`, `session_invoke`,
@@ -54,21 +66,12 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   every call. It reads the policy sidecar's events directly, returns the typed `audit_dir`,
   `count`, and the newest 500 events with `cut`.
 
+- **The MCP server needs Python 3.14**, the version its image ships; CI tests 3.14 only.
+
 ### Removed
 - **`taint_mark` is no longer an MCP tool.** Taint is the policy sidecar's finding about where a
   session went; an orchestrator marking it was not a policy signal. The flag is still written by the
   policy sidecar, and by hand if a person wants one.
-
-- **An orchestrator can give a session's Claude an MCP server on its own API.** `session_mcp_set`
-  takes a session, a server name, a path and a bearer token, and writes one HTTP MCP server into
-  the session's Claude state: the token in a file of its own (mode 0600), a helper that prints it
-  as the `Authorization` header, and an entry in `.claude.json` that holds no token. The host is
-  `metallm.callback_url`; a caller gives only the path. The entry is written after the first
-  start has installed the seed that strips `mcpServers`, and it stays through `aidc restart`,
-  `aidc upgrade` and `--continue`. A new token for a server the session already has is read by a
-  running Claude with no restart; a server it did not have is there after Claude restarts, and
-  the result says which. The token is never in a command line, the audit log or a tool result.
-  `session_create` takes the same as `mcp_server`, `mcp_path` and `mcp_bearer`.
 
 ### Fixed
 - **aidc-mcp no longer burns a core while a large session is watched.** The watcher polls every
@@ -1210,7 +1213,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.8.3...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/pacepace/aidc/compare/v1.8.3...v1.9.0
 [1.8.3]: https://github.com/pacepace/aidc/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/pacepace/aidc/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/pacepace/aidc/compare/v1.8.0...v1.8.1

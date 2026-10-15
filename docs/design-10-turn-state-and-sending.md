@@ -452,7 +452,9 @@ attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
 - **The input box** is the region between the last two full-width `─` rules near the bottom of
   the pane; the status row sits directly below the second rule. From 2.1.284 the top rule of a
   named session carries its name (`──── metallm ─`), so a rule may hold one label set off by
-  spaces.
+  spaces. From 2.1.300, while background agents run, a blank row and one row per agent
+  (`  ● main`, `  ◯ general-purpose  <activity>`) follow the status rows; that list is set aside
+  before the rows below the box are counted, and a row with an unmeasured glyph fails closed.
 - **Its first row** starts with the glyph `❯` followed by a no-break space (`❯\xa0`). Earlier
   prompts in the scrollback also start with `❯` but are drawn on a background colour
   (`\x1b[48;5;237m`), so they do not match.

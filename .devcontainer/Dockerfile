@@ -264,6 +264,27 @@ RUN curl -fsSL https://sh.rustup.rs \
     && rustc --version \
     && cargo --version
 
+# ---- Browser runtime for Playwright -----------------------------------------
+# The system libraries and fonts Chromium needs, so a session can run browser
+# checks without sudo. Exactly what `npx playwright install-deps chromium` installs
+# on this Ubuntu (Playwright 1.63's ubuntu26.04 list: its `tools`, then `chromium`).
+# Without them `npx playwright install chromium` downloads the browser but launch
+# fails with "Host system is missing dependencies to run browsers". The browser
+# itself is NOT baked: it stays a per-project download (`npx playwright install
+# chromium`, cached in ~/.cache/ms-playwright), so it matches each project's
+# Playwright version. Firefox and WebKit need more; install-deps them in-session.
+# Placed after the toolchains so a change here does not rebuild the baked Pythons.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6 \
+        xfonts-cyrillic xfonts-scalable fonts-liberation fonts-ipafont-gothic \
+        fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf \
+        libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
+        libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
+        libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
+        libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Claude wrapper. Dispatches on env vars set by compose from aidc config:
 #   AIDC_CLAUDE_MODE    permission mode. Default `yolo` (--dangerously-skip-permissions).
 #                       `safe` is an alias for the native `default` mode; the rest map

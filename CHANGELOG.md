@@ -13,6 +13,14 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **Playwright's Chromium could not launch in a session.** The dev image lacked the system
+  libraries and fonts Chromium needs, so `npx playwright install chromium` downloaded the
+  browser but launch failed with "Host system is missing dependencies to run browsers", and
+  only `sudo npx playwright install-deps chromium` fixed it. The image now carries exactly what
+  that command installs on Ubuntu 26.04 (Playwright 1.63's list). The browser itself is still
+  a per-project download, so it matches each project's Playwright version.
+
 ## [1.9.1] - 2026-10-15
 
 ### Fixed

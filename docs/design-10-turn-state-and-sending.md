@@ -202,7 +202,8 @@ the metallm session and written here before either side builds it.
 | `ok` | bool | `false` only when the turn ended on an API error Claude Code did not recover from. An interrupt is `true`. | design 09 |
 | `source` | string | Always `"agent_watch"` for this path. | design 09 |
 | `session` | string | The aidc session that produced the turn. | design 09 |
-| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane, `"orchestrator"` if all were sent by the MCP, `""` if the turn had no prompt of its own. MetaLLM does not read it (confirmed 2026-09-17); `speaker` carries what it needs. | MCP-23 |
+| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane; else `"person"` if the MCP sent one for a person (`session_send`'s `sent_by`); else `"orchestrator"` if all were sent by the MCP for the caller; `""` if the turn had no prompt and none came before it. A turn with no prompt of its own (a continuation, a task notification) carries the origin of the session's last prompted turn. MetaLLM records a `"terminal"` or `"person"` reply as addressed to that person, not as a report on its own prompt. | MCP-23 |
+| `sent_by` | string | Present only with `prompt_origin: "person"`: the `sent_by` the caller gave `session_send`, returned as given. The orchestrator names who the prompt was for; aidc does not read it. | 2026-10-09 |
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
 | `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. Sent only on replies, and only with `metallm.send_speaker: true` (D4), which stays off until MetaLLM's record-without-wake change is deployed. | MCP-27 |
 | `error_code` | string | Present only on a callback that is not a reply, naming what it is: `"prompt_dropped"` (a failure, `ok: false`) or `"prompt_waiting"` (a status, `ok: true`), both below. It never says anything `content` does not. | MCP-33, MCP-36 |
@@ -268,12 +269,14 @@ missing a code or uses one outside the set:
 | `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
 | `command_failed` | a command inside the session failed | tell the person |
 | `timeout` | a command inside the session ran out of time | tell the person |
-| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste) | tell the person |
+| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste); `session_not_ready` also from `session_mcp_set` on a session whose first start has not finished | tell the person |
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
 | `not_found` | a file or directory the call reads is missing | tell the person |
 | `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |
+| `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry |
+| `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call |
 
-`session_send` itself only fails with `no_such_session`, `queue_full` or `out_of_scope`. Every other condition, a failed paste included, queues the prompt. The
+`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope` or `tainted`. Every other condition, a failed paste included, queues the prompt. The
 metallm side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 
@@ -352,9 +355,22 @@ Two questions are kept apart, because they have different callers:
 
 1. The transcript's tail (`transcript.log_shows_turn_in_progress`) says **not working** for a
    finished turn, an interrupt marker, an API error, a turn waiting on an interactive-input
-   tool, a local command's output (`/login`, `!` bash mode), or an empty transcript. It says
-   **working** for a prompt with no reply, a tool call or result, an unanswered Stop-hook
-   pushback, or a reply whose Stop hooks have not reported yet.
+   tool, a local command or its output (`/clear`, `/login`, `!` bash mode), or an empty
+   transcript. It says **working** for a prompt with no reply, a tool call or result, an
+   unanswered Stop-hook pushback, or a reply whose Stop hooks have not reported yet.
+
+   **A local command opens no turn.** Claude Code runs `/clear`, `/model`, `/login` itself and
+   Claude never replies, yet the command is written as an ordinary `user` line, the same shape
+   as a skill's command, which Claude does answer. Its neighbours tell them apart (measured on
+   Claude Code 2.1.222 to 2.1.287): a local command comes right after the isMeta
+   `<local-command-caveat>` line, and one that prints nothing to the conversation (`/clear`) is
+   followed by a `system` / `local_command` line. Either mark makes it local
+   (`transcript.is_local_command`), and every reader (`log_shows_turn_in_progress`,
+   `unanswered_prompt_turn`, `extract_completed_turns`) treats it as it treats a local
+   command's output: no turn, no unanswered prompt, no prompt on the next turn. Until
+   2026-10-08 a command line counted as a prompt, so after a pasted `/clear` the turn read as
+   running until the transcript had been quiet for `_LOG_STALL_S`, and every prompt queued
+   behind it waited as `claude_busy`.
 2. A turn the transcript shows in progress is **working** while the transcript has been quiet
    for less than 6 s (the mirror copies about every 2 s).
 3. A reply still waiting on its Stop hooks stays **working** until 120 s of quiet
@@ -394,7 +410,11 @@ transcript still shows the previous finished turn. `_inject` marks the session b
 (`sent_prompt_not_in_log`) and starts `_watch_for_echo`, which clears the mark once the transcript
 shows the prompt: a `user` line with the same text (or, for a slash command, its rendered
 `/name args`), or a `queue-operation` enqueue with that text when it was pasted into a running
-turn. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
+turn. "The same text" ignores whitespace and a `<pasted_content id="X">` wrapper Claude Code
+puts around a whole paste (measurement T13); `normalize_prompt` applies both rules, and the send
+record's fingerprint, this hold and `prompt_restored` all compare through it. A pasted local command (`/clear`) shows as its command line and counts as arrived. When
+the prompt arrived as a queued message or as a local command, no turn will ever claim it, so
+`_prompt_arrived` gives its send record back there. After 30 s without it, the mark is cleared and `session_send_not_seen_in_transcript` is
 logged, whether or not anything checks the session again.
 
 [DECISION: a prompt that never shows in the transcript is logged, not re-sent | a paste whose
@@ -412,8 +432,8 @@ status row shows Claude working, and the report is kept, with its session instan
 `watcher-state/<session>.interrupt-reported`: the
 watcher's watermark is past the prompt by then, so after a restart nothing would report it again,
 and a session remembered only in memory read busy for good (found in the joint test, when a
-queued prompt waited behind an interrupt reported before a restart). A tail made of a local command's output or a background task's notification is
-never reported; a slash command with no output (a skill Claude was about to run) is.
+queued prompt waited behind an interrupt reported before a restart). A tail made of a local command, its output, or a background task's notification is
+never reported; a slash command with no local-command mark (a skill Claude was about to run) is.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 

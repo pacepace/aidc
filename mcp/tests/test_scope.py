@@ -10,7 +10,9 @@ from aidc_mcp import resources, scope, tools
 
 NAMED_TOOLS = ["session_status", "session_exec", "session_invoke", "session_invoke_async",
                "session_send", "session_watch", "session_resend", "session_unwatch",
-               "file_get", "file_put", "audit_get", "taint_mark"]
+               "file_get", "file_put", "audit_get", "session_mcp_set", "session_transcript",
+               "session_interrupt", "session_queue_cancel", "file_list", "file_search",
+               "repo_status", "repo_diff", "repo_log", "repo_branches"]
 
 CALLS = {
     "session_status": {},
@@ -24,7 +26,16 @@ CALLS = {
     "file_get": {"path": "/etc/hostname"},
     "file_put": {"path": "/tmp/x", "content": "x"},
     "audit_get": {},
-    "taint_mark": {"reason": "r"},
+    "session_mcp_set": {"server": "project", "path": "/mcp", "bearer": "t"},
+    "session_transcript": {},
+    "session_interrupt": {},
+    "session_queue_cancel": {},
+    "file_list": {},
+    "file_search": {"pattern": "x"},
+    "repo_status": {},
+    "repo_diff": {},
+    "repo_log": {},
+    "repo_branches": {},
 }
 
 
@@ -137,7 +148,7 @@ async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
     assert out == "SESSION   STATUS   PROFILE\njointtest Up 1 min multi\n"
 
 
-async def test_in_scope_calls_go_through(app, monkeypatch):
+async def test_in_scope_calls_go_through(app, monkeypatch, idle_session):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "status ok", "stderr": ""})

@@ -13,6 +13,13 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **Prompts held as `screen_unrecognized` on Claude Code 2.1.300.** While background agents run,
+  Claude Code lists them under the status rows (`● main`, `◯ general-purpose …`). The screen
+  reader counted those rows as foreign content below the input box, so it reported no box and
+  `session_send` queued every prompt with no paste attempted. The agent list is now set aside
+  before the rows below the box are counted; a row with an unmeasured glyph still fails closed.
+
 ## [1.9.0] - 2026-10-15
 
 ### Added

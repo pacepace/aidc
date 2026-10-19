@@ -11,8 +11,9 @@
 #   REPO_PATH                absolute path to repo (mounted at the same path inside the container)
 #   AUDIT_DIR                absolute path to per-session audit dir on host
 #   HOST_CLAUDE_PROJECT_DIR  absolute path to host's ~/.claude/projects/<encoded-repo>/
-#   ENCODED_REPO             repo path with "/" replaced by "-" (names both Claude's
-#                            memory dir and, via CLAUDE_SCRATCHPAD_MOUNT, its scratchpad dir)
+#   ENCODED_REPO             Claude's name for the repo path (aidc_claude_project_name: every
+#                            non-alphanumeric character becomes "-"); names both Claude's
+#                            memory dir and, via CLAUDE_SCRATCHPAD_MOUNT, its scratchpad dir
 #   TAINT_RESPONSE           one of: log | notify | freeze   (product default: freeze)
 #   TLD_TAINTS               "true" | "false"
 #   NOTIFY_WEBHOOK           optional webhook URL (may be empty)

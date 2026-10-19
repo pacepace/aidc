@@ -34,9 +34,57 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-19: the loop guard no longer drops replies to a person's own prompts
+
+<!-- prawduct: scope=loop-guard-human-turns -->
+
+**Why:** found reviewing metallm's MCP history, 2026-10-19. The loop guard caps an unbroken run of
+deliveries (more than 20, reset only by a 15-minute idle gap) to stop an orchestrator and a session
+answering each other forever. On 2026-10-08 at 05:56:43 it dead-lettered metallm's reply to Pace
+("`aidc-mcp-dev` is confirmed on `aidc/mcp:dev-local-command` ...") while Pace was working at the
+terminal: the run that tripped it, reconstructed from the access log and the conversation's
+delivered ledger, was 11 replies to typed prompts and 9 turns no one prompted (task
+notifications, a subagent hand-back, the turn after a safety-classifier stop), with no
+orchestrator prompt at all. The guard counted every delivery; a runaway needs the orchestrator's
+prompts, and a typed one proves a human is there.
+
+**What:** the loop guard (in `_drain_once_body`, under `_drain_transcript_once`) resets the run on a delivery whose origin is `terminal` or
+`person` and does not count it; replies to the orchestrator's prompts, and turns no one prompted
+that carry that origin (`_carry_prompt_origin`), count as before. Origin rests on matching each
+prompt to the send record, and that can fail (a failed record write, an expired entry, paste
+drift like 2026-10-08's), which would let a runaway read as typed and never trip; so a backstop,
+`_LOOP_GUARD_BACKSTOP` = 100, caps every delivery since the last idle gap whatever its origin
+(new persisted `deliveries_since_idle`, loading as 0 from older watermarks). Tests: a morning at the terminal
+with task notifications between prompts delivers past the cap with nothing dead-lettered (the
+10-08 shape); a typed prompt, and a prompt sent for a person, mid-run let two runs below the cap
+deliver together; continuations of the orchestrator's turns still trip it; a runaway with no send
+record hits the backstop (red with the backstop disabled), and an idle gap resets it. Live: the
+real 10-08 metallm transcript replayed through the drain under a constant clock (no idle resets)
+from midnight to 05:57: the old code dead-letters 7 replies, the lost one among them; the new
+code delivers all 27. The pre-existing guard
+tests built their runaways from prompts with no send record, which the drain now reads as typed at
+the terminal; their fixtures record those prompts as the orchestrator's sends, as session_send
+does, and every assertion is unchanged (TestLoopGuard and the transcript-move test).
+
+Review rev-20261019T045416Z-1738de1c (0 blocking): O-1 the backstop above; O-2 the "no human at
+the pane" premise is gone from the comments. Cumulative rev-20261019T050219Z-0b5052d1 (0
+blocking): R-1 the CHANGELOG names the backstop; R-2 the comments no longer say only an idle gap
+resets the run; R-5 this entry names `_drain_once_body`.
+
+Also on this branch: the shipped change-log entries since v1.8.3 carry their `release=` (mapped
+from the tag that first contained each entry's commit), and compose-render.sh's header names
+`aidc_claude_project_name` as ENCODED_REPO's rule. Looked at and not changed: the 10-15 queued send
+held 25 minutes by `screen_unrecognized` was the agent-panel screen v1.9.1 fixed (the saved capture
+classifies as idle on the current parser, and a fixture covers it); the abandoned deliveries were
+the orchestrator answering 404/502; the October dedupe followed a stale-pin recovery and stopped a
+duplicate, as designed. #55 stays open: sessions restart with the daemon (`unless-stopped`) before
+any aidc command runs, so every fix trades something (a session down after a reboot, a wider mount,
+or root repairs on every command) and needs Pace's call.
+
+
 ## 2026-10-19: a memory dir Docker made as root no longer silences a session
 
-<!-- prawduct: scope=memory-dir-writable -->
+<!-- prawduct: scope=memory-dir-writable | release=v1.9.4 -->
 
 **Why:** live, 2026-10-19, session handmcp: Claude showed "Transcript writes are failing
 (permission denied — EACCES)". The bridged memory dir `~/.claude/projects/<enc>` on the host was
@@ -109,7 +157,7 @@ tested with a chown that fails on one side.
 
 ## 2026-10-19: aidc create from $HOME no longer reads ~/.profile as the profile
 
-<!-- prawduct: scope=yq-expression-file-collision -->
+<!-- prawduct: scope=yq-expression-file-collision | release=v1.9.3 -->
 
 **Why:** live, 2026-10-19: `aidc create` run from `~` on plexdock failed with "invalid profile
 '# ~/.profile: executed by the command interpreter …'". yq decides which argument is its
@@ -137,7 +185,7 @@ rev-20261019T005225Z-5b0eac65.
 
 ## 2026-10-08: a pasted prompt Claude Code wrapped is still the orchestrator's
 
-<!-- prawduct: scope=local-command-opens-no-turn -->
+<!-- prawduct: scope=local-command-opens-no-turn | release=v1.9.0 -->
 
 **Why:** live, 2026-10-08: the MCP pasted an 844-character project brief, and Claude Code
 2.1.284 transcribed it as `\n\n<pasted_content id="fab9">\n<brief>\n</pasted_content id="fab9">\n`.
@@ -156,7 +204,7 @@ Six mutants each fail on a test's own assertion.
 
 ## 2026-10-08: session_send names the conversation a reply goes to
 
-<!-- prawduct: scope=local-command-opens-no-turn -->
+<!-- prawduct: scope=local-command-opens-no-turn | release=v1.9.0 -->
 
 **Why:** live, 2026-10-08: a session was first sent a stray task from metallm conversation A,
 which opened its webhook. A project's brief was later sent from conversation B, and
@@ -172,7 +220,7 @@ one-webhook design is unchanged. Three tests (sent, queued, same conversation); 
 
 ## 2026-10-08: a local command opens no turn
 
-<!-- prawduct: scope=local-command-opens-no-turn -->
+<!-- prawduct: scope=local-command-opens-no-turn | release=v1.9.0 -->
 
 **Why:** live, 2026-10-08: a session was sent `/clear`, then a prompt that queued behind it. 14
 minutes later the prompt still waited as `claude_busy` (`status_row_unproven`) while Claude sat
@@ -193,7 +241,7 @@ Tests use the live transcript's lines; nine mutants each fail on a test's own as
 
 ## 2026-09-29: v1.8.3 — a labelled box rule still bounds Claude's input box
 
-<!-- prawduct: scope=screen-labelled-rule -->
+<!-- prawduct: scope=screen-labelled-rule | release=v1.8.3 -->
 
 **Why:** live on metallm, 2026-09-29: an orchestrator's `session_send` waited in the queue as
 `screen_unrecognized` while the session sat idle. Claude Code 2.1.284 draws a named session's name

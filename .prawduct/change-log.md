@@ -34,6 +34,79 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-19: a memory dir Docker made as root no longer silences a session
+
+<!-- prawduct: scope=memory-dir-writable -->
+
+**Why:** live, 2026-10-19, session handmcp: Claude showed "Transcript writes are failing
+(permission denied — EACCES)". The bridged memory dir `~/.claude/projects/<enc>` on the host was
+root:root 0755, born 01:38:22 between the session's first container (00:43) and its second
+(02:03), with no aidc command at that time. Docker materialises a missing bind-mount source as
+root whenever it starts a container, so the dir had gone missing and Docker made it again; the
+02:03 `aidc create`, run on the host, found it present and mounted it as it was
+(`aidc_mkdir_host` repairs ownership only inside aidc-mcp). For half an hour Claude saved
+nothing and the MCP saw no transcript (`session_send_not_seen_in_transcript`). Fixing the
+ownership exposed a second fault: the Claude that had been unable to write left a transcript
+holding only bookkeeping (cost-state, mode, a file-history snapshot) on exit, `aidc-claude` saw
+a `*.jsonl` and passed `--continue`, and `claude` exited with "No conversation found to
+continue".
+
+**What:** `claude-state-install.sh` (now sourced by entrypoint.sh, user-main.sh, the
+`aidc-claude` wrapper and cmd-create.sh) adds:
+- `aidc_claim_docker_made_dirs`, run by entrypoint.sh as root on every start over
+  `~/.claude/projects` and `/tmp/claude-<uid>`: each of those dirs, and each dir directly inside
+  it, that root owns goes to vscode, non-recursively; a dir owned by anyone else is left alone.
+  A claimed scratchpad dir also gets 0700, the mode create gives it. Not covered: when Docker
+  also had to make the host's `/tmp/claude-<uid>` (after a reboot cleared /tmp), that parent
+  stays root-owned on the host, since inside the container it is not a mount (backlog).
+- `aidc_host_user_is_session_user`, the guard on that claim: it runs only when the bind-mounted
+  repo's owner, seen from inside, is vscode's uid. Under rootless Docker the host user appears as
+  root, so their own memory dir reads as uid 0 and an unguarded claim would take it from them; a
+  host user whose uid is not the container's would lose a Docker-made dir to whoever holds that
+  uid. Otherwise the entrypoint logs why it is not claiming.
+- `aidc_transcript_dir_warning`, which user-main.sh logs when the project dir is still not
+  writable. It and a failed claim carry one tag, `transcript-unwritable:`, and the new
+  `relay_transcript_warnings` in common.sh repeats any line carrying it to the operator from
+  `wait_for_dev_ready` (create, upgrade) and from cmd-restart.sh (this start's log only).
+- `aidc_has_resumable_conversation` for the wrapper: a transcript must hold a `user` or
+  `assistant` line. Any transcript counts, not only the newest: live, `claude --continue` (2.1.303)
+  with a newer bookkeeping-only stub beside an older conversation resumed the conversation.
+- `aidc_claude_project_name`, the one encoder for the project-dir name, used by cmd-create.sh's
+  memory mount, user-main.sh's check and transcript mirror, the wrapper and the smoke test. Claude
+  Code 2.1.303's encoder (read from its binary) replaces every non-alphanumeric character with
+  "-"; aidc replaced only "/" and ".", so a repo path holding "_" or a space got a memory mount,
+  mirror and resume check at a dir Claude never writes, and the MCP no replies. Paths over 200
+  characters (Claude adds a hash) and non-ASCII paths (Claude counts UTF-16 units, this counts
+  bytes) are not handled. An existing session on such a path needs kill+create: upgrade keeps
+  its compose file, mount included.
+
+Tests: test-claude-state-install.sh (claims, non-recursion, host-owned left alone, failure tagged
+and non-zero; the guard for a matching, root and foreign repo owner; the warning silent for a
+writable or absent dir and tagged for an unwritable one; the encoder on "_", space and
+punctuation; the handmcp stub not resumable). New test-dev-ready.sh builds its log from those
+functions' real output, so rewording a line cannot leave it green while the CLI goes quiet; a
+quiet log does not trip `set -e` (the `|| true` is load-bearing: it caught its own removal during
+the refactor). Live, aidc/dev-base:v1.9.3 with the branch entrypoint, library and wrapper mounted
+over and a host memory dir Docker created as root, repo at /work/my_repo: with the repo owned by
+the host user the dir is claimed, the host shows pace:pace, vscode writes, and the wrapper adds
+`--continue` once a message exists (and not for no transcript or the stub); with the repo owned
+by uid 1234 the claim stands down, the dir stays root:root, and the tagged warning is produced.
+
+Review rev-20261019T024728Z-dfb55d9f: R-1 (blocking) the WARN had no test and its consumer
+matched hand-typed wording; now a library function with a tag the consumer matches, tested from
+real output. O-1/O-8 the root-ownership premise is checked (the guard above). O-2 settled live,
+no change. O-3/O-4 the encoder is shared and corrected. O-5 the tag. O-6 the library header
+rewritten. O-7 the entrypoint reuses CLAUDE_TMP_ROOT. O-9 restart relays the warnings. Backlog
+#35 (symlinks in the bridged memory dir) is untouched: the claim skips symlinks and never
+recurses. Cumulative rev-20261019T030421Z-60591e6e (0 blocking): R-1 the claimed scratchpad
+gets 0700 and the comment states the parent it cannot reach (filed to the backlog); R-3 the
+claim's bounds are written into docs/security-model.md as the security property; R-4 the
+Claude Code facts are in claude-code-measurements.md (P1-P4). Verify rev-20261019T031033Z-22f7e282 caught
+the split claim under the entrypoint's `set -e` (a failed memory-side chown would have skipped the
+scratchpad side): both now run inside `aidc_claim_session_mounts`, each attempted regardless,
+tested with a chown that fails on one side.
+
+
 ## 2026-10-19: aidc create from $HOME no longer reads ~/.profile as the profile
 
 <!-- prawduct: scope=yq-expression-file-collision -->

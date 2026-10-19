@@ -26,6 +26,12 @@ case $? in
     2) log "WARN: could not install the host's settings.json copy; Claude starts with its defaults" ;;
 esac
 
+# Claude writes this conversation's transcript here, and the MCP reads its replies
+# from it. Say so if it cannot: see aidc_transcript_dir_warning.
+_proj_dir="${HOME}/.claude/projects/$(aidc_claude_project_name "${AIDC_REPO_PATH:-$HOME}")"
+_warning=$(aidc_transcript_dir_warning "$_proj_dir")
+[ -n "$_warning" ] && log "WARN: ${_warning}"
+
 # Set up tmux session (idempotent).
 log "starting tmux session 'main'"
 /usr/local/bin/aidc-tmux-start.sh || log "WARN: tmux-start exited non-zero"
@@ -38,8 +44,7 @@ log "starting tmux session 'main'"
 . /usr/local/bin/aidc-transcript-mirror.sh
 TRANSCRIPT_OUT=/var/aidc/transcript-out
 if [ -d "$TRANSCRIPT_OUT" ]; then
-    _enc=$(printf '%s' "${AIDC_REPO_PATH:-$HOME}" | tr '/.' '-')
-    _src="${HOME}/.claude/projects/${_enc}"
+    _src="$_proj_dir"
     log "transcript mirror: ${_src}/*.jsonl -> ${TRANSCRIPT_OUT}"
     (
         while true; do

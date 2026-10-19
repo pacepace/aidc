@@ -25,6 +25,10 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/config.sh"
 # shellcheck source=lib/claude-state.sh
 . "$AIDC_SCRIPTS/lib/claude-state.sh"
+# The container's Claude-state helpers, for the one rule both sides must agree on:
+# the project-dir name (aidc_claude_project_name).
+# shellcheck source=../.devcontainer/claude-state-install.sh
+. "$AIDC_ROOT/.devcontainer/claude-state-install.sh"
 # shellcheck source=lib/network.sh
 . "$AIDC_SCRIPTS/lib/network.sh"
 # shellcheck source=lib/egress.sh
@@ -406,14 +410,15 @@ fi
 #
 # Claude Code stores per-project memory at:
 #   $HOME/.claude/projects/<encoded-repo-path>/
-# where <encoded-repo-path> is the absolute path with "/" and "." replaced by "-".
+# where <encoded-repo-path> is the name Claude derives from the absolute path (see
+# aidc_claude_project_name; the container computes it the same way).
 # We want the container's Claude to see the same memory dir, so we:
 #   1. Compute the encoded name from REPO_PATH
 #   2. Ensure the host dir exists (Claude expects it)
 #   3. Bind-mount it at /home/vscode/.claude/projects/<encoded-repo-path>/
 #      (compose template handles the mount declaration)
 
-ENCODED_REPO=$(printf '%s' "$REPO_PATH" | sed 's|[/.]|-|g')
+ENCODED_REPO=$(aidc_claude_project_name "$REPO_PATH")
 HOST_CLAUDE_PROJECT_DIR="$(aidc_host_home)/.claude/projects/${ENCODED_REPO}"
 
 # Memory mount toggleable via config.

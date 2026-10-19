@@ -13,6 +13,17 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-10-19
+
+### Fixed
+- **The MCP could drop a session's reply to you while you worked in it by hand.** Its guard
+  against an orchestrator and a session answering each other forever counted every reply, so a
+  long stretch of prompts typed at the terminal, with Claude's task notifications between them,
+  tripped it and the next reply was dead-lettered instead of delivered. Only replies to the
+  orchestrator's own prompts count toward that cap now, and a prompt you type (or one sent for a
+  person) ends the run. A much larger backstop still counts every reply: past 100 with no
+  15-minute pause, replies are held back whoever prompted them.
+
 ## [1.9.4] - 2026-10-19
 
 ### Fixed

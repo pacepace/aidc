@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-10-19
+
 ### Fixed
 - **The MCP could drop a session's reply to you while you worked in it by hand.** Its guard
   against an orchestrator and a session answering each other forever counted every reply, so a

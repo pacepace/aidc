@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-10-19
+
 ### Fixed
 - **A session could silently stop saving its conversation.** When the shared memory folder
   (`~/.claude/projects/<repo>`) was missing as a container started, Docker recreated it owned by

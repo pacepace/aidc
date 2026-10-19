@@ -13,6 +13,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-10-19
+
+### Fixed
+- **`aidc create` run from your home directory failed with "invalid profile '# ~/.profile: …'".**
+  yq takes its first argument for a file to read when a file by that name exists in the current
+  directory, so reading the `profile` setting from `~` printed `~/.profile` instead. Any setting
+  whose name matched a dotfile in the directory you ran aidc from could be misread the same way.
+  aidc now tells yq explicitly which argument is the query (`--expression`) wherever the installed
+  yq supports it.
+
 ## [1.9.2] - 2026-10-15
 
 ### Fixed

@@ -12,7 +12,7 @@ exclude-newer-span = "P14D"
 
 [[package]]
 name = "aidc-mcp"
-version = "1.9.2"
+version = "1.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

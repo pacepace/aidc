@@ -56,6 +56,9 @@ continue".
 - `aidc_claim_docker_made_dirs`, run by entrypoint.sh as root on every start over
   `~/.claude/projects` and `/tmp/claude-<uid>`: each of those dirs, and each dir directly inside
   it, that root owns goes to vscode, non-recursively; a dir owned by anyone else is left alone.
+  A claimed scratchpad dir also gets 0700, the mode create gives it. Not covered: when Docker
+  also had to make the host's `/tmp/claude-<uid>` (after a reboot cleared /tmp), that parent
+  stays root-owned on the host, since inside the container it is not a mount (backlog).
 - `aidc_host_user_is_session_user`, the guard on that claim: it runs only when the bind-mounted
   repo's owner, seen from inside, is vscode's uid. Under rootless Docker the host user appears as
   root, so their own memory dir reads as uid 0 and an unguarded claim would take it from them; a
@@ -95,7 +98,13 @@ real output. O-1/O-8 the root-ownership premise is checked (the guard above). O-
 no change. O-3/O-4 the encoder is shared and corrected. O-5 the tag. O-6 the library header
 rewritten. O-7 the entrypoint reuses CLAUDE_TMP_ROOT. O-9 restart relays the warnings. Backlog
 #35 (symlinks in the bridged memory dir) is untouched: the claim skips symlinks and never
-recurses.
+recurses. Cumulative rev-20261019T030421Z-60591e6e (0 blocking): R-1 the claimed scratchpad
+gets 0700 and the comment states the parent it cannot reach (filed to the backlog); R-3 the
+claim's bounds are written into docs/security-model.md as the security property; R-4 the
+Claude Code facts are in claude-code-measurements.md (P1-P4). Verify rev-20261019T031033Z-22f7e282 caught
+the split claim under the entrypoint's `set -e` (a failed memory-side chown would have skipped the
+scratchpad side): both now run inside `aidc_claim_session_mounts`, each attempted regardless,
+tested with a chown that fails on one side.
 
 
 ## 2026-10-19: aidc create from $HOME no longer reads ~/.profile as the profile

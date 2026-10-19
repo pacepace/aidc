@@ -119,8 +119,8 @@ fi
 if aidc_host_user_is_session_user "${AIDC_REPO_PATH:-/nonexistent}" "$(id -u vscode)"; then
     while IFS= read -r _line; do
         log "memory/scratchpad mount: ${_line}"
-    done < <(aidc_claim_docker_made_dirs vscode:vscode \
-                /home/vscode/.claude/projects "${CLAUDE_TMP_ROOT:-/tmp/claude-$(id -u vscode)}")
+    done < <(aidc_claim_session_mounts vscode:vscode /home/vscode/.claude/projects \
+                "${CLAUDE_TMP_ROOT:-/tmp/claude-$(id -u vscode)}" || true)
 else
     log "memory/scratchpad mount: not claiming root-owned dirs: the host user does not appear here as vscode (repo owner uid $(stat -c %u "${AIDC_REPO_PATH:-/nonexistent}" 2>/dev/null || echo unknown))"
 fi

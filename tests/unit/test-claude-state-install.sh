@@ -107,7 +107,7 @@ CLAIM="$SCRATCH/claim"
 mkdir -p "$CLAIM/projects-root-made/-repo-root-made/sub-root-made" "$CLAIM/projects-root-made/-other" \
     "$CLAIM/tmp/-repo-root-made"
 export CHOWNS="$SCRATCH/chowns"
-claim() { : > "$CHOWNS"; PATH="$STUBS:$PATH" aidc_claim_docker_made_dirs vscode:vscode "$@"; }
+claim() { : > "$CHOWNS"; PATH="$STUBS:$PATH" aidc_claim_docker_made_dirs vscode:vscode - "$@"; }
 # shellcheck disable=SC2034  # read inside the eval'd assert string below
 OUT=$(claim "$CLAIM/projects-root-made" "$CLAIM/tmp")
 assert "a root-owned parent and its root-owned children go to the session user" \
@@ -124,6 +124,30 @@ assert "a parent that does not exist is skipped quietly" \
 OUT=$(CHOWN_FAIL=1 claim "$CLAIM/tmp"; echo "rc=$?")
 assert "a chown that fails is reported and returns non-zero, so the caller can warn" \
     "printf '%s' \"\$OUT\" | grep -qx 'transcript-unwritable: could not claim $CLAIM/tmp/-repo-root-made' && printf '%s' \"\$OUT\" | grep -qx 'rc=1'"
+mkdir -p "$CLAIM/scratch/-repo-root-made"; chmod 0755 "$CLAIM/scratch/-repo-root-made"
+: > "$CHOWNS"
+PATH="$STUBS:$PATH" aidc_claim_docker_made_dirs vscode:vscode 0700 "$CLAIM/scratch" >/dev/null
+assert "a claimed scratchpad dir gets the mode it was asked for (0700, not Docker's 0755)" \
+    "[ \"\$(stat -c %a '$CLAIM/scratch/-repo-root-made')\" = 700 ]"
+assert "while '-' leaves the mode alone" \
+    "[ \"\$(stat -c %a '$CLAIM/tmp/-repo-root-made')\" != 700 ]"
+# The entrypoint's pass, under set -e as entrypoint.sh runs it: a chown that fails on
+# the memory side must not stop the scratchpad side being claimed.
+cat > "$STUBS/chown-fail-projects" <<'STUB'
+#!/bin/sh
+case "$2" in *projects*) exit 1 ;; esac
+printf '%s\n' "$*" >> "$CHOWNS"
+STUB
+chmod +x "$STUBS/chown-fail-projects"
+mkdir -p "$STUBS/failproj"; cp "$STUBS/stat" "$STUBS/failproj/stat"; cp "$STUBS/chown-fail-projects" "$STUBS/failproj/chown"
+mkdir -p "$CLAIM/scratch2/-repo-root-made"
+: > "$CHOWNS"
+# shellcheck disable=SC2034  # read inside the eval'd assert string below
+OUT=$(set -e; PATH="$STUBS/failproj:$PATH" aidc_claim_session_mounts vscode:vscode "$CLAIM/projects-root-made" "$CLAIM/scratch2"; echo "rc=$?")
+assert "a failed memory-side claim still lets the scratchpad side be claimed, and is reported" \
+    "grep -qx 'vscode:vscode $CLAIM/scratch2/-repo-root-made' '$CHOWNS' && printf '%s' \"\$OUT\" | grep -q 'could not claim $CLAIM/projects-root-made'"
+assert "and the pass returns non-zero" \
+    "! (PATH='$STUBS/failproj':\$PATH aidc_claim_session_mounts vscode:vscode '$CLAIM/projects-root-made' '$CLAIM/scratch2' >/dev/null)"
 echo
 
 echo "[2c/3] aidc_has_resumable_conversation"

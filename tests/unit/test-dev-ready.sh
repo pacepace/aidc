@@ -51,7 +51,7 @@ echo 0
 STUB
 chmod +x "$SCRATCH/bin/chown" "$SCRATCH/bin/stat"
 mkdir -p "$SCRATCH/projects/-work-repo"
-CLAIM_LINE=$(PATH="$SCRATCH/bin:$PATH" aidc_claim_docker_made_dirs vscode:vscode "$SCRATCH/projects" | tail -1)
+CLAIM_LINE=$(PATH="$SCRATCH/bin:$PATH" aidc_claim_docker_made_dirs vscode:vscode - "$SCRATCH/projects" | tail -1)
 chmod 0555 "$SCRATCH/projects/-work-repo"
 if [ -w "$SCRATCH/projects/-work-repo" ]; then
     echo "  SKIP: running as root, a 0555 dir is still writable; using a claim line instead"

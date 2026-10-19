@@ -89,30 +89,37 @@ aidc_host_user_is_session_user() {
     [ "$(stat -c %u "$1" 2>/dev/null)" = "$2" ]
 }
 
-# aidc_claim_docker_made_dirs <owner> <parent>...
+# aidc_claim_docker_made_dirs <owner> <mode|-> <parent>...
 # Gives <owner> each <parent>, and each directory directly inside it, that is owned by
-# root. Run by entrypoint.sh as root on every start, before privileges drop, and only
-# when aidc_host_user_is_session_user holds. Docker materialises a missing bind-mount
-# source on the HOST as root 0755 whenever it starts the container -- an
-# `aidc restart`, an upgrade, a /tmp wiped by a host reboot -- and a memory dir made
-# that way leaves Claude unable to save the conversation and the MCP's transcript
-# mirror with nothing to read. With the host user being the session user, a root-owned
-# dir here is root-owned on the host too: nobody meant a dir under their own ~/.claude
-# to belong to root, and giving it to the session user gives it back to them. A dir
-# already owned by anyone else is left alone. Never recursive, because what lives
-# inside a bridged dir is the host's.
+# root, and sets <mode> on each one claimed ("-" leaves Docker's 0755). The scratchpad
+# passes 0700, the mode Claude Code and `aidc create` give it, so a claimed one is not
+# left listable by other host users. Run by entrypoint.sh as root on every start
+# (through aidc_claim_session_mounts), before privileges drop, and only when
+# aidc_host_user_is_session_user holds. Docker materialises a missing bind-mount source
+# on the HOST as root 0755 whenever it starts the container -- an `aidc restart`, an
+# upgrade, a /tmp wiped by a host reboot -- and a memory dir made that way leaves
+# Claude unable to save the conversation and the MCP's transcript mirror with nothing
+# to read. With the host user being the session user, a root-owned dir here is
+# root-owned on the host too: nobody meant a dir under their own ~/.claude to belong to
+# root, and giving it to the session user gives it back to them. A dir already owned by
+# anyone else is left alone. Never recursive, because what lives inside a bridged dir
+# is the host's. What this cannot reach: when Docker also had to make the bridged dir's
+# PARENT on the host (the host's /tmp/claude-<uid> after a reboot cleared /tmp), that
+# parent stays root-owned there, because the container's /tmp/claude-<uid> is its own
+# and not a mount.
 # Emits "claimed <dir>", or the unwritable tag and "could not claim <dir>", per dir on
 # stdout (the caller logs it); returns 1 when any claim failed.
 aidc_claim_docker_made_dirs() {
-    local owner="$1" parent d rc=0
-    shift
+    local owner="$1" mode="$2" parent d rc=0
+    shift 2
     for parent in "$@"; do
         [ -d "$parent" ] || continue
         for d in "$parent" "$parent"/*/; do
             d="${d%/}"
             [ -d "$d" ] && [ ! -L "$d" ] || continue
             [ "$(stat -c %u "$d" 2>/dev/null)" = 0 ] || continue
-            if chown "$owner" "$d" 2>/dev/null; then
+            if chown "$owner" "$d" 2>/dev/null \
+                    && { [ "$mode" = - ] || chmod "$mode" "$d" 2>/dev/null; }; then
                 printf 'claimed %s\n' "$d"
             else
                 printf '%s could not claim %s\n' "$AIDC_TRANSCRIPT_UNWRITABLE_TAG" "$d"
@@ -120,6 +127,19 @@ aidc_claim_docker_made_dirs() {
             fi
         done
     done
+    return "$rc"
+}
+
+# aidc_claim_session_mounts <owner> <projects-dir> <scratchpad-root>
+# The entrypoint's claim over both bridged mounts: the memory dirs under <projects-dir>
+# keep their mode, the scratchpad dirs under <scratchpad-root> get 0700. Each is
+# attempted whatever the other returned, because the entrypoint runs under `set -e`,
+# which would otherwise end the pass at the first failed chown and leave the rest
+# unclaimed and unreported. Returns 1 when either failed.
+aidc_claim_session_mounts() {
+    local rc=0
+    aidc_claim_docker_made_dirs "$1" - "$2" || rc=1
+    aidc_claim_docker_made_dirs "$1" 0700 "$3" || rc=1
     return "$rc"
 }
 

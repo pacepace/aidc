@@ -65,3 +65,12 @@ box row counts as "not at prompt", which covers it.
    On the container's versions it is on the status row whenever Claude works.
 4. **S5: the dim placeholder exists but is transient.** The empty-box rule is "nothing, or only
    dim text, after `❯\xa0`".
+
+## Project dirs and resume (2026-10-19, Claude Code 2.1.303)
+
+| # | What | Observed |
+|---|---|---|
+| P1 | Project-dir name | `~/.claude/projects/<name>`: every character of the path that is not an ASCII letter or digit becomes `-` (`e.replace(/[^a-zA-Z0-9]/g,"-")`, read from the 2.1.303 binary). Over 200 characters it is cut and given a hash suffix. aidc's `aidc_claude_project_name` follows it |
+| P2 | `--continue` with nothing to continue | Exits with `No conversation found to continue` instead of opening a session |
+| P3 | What counts as a conversation | A transcript holding only `cost-state`, `file-history-snapshot`, `last-prompt`, `mode`, `permission-mode` lines is not one (P2 fires). With such a stub newer than a real transcript, `--continue` skips the stub and resumes the real one (live: it recalled a word from the older conversation) |
+| P4 | What a Claude that could not write leaves | On exit after its project dir became writable mid-session: one transcript of bookkeeping lines only (P3), none of the conversation |

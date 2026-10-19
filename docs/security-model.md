@@ -137,6 +137,25 @@ and transcripts (`~/.claude/projects/<encoded>/`): a session can edit its own me
 leave a symlink there that the host's Claude Code follows when it reads that dir. Narrower, and
 open: see the backlog.
 
+### Host directories the dev container re-owns at start
+
+The dev container's entrypoint runs as root, and on every start it gives the session user any
+root-owned directory at the top of the bridged memory and scratchpad mounts
+(`aidc_claim_docker_made_dirs`). Those are directories Docker made on the host because the mount
+source was missing, and nobody meant a directory under their own `~/.claude` to belong to root.
+It re-owns host files, so its bounds are the security property, and each one is load-bearing:
+
+- **Only when the host user is the session user** (`aidc_host_user_is_session_user`: the
+  bind-mounted repo's owner, seen from inside, is vscode's uid). Under rootless Docker the host
+  user appears as root inside, so every directory they own reads as uid 0; without this check the
+  entrypoint would take their memory directory from them. With a host uid that is not the
+  container's, it would hand a Docker-made directory to whichever host account holds that uid.
+- **Only root-owned directories.** A directory anyone else owns is never touched.
+- **Never recursive, never through a symlink.** What lives inside a bridged directory is the
+  host's.
+
+Dropping any of these turns a repair into a way for a session to take host files.
+
 ### A token an orchestrator hands a session (MCP-39)
 
 `session_mcp_set` gives a session's Claude an MCP server on the orchestrator's API and a bearer

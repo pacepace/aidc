@@ -54,6 +54,13 @@ holding `.profile` and `.mcp.port` (red before the fix, under yq; green after un
 parsers) and checks `aidc_yq -i` edits in place. Live: `aidc config` and a throwaway
 `aidc create` from `~` with the branch CLI read `profile: multi` and labelled every container.
 
+Review rev-20261019T004817Z-4313009a (0 blocking): R-1 the flag probe piped yq's help into
+`grep -q`, which under pipefail can SIGPIPE yq and fall back silently, and cached its answer inside
+`$(...)`; it now runs once when yq.sh is sourced, with no pipe. R-4 `_aidc_has_yq` moved into
+yq.sh, so `AIDC_NO_YQ=1` now also hides yq from network.sh and cmd-create.sh. R-2/R-3 a stub yq
+covers both forms, and a guard fails on any `yq eval` outside yq.sh. Verified by
+rev-20261019T005225Z-5b0eac65.
+
 
 ## 2026-10-08: a pasted prompt Claude Code wrapped is still the orchestrator's
 

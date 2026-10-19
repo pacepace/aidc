@@ -133,9 +133,7 @@ EOF
 
 # ---- yq vs fallback ----------------------------------------------------------
 
-# AIDC_NO_YQ=1 forces the awk fallback, so the unit tests can run both parsers on
-# one machine (a defect in one of them hid behind the other once: see below).
-_aidc_has_yq() { [ "${AIDC_NO_YQ:-}" != 1 ] && command -v yq >/dev/null 2>&1; }
+# _aidc_has_yq (yq.sh) says which parser runs; AIDC_NO_YQ=1 forces the awk fallback.
 
 # ---- scalar getter -----------------------------------------------------------
 #

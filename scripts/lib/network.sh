@@ -202,7 +202,7 @@ aidc_session_attached_networks() {
 aidc_declared_networks() {
     local compose_file="$1"
     [ -f "$compose_file" ] || return 1
-    if command -v yq >/dev/null 2>&1; then
+    if _aidc_has_yq; then
         aidc_yq '.networks[] | select(.external == true) | .name' "$compose_file" 2>/dev/null \
             | awk 'NF'
         return 0

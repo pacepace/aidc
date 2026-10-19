@@ -11,16 +11,25 @@
 # Bash 3.2 compatible. Defines no die/err: a sourced library reports its own
 # failures (tests/unit/test-lib-self-contained.sh).
 
+# AIDC_NO_YQ=1 hides yq, so the unit tests can run the awk fallbacks on a machine
+# that has it (a defect in one parser hid behind the other once).
+_aidc_has_yq() { [ "${AIDC_NO_YQ:-}" != 1 ] && command -v yq >/dev/null 2>&1; }
+
+# Whether this yq has --expression, decided once here in the sourcing shell: most
+# calls run inside $(...), where an answer cached on first use would be lost. No
+# pipe into grep: under pipefail, grep -q exiting early can kill yq with SIGPIPE,
+# the check then reads as "no flag", and the guessing form comes back.
+_AIDC_YQ_EXPR_FLAG=""
+if _aidc_has_yq; then
+    case "$(yq eval --help 2>&1)" in
+        *--expression*) _AIDC_YQ_EXPR_FLAG="--expression" ;;
+    esac
+fi
+
 # aidc_yq <expression> [yq args and files...]: `yq eval` with the expression pinned.
 aidc_yq() {
     local expr="$1"
     shift
-    if [ -z "${_AIDC_YQ_EXPR_FLAG+set}" ]; then
-        _AIDC_YQ_EXPR_FLAG=""
-        if yq eval --help 2>/dev/null | grep -q -- '--expression'; then
-            _AIDC_YQ_EXPR_FLAG="--expression"
-        fi
-    fi
     if [ -n "$_AIDC_YQ_EXPR_FLAG" ]; then
         yq eval --expression "$expr" "$@"
     else

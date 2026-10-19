@@ -408,7 +408,42 @@ if [ "$AIDC_CONFIG_PARSER" = yq ]; then
             . "$AIDC_ROOT/scripts/lib/yq.sh"
             aidc_yq ".a = 2" -i "$F"')
     eq "aidc_yq -i edits the file in place" "a: 2" "$(cat "$SCRATCH/dotfiles/inplace.yaml")"
+
+    # aidc create runs under pipefail. Probing the help through `| grep -q` there
+    # could kill yq with SIGPIPE and read as "no flag", bringing the bug back.
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    eq "the flag is detected under set -euo pipefail" "--expression" \
+        "$(env -i PATH="$TEST_PATH" AIDC_ROOT="$AIDC_ROOT" bash -c '
+            set -euo pipefail
+            . "$AIDC_ROOT/scripts/lib/yq.sh"
+            printf "%s" "$_AIDC_YQ_EXPR_FLAG"')"
 fi
+
+# Which form aidc_yq uses, against a stub yq that prints its arguments: one whose
+# help offers --expression, and an older one whose help does not.
+stub_yq_args() {
+    # $1 = the stub's help text
+    mkdir -p "$SCRATCH/stubyq"
+    cat > "$SCRATCH/stubyq/yq" <<EOF_STUB
+#!/bin/sh
+case "\$*" in *--help*) printf '%s\n' '$1'; exit 0 ;; esac
+printf '%s|' "\$@"
+EOF_STUB
+    chmod +x "$SCRATCH/stubyq/yq"
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    env -i PATH="$SCRATCH/stubyq:/usr/bin:/bin" AIDC_ROOT="$AIDC_ROOT" bash -c '
+        . "$AIDC_ROOT/scripts/lib/yq.sh"
+        aidc_yq ".profile" -i f.yaml'
+}
+eq "a yq with --expression gets the expression pinned" "eval|--expression|.profile|-i|f.yaml|" \
+    "$(stub_yq_args '      --expression string   forcibly set the expression argument.')"
+eq "an older yq without it gets the guessing form" "eval|.profile|-i|f.yaml|" \
+    "$(stub_yq_args '  -i, --inplace   update the file in place')"
+
+# Every yq call goes through aidc_yq: a plain `yq eval` anywhere else is the bug back.
+plain=$(grep -rnE '(^|[^_[:alnum:]])yq (eval|e) ' "$AIDC_ROOT/scripts" \
+    | grep -v '^[^:]*/scripts/lib/yq\.sh:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+eq "no yq eval outside scripts/lib/yq.sh" "" "$plain"
 
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"

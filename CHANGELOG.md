@@ -21,7 +21,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   root, so Claude could not write its transcript: resume lost everything since, and the MCP never
   saw the session's replies. The container now takes back any such folder from root each time it
   starts, along with a root-owned scratchpad folder under `/tmp/claude-<uid>` (set to 0700), and
-  only when your host user is the container's user, so it never takes a folder that is yours, and `aidc create`, `aidc upgrade` and `aidc restart` warn if it is still not writable.
+  only when your host user is the container's user, so it never takes a folder that is yours.
+  `aidc create`, `aidc upgrade` and `aidc restart` warn if it is still not writable.
 - **`aidc-claude` could exit with "No conversation found to continue".** It resumed whenever a
   transcript file existed, even one with no messages in it. It now resumes only when there is a
   conversation to resume.

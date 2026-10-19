@@ -24,6 +24,9 @@
 #     hand-roll a YAML parser unless absolutely necessary"; this fallback
 #     exists so the CLI degrades gracefully when yq isn't installed.
 
+# shellcheck source=yq.sh
+. "$(dirname "${BASH_SOURCE[0]}")/yq.sh"
+
 # ---- defaults ----------------------------------------------------------------
 
 aidc_config_defaults() {
@@ -148,7 +151,7 @@ _aidc_yaml_scalar() {
         # (tld_taints, claude_resume, share_*) was silently dropped wherever yq
         # was installed, while the awk fallback read it. Found by CI 2026-09-22.
         local v
-        v=$(yq eval ".${key}" "$file" 2>/dev/null || printf '')
+        v=$(aidc_yq ".${key}" "$file" 2>/dev/null || printf '')
         [ "$v" = "null" ] && v=""
         printf '%s' "$v"
         return 0
@@ -179,7 +182,7 @@ _aidc_yaml_list() {
     if _aidc_has_yq; then
         # `.x[]` over a missing or null key prints nothing; the `// []` guard
         # keeps yq quiet about traversing null.
-        yq eval ".${key} // [] | .[]" "$file" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+        aidc_yq ".${key} // [] | .[]" "$file" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
         return 0
     fi
     # Fallback: detect `key:` line, then either read inline [..] or following
@@ -698,9 +701,9 @@ mcp_load_settings() {
     local b="" p="" c=""
     if _aidc_has_yq; then
         # Not `// ""`: yq's // treats false as missing (see _aidc_yaml_scalar).
-        b=$(yq eval '.mcp.bind_address' "$cfg" 2>/dev/null || printf '')
-        p=$(yq eval '.mcp.port' "$cfg" 2>/dev/null || printf '')
-        c=$(yq eval '.mcp.session_create' "$cfg" 2>/dev/null || printf '')
+        b=$(aidc_yq '.mcp.bind_address' "$cfg" 2>/dev/null || printf '')
+        p=$(aidc_yq '.mcp.port' "$cfg" 2>/dev/null || printf '')
+        c=$(aidc_yq '.mcp.session_create' "$cfg" 2>/dev/null || printf '')
         [ "$b" = "null" ] && b=""
         [ "$p" = "null" ] && p=""
         [ "$c" = "null" ] && c=""

@@ -373,6 +373,43 @@ eq "every key in the config template has a trust class" "" "$unclassified"
 unlisted=$(grep -oE 'val=\$\(_aidc_yaml_(scalar|list) "\$f" "[a-z_]+"' "$AIDC_ROOT/scripts/lib/config.sh" || true)
 eq "load_config reads no key by name outside the table" "" "$unlisted"
 
+# yq takes its first argument for a file when one by that name is in the current
+# directory, so `yq eval .profile <config>` run from $HOME printed ~/.profile and
+# `aidc create` rejected it as the profile. Run from a directory holding files named
+# after the keys, every value must still come from the config.
+mkdir -p "$SCRATCH/dotfiles/home/.config/aidc" "$SCRATCH/dotfiles/cwd"
+printf '# ~/.profile: executed by the command interpreter for login shells.\n' \
+    > "$SCRATCH/dotfiles/cwd/.profile"
+printf 'not: yaml: at all\n' > "$SCRATCH/dotfiles/cwd/.mcp.port"
+dotfile_load() {
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    (cd "$SCRATCH/dotfiles/cwd" && env -i PATH="$TEST_PATH" AIDC_NO_YQ="$AIDC_NO_YQ" \
+        HOME="$SCRATCH/dotfiles/home" AIDC_ROOT="$AIDC_ROOT" bash -c '
+            . "$AIDC_ROOT/scripts/lib/config.sh"
+            load_config >/dev/null 2>&1
+            mcp_load_settings
+            printf "%s|%s|%s" "$AIDC_PROFILE" "$AIDC_MCP_PORT" "$(printf "%s" "$AIDC_STATE_ACTOR_TLDS" | tr "\n" ,)"')
+}
+printf 'mcp:\n  port: 7878\n' > "$SCRATCH/dotfiles/home/.config/aidc/config.yaml"
+eq "a .profile in the current directory leaves the default profile alone" \
+    "multi|7878|.ru,.cn,.by,.ir,.kp" "$(dotfile_load)"
+printf 'profile: node\nstate_actor_tlds:\n  - .xx\nmcp:\n  port: 9999\n' \
+    > "$SCRATCH/dotfiles/home/.config/aidc/config.yaml"
+eq "and the configured values are the ones read" \
+    "node|9999|.ru,.cn,.by,.ir,.kp,.xx" "$(dotfile_load)"
+
+# cmd-create.sh labels the compose file in place through the same wrapper, with -i
+# after the expression; check that order edits the file on this yq.
+if [ "$AIDC_CONFIG_PARSER" = yq ]; then
+    printf 'a: 1\n' > "$SCRATCH/dotfiles/inplace.yaml"
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    (cd "$SCRATCH/dotfiles/cwd" && env -i PATH="$TEST_PATH" AIDC_ROOT="$AIDC_ROOT" \
+        F="$SCRATCH/dotfiles/inplace.yaml" bash -c '
+            . "$AIDC_ROOT/scripts/lib/yq.sh"
+            aidc_yq ".a = 2" -i "$F"')
+    eq "aidc_yq -i edits the file in place" "a: 2" "$(cat "$SCRATCH/dotfiles/inplace.yaml")"
+fi
+
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

@@ -34,6 +34,26 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-19: aidc create from $HOME no longer reads ~/.profile as the profile
+
+<!-- prawduct: scope=yq-expression-file-collision -->
+
+**Why:** live, 2026-10-19: `aidc create` run from `~` on plexdock failed with "invalid profile
+'# ~/.profile: executed by the command interpreter …'". yq decides which argument is its
+expression by checking whether the first one names a file in the current directory; `yq eval
+.profile <config>` run from `~` read `~/.profile` instead, and `_aidc_yaml_scalar` returned its
+text. Any scalar key whose `.key` matched a file in the caller's directory was exposed.
+
+**What:** `scripts/lib/yq.sh` adds `aidc_yq <expr> [args...]`, which passes the expression with
+`--expression` when the installed yq offers it (the flag exists for exactly this) and the old
+form otherwise. Every yq call goes through it: the scalar, list and `mcp.*` readers in
+config.sh, `aidc_declared_networks` in network.sh, and the compose labelling in cmd-create.sh
+(now `aidc_yq "<expr>" -i <file>`). config.sh and network.sh each source yq.sh themselves, so
+neither depends on the other being loaded. test-config-sources.sh loads config from a directory
+holding `.profile` and `.mcp.port` (red before the fix, under yq; green after under both
+parsers) and checks `aidc_yq -i` edits in place. Live: `aidc config` and a throwaway
+`aidc create` from `~` with the branch CLI read `profile: multi` and labelled every container.
+
 
 ## 2026-10-08: a pasted prompt Claude Code wrapped is still the orchestrator's
 

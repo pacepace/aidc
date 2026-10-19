@@ -388,6 +388,20 @@ remove_session_networks() {
     fi
 }
 
+# Repeat to the operator every line of a dev container's log that says Claude cannot
+# write this session's transcripts.
+#   relay_transcript_warnings <log-text>
+# Such a session looks healthy from here and says so only in Claude's own status bar,
+# while the orchestrator waits on replies the MCP cannot read. The lines are matched
+# by the tag alone (AIDC_TRANSCRIPT_UNWRITABLE_TAG in .devcontainer/claude-state-install.sh,
+# which writes them), so their wording is free to change. Always returns 0: callers
+# run under `set -e`, and a log with nothing to say is the normal case.
+relay_transcript_warnings() {
+    printf '%s\n' "$1" | grep -F 'transcript-unwritable:' \
+        | while IFS= read -r msg; do info "WARNING: $msg"; done || true
+    return 0
+}
+
 # Wait for the dev container of a session to print its ready marker.
 #   wait_for_dev_ready <session> [max-seconds]
 # Polls `docker logs` (NOT `docker exec` -- exec polling during the dev
@@ -408,6 +422,7 @@ wait_for_dev_ready() {
         logs=$(docker logs "$dev_ct" 2>&1 || true)
         if printf '%s' "$logs" | grep -q '\[aidc-user-main\] ready'; then
             info "$dev_ct ready (user-main reported ready)"
+            relay_transcript_warnings "$logs"
             return 0
         fi
         if [ $((i % 10)) -eq 0 ]; then

@@ -339,10 +339,10 @@ case "$mode" in
         ;;
 esac
 if [ "${AIDC_CLAUDE_RESUME:-true}" = "true" ]; then
-    _proj_enc="$(pwd | tr '/.' '-')"
-    _proj_dir="${HOME}/.claude/projects/${_proj_enc}"
-    _sessions=("${_proj_dir}"/*.jsonl)
-    if [ -e "${_sessions[0]}" ]; then
+    # A transcript holding a message, not just a transcript: see
+    # aidc_has_resumable_conversation.
+    . /usr/local/bin/aidc-claude-state-install.sh
+    if aidc_has_resumable_conversation "${HOME}/.claude/projects/$(aidc_claude_project_name "$(pwd)")"; then
         args+=(--continue)
     fi
 fi

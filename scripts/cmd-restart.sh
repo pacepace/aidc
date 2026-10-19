@@ -63,6 +63,8 @@ i=0
 while [ $i -lt 20 ]; do
     if docker exec -u vscode "$DEV" tmux has-session -t main 2>/dev/null; then
         info "tmux session 'main' is back; aidc-claude (with --continue) should be running in window 0"
+        # `docker restart` keeps the container's earlier logs: read only this start's.
+        relay_transcript_warnings "$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$DEV")" "$DEV" 2>&1 || true)"
         info "attach with: aidc attach $NAME"
         exit 0
     fi

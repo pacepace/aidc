@@ -1620,9 +1620,8 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 
     The loop-guard runs (``consecutive_deliveries``, ``deliveries_since_idle``,
     ``last_delivery_at``) are PRESERVED across the re-anchor (loaded from the
-    existing mark), so the
-    ongoing-runaway backstop keeps accumulating — only an idle gap resets it, never
-    a re-anchor.
+    existing mark), so the ongoing-runaway backstop keeps accumulating: a re-anchor
+    never resets it.
 
     Called synchronously at watch registration so the anchor is set before any
     prompt is injected; _drain_transcript_once also self-baselines defensively."""
@@ -1688,10 +1687,10 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 # runaway's turns grew slow as context ballooned (observed gaps up to ~250 s), so
 # it never tripped while it flooded the orchestrator. The signal is an unbroken RUN
 # of deliveries. Count consecutive deliveries and trip past
-# _LOOP_GUARD_MAX_CONSECUTIVE. Only a genuinely IDLE gap — the orchestrator stopped
-# driving, far longer than any single turn (_LOOP_GUARD_IDLE_RESET_S) — resets the
-# run, so a session that goes quiet and later resumes is not latched, while a slow
-# runaway cannot use its slow turns to dodge. The run + last-delivery time are
+# _LOOP_GUARD_MAX_CONSECUTIVE. A slow turn never resets the run; a genuinely IDLE gap
+# does — the orchestrator stopped driving, far longer than any single turn
+# (_LOOP_GUARD_IDLE_RESET_S) — so a session that goes quiet and later resumes is not
+# latched, while a slow runaway cannot use its slow turns to dodge. The run + last-delivery time are
 # persisted in the durable watermark, so an MCP restart cannot silently resume the
 # loop. This is the coarse backstop; the orchestrator's own guard (which resets on
 # a human turn) is the precise layer, so this cap sits ABOVE it. On trip a turn is
@@ -2172,11 +2171,11 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 # Loop guard: cap the run of CONSECUTIVE deliveries, or an
                 # orchestrator<->session runaway would deliver forever. Timing is not the
                 # signal — the runaway can be slow (context-bloated turns), which is
-                # what defeated the old rate-based reset. Only a genuinely IDLE gap
+                # what defeated the old rate-based reset. A genuinely IDLE gap
                 # (_LOOP_GUARD_IDLE_RESET_S — far longer than any single turn) resets
-                # the run, so a session that truly goes quiet is not latched while a
-                # slow runaway still trips. State is durable so an MCP restart stays
-                # latched. On trip: DROP (dead-letter + advance, no POST) so the
+                # the run, and a slow turn does not, so a session that truly goes quiet
+                # is not latched while a slow runaway still trips. State is durable so an
+                # MCP restart stays latched. On trip: DROP (dead-letter + advance, no POST) so the
                 # orchestrator stops receiving and the session idles out.
                 # Only replies to the orchestrator's prompts count toward the cap;
                 # every delivery counts toward the backstop (see the constants).

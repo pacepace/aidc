@@ -48,7 +48,7 @@ notifications, a subagent hand-back, the turn after a safety-classifier stop), w
 orchestrator prompt at all. The guard counted every delivery; a runaway needs the orchestrator's
 prompts, and a typed one proves a human is there.
 
-**What:** `_drain_transcript_once` resets the run on a delivery whose origin is `terminal` or
+**What:** the loop guard (in `_drain_once_body`, under `_drain_transcript_once`) resets the run on a delivery whose origin is `terminal` or
 `person` and does not count it; replies to the orchestrator's prompts, and turns no one prompted
 that carry that origin (`_carry_prompt_origin`), count as before. Origin rests on matching each
 prompt to the send record, and that can fail (a failed record write, an expired entry, paste
@@ -67,7 +67,9 @@ the terminal; their fixtures record those prompts as the orchestrator's sends, a
 does, and every assertion is unchanged (TestLoopGuard and the transcript-move test).
 
 Review rev-20261019T045416Z-1738de1c (0 blocking): O-1 the backstop above; O-2 the "no human at
-the pane" premise is gone from the comments.
+the pane" premise is gone from the comments. Cumulative rev-20261019T050219Z-0b5052d1 (0
+blocking): R-1 the CHANGELOG names the backstop; R-2 the comments no longer say only an idle gap
+resets the run; R-5 this entry names `_drain_once_body`.
 
 Also on this branch: the shipped change-log entries since v1.8.3 carry their `release=` (mapped
 from the tag that first contained each entry's commit), and compose-render.sh's header names

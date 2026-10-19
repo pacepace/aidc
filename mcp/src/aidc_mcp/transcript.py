@@ -1141,11 +1141,11 @@ class Watermark:
     byte_offset: int = 0
     last_delivered_uuid: str = ""  # terminal assistant uuid last delivered
     # Loop-guard state (durable across MCP restart): the count of consecutive
-    # deliveries and the wall-clock time of the last one. Only a genuinely IDLE
-    # gap (the orchestrator stopped driving — far longer than any single turn)
-    # resets the count; a slow turn does NOT — those slow-turn gaps are exactly
-    # what let the 019f1fde runaway dodge the old rate-based guard. See the loop
-    # guard in tools._drain_transcript_once.
+    # deliveries and the wall-clock time of the last one. A genuinely IDLE gap
+    # (the orchestrator stopped driving — far longer than any single turn) or a
+    # person's prompt resets the count; a slow turn does NOT — those slow-turn gaps
+    # are exactly what let the 019f1fde runaway dodge the old rate-based guard. See
+    # the loop guard in tools._drain_once_body.
     consecutive_deliveries: int = 0
     # Every delivery since the last idle gap, whatever its prompt's origin: the
     # backstop for a runaway whose prompts were misread as typed at the terminal.

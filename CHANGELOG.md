@@ -13,6 +13,25 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-10-19
+
+### Fixed
+- **A session could silently stop saving its conversation.** When the shared memory folder
+  (`~/.claude/projects/<repo>`) was missing as a container started, Docker recreated it owned by
+  root, so Claude could not write its transcript: resume lost everything since, and the MCP never
+  saw the session's replies. The container now takes back any such folder from root each time it
+  starts, along with a root-owned scratchpad folder under `/tmp/claude-<uid>` (set to 0700), and
+  only when your host user is the container's user, so it never takes a folder that is yours.
+  `aidc create`, `aidc upgrade` and `aidc restart` warn if it is still not writable.
+- **`aidc-claude` could exit with "No conversation found to continue".** It resumed whenever a
+  transcript file existed, even one with no messages in it. It now resumes only when there is a
+  conversation to resume.
+- **A repo whose path held `_`, a space or other punctuation lost its memory and its replies.**
+  aidc named the project folder by replacing only `/` and `.`, but Claude Code replaces every
+  character that is not a letter or digit, so the memory mount, resume and the MCP's transcript
+  mirror all pointed at a folder Claude never wrote. They now use Claude's rule. A session already
+  on such a path needs `aidc kill` and `aidc create`.
+
 ## [1.9.3] - 2026-10-19
 
 ### Fixed

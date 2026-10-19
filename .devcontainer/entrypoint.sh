@@ -110,6 +110,21 @@ else
     log "WARN: could not prepare the claude scratchpad root (continuing)"
 fi
 
+# The bridged memory and scratchpad dirs, when Docker made them: see
+# aidc_claim_docker_made_dirs, and aidc_host_user_is_session_user for when that is
+# safe. Non-fatal for the same reason as above; user-main.sh warns, and the CLI
+# repeats it, if Claude still cannot write its transcripts.
+# shellcheck source=claude-state-install.sh
+. /usr/local/bin/aidc-claude-state-install.sh
+if aidc_host_user_is_session_user "${AIDC_REPO_PATH:-/nonexistent}" "$(id -u vscode)"; then
+    while IFS= read -r _line; do
+        log "memory/scratchpad mount: ${_line}"
+    done < <(aidc_claim_session_mounts vscode:vscode /home/vscode/.claude/projects \
+                "${CLAUDE_TMP_ROOT:-/tmp/claude-$(id -u vscode)}" || true)
+else
+    log "memory/scratchpad mount: not claiming root-owned dirs: the host user does not appear here as vscode (repo owner uid $(stat -c %u "${AIDC_REPO_PATH:-/nonexistent}" 2>/dev/null || echo unknown))"
+fi
+
 # Drop privileges to vscode and exec the container's CMD (whatever was
 # passed — compose's tmux+tail script, VS Code Dev Containers' keep-alive
 # loop, or the Dockerfile's default of /usr/local/bin/aidc-user-main.sh

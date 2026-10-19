@@ -184,7 +184,7 @@ assert "CLAUDE_CONFIG_DIR points Claude's state at the dev-home volume" \
 # path Claude reads under CLAUDE_CONFIG_DIR. settings.json is copied, not shared.
 assert "host per-project memory dir is mounted read-write at Claude's projects path" \
     "docker inspect -f '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' aidc-${SESSION}-dev | tr ' ' '\\n' | grep -q '^/home/vscode/.claude/projects/.*=true$'"
-SMOKE_ENC=$(printf '%s' "$TMP_REPO" | tr '/.' '-')
+SMOKE_ENC=$(. "$AIDC_ROOT/.devcontainer/claude-state-install.sh" && aidc_claude_project_name "$TMP_REPO")
 SMOKE_PROBE="$HOME/.claude/projects/${SMOKE_ENC}/.aidc-smoke-probe"
 touch "$SMOKE_PROBE"
 assert "a file the host writes into the project memory dir is visible where Claude reads it" \

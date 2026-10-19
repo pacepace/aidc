@@ -1618,8 +1618,9 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
     injected, so the response — a strictly-later turn — is still delivered; only
     pre-existing history is skipped. Forward-only.
 
-    The loop-guard run (``consecutive_deliveries`` / ``last_delivery_at``) is
-    PRESERVED across the re-anchor (loaded from the existing mark), so the
+    The loop-guard runs (``consecutive_deliveries``, ``deliveries_since_idle``,
+    ``last_delivery_at``) are PRESERVED across the re-anchor (loaded from the
+    existing mark), so the
     ongoing-runaway backstop keeps accumulating — only an idle gap resets it, never
     a re-anchor.
 
@@ -1679,9 +1680,9 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
               consecutive_deliveries=mark.consecutive_deliveries)
 
 
-# Loop guard for the delivery watcher. An aidc session has no human at the pane:
-# every turn is driven by the orchestrator's session_send, so a runaway where the
-# orchestrator and this session answer each other forever (prod incident
+# Loop guard for the delivery watcher. When the orchestrator's session_send drives
+# every turn, a runaway where the orchestrator and this session answer each other
+# forever (prod incident
 # 2026-07-03, orchestrator conv 019f1fde) has no natural terminator. TIMING is NOT the
 # signal: the earlier rate-based guard reset its run on any >45 s gap, but the
 # runaway's turns grew slow as context ballooned (observed gaps up to ~250 s), so
@@ -1697,7 +1698,18 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 # DROPPED (dead-lettered + watermark advanced, no POST) so the orchestrator stops
 # receiving callbacks and the session idles out — self-healing once a long idle
 # resets the run.
+#
+# The run counts only replies to the orchestrator's prompts: a prompt typed at the
+# terminal, or sent for a person, puts a human in the loop, which a runaway never has,
+# and ends it. A turn no one prompted carries the origin of the prompt before it
+# (_carry_prompt_origin) and counts with that. Origin rests on matching each prompt to
+# the MCP's send record, and that match can fail (a record write that failed, an
+# expired entry, Claude Code writing a paste differently), which would make a runaway's
+# prompts read as typed and never trip the cap. _LOOP_GUARD_BACKSTOP is the cap for
+# that case: an unbroken run of deliveries of any origin, set far above what a person
+# working at the terminal reaches without a long pause.
 _LOOP_GUARD_MAX_CONSECUTIVE = 20
+_LOOP_GUARD_BACKSTOP = 100
 _LOOP_GUARD_IDLE_RESET_S = 900.0
 
 # Consecutive torn-read polls before the watcher concludes the pinned session is
@@ -2157,9 +2169,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                           conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                           fingerprint=fingerprint)
             else:
-                # Loop guard: cap the run of CONSECUTIVE deliveries. There is no
-                # human at the pane to end the exchange, so an orchestrator<->
-                # session runaway would otherwise deliver forever. Timing is not the
+                # Loop guard: cap the run of CONSECUTIVE deliveries, or an
+                # orchestrator<->session runaway would deliver forever. Timing is not the
                 # signal — the runaway can be slow (context-bloated turns), which is
                 # what defeated the old rate-based reset. Only a genuinely IDLE gap
                 # (_LOOP_GUARD_IDLE_RESET_S — far longer than any single turn) resets
@@ -2167,17 +2178,29 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 # slow runaway still trips. State is durable so an MCP restart stays
                 # latched. On trip: DROP (dead-letter + advance, no POST) so the
                 # orchestrator stops receiving and the session idles out.
+                # Only replies to the orchestrator's prompts count toward the cap;
+                # every delivery counts toward the backstop (see the constants).
                 wall_now = wall_now_fn()
+                human = origin in ("terminal", "person")
                 if wall_now - mark.last_delivery_at > _LOOP_GUARD_IDLE_RESET_S:
                     mark.consecutive_deliveries = 0
-                mark.consecutive_deliveries += 1
+                    mark.deliveries_since_idle = 0
+                if human:
+                    mark.consecutive_deliveries = 0
+                else:
+                    mark.consecutive_deliveries += 1
+                mark.deliveries_since_idle += 1
                 mark.last_delivery_at = wall_now
-                if mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE:
+                if (mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
+                        or mark.deliveries_since_idle > _LOOP_GUARD_BACKSTOP):
                     _write_dead_letter(state_dir, session, conversation_id, outgoing)
                     log_event("transcript_delivery_loop_guard_tripped", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                               consecutive_deliveries=mark.consecutive_deliveries,
-                              cap=_LOOP_GUARD_MAX_CONSECUTIVE)
+                              deliveries_since_idle=mark.deliveries_since_idle,
+                              cap=(_LOOP_GUARD_MAX_CONSECUTIVE
+                                   if mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
+                                   else _LOOP_GUARD_BACKSTOP))
                 elif await _deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn):
                     # Record ONLY a confirmed delivery, so a dead-lettered or
                     # dropped turn stays eligible for a later resend.

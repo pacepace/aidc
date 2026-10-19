@@ -13,6 +13,7 @@ import pytest
 
 from aidc_mcp import transcript as ts
 from aidc_mcp.tools import (
+    _LOOP_GUARD_BACKSTOP,
     _LOOP_GUARD_IDLE_RESET_S,
     _LOOP_GUARD_MAX_CONSECUTIVE,
     _STALE_PIN_RECOVER_POLLS,
@@ -562,6 +563,7 @@ class TestDrain:
         mark.consecutive_deliveries = 7
         mark.last_delivery_at = time.time()   # recent: not the idle gap that does reset
         ts.save_watermark(state, mark)
+        ts.record_sent_prompt(state, sess, "go")   # the runaway's prompts are the orchestrator's
         _mk_transcript(base, sess, "new", [
             _ts(_user("u2", "go"), "2026-07-04T18:00:00.000Z"),
             _ts(_assistant("b1", "NEW"), "2026-07-04T18:00:01.000Z"),
@@ -821,11 +823,14 @@ class TestPostTurnInstrumentation:
 
 
 # --- loop guard (prod incident 2026-07-03: orchestrator<->session runaway) ----
-# An aidc session has no human at the pane, so a runaway where the orchestrator
-# (MetaLLM) and this session answer each other forever has no natural end. The
-# guard is RATE-based: it caps consecutive RAPID deliveries (each within the fast
-# gap of the prior); a slower gap (real work) resets the run, so a legitimate long
-# task never trips. The run is durable so a short MCP restart stays latched.
+# A runaway where the orchestrator (MetaLLM) and a session answer each other forever
+# has no natural end, so the guard caps an unbroken run of deliveries; only a long
+# idle gap resets it, so a slow runaway still trips. The run is durable so a short MCP
+# restart stays latched. It counts only replies to the orchestrator's own prompts: a
+# prompt typed at the terminal (or sent for a person) puts a human in the loop, which
+# a runaway never has, and resets the run. 2026-10-08: counting every delivery dropped
+# metallm's reply to the 11th of Pace's prompts that morning, the 21st delivery
+# counting the task notifications between them.
 
 class TestLoopGuard:
     async def _drain_at(self, base, state, rec, wall):
@@ -834,12 +839,25 @@ class TestLoopGuard:
             post_fn=rec, sleep_fn=_nosleep, wall_now_fn=lambda: wall,
         )
 
-    def _turns(self, n):
-        """seed + n completed user->assistant turns (terminal uuids a1..aN)."""
+    def _turns(self, n, state=None):
+        """seed + n completed user->assistant turns (terminal uuids a1..aN). With
+        ``state``, each prompt not yet on record is recorded as the orchestrator's
+        send, as session_send does: the runaway these tests describe is the
+        orchestrator's prompts and the session's replies."""
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
         for i in range(1, n + 1):
             objs += [_user(f"u{i}", f"q{i}"), _assistant(f"a{i}", f"r{i}")]
+        if state is not None:
+            recorded = self._recorded.setdefault(str(state), set())
+            for i in range(1, n + 1):
+                if i not in recorded:
+                    ts.record_sent_prompt(state, "sess", f"q{i}")
+                    recorded.add(i)
         return objs
+
+    @pytest.fixture(autouse=True)
+    def _fresh_record_tracking(self):
+        self._recorded = {}
 
     async def test_rapid_burst_trips(self, tmp_path):
         """Rapid-fire deliveries (constant clock, no idle gap) stop at the cap; the
@@ -849,7 +867,7 @@ class TestLoopGuard:
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         overflow = 5
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + overflow))
+        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + overflow, state))
         await self._drain_at(base, state, rec, wall=1000.0)          # constant clock -> one run
         assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
         assert len(list((state / "dead-letter").glob("*.json"))) == overflow
@@ -873,7 +891,7 @@ class TestLoopGuard:
         # idle, so the run accumulates and trips.
         slow_gap = _LOOP_GUARD_IDLE_RESET_S / 4
         for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + overflow + 1):
-            _mk_transcript(base, "sess", "sid1", self._turns(i))     # one new turn per pass
+            _mk_transcript(base, "sess", "sid1", self._turns(i, state))     # one new turn per pass
             wall += slow_gap
             await self._drain_at(base, state, rec, wall=wall)
         assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
@@ -891,14 +909,14 @@ class TestLoopGuard:
         wall = 1000.0
         # Deliver right up to the cap (not over), rapid.
         for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
-            _mk_transcript(base, "sess", "sid1", self._turns(i))
+            _mk_transcript(base, "sess", "sid1", self._turns(i, state))
             wall += 1.0
             await self._drain_at(base, state, rec, wall=wall)
         assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
         assert not (state / "dead-letter").exists()                  # at cap, not over
         # A long idle, then one more turn: the idle resets the run, so the turn
         # delivers instead of tripping (it would trip without the reset).
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1))
+        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
         wall += _LOOP_GUARD_IDLE_RESET_S + 1
         await self._drain_at(base, state, rec, wall=wall)
         assert rec.delivered[-1] == f"a{_LOOP_GUARD_MAX_CONSECUTIVE + 1}"
@@ -918,6 +936,8 @@ class TestLoopGuard:
         for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
             objs += [_user(f"ue{i}", "x"), _assistant(f"e{i}", None)]   # empty
             objs += [_user(f"ur{i}", "y"), _assistant(f"a{i}", f"r{i}")]  # real
+            ts.record_sent_prompt(state, "sess", "x")                     # the orchestrator's
+            ts.record_sent_prompt(state, "sess", "y")
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
         assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
@@ -930,15 +950,138 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1))
+        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
         await self._drain_at(base, state, rec, wall=1000.0)          # trips on the overflow
         assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
         # "Restart": fresh Recorder + one more turn, gap < idle reset. The persisted
         # run is already past the cap, so the new turn is dropped — no resume.
         rec2 = Recorder()
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 2))
+        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 2, state))
         await self._drain_at(base, state, rec2, wall=1001.0)         # 1s later, < idle reset
         assert rec2.delivered == []
+
+    @staticmethod
+    def _notified(uuid, n):
+        """A task notification and Claude's reply to it: a turn no one prompted."""
+        return [_user(f"n{uuid}", f"<task-notification>\n<task-id>t{n}</task-id>\n</task-notification>"),
+                _assistant(uuid, f"noted {n}")]
+
+    async def test_a_morning_at_the_terminal_never_trips(self, tmp_path):
+        """2026-10-08 at metallm: prompts typed at the terminal, each with task
+        notifications answered between them, and no orchestrator prompt at all. Every
+        reply is delivered, well past the cap, with nothing dead-lettered."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        want = []
+        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
+            objs += [_user(f"u{i}", f"typed {i}"), _assistant(f"a{i}", f"r{i}")]
+            objs += self._notified(f"c{i}", i)
+            want += [f"a{i}", f"c{i}"]
+        _mk_transcript(base, "sess", "sid1", objs)
+        await self._drain_at(base, state, rec, wall=1000.0)          # constant clock: one run
+        assert rec.delivered == want
+        assert not (state / "dead-letter").exists()
+        assert ts.load_watermark(state, "sess", "conv").consecutive_deliveries == 0
+
+    async def test_a_typed_prompt_resets_an_orchestrator_run(self, tmp_path):
+        """A person typing at the terminal in the middle of an orchestrator-driven run
+        ends it: the orchestrator's prompts after it start a new run, so the two
+        halves together deliver more than the cap without tripping."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        half = _LOOP_GUARD_MAX_CONSECUTIVE - 2
+        objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        for i in range(1, half + 1):
+            objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
+            ts.record_sent_prompt(state, "sess", f"orch {i}")
+        objs += [_user("uh", "a person typed this"), _assistant("ah", "answered")]
+        for i in range(half + 1, 2 * half + 1):
+            objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
+            ts.record_sent_prompt(state, "sess", f"orch {i}")
+        _mk_transcript(base, "sess", "sid1", objs)
+        await self._drain_at(base, state, rec, wall=1000.0)
+        assert len(rec.delivered) == 2 * half + 1
+        assert not (state / "dead-letter").exists()
+        assert ts.load_watermark(state, "sess", "conv").consecutive_deliveries == half
+
+    async def test_a_prompt_sent_for_a_person_resets_the_run_too(self, tmp_path):
+        """A prompt the orchestrator relays for a named person (session_send's
+        sent_by) is a human's, like one typed at the terminal: it ends the run."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        half = _LOOP_GUARD_MAX_CONSECUTIVE - 2
+        objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        for i in range(1, half + 1):
+            objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
+            ts.record_sent_prompt(state, "sess", f"orch {i}")
+        objs += [_user("up", "from a person"), _assistant("ap", "answered")]
+        ts.record_sent_prompt(state, "sess", "from a person", sent_by="u-1")
+        for i in range(half + 1, 2 * half + 1):
+            objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
+            ts.record_sent_prompt(state, "sess", f"orch {i}")
+        _mk_transcript(base, "sess", "sid1", objs)
+        await self._drain_at(base, state, rec, wall=1000.0)
+        assert len(rec.delivered) == 2 * half + 1
+        assert not (state / "dead-letter").exists()
+
+    async def test_a_runaway_misread_as_typed_still_hits_the_backstop(self, tmp_path):
+        """Origin rests on matching each prompt to the send record. If that match
+        fails (a record write that failed, an expired entry, a paste Claude Code wrote
+        differently), a runaway's prompts read as typed at the terminal and never trip
+        the cap; the backstop counts every delivery and stops it anyway."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        overflow = 3
+        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_BACKSTOP + overflow))  # no record
+        await self._drain_at(base, state, rec, wall=1000.0)
+        assert len(rec.delivered) == _LOOP_GUARD_BACKSTOP
+        assert len(list((state / "dead-letter").glob("*.json"))) == overflow
+        mark = ts.load_watermark(state, "sess", "conv")
+        assert mark.consecutive_deliveries == 0                       # read as typed
+        assert mark.deliveries_since_idle == _LOOP_GUARD_BACKSTOP + overflow
+
+    async def test_an_idle_gap_resets_the_backstop_too(self, tmp_path):
+        """A person who pauses for longer than the idle reset starts over on the
+        backstop as well, so a long day at the terminal with breaks never reaches it."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        n = _LOOP_GUARD_BACKSTOP
+        _mk_transcript(base, "sess", "sid1", self._turns(n))
+        await self._drain_at(base, state, rec, wall=1000.0)          # right at the backstop
+        _mk_transcript(base, "sess", "sid1", self._turns(n + 1))
+        await self._drain_at(base, state, rec, wall=1000.0 + _LOOP_GUARD_IDLE_RESET_S + 1)
+        assert len(rec.delivered) == n + 1
+        assert not (state / "dead-letter").exists()
+        assert ts.load_watermark(state, "sess", "conv").deliveries_since_idle == 1
+
+    async def test_the_orchestrators_continuations_still_count(self, tmp_path):
+        """A turn no one prompted takes the origin of the prompt before it, so task
+        notifications answered inside an orchestrator-driven run count toward the cap
+        like the replies around them: the runaway cannot hide in them."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
+        rec = Recorder()
+        await self._drain_at(base, state, rec, wall=1000.0)          # baseline
+        objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE // 2 + 2):
+            objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
+            ts.record_sent_prompt(state, "sess", f"orch {i}")
+            objs += self._notified(f"c{i}", i)
+        _mk_transcript(base, "sess", "sid1", objs)
+        await self._drain_at(base, state, rec, wall=1000.0)
+        assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
+        assert (state / "dead-letter").exists()
 
     async def test_old_watermark_without_new_fields_loads(self, tmp_path):
         """A watermark written before the loop-guard fields existed (missing
@@ -952,6 +1095,7 @@ class TestLoopGuard:
         }), encoding="utf-8")
         mark = ts.load_watermark(state, "sess", "conv")
         assert mark.consecutive_deliveries == 0
+        assert mark.deliveries_since_idle == 0
         assert mark.last_delivery_at == 0.0
         assert mark.last_delivered_uuid == "a1"     # existing fields still load
 

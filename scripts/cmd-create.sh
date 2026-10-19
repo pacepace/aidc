@@ -992,14 +992,14 @@ chmod 600 "$COMPOSE_OUT"
 # available; otherwise we fall back to appending via a YAML-aware insertion.
 # Best-effort: if either path fails we still proceed (label is a nicety,
 # not load-bearing for container_name lookups).
-if command -v yq >/dev/null 2>&1; then
+if _aidc_has_yq; then
     for svc in squid refresher policy audit dev; do
         # Compute the role label. Sidecar role = service name; dev = "dev".
-        yq eval -i "
+        aidc_yq "
             .services.${svc}.labels[\"aidc.session\"] = \"${NAME}\" |
             .services.${svc}.labels[\"aidc.role\"] = \"${svc}\" |
             .services.${svc}.labels[\"aidc.profile\"] = \"${AIDC_PROFILE}\"
-        " "$COMPOSE_OUT" 2>/dev/null || true
+        " -i "$COMPOSE_OUT" 2>/dev/null || true
     done
 fi
 

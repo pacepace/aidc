@@ -34,6 +34,9 @@
 # route: Docker installs a subnet route per attachment. Pinning the gateway
 # costs nothing and keeps egress where it belongs.)
 
+# shellcheck source=yq.sh
+. "$(dirname "${BASH_SOURCE[0]}")/yq.sh"
+
 # ---- naming ------------------------------------------------------------------
 
 # The network compose creates and owns for a session. Always the gateway holder.
@@ -199,8 +202,8 @@ aidc_session_attached_networks() {
 aidc_declared_networks() {
     local compose_file="$1"
     [ -f "$compose_file" ] || return 1
-    if command -v yq >/dev/null 2>&1; then
-        yq eval '.networks[] | select(.external == true) | .name' "$compose_file" 2>/dev/null \
+    if _aidc_has_yq; then
+        aidc_yq '.networks[] | select(.external == true) | .name' "$compose_file" 2>/dev/null \
             | awk 'NF'
         return 0
     fi

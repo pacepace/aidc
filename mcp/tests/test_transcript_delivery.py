@@ -2147,3 +2147,27 @@ class TestARewatchDoesNotStallTheServer:
         await _drain(base, state, rec)
         await _drain(base, state, rec)
         assert on_loop and not any(on_loop)
+
+
+class TestAJoinedPromptIsAnsweredInTheRunningTurn:
+    async def test_the_turn_it_joined_is_delivered_once_without_a_terminal_note(self, tmp_path):
+        """session_send(deliver="join"): the prompt reaches the transcript only as a
+        queue-operation and its queued_command attachment, and the answer is part of
+        the running turn's reply. Fixture shapes from metallm, 2026-10-22."""
+        from pathlib import Path
+        evening = [json.loads(ln) for ln in
+                   (Path(__file__).parent / "fixtures" / "claude-2.1.300-notification-turn.jsonl")
+                   .read_text().splitlines()]
+        upto = next(i for i, o in enumerate(evening) if o.get("uuid") == "s2") + 1
+        end = next(i for i, o in enumerate(evening) if o.get("uuid") == "s4") + 1
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", evening[:upto])
+        rec = ContentRecorder()
+        await _drain(base, state, rec)          # baseline past the first turn
+        _mk_transcript(base, "sess", "sid1", evening[:end])
+        await _drain(base, state, rec)
+        await _drain(base, state, rec)
+        assert [t.terminal_uuid for t in rec.turns] == ["a9"]
+        assert rec.turns[0].text.endswith("On your status check: I was on the merge.")
+        assert not rec.turns[0].text.startswith(ts.TERMINAL_PROMPT_NOTE)
+        assert rec.turns[0].prompt_origin != "terminal"

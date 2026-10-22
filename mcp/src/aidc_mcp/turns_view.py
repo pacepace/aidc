@@ -82,15 +82,136 @@ def last_reply_at(objs: list[dict]) -> str | None:
     return _iso(line_times(objs).get(turns[-1].terminal_uuid))
 
 
-def working_on(objs: list[dict], cap: int = 300) -> str:
-    """The newest prompt in the transcript, cut to `cap`: what an open turn is working on."""
-    for obj in reversed(objs):
-        if obj.get("type") != "user":
+# What opened a turn (started_by):
+#   prompt           a person's prompt, or one the MCP pasted (the two look the same);
+#   background_task  a background task's <task-notification>;
+#   session_message  another Claude session's message (a peer agent, the coordinator);
+#   system           anything else Claude Code started itself (an auto-continue, a
+#                    scheduled wake-up), or a turn whose opening line is not in the
+#                    transcript.
+STARTED_BY = ("prompt", "background_task", "session_message", "system")
+
+# What a caller reads when no turn is open.
+NO_TURN: dict[str, Any] = {"working_on": "", "started_by": None, "turn_started_at": None,
+                           "last_activity": None}
+
+# promptSource values a person's (or the MCP's) words arrive under, besides "typed":
+# a prompt Claude Code held while it worked and then ran ("queued"), a suggestion the
+# person accepted, and one sent through Claude Code's remote control ("sdk"). Measured
+# over every transcript on the build host, 2026-10-22: each comes with origin.kind
+# "human" or no origin at all.
+_PERSON_SOURCES = frozenset({"typed", "queued", "suggestion_accepted", "sdk"})
+_NOTIFICATION_KIND = "task-notification"
+_NOTIFICATION_TAG = "<task-notification>"
+_TAG_RE = {name: re.compile(rf"<{name}>(.*?)</{name}>", re.DOTALL)
+           for name in ("task-id", "status", "summary")}
+
+
+def _origin_kind(obj: dict) -> str:
+    origin = obj.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return kind if isinstance(kind, str) else ""
+
+
+def _person_words(obj: dict) -> str:
+    """What a person (or the MCP) wrote on this prompt line, or "" when nobody did.
+    human_prompt_text's rules, with the other promptSource values a person's words
+    arrive under; a line opening with a wrapper tag still yields nothing."""
+    words = ts.human_prompt_text(obj)
+    if words:
+        return words
+    source = obj.get("promptSource")
+    if (obj.get("isMeta") or source not in _PERSON_SOURCES
+            or _origin_kind(obj) not in ("", "human")):
+        return ""
+    return ts.human_prompt_text({**obj, "promptSource": "typed"})
+
+
+def _tag(text: str, name: str) -> str:
+    m = _TAG_RE[name].search(text)
+    return " ".join(m.group(1).split()) if m else ""
+
+
+def started_by(opener: dict | None) -> str:
+    """What opened a turn, as one of STARTED_BY, from its opening line."""
+    if opener is None:
+        return "system"
+    kind = _origin_kind(opener)
+    if kind == _NOTIFICATION_KIND or ts.line_text(opener).lstrip().startswith(_NOTIFICATION_TAG):
+        return "background_task"
+    if kind in ts.SESSION_MESSAGE_KINDS:
+        return "session_message"
+    if _person_words(opener):
+        return "prompt"
+    return "system"
+
+
+def _describe(opener: dict | None, by: str) -> str:
+    """working_on for a turn: the prompt's words when a person or the MCP opened it;
+    otherwise what started it, said as such. A system wrapper is never shown as if a
+    person had written it."""
+    if opener is None:
+        return "a turn whose opening line is not in the transcript"
+    if by == "prompt":
+        return _person_words(opener).strip()
+    if by == "background_task":
+        text = ts.line_text(opener)
+        status = _tag(text, "status") or "finished"
+        summary = _tag(text, "summary")
+        task = _tag(text, "task-id")
+        said = summary or (f"task {task}" if task else "")
+        if summary and task:
+            said += f" (task {task})"
+        return f"background task {status}: {said}" if said else f"background task {status}"
+    if by == "session_message":
+        origin = opener.get("origin")
+        sender = origin.get("from") or origin.get("name") if isinstance(origin, dict) else ""
+        if _origin_kind(opener) == "coordinator":
+            return "a message from the coordinator session"
+        return (f"a message from another Claude session ({sender})" if isinstance(sender, str)
+                and sender else "a message from another Claude session")
+    return "something Claude Code started itself, not a prompt"
+
+
+def _activity(obj: dict | None) -> dict[str, Any] | None:
+    """The newest step of an assistant line: the last tool_use, text or thinking block."""
+    if obj is None:
+        return None
+    raw = obj.get("message")
+    msg = raw if isinstance(raw, dict) else {}
+    content = msg.get("content")
+    blocks = content if isinstance(content, list) else []
+    for block in reversed(blocks):
+        if not isinstance(block, dict):
             continue
-        text = ts.human_prompt_text(obj)
-        if text.strip():
-            return redact(text.strip())[:cap]
-    return ""
+        kind = block.get("type")
+        if kind == "tool_use":
+            name = block.get("name")
+            return {"kind": "tool_use", "name": name if isinstance(name, str) else "",
+                    "at": _iso(ts.wall_time(obj))}
+        if kind in ("text", "thinking"):
+            return {"kind": kind, "at": _iso(ts.wall_time(obj))}
+    if obj.get("isApiErrorMessage") or isinstance(content, str):
+        return {"kind": "text", "at": _iso(ts.wall_time(obj))}
+    return None
+
+
+def turn_info(objs: list[dict], cap: int = 300) -> dict[str, Any]:
+    """What the open turn is doing: working_on (cut to `cap`, redacted), started_by,
+    turn_started_at (ISO UTC) and last_activity ({kind, name for a tool_use, at}, or
+    None before Claude has written anything). NO_TURN when no turn is open."""
+    turn = ts.open_turn(objs)
+    if turn is None:
+        return dict(NO_TURN)
+    by = started_by(turn.opener)
+    return {"working_on": redact(_describe(turn.opener, by))[:cap], "started_by": by,
+            "turn_started_at": _iso(turn.started_at),
+            "last_activity": _activity(turn.newest_assistant)}
+
+
+def working_on(objs: list[dict], cap: int = 300) -> str:
+    """What the open turn is working on (turn_info's working_on), "" with none open."""
+    return str(turn_info(objs, cap)["working_on"])
 
 
 class UnknownTurn(ValueError):

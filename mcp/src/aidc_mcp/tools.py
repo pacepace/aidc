@@ -54,6 +54,15 @@ _SENT_BY_DESC = (
     "Set by the orchestrator when the prompt is a person's, not its own: who sent it. "
     "Leave this unset."
 )
+# session_send's `deliver`: what to do with a prompt sent while the agent is mid-turn.
+DELIVER_QUEUE = "queue"
+DELIVER_JOIN = "join"
+_DELIVER_DESC = (
+    'What to do if the agent is in the middle of a turn. "queue" (the default): hold the '
+    "prompt and paste it when the turn ends; its reply comes on its own. \"join\": paste it "
+    "now, and the agent takes it into the turn it is working on at its next step; the reply "
+    "is part of that turn's final answer. With the agent idle, both send at once."
+)
 # Config file lives in the same directory as the token file (both on the
 # aidc-config volume, mounted at /aidc-config/ in the container).
 # Override AIDC_MCP_TOKEN_FILE to relocate both simultaneously.
@@ -678,6 +687,54 @@ async def _check_free(container: str, name: str) -> str:
     return reason
 
 
+def _join_refusal(name: str, state: SessionState) -> str:
+    """Why a prompt may not be pasted into the turn running now (session_send's
+    deliver="join"), or "". The screen rules of _paste_reason all hold: the turn
+    being busy is the one they skip. And an Esc the watcher has not reported yet: a
+    prompt pasted on top of it would bury the report (design 10 S1)."""
+    if not state.claude_running or state.screen is None:
+        return "claude_not_running"
+    if state.screen.input_box == scr.NOT_AT_PROMPT:
+        return "claude_not_at_prompt"
+    if state.screen.input_box == scr.UNRECOGNIZED:
+        return "screen_unrecognized"
+    if state.screen.list_focused:
+        return "agent_list_selected"
+    if state.screen.input_box == scr.HAS_TEXT and not _own_unsent_text(name, state.screen):
+        return "input_has_text"
+    if state.why == "interrupt_not_reported_yet":
+        return "interrupt_not_reported_yet"
+    return ""
+
+
+async def _join_running_turn(container: str, name: str, text: str, sent_by: str) -> str:
+    """Paste `text` into the turn running in `name` now, for session_send's
+    deliver="join". Called under the session's send lock, with nothing queued.
+
+    Returns "joined" once it went in; "idle" when no turn is running, so the caller
+    sends as usual; else why it may not go in now (a waiting reason, or
+    "interrupt_not_reported_yet"), and the caller queues it.
+
+    Claude Code holds a prompt pasted mid-turn as a queue-operation and hands it to the
+    turn at its next tool boundary (or runs it next, if the turn ends first);
+    _prompt_arrived recognizes that arrival."""
+    state = await _session_state(container, name)
+    if state.claude_running and state.turn != TURN_RUNNING:
+        return "idle"
+    refusal = _join_refusal(name, state)
+    if not refusal and await sf.taint_or_none(name) is not None:
+        refusal = "session_tainted"
+    if refusal:
+        log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
+        return refusal
+    if not await _inject(container, text, _SESSION_WINDOW, session=name, sent_by=sent_by):
+        log_event("session_send_join_declined", session=name, reason="paste_failing",
+                  why=state.why)
+        return "paste_failing"
+    log_event("session_send_joined_turn", session=name, prompt_len=len(text), why=state.why)
+    return "joined"
+
+
 async def _wait_until_free(container: str, name: str, timeout: float) -> str:
     """Poll _check_free until two consecutive readings are free (""), or the timeout
     runs out (the last reason). The timeout is held to on the clock: after a reading
@@ -728,9 +785,11 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
     ever claim it, give its send record back.
 
     Claude Code records a prompt pasted while it is working only as a `queue-operation`
-    and answers it inside the running turn, so it never becomes a prompt line. A local
-    slash command (/clear, /model) arrives as a prompt line, but Claude Code runs it
-    itself and no turn opens for it. Either way no turn can claim the prompt, and its
+    and answers it inside the running turn, so it never becomes a prompt line; if the
+    turn ends first, it runs it next as a prompt line marked `promptSource: "queued"`,
+    which no turn attributes (human_prompt_text). A local slash command (/clear,
+    /model) arrives as a prompt line, but Claude Code runs it itself and no turn opens
+    for it. In each case no turn can claim the prompt, and its
     record would wait out its 24 h, where the same words typed by a person would match
     it and be delivered as the orchestrator's own prompt. Both watchers of a pasted
     prompt (the free check and _watch_for_echo) come through here, because either can
@@ -739,7 +798,12 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
     index = ts.prompt_index_since(objs, text, sent_at)
     if index is None:
         return False
-    if objs[index].get("type") == "queue-operation":
+    line = objs[index]
+    if line.get("type") == "queue-operation" or (
+            line.get("type") == "user" and not ts.human_prompt_text(line)
+            and not ts.is_local_command(objs, index)):
+        # Taken into a running turn, or held while one ran and then run as a prompt
+        # line no turn attributes to anyone (promptSource "queued").
         event = "session_send_queued_by_claude"
     elif ts.is_local_command(objs, index):
         event = "session_send_ran_as_local_command"
@@ -1451,6 +1515,9 @@ _WAITING_EXPLAINED = {
                            "agent list, where typed keys are commands",
     "session_tainted": "the session is tainted, so nothing more is pasted into it; the person "
                        "has to kill and recreate it",
+    # Only ever a join_declined: the prompt itself then waits as claude_busy.
+    "interrupt_not_reported_yet": "the agent was just interrupted, and that has not been "
+                                  "reported to its conversation yet",
 }
 
 
@@ -2800,7 +2867,10 @@ async def _session_report(name: str) -> dict[str, Any]:
         "working": working,
         "turn": state.turn,
         "why": state.why,
-        "working_on": tv.working_on(objs) if working else "",
+        # What the open turn is: what opened it, since when, its newest step. Read
+        # from the transcript only while the agent is working, so an idle session
+        # names no work.
+        **(tv.turn_info(objs) if working else tv.NO_TURN),
         "last_reply_at": tv.last_reply_at(objs),
         "watched_conversation_id": _watched_conversation(name) or None,
     }
@@ -2969,8 +3039,16 @@ def register(app: Any) -> None:
         """What one session is doing: whether its coding agent is working, and on what.
 
         Returns: working (true while the coding agent is on a turn), turn and why (the
-        evidence), working_on (the prompt it is answering, while working), claude_running,
-        last_reply_at (when its newest reply finished, UTC), repo and branch (and head),
+        evidence), claude_running, and while working, what the turn is: working_on (the
+        prompt it answers, or what else started it, e.g. "background task completed:
+        ..."), started_by (what opened the turn: "prompt" a person's or a session_send
+        prompt, "background_task" a background task finishing, "session_message" another
+        Claude session's message, "system" anything else Claude Code started itself),
+        turn_started_at (when the turn opened, UTC) and last_activity (the agent's newest
+        step: {kind: tool_use|text|thinking, name: the tool, at: UTC}, null before its
+        first; an old `at` on a long turn is a stall or one long tool call). Not working,
+        these are "" and null. Also last_reply_at (when its newest reply finished, UTC),
+        repo and branch (and head),
         tainted ({at, trigger, domain} or null: a tainted session takes no more work),
         audit_dir, watched_conversation_id (where its replies are delivered), and
         `send_queue`: prompts sent with session_send that wait to be pasted, and why.
@@ -3239,6 +3317,8 @@ def register(app: Any) -> None:
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
         sent_by: Annotated[str | None, Field(description=_SENT_BY_DESC)] = None,
+        deliver: Annotated[str, Field(description=_DELIVER_DESC, json_schema_extra={
+            "enum": [DELIVER_QUEUE, DELIVER_JOIN]})] = DELIVER_QUEUE,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Ask the live Claude agent running in a session a question, or hand it a task —
@@ -3273,16 +3353,40 @@ def register(app: Any) -> None:
         for session_resend because a reply is slow: that delivers an OLDER reply and
         is how a conversation ends up answering the wrong question.
 
+        A queued return also says what the agent is busy with: working_on, started_by
+        (prompt | background_task | session_message | system), turn_started_at (UTC) and
+        last_activity (its newest step and when), as session_status does. From that you
+        decide: leave it queued, send again with deliver "join", or session_interrupt.
+
+        deliver "join" — WHEN TO USE: the prompt bears on the work in flight (a correction,
+        an answer it is waiting for, "also do X", "what are you on?") and should not wait
+        out a long turn. The prompt is pasted now and the agent takes it in at its next
+        step; status "joined_turn". The reply is NOT separate: it comes inside the running
+        turn's final answer, over the webhook as usual, and may cover the earlier work too.
+        If the turn ends before the agent takes it in, the agent runs it next and the reply
+        comes the same way. WHEN NOT ("queue", the default): an unrelated task, or anything
+        that needs its own clean reply. "join" still queues, saying why in join_declined,
+        when a prompt is already queued for the session (it never jumps the queue), when
+        Claude is not running or shows a dialog or a screen aidc does not recognize, when
+        someone has unsent text in the input box or the agent list selected, when an
+        interrupt has not been reported yet, or when the session is tainted. With the
+        agent idle, "join" sends like "queue".
+
         Args:
             name: the aidc session to talk to (see the open-webhook list below).
             prompt: the message to send.
+            deliver: "queue" (default) or "join", see above.
         """
         # Who the prompt is for: the reply comes back with prompt_origin "person"
         # and this, so the orchestrator answers it as that person's and not as a
         # report on its own prompt.
         sent_by = (sent_by or "").strip()
+        deliver = (deliver or DELIVER_QUEUE).strip()
         log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
-                  sent_by=sent_by)
+                  sent_by=sent_by, deliver=deliver)
+        if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
+            return _envelope_err(f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
+                                 f"not {deliver!r}", code="invalid_argument")
         container = f"aidc-{name}-dev"
         if (await _session_instance(name))[0] == SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
@@ -3341,11 +3445,38 @@ def register(app: Any) -> None:
             # queue and the drainer injects it the moment the turn ends. Anything
             # already queued means this one MUST queue behind it, or a send would
             # overtake an earlier one that is still waiting.
-            wait_reason = ("queued_behind" if _pending_sends.get(name)
-                           else await _wait_until_free(container, name,
-                                                       timeout=_SEND_FREE_WAIT_S))
-            if not wait_reason and not await _inject(container, sanitized, _SESSION_WINDOW,
-                                                     session=name, sent_by=sent_by):
+            # deliver="join" pastes into a running turn instead, on one reading: the
+            # two-reading wait exists to keep a prompt OUT of a turn just starting, which
+            # is what joining asks for. It never overtakes a queued prompt either.
+            joined = False
+            join_declined = ""
+
+            async def try_join() -> str:
+                nonlocal joined, join_declined, wait_reason, attempts
+                outcome = await _join_running_turn(container, name, sanitized, sent_by)
+                if outcome == "joined":
+                    joined, wait_reason = True, ""
+                elif outcome == "paste_failing":
+                    join_declined, wait_reason, attempts = outcome, outcome, 1
+                elif outcome != "idle":
+                    join_declined = outcome
+                return outcome
+
+            if _pending_sends.get(name):
+                wait_reason = "queued_behind"
+                if deliver == DELIVER_JOIN:
+                    join_declined = "queued_behind"
+            else:
+                first = await try_join() if deliver == DELIVER_JOIN else "idle"
+                if not joined and not wait_reason:
+                    wait_reason = await _wait_until_free(container, name,
+                                                         timeout=_SEND_FREE_WAIT_S)
+                if deliver == DELIVER_JOIN and first == "idle" and wait_reason == "claude_busy":
+                    # Idle at the first reading, and a turn started during the wait.
+                    await try_join()
+            if (not joined and not wait_reason
+                    and not await _inject(container, sanitized, _SESSION_WINDOW,
+                                          session=name, sent_by=sent_by)):
                 # A paste that did not land is a fact about one attempt, not about the
                 # session: queue it, and the drainer retries with backoff.
                 wait_reason = "paste_failing"
@@ -3383,8 +3514,22 @@ def register(app: Any) -> None:
         # task first).
         watched = _watched_conversation(name) if watching else ""
         elsewhere = bool(conversation_id and watched and watched != conversation_id)
-        if elsewhere:
+        not_joined = (f"Not joined to the running turn: "
+                      f"{_WAITING_EXPLAINED.get(join_declined, join_declined)}. "
+                      if join_declined else "")
+        if joined:
             delivery = (
+                "Joined — pasted into the turn the agent is already working on; it takes "
+                "the prompt in at its next step (or runs it next, if the turn ends first). "
+                "The reply is not separate: it comes in that turn's final answer"
+                + (f", to conversation {watched} (one webhook per session), not this one"
+                   if elsewhere else ", over the webhook" if watching
+                   else ", but no webhook is open for this session, so it will NOT be "
+                   "auto-delivered")
+                + ". Do NOT re-send it."
+            )
+        elif elsewhere:
+            delivery = not_joined + (
                 (f"Queued — held because {waiting_why}. It will be pasted automatically "
                  f"as soon as the session is free ({queued_depth} waiting, this one "
                  "last). Do NOT re-send it. " if queued_depth else "Sent. ")
@@ -3394,7 +3539,7 @@ def register(app: Any) -> None:
                 "session_unwatch and then session_watch for this session."
             )
         elif watching and queued_depth:
-            delivery = (
+            delivery = not_joined + (
                 f"Queued — held because {waiting_why}. It will be pasted automatically "
                 f"as soon as the session is free ({queued_depth} "
                 "waiting, this one last). Nothing is lost and there is nothing to "
@@ -3412,7 +3557,7 @@ def register(app: Any) -> None:
             # injection) and the session will work on it. Returning an error would
             # invite the caller to retry, putting a second copy of the prompt into
             # the same tmux window.
-            delivery = (
+            delivery = not_joined + (
                 (f"Queued (held because {waiting_why}), but " if queued_depth
                  else "Sent, but ")
                 + "no webhook is open for this session, so the reply will NOT "
@@ -3426,11 +3571,18 @@ def register(app: Any) -> None:
         # it parses: here, to another conversation, or nowhere.
         # The same rule the delivery sentence above follows.
         reply_goes = "nowhere" if not watching else "elsewhere" if elsewhere else "here"
+        status = "joined_turn" if joined else "queued" if queued_depth else "sent"
+        # What the agent is busy with, so a caller whose prompt waits (or joined) can
+        # decide what to do next without another call: the fields session_status gives.
+        # A prompt sent to an idle session has no turn to describe.
+        turn = tv.turn_info(_session_transcript(name)[0]) if status != "sent" else {}
         return _envelope_ok(
-            {"status": "queued" if queued_depth else "sent", "session": name,
+            {"status": status, "session": name,
              "reply_goes": reply_goes,
              "queued_behind": max(0, queued_depth - 1),
              **({"waiting_reason": wait_reason} if queued_depth else {}),
+             **({"join_declined": join_declined} if join_declined else {}),
+             **turn,
              **({"watched_conversation_id": watched} if watched else {}),
              "window": _SESSION_WINDOW, "delivery": delivery}
         )
@@ -3874,9 +4026,9 @@ def register(app: Any) -> None:
 
         This stops work mid-edit, and it is the person's call: what it changed so far
         stays in the working tree, uncommitted. Returns interrupted, was_running (why it
-        was judged working, and the prompt it was answering) and tree (branch, head, how
-        many paths are changed, the first 20). With nothing running it does nothing and
-        says so.
+        was judged working, and session_status's working_on, started_by, turn_started_at
+        and last_activity for the turn it stopped) and tree (branch, head, how many paths
+        are changed, the first 20). With nothing running it does nothing and says so.
         """
         container = f"aidc-{name}-dev"
         state = await _session_state(container, name)
@@ -3887,7 +4039,7 @@ def register(app: Any) -> None:
                       why=state.why)
             return _envelope_ok({"session": name, "interrupted": False, "was_running": None,
                                  "tree": tree, "note": "nothing was running"})
-        was = {"why": state.why, "working_on": tv.working_on(objs)}
+        was = {"why": state.why, **tv.turn_info(objs)}
         rc = await _tmux_exec(container, ["send-keys", "-t", f"main:{_SESSION_WINDOW}", "Escape"])
         if rc != 0:
             log_event("tool_call", tool="session_interrupt", session=name, ok=False, rc=rc)

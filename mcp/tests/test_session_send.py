@@ -11,7 +11,7 @@ import asyncio
 import json
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
@@ -31,7 +31,7 @@ async def _let_drainer_run(session: str, ticks: int = 50) -> None:
 
 
 def _make_send():
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app, app._tool_manager._tools["session_send"].fn
 
@@ -239,7 +239,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     async def fake_watcher(*a, **k):
         await asyncio.Event().wait()  # stay alive until the cleanup fixture cancels
 
-    async def announce(app_):
+    async def announce(app_, ctx=None):
         return None
 
     monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
@@ -595,7 +595,7 @@ async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch
         raise OSError("spawn failed")
 
     monkeypatch.setattr(tools, "_session_instance", broken)
-    await tools.resume_on_startup(FastMCP("t"))
+    await tools.resume_on_startup(MCPServer("t"))
     assert "proj" not in tools._queue_loaded
     monkeypatch.setattr(tools, "_session_instance", working)
 
@@ -654,7 +654,7 @@ async def test_status_line_clears_when_the_wait_changes_to_another_reason(wiring
 
 
 async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeypatch):
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     status = app._tool_manager._tools["session_status"].fn
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {

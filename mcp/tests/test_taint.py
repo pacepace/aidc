@@ -8,7 +8,7 @@ stay open.
 import inspect
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, tools
 from aidc_mcp import session_facts as sf
@@ -18,7 +18,7 @@ TAINT = (b'{"tainted_at":"2026-10-14T09:00:00Z","trigger":"blocklist",'
 
 
 def _app():
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app
 

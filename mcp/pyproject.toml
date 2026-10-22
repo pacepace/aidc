@@ -1,10 +1,10 @@
 [project]
 name = "aidc-mcp"
-version = "1.9.6"
+version = "1.9.7"
 description = "aidc control plane: MCP server exposing aidc CLI as tools + resources"
 requires-python = ">=3.14"
 dependencies = [
-    "mcp[cli]>=1.2,<2",
+    "mcp[cli]>=2.3,<3",
     "httpx>=0.27",
     # Imported directly (auth.py / server.py / tools.py), not just transitively via mcp.
     # uvicorn[standard] keeps the uvloop/httptools speedups the shipped image runs.
@@ -53,3 +53,18 @@ ignore_missing_imports = true
 # A fix that needs to land sooner is an explicit, reviewed exception:
 # `exclude-newer-package` for that one package, with the reason beside it.
 exclude-newer = "14 days"
+# Reviewed exception: certifi 2026.10.19 (uploaded 2026-10-20) is the first release
+# without the `emSign ECC Root CA - G3` root, eight of whose intermediate CAs have
+# compromised keys (GHSA-6q48-6c7w-9gw2, critical), that keeps the unaffected emSign
+# roots. The cutoff admits that release and nothing later. It is a fixed date, so once
+# 2026.10.19 clears the 14-day window it only holds certifi back. Drop it then:
+# tests/unit/test-supply-chain-cooldown.sh fails once the cutoff is more than 14 days old.
+exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
+# Security floors for transitive dependencies (not imported here): a re-lock, or the
+# exception above being dropped early, must fail to resolve rather than quietly
+# return to a vulnerable version. PyJWT comes in via mcp; certifi via httpx/httpcore.
+# PyJWT < 2.15.0: GHSA-x33g-cr3x-6449, GHSA-42vr-xj54-vc7v and the 2.14.0 batch.
+constraint-dependencies = [
+    "pyjwt>=2.15.0",
+    "certifi>=2026.10.19",
+]

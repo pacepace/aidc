@@ -46,7 +46,7 @@ def parse_audit_dir(status: str) -> Path | None:
 
 
 def register(app: Any) -> None:
-    """Attach every resource to the given FastMCP app."""
+    """Attach every resource to the given MCPServer app."""
 
     @app.resource("aidc://sessions")
     @off_loop

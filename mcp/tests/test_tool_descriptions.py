@@ -4,7 +4,7 @@ So the orchestrating LLM knows which session to talk to without remembering it:
 the session-aware tools' descriptions carry a live list of sessions that
 currently have an open webhook (an active watcher).
 """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp.tools import (
     _refresh_session_tool_descriptions,
@@ -46,7 +46,7 @@ class TestWatchingSuffix:
 
 class TestRefreshDescriptions:
     def _app_with_send(self):
-        app = FastMCP("t")
+        app = MCPServer("t")
 
         @app.tool()
         def session_send(name: str) -> str:
@@ -97,7 +97,7 @@ class TestRefreshDescriptions:
     def test_unknown_tool_name_is_skipped(self):
         # Only session-aware tools are touched; a missing one must not error.
         _reset()
-        app = FastMCP("t")  # no session_send registered
+        app = MCPServer("t")  # no session_send registered
         _refresh_session_tool_descriptions(app)  # must not raise
         _reset()
 
@@ -109,7 +109,7 @@ class TestRoutingCues:
 
     def _descs(self):
         from aidc_mcp import tools
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         t = app._tool_manager._tools
         return {n: (t[n].description or "").lower() for n in t}
@@ -127,3 +127,77 @@ class TestRoutingCues:
     def test_session_invoke_distinguishes_fresh_from_resident_agent(self):
         d = self._descs()["session_invoke"]
         assert "session_send" in d and "fresh" in d     # not the resident, context-loaded agent
+
+
+class _Session:
+    def __init__(self, fail=False):
+        self.sent = 0
+        self.fail = fail
+
+    async def send_tool_list_changed(self):
+        if self.fail:
+            raise RuntimeError("stream closed")
+        self.sent += 1
+
+
+class _Ctx:
+    """The two notify paths of the SDK's request Context: the requesting session's
+    own channel (clients on 2025-era protocol versions) and the subscriptions/listen
+    bus (2026-07-28 clients get list changes only there)."""
+
+    def __init__(self, fail=False):
+        self.session = _Session(fail)
+        self.published = 0
+
+    async def notify_tools_changed(self):
+        self.published += 1
+
+
+class TestAnnounceWatchers:
+    def _app(self):
+        app = MCPServer("t")
+
+        @app.tool()
+        def session_send(name: str) -> str:
+            "Send a prompt to the session."
+            return name
+
+        return app
+
+    async def test_a_request_notifies_its_session_and_the_subscription_streams(self):
+        from aidc_mcp import tools
+        _reset()
+        app, ctx = self._app(), _Ctx()
+        _session_watchers["proj"] = _StubTask()
+        await tools._announce_watchers(app, ctx)
+        assert ctx.session.sent == 1
+        assert ctx.published == 1
+        assert "proj" in app._tool_manager._tools["session_send"].description
+        _reset()
+
+    async def test_without_a_request_the_description_still_changes(self):
+        from aidc_mcp import audit, tools
+        _reset()
+        app = self._app()
+        _session_watchers["proj"] = _StubTask()
+        await tools._announce_watchers(app)
+        assert "proj" in app._tool_manager._tools["session_send"].description
+        assert "tool_list_changed_notify_failed" in audit._AUDIT_PATH.read_text()
+        _reset()
+
+    async def test_a_failed_legacy_notify_still_reaches_the_subscription_streams(self):
+        from aidc_mcp import tools
+        _reset()
+        app, ctx = self._app(), _Ctx(fail=True)
+        await tools._announce_watchers(app, ctx)
+        assert ctx.published == 1
+        _reset()
+
+    def test_the_tools_that_change_the_watch_list_get_the_request_context(self):
+        from aidc_mcp import tools
+        app = MCPServer("t")
+        tools.register(app)
+        for name in ("session_send", "session_watch", "session_unwatch"):
+            tool = app._tool_manager._tools[name]
+            assert tool.context_kwarg == "ctx", name
+            assert "ctx" not in tool.parameters["properties"], name

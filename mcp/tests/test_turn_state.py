@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
@@ -739,7 +739,7 @@ class TestQueuedPromptOnTheAgentListScreen:
         monkeypatch.setattr(tools, "_load_and_paste", load_paste)
         monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
         monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         send = app._tool_manager._tools["session_send"].fn
         tools._session_watchers["proj"] = Watching()
@@ -801,7 +801,7 @@ class TestSendWhileABackgroundAgentRuns:
         monkeypatch.setattr(tools, "_load_and_paste", load_paste)
         monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
         monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         tools._session_watchers["proj"] = Watching()
         return app._tool_manager._tools["session_send"].fn

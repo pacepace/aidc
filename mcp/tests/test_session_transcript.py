@@ -10,7 +10,7 @@ import os
 import time
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import turns_view as tv
@@ -65,7 +65,7 @@ def transcript(tmp_path, monkeypatch):
 
 
 def _call(**kwargs):
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app._tool_manager._tools["session_transcript"].fn(name="proj", **kwargs)
 

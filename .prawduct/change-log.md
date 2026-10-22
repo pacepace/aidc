@@ -34,6 +34,84 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-22: Dependabot advisories cleared, and aidc-mcp moved to MCP SDK 2.3
+
+<!-- prawduct: scope=dependabot-pyjwt-certifi -->
+
+**Why:** pacepace/aidc had fifteen open Dependabot alerts, all on `mcp/uv.lock` with
+runtime scope: certifi 2026.7.22 (#27, critical: GHSA-6q48-6c7w-9gw2, the
+`emSign ECC Root CA - G3` root, eight of whose intermediate CAs have compromised keys) and PyJWT 2.13.0 (#13-#26: critical, high and medium).
+PyJWT is transitive through `mcp`; aidc-mcp does not import jwt. certifi comes in through
+httpx and httpcore. Pace then widened the scope (2026-10-22): "let's do the mcp upgrade too".
+That meant upgrading the whole lock and moving from mcp 1.30.0 to 2.x, with nothing a client
+sees allowed to change.
+
+**What:**
+- certifi 2026.10.19 and PyJWT 2.15.1. #24 and #26 needed 2.15.0. #25 lists no patched
+  version, but its range ends at 2.13.0 and its fix commit (0c87c8c) is an ancestor of
+  the 2.14.0 tag (GitHub compare). certifi 2026.10.19 was uploaded on 2026-10-20, inside
+  the REL-09 cooldown, so it gets a per-package `exclude-newer-package` cutoff
+  (2026-10-21T00:00Z, which admits that release and nothing later) with its reason beside it
+  in `mcp/pyproject.toml`. The cutoff is a fixed date, so after 2026-11-03 it only holds
+  certifi back. tests/unit/test-supply-chain-cooldown.sh fails once any `exclude-newer-package`
+  cutoff is older than the cooldown (after 2026-11-04T00:00Z for this one, checked with
+  `COOLDOWN_NOW`; its fixtures fail on an old cutoff in both TOML forms), so it cannot be
+  forgotten. The built image's bundle was checked: v1.9.6 has the four
+  emSign roots, and v1.9.7 has all of them except ECC G3, which is what the advisory's fix does.
+- `constraint-dependencies` floors (`pyjwt>=2.15.0`, `certifi>=2026.10.19`) under
+  `[tool.uv]`. Under the cooldown alone, a re-lock left certifi at 2026.7.22. With the floor
+  and the exception removed, `uv lock` fails to resolve instead (checked). They are
+  constraints, so neither package becomes a direct dependency.
+- `uv lock --upgrade` for everything else, all inside the cooldown. mcp 1.30.0 -> 2.3.0
+  brings mcp-types, httpx2 (with httpcore2 and truststore) and opentelemetry-api, and
+  drops httpx-sse and pydantic-settings. The full list is in the CHANGELOG.
+- The SDK 2.x port, covering the surface the 2.x migration guide changes for aidc:
+  `FastMCP` -> `MCPServer`; `transport_security` moved to `streamable_http_app()`; and
+  `get_context()` removed. That last one is what the tools/list_changed announcement used, so
+  session_send, session_watch and session_unwatch now take the injected Context and pass it on.
+  Since a client on protocol 2026-07-28 receives list changes only on a `subscriptions/listen`
+  stream, the announcement also publishes there (`ctx.notify_tools_changed()`). The server
+  also passes `version=` (serverInfo.version was the SDK's version), and publish.py reads
+  `Tool.input_schema`. `server.build_app()` is what `main()` serves.
+- Checked and left as is: 2.x runs a synchronous handler in a worker thread, but every
+  registered function is already a coroutine (`off_loop`, test_offload). The 4 MiB body
+  limit and 30-minute session idle timeout were already the 1.30 defaults. With the stricter
+  template matching, a `filename` of `..` in `aidc://sessions/{name}/audit/{filename}` is now
+  refused by the SDK as an unknown resource (-32602). Before, aidc's own check answered
+  `{"error": "path traversal denied"}`; that check stays as a second line. `ctx.info` progress streaming still reaches
+  2025-era clients; it is deprecated (SEP-2577) and reaches a 2026-07-28 client only if
+  that request opts in to log delivery.
+
+**Tests:** new `tests/test_wire.py` drives `build_app()` over streamable HTTP as a
+2025-11-25 client: no token or a wrong token gives 401, a private-interface Host is served,
+the handshake carries the aidc name and instructions, and tools/list matches
+`published-tools.json`; it also covers a tool call and resources/list. It passed on 1.30.0
+before the port and on 2.3.0 after. After the Critic review (rev-20261022T142758Z-377a7fbe,
+W2) it compares every tool description in full, the open-webhook suffix included, checks
+the resource list and the three template URIs exactly, and reads `aidc://sessions/proj/audit/..`
+over the wire, which must be refused (SDK -32602, or aidc's traversal denial). Mutations
+checked: shortening the suffix fails the tools/list case, and exempting `filename` from the
+SDK's path check while disabling aidc's check fails the traversal case.
+
+Smoke did not exercise aidc-mcp before this change. Its only MCP check read the running
+aidc-mcp's port binding to test the egress refusal, so it never sent a request to the server
+or used the image this checkout builds. New step 9a runs `aidc/mcp:<VERSION>` the way `aidc mcp
+start` does (docker socket, the aidc tree read-only, a token file). It uses an ephemeral loopback
+port and its own name, so a serving aidc-mcp is untouched. It then speaks MCP over HTTP with
+curl. The handshake must name aidc at the release version, and a call with no token must get
+401. tools/list must equal published-tools.json (less the opt-in session_create).
+session_list, run by the aidc CLI inside the container, must list the smoke session, and
+session_status must report it tainted. 109 passed, 0 failed. The cooldown scan now also
+reports an `exclude-newer-package` it cannot read (a multi-line inline table, a dotted key)
+instead of passing it. That was Critic observation 1 of rev-20261022T143917Z-169f256c, and a
+new fixture covers it. A full wire dump (initialize, tools/list, resource and
+template lists, a tool call and a tool-argument error) is byte-identical between the two
+SDKs except for serverInfo.version (SDK version -> aidc version) and an empty
+`capabilities.experimental` that 2.x leaves out. New announce tests cover both notify
+paths, the no-request path, a failed legacy notify still publishing, and `ctx` being
+injected but not advertised. Existing tests changed only in the import rename and in the
+`_announce_watchers` stubs taking the optional ctx. No assertion was changed.
+
 ## 2026-10-22: session_send takes prompts while a background agent runs, and answers promptly
 
 <!-- prawduct: scope=send-while-background-task -->

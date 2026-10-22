@@ -13,6 +13,38 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.7] - 2026-10-22
+
+### Security
+- **The MCP server's image no longer ships a certifi that trusts a compromised CA root.**
+  certifi 2026.7.22 still carried `emSign ECC Root CA - G3`, eight of whose intermediate CAs
+  have compromised keys (GHSA-6q48-6c7w-9gw2, critical). aidc-mcp now locks certifi 2026.10.19,
+  which drops that root and keeps the unaffected emSign roots.
+  That release is younger than the 14-day supply-chain cooldown, so it is admitted as a
+  single, dated exception in `mcp/pyproject.toml`, with the reason beside it.
+- **PyJWT 2.13.0 -> 2.15.1** in the MCP server's lock, clearing the fourteen PyJWT advisories
+  open against it (critical, high and medium: HMAC/PEM and JWK key confusion, a BOM bypass,
+  ReDoS, RecursionError denial of service, JWKS redirect and fetch amplification). aidc-mcp
+  does not use PyJWT itself; it comes in through the MCP SDK.
+- A re-lock can no longer quietly bring either package back below these versions: both now
+  have a version floor that makes such a lock fail.
+
+### Changed
+- **The MCP server runs on MCP SDK 2.3** (from 1.30). Its tools, their schemas, resources,
+  bearer-token auth, bind address and port, and webhook delivery are unchanged. A client on
+  protocol 2025-11-25 sees the same handshake, tool list and results as before. Three
+  things differ at the edges:
+  - `serverInfo.version` now reports aidc-mcp's own version instead of the SDK's.
+  - A client on the newer 2026-07-28 protocol hears that the open-webhook list changed through
+    its `subscriptions/listen` stream.
+  - Reading `aidc://sessions/<name>/audit/..` is now refused as an unknown resource instead of
+    answering "path traversal denied".
+- Every other dependency of the MCP server is upgraded to its newest release outside the
+  14-day cooldown. Among them: starlette 1.7.0, uvicorn 0.54.0, sse-starlette 3.5.0,
+  cryptography 50.0.2 and websockets 17.2. The SDK now brings in mcp-types, httpx2 and
+  opentelemetry-api (tracing is inert unless you configure an OpenTelemetry SDK), and no longer
+  needs httpx-sse or pydantic-settings.
+
 ## [1.9.6] - 2026-10-22
 
 ### Fixed
@@ -1304,7 +1336,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.6...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.7...HEAD
+[1.9.7]: https://github.com/pacepace/aidc/compare/v1.9.6...v1.9.7
 [1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6
 [1.9.5]: https://github.com/pacepace/aidc/compare/v1.9.4...v1.9.5
 [1.9.4]: https://github.com/pacepace/aidc/compare/v1.9.3...v1.9.4

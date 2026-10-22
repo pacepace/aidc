@@ -308,11 +308,11 @@ def _refresh_session_tool_descriptions(app: Any) -> None:
 async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
     """Refresh descriptions and notify connected clients to refetch tools/list.
 
-    Best-effort: without the request's Context (a background caller, such as the
-    startup resume), the description is still updated and the next tools/list
-    reflects it. A client on a 2025-era protocol version hears of the change on its
-    own session; one on 2026-07-28 hears only through a subscriptions/listen stream,
-    so the change goes both ways and either may find nobody listening.
+    Best-effort: without the request's Context, the description is still updated
+    and the next tools/list reflects it. A client on a 2025-era protocol version
+    hears of the change on its own session; one on 2026-07-28 hears only through a
+    subscriptions/listen stream, so the change goes both ways and either may find
+    nobody listening.
     """
     _refresh_session_tool_descriptions(app)
     if ctx is None:

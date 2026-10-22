@@ -10,7 +10,7 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
-from aidc_mcp import auth, publish, server, tools
+from aidc_mcp import auth, publish, resources, server, tools
 
 TOKEN = "wire-test-token"
 # A private-interface bind (ZeroTier/Tailscale): the Host a real client sends. The
@@ -101,7 +101,10 @@ def test_tools_list_on_the_wire_is_the_published_list(client):
     assert set(wire) == set(published)
     for name, pub in published.items():
         assert wire[name]["inputSchema"] == pub["input_schema"], name
-        assert wire[name]["description"].startswith(pub["description"].split("\n\n")[0]), name
+        # Exact: an orchestrator's model reads all of it, the open-webhook suffix included.
+        assert wire[name]["description"] == pub["description"], name
+    for name in tools._SESSION_AWARE_TOOLS:
+        assert wire[name]["description"].endswith(tools._watching_suffix()), name
 
 
 def test_a_tool_call_answers_with_the_envelope(client, monkeypatch):
@@ -117,9 +120,33 @@ def test_a_tool_call_answers_with_the_envelope(client, monkeypatch):
     assert body["ok"] is True
 
 
-def test_resources_are_listed(client):
+def test_resources_and_templates_are_listed(client):
     _, sid = _initialize(client)
     msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
         "jsonrpc": "2.0", "id": 4, "method": "resources/list", "params": {}}))
-    uris = {r["uri"] for r in msg["result"]["resources"]}
-    assert {"aidc://sessions", "aidc://config"} <= uris
+    assert {r["uri"] for r in msg["result"]["resources"]} == {"aidc://sessions", "aidc://config"}
+    msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
+        "jsonrpc": "2.0", "id": 5, "method": "resources/templates/list", "params": {}}))
+    assert {t["uriTemplate"] for t in msg["result"]["resourceTemplates"]} == {
+        "aidc://sessions/{name}/status",
+        "aidc://sessions/{name}/audit",
+        "aidc://sessions/{name}/audit/{filename}",
+    }
+
+
+def test_an_audit_file_outside_the_audit_dir_is_never_read(client, monkeypatch, tmp_path):
+    """`..` as the filename: the SDK refuses it as an unknown resource before aidc's
+    own traversal check runs. Either refusal will do; reading the parent will not."""
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    monkeypatch.setattr(resources, "parse_audit_dir", lambda out: audit_dir)
+    monkeypatch.setattr(resources, "_run", lambda args: "")
+    _, sid = _initialize(client)
+    msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
+        "jsonrpc": "2.0", "id": 6, "method": "resources/read",
+        "params": {"uri": "aidc://sessions/proj/audit/.."}}))
+    if "error" in msg:
+        assert msg["error"]["code"] == -32602, msg
+    else:
+        text = msg["result"]["contents"][0]["text"]
+        assert json.loads(text) == {"error": "path traversal denied"}, text

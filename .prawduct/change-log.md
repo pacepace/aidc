@@ -53,7 +53,10 @@ sees allowed to change.
   the REL-09 cooldown, so it gets a per-package `exclude-newer-package` cutoff
   (2026-10-21T00:00Z, which admits that release and nothing later) with its reason beside it
   in `mcp/pyproject.toml`. The cutoff is a fixed date, so after 2026-11-03 it only holds
-  certifi back; it should be removed then. The built image's bundle was checked: v1.9.6 has the four
+  certifi back. tests/unit/test-supply-chain-cooldown.sh fails once any `exclude-newer-package`
+  cutoff is older than the cooldown (from 2026-11-05 for this one, checked with
+  `COOLDOWN_NOW`; its fixtures fail on an old cutoff in both TOML forms), so it cannot be
+  forgotten. The built image's bundle was checked: v1.9.6 has the four
   emSign roots, and v1.9.7 has all of them except ECC G3, which is what the advisory's fix does.
 - `constraint-dependencies` floors (`pyjwt>=2.15.0`, `certifi>=2026.10.19`) under
   `[tool.uv]`. Under the cooldown alone, a re-lock left certifi at 2026.7.22. With the floor
@@ -83,7 +86,12 @@ sees allowed to change.
 2025-11-25 client: no token or a wrong token gives 401, a private-interface Host is served,
 the handshake carries the aidc name and instructions, and tools/list matches
 `published-tools.json`; it also covers a tool call and resources/list. It passed on 1.30.0
-before the port and on 2.3.0 after. A full wire dump (initialize, tools/list, resource and
+before the port and on 2.3.0 after. After the Critic review (rev-20261022T142758Z-377a7fbe,
+W2) it compares every tool description in full, the open-webhook suffix included, checks
+the resource list and the three template URIs exactly, and reads `aidc://sessions/proj/audit/..`
+over the wire, which must be refused (SDK -32602, or aidc's traversal denial). Mutations
+checked: shortening the suffix fails the tools/list case, and exempting `filename` from the
+SDK's path check while disabling aidc's check fails the traversal case. A full wire dump (initialize, tools/list, resource and
 template lists, a tool call and a tool-argument error) is byte-identical between the two
 SDKs except for serverInfo.version (SDK version -> aidc version) and an empty
 `capabilities.experimental` that 2.x leaves out. New announce tests cover both notify

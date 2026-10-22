@@ -31,6 +31,16 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   (and every other call) for seconds on a long-lived session. That knowledge is kept now, the
   earlier transcripts are read in a worker thread, and slow readings of the session no longer
   stretch the send's 5-second wait for it to be free.
+- **The malware blocklist had lost two of its three feeds.** abuse.ch now requires a per-user
+  Auth-Key for every export, and its URLhaus and ThreatFox downloads answer 410 Gone, so the
+  refresher was building the list from HaGeZi TIF alone. URLhaus data now comes from the
+  malware-filter project's keyless mirror of it (gitlab, with its github copy as a fallback).
+  ThreatFox has no keyless source and is no longer a feed. HaGeZi TIF, about 40 MB, gets
+  300 seconds to download instead of 60, which a loaded machine ran out of part-way through.
+  The refresher's summary line drops its `threatfox=` count, and it now logs a `WARN <feed>:`
+  line when a feed fails or yields no entries. The URLhaus entries now come from a single
+  maintainer's mirror rather than from abuse.ch; `docs/security-model.md` explains what that
+  means for tainting.
 
 ## [1.9.5] - 2026-10-19
 

@@ -581,12 +581,36 @@ assert "egress to a TLD-blocked .cn domain returns 403 from squid" \
     "dev_exec 'curl -sS --max-time 15 -x ${PROXY} -o /dev/null -w \"%{http_code}\" http://anything.cn' | grep -q 403"
 
 # The refresher's own first download is still running for a while after create.
-# Wait for it: the refresh started below would race it, and so would the list
-# edit further down (a later rename would replace the edited list).
-for _ in $(seq 1 90); do
-    docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh OK' && break
+# Wait for it to finish, either way. Its worst case is the sum of refresh.sh's
+# per-feed limits: 60 s for each URLhaus mirror and 300 s for HaGeZi, 420 s; the
+# wait allows 600. Finishing first matters for what follows, not for the list
+# itself (two refreshes each rename a whole list into place, so neither can leave a
+# torn one): the edit further down adds a domain by renaming a copy over the list,
+# and a startup refresh still running would rename its own list over that edit
+# afterwards. If the startup refresh is still running at 600 s, the assert below
+# fails saying so, and later failures follow from that one.
+REFRESHER_WAIT_S=600
+for _ in $(seq 1 "$REFRESHER_WAIT_S"); do
+    docker logs "aidc-${SESSION}-refresher" 2>&1 | grep -q 'startup refresh \(OK\|FAILED\)' && break
     sleep 1
 done
+REFRESHER_LOG=$(docker logs "aidc-${SESSION}-refresher" 2>&1)
+REFRESHED_LINE=$(printf '%s\n' "$REFRESHER_LOG" | grep -m1 '^refreshed: ' || true)
+if printf '%s\n' "$REFRESHER_LOG" | grep -q 'startup refresh OK'; then
+    STARTUP_REFRESH="succeeded"
+elif printf '%s\n' "$REFRESHER_LOG" | grep -q 'startup refresh FAILED'; then
+    STARTUP_REFRESH="FAILED"
+else
+    STARTUP_REFRESH="still running after ${REFRESHER_WAIT_S}s"
+fi
+echo "  refresher: startup refresh ${STARTUP_REFRESH}; ${REFRESHED_LINE:-no refresh line logged}"
+printf '%s\n' "$REFRESHER_LOG" | grep 'WARN ' | sed 's/^/  refresher: /' || true
+assert "the refresher's startup refresh succeeded and wrote entries (it ${STARTUP_REFRESH})" \
+    "[ '${STARTUP_REFRESH}' = succeeded ] && printf '%s' '${REFRESHED_LINE}' | grep -q '^refreshed: [1-9][0-9]* entries'"
+# Each feed must have contributed: a refresh that succeeds on one feed alone still
+# publishes a list (NET-11), which is how two dead abuse.ch feeds went unnoticed.
+assert "every malware feed contributed entries (urlhaus > 0, hagezi > 0)" \
+    "printf '%s' '${REFRESHED_LINE}' | grep -Eq 'urlhaus=[1-9][0-9]* hagezi=[1-9][0-9]* '"
 # NET-16 / issue #34: a new blocklist must not cost a single connection. Squid used to
 # reload for every list and refused everything for ~20 s. Run a real refresh while
 # requests stream through the proxy, and count refusals.
@@ -610,7 +634,7 @@ assert "a blocklist refresh drops no connections (NET-16)" \
 # case), not only the one this test writes below. The squid image has no head;
 # perl reads line 1. Requested together with the others below: the FIRST denied
 # request taints the session and the freeze response pauses dev.
-FEED_DOMAIN=$(docker exec "aidc-${SESSION}-squid" perl -ne 'next if /^#/; chomp; print; exit' /etc/squid/blocklist.txt)
+FEED_DOMAIN=$(docker exec "aidc-${SESSION}-squid" perl -ne 'next if /^#/; chomp; print; exit' /etc/squid/blocklist.txt 2>/dev/null || true)
 
 # Put a known-bad domain on the list the way the refresher does: a sorted copy
 # renamed over the file, since squid's helper binary-searches it (an append would
@@ -625,6 +649,8 @@ docker exec --user root "aidc-${SESSION}-squid" perl -e '
     rename "$f.new", $f or die' /etc/squid/blocklist.txt "$MALWARE_DOMAIN"
 # All three requests in ONE exec: the first denied request taints the session, and
 # the freeze response pauses dev, so a later exec would land on a paused container.
+# With no feed domain (the refresher never wrote a list) only two are requested,
+# and the feed check below fails saying so.
 CODES=$(dev_exec "for h in ${MALWARE_DOMAIN} www.${MALWARE_DOMAIN} ${FEED_DOMAIN}; do curl -sS --max-time 5 -x ${PROXY} -o /dev/null -w '%{http_code} ' http://\$h/; done" 2>/dev/null || true)
 MALWARE_CODE=$(printf '%s' "$CODES" | awk '{ print $1 }')
 SUB_CODE=$(printf '%s' "$CODES" | awk '{ print $2 }')
@@ -633,7 +659,7 @@ assert "egress to malware-listed ${MALWARE_DOMAIN} returns 403 from squid, with 
     "[ '$MALWARE_CODE' = '403' ]"
 assert "a subdomain of a listed domain is blocked too (www.${MALWARE_DOMAIN})" \
     "[ '$SUB_CODE' = '403' ]"
-assert "a domain from the downloaded feed (${FEED_DOMAIN}) is denied" \
+assert "a domain from the downloaded feed (${FEED_DOMAIN:-NONE: the refresher never wrote a list, see its log above}) is denied" \
     "[ -n '${FEED_DOMAIN}' ] && [ '$FEED_CODE' = '403' ]"
 echo
 

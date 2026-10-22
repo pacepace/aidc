@@ -34,6 +34,45 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-22: the malware blocklist's feeds: URLhaus from a keyless mirror, ThreatFox dropped
+
+<!-- prawduct: scope=malware-feeds-keyless -->
+
+**Why:** found by the v1.9.6 `make smoke` run, 2026-10-22. `https://urlhaus.abuse.ch/downloads/hostfile/`
+and `https://threatfox.abuse.ch/export/csv/recent/` both answer 410 Gone: abuse.ch now requires a
+per-user Auth-Key for every export. The refresher had been building the list from HaGeZi TIF
+alone, and nothing said so, because a refresh that succeeds on one feed still publishes (NET-11).
+The same run's HaGeZi TIF download (about 39 MB) hit curl's 60 s limit at 31 MB under load.
+
+**Decision (Pace, 2026-10-22):** "let's see if we can find suitable replacements for the two
+missing ones please, and if we can't then we drop to just the one." So no Auth-Key is held;
+each feed is replaced by a keyless source where one exists, and dropped where none does.
+- URLhaus: replaced by the malware-filter project's mirror of URLhaus data
+  (`https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt`, falling back to
+  `https://curbengh.github.io/malware-filter/urlhaus-filter-hosts.txt`): hosts format, rebuilt
+  every 12 h, about 1,800 domains.
+- ThreatFox: dropped. No keyless source of its data was found.
+- **Trust shift.** The URLhaus entries now come from a single maintainer's rebuild (curbengh,
+  malware-filter) rather than from abuse.ch. Anything that mirror publishes is denied by squid,
+  and the first request to a listed domain taints the session; under `taint_response: freeze`
+  the dev container is paused. A wrong or hostile entry (a widely used domain) would therefore
+  freeze any session that touches it, and an entry the mirror drops would no longer be blocked.
+  Both mirrors are the same maintainer's, so the fallback covers an outage, not a bad publish.
+  NET-04 and SEC-03 in `docs/requirements.md` are amended to the two feeds and point here;
+  `docs/security-model.md` states the trust shift.
+
+**What:** `proxy/refresher/refresh.sh` fetches the URLhaus mirror (gitlab, then github, the
+fallback logged), drops the ThreatFox fetch, parse and count (summary line now
+`urlhaus=N hagezi=N additions=N`), gives HaGeZi TIF `--max-time 300` (every fetch
+`--connect-timeout 15`), and logs a `WARN <feed>:` line for a feed that failed or yielded 0
+entries. New `tests/unit/test-refresher-feeds.sh` runs the real refresh.sh against a curl stub:
+parsing, the fallback order, the timeouts, the WARN lines, and NET-11's kept list. The smoke now
+waits for the startup refresh to finish (either way) for longer than the refresher's worst case,
+requires it to have succeeded with entries, requires urlhaus and hagezi each above 0, and names
+the missing list instead of requesting an empty domain. Not done: `aidc status` does not show a
+lost feed; filed as #60.
+
+
 ## 2026-10-19: the loop guard no longer drops replies to a person's own prompts
 
 <!-- prawduct: scope=loop-guard-human-turns -->

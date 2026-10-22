@@ -1,3 +1,3 @@
 """aidc-mcp: MCP control plane for the aidc sandbox."""
 
-__version__ = "1.9.6"
+__version__ = "1.9.7"

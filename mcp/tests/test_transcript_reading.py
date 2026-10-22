@@ -170,6 +170,16 @@ class TestAnUnchangedFileCostsNoParsing:
         ts.forget_transcripts(tmp_path / "s")
         assert set(ts._parsed) == {other}
 
+    def test_forgetting_keeps_the_stamps_of_files_still_on_disk(self, tmp_path):
+        kept = _write(tmp_path / "s" / "a.jsonl", _jsonl([_line("a")]))
+        gone = _write(tmp_path / "s" / "b.jsonl", _jsonl([_line("b")]))
+        ts.newest_message_ts_of(kept)
+        ts.newest_message_ts_of(gone)
+        gone.unlink()
+
+        ts.forget_transcripts(tmp_path / "s")
+        assert set(ts._newest_ts) == {kept}
+
 
 class _Recorder:
     def __init__(self):

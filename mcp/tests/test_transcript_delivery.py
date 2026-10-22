@@ -2093,3 +2093,57 @@ class TestInterruptDelivery:
                              attempt=0, session="s")
         assert [c["interrupted"] for c in captured] == [False, True]
         assert [c["ok"] for c in captured] == [True, True]
+
+
+class TestARewatchDoesNotStallTheServer:
+    """Live 2026-10-21/22: the orchestrator calls session_unwatch and session_watch
+    before each session_send. Unwatching dropped what the server knew of the
+    session's earlier transcripts, so the new watcher's first pass read every one of
+    them again (29 files, 775 MB for `metallm`; about 9 s measured) on the event loop,
+    and the session_send waiting on it took 12-15 s to answer."""
+
+    def _session_with_history(self, tmp_path, monkeypatch):
+        from aidc_mcp import tools
+        base, state = tmp_path / "t", tmp_path / "s"
+        monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", base)
+        for i in range(3):
+            _mk_transcript(base, "sess", f"old{i}",
+                           [_user(f"old{i}-u", "q"), _assistant(f"old{i}-a", "A")],
+                           mtime=1000 + i)
+        _mk_transcript(base, "sess", "live",
+                       [_user("u0", "seed"), _assistant("a0", "SEED")], mtime=2000)
+        return base, state
+
+    async def test_unwatching_keeps_what_is_known_of_earlier_transcripts(self, tmp_path,
+                                                                         monkeypatch):
+        from aidc_mcp import tools
+        base, state = self._session_with_history(tmp_path, monkeypatch)
+        rec = Recorder()
+        await _drain(base, state, rec)      # baseline
+        await _drain(base, state, rec)      # nothing new: the earlier files are scanned
+        parsed = []
+        real_parse = ts.parse_jsonl
+        monkeypatch.setattr(ts, "parse_jsonl",
+                            lambda text: parsed.append(text) or real_parse(text))
+
+        tools._evict_session_state("sess")
+        await _drain(base, state, rec)
+
+        assert not [t for t in parsed if "old" in t]
+
+    async def test_earlier_transcripts_are_read_off_the_event_loop(self, tmp_path,
+                                                                   monkeypatch):
+        import threading
+        base, state = self._session_with_history(tmp_path, monkeypatch)
+        on_loop = []
+        real_newest = ts.newest_message_ts_of
+
+        def newest(path):
+            on_loop.append(threading.current_thread() is threading.main_thread())
+            return real_newest(path)
+
+        monkeypatch.setattr(ts, "newest_message_ts_of", newest)
+        rec = Recorder()
+        await _drain(base, state, rec)
+        await _drain(base, state, rec)
+        assert on_loop and not any(on_loop)

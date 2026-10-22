@@ -199,6 +199,10 @@ _ECHO_WAIT_S = 30.0
 # so they cannot both come from the same stale copy.
 _FREE_POLL_S = 2.5
 _ECHO_POLL_S = 2.0
+# How often, and how far apart, the input box is read after a paste that has to be
+# confirmed there before Enter (see _inject): long enough for Claude Code to draw it.
+_PASTE_CONFIRM_POLLS = 5
+_PASTE_CONFIRM_POLL_S = 0.3
 
 TURN_RUNNING = "running"
 TURN_IDLE = "idle"
@@ -387,8 +391,13 @@ _working_indicator_seen: set[str] = set()
 _reported_interrupts: dict[str, str] = {}
 # Last (reason, why) the free check logged per session: it logs on change only.
 _last_free_verdict: dict[str, tuple[str, str]] = {}
-# Last raw screen capture per session, kept for the unrecognized-screen excerpt.
+# Last raw screen capture per session: the unrecognized-screen excerpt, and the
+# screen _inject judges the paste against (the one the free check just read).
 _last_screen_raw: dict[str, str] = {}
+# session -> a prompt _inject pasted but did not submit because it had not shown in
+# the input box in time. If it shows there later, it is ours, not a person's unsent
+# text: the next free check lets it through and _inject presses Enter on it.
+_unsubmitted_paste: dict[str, str] = {}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -589,6 +598,8 @@ def _paste_reason(state: SessionState) -> str:
                             does not recognize (a screen excerpt is saved)
       claude_busy           Claude is working on a turn, or a prompt just pasted has
                             not shown up in the transcript yet
+      agent_list_selected   the background-agent list has the keyboard (a person is
+                            in it), where typed keys are list commands
       input_has_text        a person has unsent text in the input box
     """
     if not state.claude_running or state.screen is None:
@@ -599,9 +610,28 @@ def _paste_reason(state: SessionState) -> str:
         return "screen_unrecognized"
     if state.turn == TURN_RUNNING:
         return "claude_busy"
+    if state.screen.list_focused:
+        return "agent_list_selected"
     if state.screen.input_box == scr.HAS_TEXT:
         return "input_has_text"
     return ""
+
+
+def _own_unsent_text(name: str, screen: scr.ScreenState | None) -> bool:
+    """Whether the input box holds the prompt _inject pasted and left unsubmitted, and
+    that prompt is still the head of the queue, so the drainer is the one that comes
+    back for it and submits it alone. A paste from a caller that does not queue (the
+    unadvertised session_run) is not the queue head, and its text stays a person's
+    unsent input, which nothing is pasted on top of. Claude Code shows a long paste
+    as a placeholder (`[Pasted text …]`), so that counts as well: a person pasting
+    into the box in the seconds before a late paste draws is the narrow window
+    this accepts."""
+    pending = _unsubmitted_paste.get(name)
+    queue = _pending_sends.get(name)
+    if (pending is None or not queue or queue[0].text != pending
+            or screen is None or screen.input_box != scr.HAS_TEXT):
+        return False
+    return scr.same_text(screen.typed, pending) or screen.typed.startswith("[Pasted text")
 
 
 def _save_unrecognized_screen(name: str) -> None:
@@ -624,6 +654,8 @@ async def _check_free(container: str, name: str) -> str:
     row) is on record."""
     state = await _session_state(container, name)
     reason = _paste_reason(state)
+    if reason == "input_has_text" and _own_unsent_text(name, state.screen):
+        reason = ""
     verdict = (reason, state.why)
     if _last_free_verdict.get(name) != verdict:
         _last_free_verdict[name] = verdict
@@ -635,19 +667,29 @@ async def _check_free(container: str, name: str) -> str:
 
 
 async def _wait_until_free(container: str, name: str, timeout: float) -> str:
-    """Poll _check_free until two consecutive readings are free (""), or the timeout's
-    worth of polls runs out (the last reason). Counted in polls rather than wall-clock
-    so the loop terminates deterministically under a patched clock."""
+    """Poll _check_free until two consecutive readings are free (""), or the timeout
+    runs out (the last reason). The timeout is held to on the clock: after a reading
+    that was not free, no further reading starts that could not finish inside it, so
+    slow readings (docker exec under load) cannot stretch the wait. A free reading is
+    always confirmed by a second one, which may run past the timeout by one poll. The
+    poll count still caps it, so the loop ends under a patched sleep too."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     polls = max(2, int(timeout / _FREE_POLL_S))
     streak = 0
     reason = ""
     for i in range(polls):
+        started = loop.time()
         reason = await _check_free(container, name)
         streak = 0 if reason else streak + 1
         if streak >= 2:
             return ""
-        if i < polls - 1:
-            await asyncio.sleep(_FREE_POLL_S)
+        took = loop.time() - started
+        # A free reading always gets the second one it needs, even past the deadline:
+        # stopping there would report a free session as busy.
+        if i == polls - 1 or (streak == 0 and loop.time() + _FREE_POLL_S + took > deadline):
+            break
+        await asyncio.sleep(_FREE_POLL_S)
     return reason or "claude_busy"
 
 
@@ -841,8 +883,30 @@ async def _inject(container: str, text: str, window: str, *, session: str,
     own) — the drain tells the orchestrator's prompts from a person's by that
     record alone, so a paste path that skipped it would ship a reply falsely
     framed as answering something the person typed."""
-    if not await _load_and_paste(container, text, window):
-        return False
+    # Judged against the screen the free check just read: every caller pastes only
+    # after _check_free said "" for this session, which it says only having read the
+    # screen (a session whose screen could not be read is never free). With the
+    # background-agent list's pointer showing, the paste is confirmed in the input
+    # box before Enter: Enter in the list opens an agent instead of sending.
+    raw = _last_screen_raw.get(session)
+    screen = scr.classify(raw) if raw is not None else None
+    if _unsubmitted_paste.get(session) == text and _own_unsent_text(session, screen):
+        log_event("session_send_late_paste_submitted", session=session,
+                  prompt_len=len(text))
+    else:
+        if not await _load_and_paste(container, text, window):
+            return False
+        if screen is not None and screen.agent_pointed and not await _paste_in_box(
+                container, window, session):
+            # What the box showed last: still empty means the keys went elsewhere;
+            # anything else means the screen changed under the paste.
+            box = scr.classify(_last_screen_raw.get(session, "")).input_box
+            _unsubmitted_paste[session] = text
+            log_event("session_send_paste_not_in_box", session=session,
+                      prompt_len=len(text), input_box=box,
+                      waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
+            return False
+    _unsubmitted_paste.pop(session, None)
     await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
     _record_sent(session, text, sent_by)
     # Until the transcript shows this prompt, a follow-up's free check must read the
@@ -852,6 +916,20 @@ async def _inject(container: str, text: str, window: str, *, session: str,
     _sent_awaiting_echo[session] = (text, sent_at)
     fire(_watch_for_echo(session, text, sent_at))
     return True
+
+
+async def _paste_in_box(container: str, window: str, session: str) -> bool:
+    """Whether the input box shows text after a paste into an empty box, read a few
+    times while Claude Code draws it. Any text counts: Claude Code shows a long paste
+    as a placeholder (`[Pasted text #1]`), not as the words."""
+    for i in range(_PASTE_CONFIRM_POLLS):
+        raw = await _capture_screen(container, window)
+        _last_screen_raw[session] = raw
+        if scr.classify(raw).input_box == scr.HAS_TEXT:
+            return True
+        if i < _PASTE_CONFIRM_POLLS - 1:
+            await asyncio.sleep(_PASTE_CONFIRM_POLL_S)
+    return False
 
 
 SESSION_EXISTS = "exists"
@@ -1217,6 +1295,7 @@ def _forget_session_send_state(name: str) -> None:
     session is gone."""
     _working_indicator_seen.discard(name)
     _sent_awaiting_echo.pop(name, None)
+    _unsubmitted_paste.pop(name, None)
     _last_free_verdict.pop(name, None)
     _last_screen_raw.pop(name, None)
     _waiting_notice_shown.discard(name)
@@ -1356,6 +1435,8 @@ _WAITING_EXPLAINED = {
     "screen_unrecognized": "aidc does not recognize Claude's screen",
     "paste_failing": "pasting into the session is failing and being retried",
     "queued_behind": "an earlier prompt is still waiting",
+    "agent_list_selected": "someone in the session has the keyboard in Claude's background-"
+                           "agent list, where typed keys are commands",
     "session_tainted": "the session is tainted, so nothing more is pasted into it; the person "
                        "has to kill and recreate it",
 }
@@ -1736,9 +1817,30 @@ def _resume_fields(mark: ts.Watermark, seen: float | None) -> dict[str, Any]:
             "anchored_at_end": seen is None}
 
 
-def _rotate_if_stale_pin(session: str, conversation_id: str,
-                         key: tuple[str, str], sid: str, pinned_objs: list,
-                         transcripts_base: Path, state_dir: Path) -> bool:
+def _newest_of_siblings(d: Path, sid: str) -> list[tuple[Path, str]]:
+    """Each transcript in `d` other than `sid`, with its newest message timestamp.
+    Blocking (it may read every earlier transcript): run it in a worker thread."""
+    try:
+        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
+    except OSError:
+        return []
+    found = []
+    for p in candidates:
+        if p.stem == sid:
+            continue
+        # Every sibling, every poll: read once per version of the file, never again
+        # while it is unchanged (ts.newest_message_ts_of). Parsing them all each time
+        # was nearly all of the server's CPU while a large session was watched.
+        try:
+            found.append((p, ts.newest_message_ts_of(p)))
+        except OSError:
+            continue
+    return found
+
+
+async def _rotate_if_stale_pin(session: str, conversation_id: str,
+                               key: tuple[str, str], sid: str, pinned_objs: list,
+                               transcripts_base: Path, state_dir: Path) -> bool:
     """Follow a session rotation the pin can't see on its own.
 
     The session pin selects the pinned transcript as long as it EXISTS, and
@@ -1758,20 +1860,10 @@ def _rotate_if_stale_pin(session: str, conversation_id: str,
     """
     d = Path(transcripts_base) / session
     best, best_ts = None, ts.newest_message_ts(pinned_objs)
-    try:
-        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
-    except OSError:
-        candidates = []
-    for p in candidates:
-        if p.stem == sid:
-            continue
-        # Every sibling, every poll: read once per version of the file, never again
-        # while it is unchanged (ts.newest_message_ts_of). Parsing them all each time
-        # was nearly all of the server's CPU while a large session was watched.
-        try:
-            cand_ts = ts.newest_message_ts_of(p)
-        except OSError:
-            continue
+    # Off the event loop: the first scan after a restart reads every earlier
+    # transcript, seconds of work for a long-lived session, and every tool call and
+    # watcher would wait behind it.
+    for p, cand_ts in await asyncio.to_thread(_newest_of_siblings, d, sid):
         if cand_ts and cand_ts > best_ts:
             best, best_ts = p, cand_ts
 
@@ -2079,8 +2171,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # lingers on disk, which the pin can't see on its own. Follow the rotation
         # forward. Content-timestamp gated, so an active pinned session that is
         # merely mid-turn is never abandoned — no sibling can out-timestamp it.
-        _rotate_if_stale_pin(session, conversation_id, key, sid, objs,
-                             transcripts_base, state_dir)
+        await _rotate_if_stale_pin(session, conversation_id, key, sid, objs,
+                                   transcripts_base, state_dir)
         return
     _consumed_idle_counts.pop(key, None)   # delivering — not a stale pin
     if post_fn is None:
@@ -3414,7 +3506,11 @@ def register(app: Any) -> None:
                 sanitized = turn_prompt.replace("\n", " ").strip()
                 sent_at = time.time()
                 if not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
-                    err = f"failed to inject turn {i + 1}"
+                    # Not retried: if the paste shows in the box later, it stays there
+                    # as unsent input, held like a person's (see _own_unsent_text).
+                    _unsubmitted_paste.pop(name, None)
+                    err = (f"failed to inject turn {i + 1} (if the text reached the input "
+                           "box it was not submitted and stays there unsent)")
                     return _envelope_err(err, {"completed_turns": transcript}, code="paste_failed")
 
                 ended = await _wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)

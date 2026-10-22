@@ -402,6 +402,12 @@ interval, so both cannot come from the same stale copy), in `_wait_until_free`. 
 turn starting the moment another ends (a background task's notification). The drainer re-checks
 once more under the send lock right before pasting, and `_wait_for_turn_end` likewise needs two
 idle readings. `session_resend` takes a single reading: it only labels a reply, it does not paste.
+The wait is bounded on the clock as well as in polls: after a reading that was not free, no
+reading starts that could not finish inside the timeout, so slow readings do not stretch the free
+wait in `session_send` (`_SEND_FREE_WAIT_S`). A free reading is always followed by its confirming
+second reading, which can run past the timeout by one poll, so a free session is not reported
+busy. The paste that may follow adds its own few docker calls. A session not confirmed free in
+time is queued for the drainer.
 Pane byte-stability (`_wait_for_idle`) and pane-scraped replies (`_extract_delta`, `_strip_ansi`)
 are gone; `session_run` reads each reply from the transcript, starting at its prompt's line.
 
@@ -455,6 +461,19 @@ attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
   spaces. From 2.1.300, while background agents run, a blank row and one row per agent
   (`  ● main`, `  ◯ general-purpose  <activity>`) follow the status rows; that list is set aside
   before the rows below the box are counted, and a row with an unmeasured glyph fails closed.
+  The row under the mouse, or the one selected from the keyboard, carries the pointer `❯ ` (a
+  plain space) in place of its indent. A keyboard selection also replaces the permission-mode
+  status row with the list's key hints (`↑/↓ to select`, `Enter to view · x to stop`); a hover
+  changes nothing else (measured on Claude Code 2.1.304, 2026-10-22). While the list has the
+  keyboard, a burst of several characters still lands in the input box, but a single character
+  is a list key (`x` stopped the selected agent) and Enter opens an agent. So a screen with the
+  key hints is not pasted into at all (`agent_list_selected`: a person is in the list). With only
+  the pointer (a hover), the prompt is pasted, and `_inject` presses Enter only once the input box
+  shows text. A paste that has not shown there after about 1.5 s is left unsubmitted and the
+  attempt counts as failed (`paste_failing`). If the text appears later, the next free check
+  recognizes it as that prompt (its words, or Claude Code's `[Pasted text …]` placeholder), not as
+  a person's unsent input, and `_inject` presses Enter on it without pasting it again. Other text
+  in the box still holds the queue as `input_has_text`.
 - **Its first row** starts with the glyph `❯` followed by a no-break space (`❯\xa0`). Earlier
   prompts in the scrollback also start with `❯` but are drawn on a background colour
   (`\x1b[48;5;237m`), so they do not match.
@@ -544,6 +563,7 @@ a plain-language `waiting_because`, and `paste_attempts`):
 |---|---|
 | `claude_busy` | the transcript shows a turn in progress |
 | `input_has_text` | the person has unsent text in Claude's input box |
+| `agent_list_selected` | the person has the keyboard in Claude Code's background-agent list, where typed keys are list commands |
 | `claude_not_running` | the `claude` window is at a shell |
 | `claude_not_at_prompt` | Claude is running and showing a dialog (e.g. the folder-trust or login screen) instead of its input box |
 | `screen_unrecognized` | Claude is running but the screen is neither its input box nor a known dialog; the capture is saved to `watcher-state/screens/<session>-unrecognized.ansi` for whoever updates `screen.py` |

@@ -13,6 +13,23 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **A prompt waited minutes for a session that sat idle at its prompt with a background agent
+  running.** When the mouse rested on a row of Claude Code's background-agent list, or the row
+  was selected from the keyboard, Claude Code draws the pointer `❯` on it. aidc did not recognize
+  that screen and queued the prompt as `screen_unrecognized` until the agent finished (five
+  minutes in the case reported). The prompt now goes in while the agent keeps running, and aidc
+  presses Enter only after the pasted text shows in the input box. If it shows late, aidc submits
+  it on its next check instead of holding it as someone's unsent text. When someone has selected
+  a row in that list from the keyboard, where a typed `x` stops an agent, the prompt waits with
+  the new reason `agent_list_selected`. A session whose own turn is running still queues.
+- **`session_send` took 12-15 seconds to answer.** An orchestrator that re-opens a session's
+  webhook before each send made the MCP forget what it knew of the session's earlier transcripts,
+  and the new watcher read all of them again on the server's event loop, holding up the send
+  (and every other call) for seconds on a long-lived session. That knowledge is kept now, the
+  earlier transcripts are read in a worker thread, and slow readings of the session no longer
+  stretch the send's 5-second wait for it to be free.
+
 ## [1.9.5] - 2026-10-19
 
 ### Fixed

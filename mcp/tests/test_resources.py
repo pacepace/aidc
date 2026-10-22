@@ -7,7 +7,7 @@ security boundary that stops `{filename}` from escaping the session's audit dir.
 import json
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources
 from aidc_mcp.resources import parse_audit_dir
@@ -45,7 +45,7 @@ class TestParseAuditDir:
 # --- resource wiring ---------------------------------------------------------
 
 def _fn(uri: str):
-    app = FastMCP("t")
+    app = MCPServer("t")
     resources.register(app)
     rm = app._resource_manager
     if uri in rm._templates:

@@ -1,8 +1,8 @@
 """Blocking tool and resource bodies run off the event loop.
 
-FastMCP calls a synchronous tool or resource inline on the one event loop that
-also runs transcript watchers and reply callbacks, so a body waiting on the aidc
-CLI or `docker exec` froze all of them (60s and more while `aidc list` was slow).
+A body waiting on the aidc CLI or `docker exec`, run inline on the one event loop
+that also runs transcript watchers and reply callbacks, freezes all of them (60s
+and more while `aidc list` is slow).
 """
 
 import ast
@@ -12,7 +12,7 @@ import textwrap
 import threading
 import time
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources, tools
 
@@ -22,7 +22,7 @@ STALL = 3.0
 
 
 def _app():
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     resources.register(app)
     return app

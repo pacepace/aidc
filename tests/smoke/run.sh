@@ -62,6 +62,10 @@ cleanup() {
     if [ -n "${EGRESS_ECHO:-}" ]; then
         docker rm -f "$EGRESS_ECHO" >/dev/null 2>&1 || true
     fi
+    # Step 9a's aidc-mcp, if we died before it removed it.
+    if [ -n "${MCP_SMOKE:-}" ]; then
+        docker rm -f "$MCP_SMOKE" >/dev/null 2>&1 || true
+    fi
 
     # git commit inside the dev container (uid 1000) leaves .git objects owned by
     # 1000; a host runner at a different uid (CI: 1001) can't rm them. Fall back to
@@ -717,6 +721,76 @@ assert "aidc status <session> reports TAINTED" \
     "printf '%s' \"\$STATUS_OUT\" | grep -qi 'TAINTED'"
 assert "aidc list shows YES in tainted column for $SESSION" \
     "printf '%s' \"\$LIST_OUT\" | grep -E \"^${SESSION}\" | grep -q 'YES'"
+echo
+
+# --- step 9a: aidc-mcp end to end ----------------------------------------
+# The MCP server image this checkout builds, run as `aidc mcp start` runs it (docker
+# socket, the aidc tree read-only, a token file) but on an ephemeral loopback port
+# under its own name, so an aidc-mcp already serving an orchestrator is untouched.
+# An MCP client's calls over streamable HTTP, answered by the aidc CLI inside it
+# against this live session.
+echo "[9a/11] aidc-mcp end to end"
+MCP_IMAGE=$(
+    # The tag scripts/aidc derives from VERSION; in a subshell so nothing leaks.
+    AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r')
+    AIDC_VERSION_TAG="${AIDC_VERSION_TAG//+/_}"
+    export AIDC_VERSION_TAG
+    # shellcheck source=/dev/null
+    . "$AIDC_ROOT/scripts/lib/common.sh" && ensure_image mcp >&2 && echo "aidc/mcp:${AIDC_VERSION_TAG}"
+)
+MCP_SMOKE="aidc-mcp-${SESSION}"
+MCP_CFG="$SCRATCH/mcp-config"
+MCP_TOKEN="smoke-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+mkdir -p "$MCP_CFG"
+printf '%s\n' "$MCP_TOKEN" > "$MCP_CFG/mcp-token"
+docker run -d --name "$MCP_SMOKE" \
+    -v /var/run/docker.sock:/var/run/docker.sock:rw \
+    -v "${AIDC_ROOT}:/aidc:ro" -v "${MCP_CFG}:/aidc-config:ro" \
+    -e AIDC_MCP_PORT=7878 -p 127.0.0.1::7878 "$MCP_IMAGE" >/dev/null
+MCP_URL="http://$(docker port "$MCP_SMOKE" 7878 | head -1)/mcp"
+MCP_HDRS="$SCRATCH/mcp-headers"
+# One JSON-RPC call; prints the JSON-RPC message (the last SSE data line, or the body).
+mcp_rpc() {   # $1 = JSON body; MCP_SID set after initialize
+    local out
+    out=$(curl -sS --max-time 60 -D "$MCP_HDRS" \
+        -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer ${MCP_TOKEN}" \
+        ${MCP_SID:+-H "Mcp-Session-Id: ${MCP_SID}" -H "Mcp-Protocol-Version: 2025-11-25"} \
+        "$MCP_URL" -d "$1") || return 1
+    printf '%s\n' "$out" | sed -n 's/^data: //p' | tail -1 | grep . || printf '%s\n' "$out"
+}
+mcp_tool() {  # $1 = tool, $2 = arguments JSON; prints the tool's own JSON envelope
+    mcp_rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+        | jq -r '.result.content[0].text'
+}
+MCP_SID=""
+MCP_INIT=""
+for _ in $(seq 1 60); do   # the server is up once it answers initialize
+    # shellcheck disable=SC2034  # read inside the eval'd assert strings below
+    MCP_INIT=$(mcp_rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aidc-smoke","version":"0"}}}' 2>/dev/null) && break
+    sleep 0.5
+done
+MCP_SID=$(awk 'tolower($1) == "mcp-session-id:" { gsub(/\r/, "", $2); print $2 }' "$MCP_HDRS")
+mcp_rpc '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null 2>&1 || true
+# shellcheck disable=SC2034  # read inside the eval'd assert strings below
+MCP_TOOLS=$(mcp_rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' || true)
+# shellcheck disable=SC2034
+MCP_LIST=$(mcp_tool session_list '{}' || true)
+# shellcheck disable=SC2034
+MCP_STATUS=$(mcp_tool session_status "{\"name\":\"${SESSION}\"}" || true)
+MCP_VERSION="$(sed 's/^v//' "$AIDC_ROOT/VERSION")"
+assert "aidc-mcp answers initialize as aidc ${MCP_VERSION} (image ${MCP_IMAGE})" \
+    "printf '%s' \"\$MCP_INIT\" | jq -e --arg v '${MCP_VERSION}' '.result.serverInfo == {name: \"aidc\", version: \$v}'"
+assert "aidc-mcp names an MCP session" "[ -n \"\$MCP_SID\" ]"
+assert "aidc-mcp refuses a call without its token" \
+    "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \"\$MCP_URL\" -d '{}')\" = 401 ]"
+assert "tools/list offers what mcp/published-tools.json lists (session_create is opt-in)" \
+    "diff <(printf '%s' \"\$MCP_TOOLS\" | jq -S '[.result.tools[] | {name, input_schema: .inputSchema}] | sort_by(.name)') <(jq -S '[.[] | select(.name != \"session_create\") | {name, input_schema}] | sort_by(.name)' \"$AIDC_ROOT/mcp/published-tools.json\")"
+assert "session_list, run by the aidc CLI inside aidc-mcp, lists $SESSION" \
+    "printf '%s' \"\$MCP_LIST\" | jq -e --arg s '${SESSION}' '.ok and (.data.raw | test(\"(^|\\\\n)\" + \$s + \" \"))'"
+assert "session_status reports $SESSION, tainted" \
+    "printf '%s' \"\$MCP_STATUS\" | jq -e --arg s '${SESSION}' '.ok and (.data.raw | contains(\"aidc session: \" + \$s)) and (.data.tainted | not | not)'"
+docker rm -f "$MCP_SMOKE" >/dev/null 2>&1 || true
 echo
 
 # --- step 10: kill tears everything down ----------------------------------

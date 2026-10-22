@@ -25,7 +25,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
@@ -124,7 +124,7 @@ def harness(tmp_path, monkeypatch):
     async def capture(container, window):
         return ""
 
-    async def announce(app):
+    async def announce(app, ctx=None):
         return None
 
     async def fake_watcher(*a, **k):
@@ -161,7 +161,7 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools.httpx, "AsyncClient", metallm.client_factory())
     monkeypatch.setattr(tools.asyncio, "sleep", _nosleep)
 
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     send = app._tool_manager._tools["session_send"].fn
     resend_tool = app._tool_manager._tools["session_resend"].fn

@@ -11,13 +11,13 @@ import asyncio
 import subprocess
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, tools
 
 
 def _tool(name):
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app._tool_manager._tools[name].fn
 
@@ -102,21 +102,21 @@ def _patch_cli(monkeypatch, result, record=None):
 class TestSessionCreate:
     def test_absent_unless_the_operator_enabled_it(self, monkeypatch):
         monkeypatch.delenv(scope.ENABLE_CREATE_ENV, raising=False)
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         assert "session_create" not in app._tool_manager._tools
         assert "session_send" in app._tool_manager._tools   # the rest are unaffected
 
     def test_present_when_enabled(self, monkeypatch):
         monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         assert "session_create" in app._tool_manager._tools
 
     def test_any_other_value_leaves_it_off(self, monkeypatch):
         for value in ("1", "yes", "TRUE ", ""):
             monkeypatch.setenv(scope.ENABLE_CREATE_ENV, value)
-            app = FastMCP("t")
+            app = MCPServer("t")
             tools.register(app)
             present = "session_create" in app._tool_manager._tools
             assert present is (value.strip().lower() == "true"), value
@@ -216,7 +216,7 @@ class TestSimpleCliTools:
         (prod audit 2026-07-04 17:53). Killing is operator-only via the
         ``aidc kill`` CLI; MCP clients must not be able to discover or call it.
         """
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         assert "session_kill" not in app._tool_manager._tools
 
@@ -304,7 +304,7 @@ class TestSessionRun:
         MCP clients must not be able to discover or call it; multi-turn work is
         driven as repeated session_send calls instead.
         """
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         assert "session_run" not in app._tool_manager._tools
 
@@ -425,7 +425,7 @@ class TestTaintMark:
     def test_not_advertised(self):
         """Taint is the policy sidecar's finding about where a session went; an MCP
         client marking it is not a policy signal, so the tool is not offered."""
-        app = FastMCP("t")
+        app = MCPServer("t")
         tools.register(app)
         assert "taint_mark" not in app._tool_manager._tools
 
@@ -440,7 +440,7 @@ def watch_stubs(monkeypatch):
     async def fake_watcher(*a, **k):
         await asyncio.Event().wait()  # live until the cleanup fixture cancels it
 
-    async def announce(app_):
+    async def announce(app_, ctx=None):
         return None
 
     monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
@@ -480,7 +480,7 @@ class TestSessionWatch:
 
 class TestSessionUnwatch:
     async def test_stops_and_evicts_state(self, monkeypatch):
-        async def announce(app_):
+        async def announce(app_, ctx=None):
             return None
         monkeypatch.setattr(tools, "_announce_watchers", announce)
 
@@ -503,7 +503,7 @@ class TestSessionUnwatch:
         assert ("other", "c1") in tools._settle_state  # only the named session evicted
 
     async def test_noop_when_not_watching(self, monkeypatch):
-        async def announce(app_):
+        async def announce(app_, ctx=None):
             return None
         monkeypatch.setattr(tools, "_announce_watchers", announce)
         res = await _tool("session_unwatch")(name="never-watched")

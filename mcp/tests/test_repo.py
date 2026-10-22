@@ -9,7 +9,7 @@ import os
 import subprocess
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import repo, tools
 from aidc_mcp import session_facts as sf
@@ -48,7 +48,7 @@ def repo_dir(tmp_path, monkeypatch):
 
 
 def _tool(name):
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app._tool_manager._tools[name].fn
 

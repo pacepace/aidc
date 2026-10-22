@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, tools
 
@@ -29,7 +29,7 @@ def published_tools() -> list[dict[str, Any]]:
     before = os.environ.get(scope.ENABLE_CREATE_ENV)
     os.environ[scope.ENABLE_CREATE_ENV] = "true"
     try:
-        app = FastMCP("aidc")
+        app = MCPServer("aidc")
         tools.register(app)
         listed = asyncio.run(app.list_tools())
     finally:
@@ -39,7 +39,7 @@ def published_tools() -> list[dict[str, Any]]:
             os.environ[scope.ENABLE_CREATE_ENV] = before
         tools._tool_base_desc.clear()
     return sorted(({"name": t.name, "description": t.description or "",
-                    "input_schema": t.inputSchema} for t in listed),
+                    "input_schema": t.input_schema} for t in listed),
                   key=lambda t: str(t["name"]))
 
 

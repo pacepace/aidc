@@ -1,6 +1,6 @@
 """aidc-mcp entry point.
 
-Boots a FastMCP server with our tools + resources + bearer auth
+Boots an MCPServer with our tools + resources + bearer auth
 middleware, then runs the streamable-HTTP transport bound to the
 container's 0.0.0.0:${AIDC_MCP_PORT}. Docker's -p flag on the host
 restricts which host interface the listener is reachable from.
@@ -12,10 +12,10 @@ import os
 import sys
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-from aidc_mcp import audit, resources, tools
+from aidc_mcp import __version__, audit, resources, tools
 
 
 class ResumeOnStartup:
@@ -38,9 +38,9 @@ class ResumeOnStartup:
         await self.app(scope, receive, send)
 
 
-def main() -> int:
-    port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
-
+def build_app() -> Any:
+    """The ASGI app main() serves: the SDK's streamable-HTTP app behind bearer auth,
+    wrapped so startup resumes persisted queues and webhooks."""
     # DNS rebinding protection is designed for browser-facing services where
     # JS can spoof Host headers. Our server is bearer-auth gated and bound
     # to a private interface (ZeroTier / Tailscale / localhost) via Docker
@@ -48,40 +48,33 @@ def main() -> int:
     # we don't know that bind choice from inside the container, so the SDK's
     # auto-enabled localhost-only allow-list rejects everything else. Turning
     # the check off here is safe given our auth + network model.
-    app = FastMCP(
+    app = MCPServer(
         name="aidc",
+        version=__version__,
         instructions=(
             "Control plane for the aidc sandbox. Tools manage sessions "
             "(create / list / status / kill / exec), invoke the in-container "
             "Claude, read/write files inside sessions, and surface audit data."
         ),
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     tools.register(app)
     resources.register(app)
 
-    audit.log_event("server_start", port=port)
-
     # We import the bearer-auth middleware lazily so a missing token file
     # produces a clean error message on startup rather than during import.
     from aidc_mcp.auth import BearerAuthMiddleware
 
-    # FastMCP exposes a Starlette ASGI app for the streamable-HTTP
-    # transport. We wrap it in our middleware and run it with uvicorn.
-    starlette_app: Any
-    try:
-        starlette_app = app.streamable_http_app()
-    except AttributeError:
-        # Some SDK versions expose the ASGI app via a different name.
-        starlette_app = app.sse_app() if hasattr(app, "sse_app") else None
-        if starlette_app is None:
-            audit.log_event("server_error", reason="no_asgi_app")
-            print("ERROR: this MCP SDK version doesn't expose a streamable-HTTP ASGI app",
-                  file=sys.stderr)
-            return 2
+    http_app = app.streamable_http_app(
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
+    return ResumeOnStartup(BearerAuthMiddleware(http_app), app)
 
-    wrapped = ResumeOnStartup(BearerAuthMiddleware(starlette_app), app)
+
+def main() -> int:
+    port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
+    audit.log_event("server_start", port=port)
+    wrapped = build_app()
 
     import uvicorn
 

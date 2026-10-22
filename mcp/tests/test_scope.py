@@ -4,7 +4,7 @@ import inspect
 import json
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources, scope, tools
 
@@ -41,7 +41,7 @@ CALLS = {
 
 @pytest.fixture
 def app():
-    a = FastMCP("t")
+    a = MCPServer("t")
     tools.register(a)
     resources.register(a)
     return a
@@ -117,7 +117,7 @@ async def test_every_tool_that_takes_a_session_name_refuses_out_of_scope(
 
 
 def test_scoping_keeps_the_tool_schemas_and_context_injection(app):
-    """The wrapper must not change what FastMCP sees: session_invoke still gets its
+    """The wrapper must not change what MCPServer sees: session_invoke still gets its
     Context injected, and `ctx` is not advertised as an argument."""
     invoke = app._tool_manager._tools["session_invoke"]
     assert invoke.context_kwarg == "ctx"
@@ -128,7 +128,7 @@ def test_scoping_keeps_the_tool_schemas_and_context_injection(app):
 async def test_session_create_is_refused_when_scoped(monkeypatch, forbid_side_effects):
     """Even with the operator's opt-in, a scoped server refuses to create sessions."""
     monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
-    a = FastMCP("t")
+    a = MCPServer("t")
     tools.register(a)
     monkeypatch.setenv(scope.ENV, "jointtest")
     result = await a._tool_manager._tools["session_create"].fn(
@@ -159,7 +159,7 @@ async def test_in_scope_calls_go_through(app, monkeypatch, idle_session):
 async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(resources, "_run", lambda args: "SESSION X\nmetallm Up\njointtest Up\n")
-    a = FastMCP("r")
+    a = MCPServer("r")
     resources.register(a)
     fns = {str(t.uri_template): t.fn for t in a._resource_manager._templates.values()}
     fns.update({str(r.uri): r.fn for r in a._resource_manager._resources.values()})

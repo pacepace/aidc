@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from aidc_mcp import repo, scope, session_mcp
@@ -305,17 +305,29 @@ def _refresh_session_tool_descriptions(app: Any) -> None:
         tool.description = base + suffix
 
 
-async def _announce_watchers(app: Any) -> None:
+async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
     """Refresh descriptions and notify connected clients to refetch tools/list.
 
-    Best-effort: if no request context/session is active (e.g. a background
-    caller), the description is still updated and the next tools/list reflects it.
+    Best-effort: without the request's Context (a background caller, such as the
+    startup resume), the description is still updated and the next tools/list
+    reflects it. A client on a 2025-era protocol version hears of the change on its
+    own session; one on 2026-07-28 hears only through a subscriptions/listen stream,
+    so the change goes both ways and either may find nobody listening.
     """
     _refresh_session_tool_descriptions(app)
+    if ctx is None:
+        log_event("tool_list_changed_notify_failed", error_type="NoRequestContext",
+                  error="no request context to notify")
+        return
     try:
-        await app.get_context().session.send_tool_list_changed()
+        await ctx.session.send_tool_list_changed()
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- best-effort notify
         log_event("tool_list_changed_notify_failed",
+                  error_type=type(exc).__name__, error=repr(exc))
+    try:
+        await ctx.notify_tools_changed()
+    except Exception as exc:  # prawduct:allow prawduct/broad-except -- best-effort notify
+        log_event("tool_list_changed_publish_failed",
                   error_type=type(exc).__name__, error=repr(exc))
 
 
@@ -2467,7 +2479,8 @@ def _register_watcher(name: str, conversation_id: str, base_url: str) -> None:
     task.add_done_callback(_make_watcher_done_callback(name))
 
 
-async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: str) -> None:
+async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: str,
+                         ctx: Context | None = None) -> None:
     """Baseline forward-only, spawn the transcript watcher, register it, and
     announce the change. Shared by session_send / session_watch.
 
@@ -2494,7 +2507,7 @@ async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: st
     # and this await completes before the caller injects any prompt, so the anchor
     # is still established before the first delivery.
     await _baseline_watermark(name, conversation_id)
-    await _announce_watchers(app)
+    await _announce_watchers(app, ctx)
 
 
 # ---- low-level CLI runner ---------------------------------------------------
@@ -2644,7 +2657,7 @@ def _envelope_err(error: str, data: Any = None, *, code: str) -> dict[str, Any]:
 def _scoped(fn: Any) -> Any:
     """Refuse a call whose `name` is outside this server's session scope (scope.py),
     before the tool does anything. Keeps the wrapped signature and docstring, which
-    FastMCP reads for the tool schema."""
+    MCPServer reads for the tool schema."""
     def refused(name: str) -> dict[str, Any] | None:
         why = scope.refusal(name)
         if why is None:
@@ -2794,7 +2807,7 @@ async def _session_report(name: str) -> dict[str, Any]:
 
 
 def register(app: Any) -> None:
-    """Attach every tool to the given FastMCP app."""
+    """Attach every tool to the given MCPServer app."""
 
     # --- session_create -------------------------------------------------
     #
@@ -3226,6 +3239,7 @@ def register(app: Any) -> None:
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
         sent_by: Annotated[str | None, Field(description=_SENT_BY_DESC)] = None,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Ask the live Claude agent running in a session a question, or hand it a task —
         and get its reply back. The agent has the project loaded in its context, so to
@@ -3306,7 +3320,7 @@ def register(app: Any) -> None:
                     "so replies have nowhere to be POSTed"
                 )
             else:
-                await _start_watcher(app, name, conversation_id, base_url)
+                await _start_watcher(app, name, conversation_id, base_url, ctx)
                 log_event("tool_call", tool="session_send_auto_watch", session=name,
                           conversation_id=conversation_id)
 
@@ -3533,6 +3547,7 @@ def register(app: Any) -> None:
     async def session_watch(
         name: Annotated[str, Field(description=_NAME_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         """CALL THIS FIRST for any back-and-forth with a session.
 
@@ -3557,7 +3572,7 @@ def register(app: Any) -> None:
             )
         # _start_watcher atomically cancels any existing watcher and installs the
         # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
-        await _start_watcher(app, name, conversation_id, base_url)
+        await _start_watcher(app, name, conversation_id, base_url, ctx)
         log_event("tool_call", tool="session_watch", session=name, conversation_id=conversation_id)
         return _envelope_ok(
             {"status": "watching", "session": name, "conversation_id": conversation_id}
@@ -3675,7 +3690,7 @@ def register(app: Any) -> None:
 
     @app.tool()
     @_scoped
-    async def session_unwatch(name: str) -> dict[str, Any]:
+    async def session_unwatch(name: str, ctx: Context | None = None) -> dict[str, Any]:
         """Stop watching the agent window for the named session.
 
         Cancels the background watcher started by session_watch.
@@ -3692,7 +3707,7 @@ def register(app: Any) -> None:
         # Evict the per-session send lock + settle entries too, or they leak as
         # sessions come and go (the done-callback also does this on natural exit).
         _evict_session_state(name)
-        await _announce_watchers(app)
+        await _announce_watchers(app, ctx)
         log_event("tool_call", tool="session_unwatch", session=name)
         return _envelope_ok({"status": "stopped", "session": name})
 

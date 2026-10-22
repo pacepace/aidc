@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, session_mcp, tools
 
@@ -263,7 +263,7 @@ class TestWhatIsRefused:
 # --- the tool ------------------------------------------------------------------
 
 def _tool(name):
-    app = FastMCP("t")
+    app = MCPServer("t")
     tools.register(app)
     return app._tool_manager._tools[name].fn
 

@@ -39,8 +39,8 @@
 <!-- prawduct: scope=dependabot-pyjwt-certifi -->
 
 **Why:** pacepace/aidc had fifteen open Dependabot alerts, all on `mcp/uv.lock` with
-runtime scope: certifi 2026.7.22 (#27, critical: GHSA-6q48-6c7w-9gw2, emSign roots whose
-intermediate CA keys were compromised) and PyJWT 2.13.0 (#13-#26: critical, high and medium).
+runtime scope: certifi 2026.7.22 (#27, critical: GHSA-6q48-6c7w-9gw2, the
+`emSign ECC Root CA - G3` root, eight of whose intermediate CAs have compromised keys) and PyJWT 2.13.0 (#13-#26: critical, high and medium).
 PyJWT is transitive through `mcp`; aidc-mcp does not import jwt. certifi comes in through
 httpx and httpcore. Pace then widened the scope (2026-10-22): "let's do the mcp upgrade too".
 That meant upgrading the whole lock and moving from mcp 1.30.0 to 2.x, with nothing a client
@@ -52,7 +52,9 @@ sees allowed to change.
   the 2.14.0 tag (GitHub compare). certifi 2026.10.19 was uploaded on 2026-10-20, inside
   the REL-09 cooldown, so it gets a per-package `exclude-newer-package` cutoff
   (2026-10-21T00:00Z, which admits that release and nothing later) with its reason beside it
-  in `mcp/pyproject.toml`. The entry can go after 2026-11-03.
+  in `mcp/pyproject.toml`. The cutoff is a fixed date, so after 2026-11-03 it only holds
+  certifi back; it should be removed then. The built image's bundle was checked: v1.9.6 has the four
+  emSign roots, and v1.9.7 has all of them except ECC G3, which is what the advisory's fix does.
 - `constraint-dependencies` floors (`pyjwt>=2.15.0`, `certifi>=2026.10.19`) under
   `[tool.uv]`. Under the cooldown alone, a re-lock left certifi at 2026.7.22. With the floor
   and the exception removed, `uv lock` fails to resolve instead (checked). They are

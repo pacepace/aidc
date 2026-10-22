@@ -16,9 +16,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ## [1.9.7] - 2026-10-22
 
 ### Security
-- **The MCP server's image no longer ships a certifi that trusts compromised CA roots.**
-  certifi 2026.7.22 still carried the emSign roots whose intermediate CA keys were compromised
-  (GHSA-6q48-6c7w-9gw2, critical); aidc-mcp now locks certifi 2026.10.19, which drops them.
+- **The MCP server's image no longer ships a certifi that trusts a compromised CA root.**
+  certifi 2026.7.22 still carried `emSign ECC Root CA - G3`, eight of whose intermediate CAs
+  have compromised keys (GHSA-6q48-6c7w-9gw2, critical). aidc-mcp now locks certifi 2026.10.19,
+  which drops that root and keeps the unaffected emSign roots.
   That release is younger than the 14-day supply-chain cooldown, so it is admitted as a
   single, dated exception in `mcp/pyproject.toml`, with the reason beside it.
 - **PyJWT 2.13.0 -> 2.15.1** in the MCP server's lock, clearing the fourteen PyJWT advisories

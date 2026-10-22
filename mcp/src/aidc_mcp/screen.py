@@ -16,7 +16,8 @@ Layout measured on Claude Code 2.1.270, 2.1.274 and 2.1.300
 last two full-width `─` rules (the top one may carry the session's name, measured on
 2.1.284), its first row starts with `❯` and a no-break space, placeholder text is drawn
 dim (SGR 2), and the status row sits right below the second rule; from 2.1.300 a list of
-running background agents may follow the status rows. Everything here fails closed: a screen
+running background agents may follow the status rows, one of its rows possibly under the
+pointer. Everything here fails closed: a screen
 without the input box is "not at prompt" (a known dialog) or "unrecognized", and both
 hold prompts rather than typing blind.
 """
@@ -46,7 +47,15 @@ _MAX_ROWS_BELOW_BOX = 4
 # blank row, then one row per agent (`  ● main`, `  ◯ general-purpose  <activity>`).
 # The list grows with the agents, so it is set aside before the rows below the box
 # are counted. Only the glyphs measured are accepted; another one fails closed.
-_AGENT_ROW_RE = re.compile("  [●◯] \\S")
+# The row under the mouse, or the one selected from the keyboard (`←`, `↓`), is drawn
+# with the pointer `❯ ` (a plain space, unlike the box's `❯` and no-break space) in
+# place of the indent. Only a keyboard selection also swaps the permission-mode status
+# row for the list's key hints (measured on Claude Code 2.1.304, 2026-10-22). While the
+# list has the keyboard, a burst of several characters still goes to the input box, but
+# a single one is a list key: `x` stopped the selected agent.
+_POINTER = "❯ "
+_AGENT_ROW_RE = re.compile(f"(  |{_POINTER})[●◯] \\S")
+_LIST_KEY_HINTS = ("↑/↓ to select", "Enter to view")
 
 _RULE_RE = re.compile(f"({_RULE_CHAR}+)(?: [^{_RULE_CHAR}]+ ({_RULE_CHAR}+))?")
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
@@ -62,6 +71,13 @@ class ScreenState:
     # Claude Code wraps a long line is not preserved, so compare it with
     # same_text(), which ignores whitespace.
     typed: str = field(default="", compare=False)
+    # A row of the background-agent list carries the pointer: the mouse rests on it,
+    # or the keyboard selected it (then list_focused is set too). A paste is
+    # confirmed in the box before it is submitted while the pointer shows.
+    agent_pointed: bool = field(default=False, compare=False)
+    # The background-agent list has the keyboard: its key hints replace the status
+    # row. Keys typed now are list commands, so nothing is pasted.
+    list_focused: bool = field(default=False, compare=False)
 
 
 def same_text(a: str, b: str) -> bool:
@@ -150,9 +166,13 @@ def classify(ansi: str) -> ScreenState:
     if not box or not plain[top + 1].startswith(_BOX_GLYPH):
         return ScreenState(no_box.input_box, working)
 
+    pointed = any(text.startswith(_POINTER) for text in plain[end:])
+    focused = pointed and any(hint in text for text in plain[bottom + 1:end]
+                              for hint in _LIST_KEY_HINTS)
     rows_typed = [box[0][len(_BOX_GLYPH):], *box[1:]]
     if not any(not ch.isspace() and not is_dim for row in rows_typed for ch, is_dim in row):
-        return ScreenState(EMPTY, working)
+        return ScreenState(EMPTY, working, agent_pointed=pointed, list_focused=focused)
     text = "\n".join("".join(ch for ch, is_dim in row if not is_dim).strip()
                      for row in rows_typed)
-    return ScreenState(HAS_TEXT, working, typed=text.strip())
+    return ScreenState(HAS_TEXT, working, typed=text.strip(), agent_pointed=pointed,
+                       list_focused=focused)

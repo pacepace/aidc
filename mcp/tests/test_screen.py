@@ -177,6 +177,62 @@ def test_trailing_rows_that_are_not_an_agent_list_fail_closed(rows):
     assert classify(_with_agents(rows)).input_box == UNRECOGNIZED
 
 
+def test_an_agent_row_under_the_pointer_is_still_the_agent_list():
+    """Live 2026-10-21 (Claude Code 2.1.30x): Claude sat at its prompt with one
+    background agent running, and the row the mouse rested on (or the keyboard
+    selected) was drawn `❯ ◯ general-purpose …`. Read as "no box", an orchestrator
+    prompt waited five minutes as screen_unrecognized."""
+    screen = (SCREENS / "claude-2.1.30x-idle-agent-row-pointed.ansi").read_text()
+    state = classify(screen)
+    assert state == ScreenState(EMPTY, working=False)
+    assert state.agent_pointed is True
+
+
+@pytest.mark.parametrize("rows", [
+    ["❯ ● main", "  ◯ general-purpose  task"],
+    ["  ● main", "❯ ◯ general-purpose  task", "  ◯ general-purpose  task"],
+])
+def test_the_pointer_may_sit_on_any_agent_row(rows):
+    state = classify(_with_agents(rows))
+    assert state == ScreenState(HAS_TEXT, working=False, typed="typed")
+    assert state.agent_pointed is True
+
+
+def test_a_hovered_agent_row_does_not_take_the_keyboard():
+    screen = (SCREENS / "claude-2.1.30x-idle-agent-row-pointed.ansi").read_text()
+    assert classify(screen).list_focused is False
+
+
+def test_the_list_has_the_keyboard_when_its_key_hints_replace_the_status_row():
+    """Measured on Claude Code 2.1.304: selecting an agent from the keyboard swaps the
+    permission-mode row for `Enter to view · x to stop`, and then a single `x`
+    stops that agent."""
+    screen = (SCREENS / "claude-2.1.30x-idle-agent-list-selected.ansi").read_text()
+    state = classify(screen)
+    assert state.input_box == EMPTY
+    assert state.agent_pointed is True
+    assert state.list_focused is True
+
+
+def test_the_main_row_selected_from_the_keyboard_is_focus_too():
+    state = classify(_with_agents(["❯ ● main", "  ◯ general-purpose  task"],
+                                  status="  ↑/↓ to select"))
+    assert state.list_focused is True
+
+
+def test_an_agent_list_without_the_pointer_is_not_pointed():
+    assert classify(_with_agents(["  ● main", "  ◯ a"])).agent_pointed is False
+    assert classify(_screen("idle-empty")).agent_pointed is False
+
+
+@pytest.mark.parametrize("rows", [
+    ["  ● main", "❯ shell output"],            # the pointer on something else
+    ["  ● main", "❯\xa0◯ general-purpose"],    # the input box's glyph, not the pointer
+])
+def test_a_pointer_on_a_row_that_is_not_an_agent_fails_closed(rows):
+    assert classify(_with_agents(rows)).input_box == UNRECOGNIZED
+
+
 def test_agent_rows_without_the_blank_separator_are_counted_as_rows():
     text = "\n".join([RULE, "❯\xa0", RULE, "  status", "  ⏵⏵ bypass",
                       "  ● main", "  ◯ a", "  ◯ b", ""])

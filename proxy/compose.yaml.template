@@ -76,7 +76,7 @@ ${DNS_BLOCK}
     container_name: aidc-${SESSION}-refresher
     networks:
       default: {}
-      egress: {}          # fetches URLhaus / ThreatFox / HaGeZi feeds directly
+      egress: {}          # fetches the URLhaus mirror and HaGeZi feeds directly
     volumes:
       - blocklist:/etc/squid:rw    # writes /etc/squid/blocklist.txt
       - aidc-log:/var/log/aidc     # writes refresher.log

@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-10-22
+
 ### Fixed
 - **A prompt waited minutes for a session that sat idle at its prompt with a background agent
   running.** When the mouse rested on a row of Claude Code's background-agent list, or the row
@@ -1289,7 +1291,11 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.2...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.6...HEAD
+[1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6
+[1.9.5]: https://github.com/pacepace/aidc/compare/v1.9.4...v1.9.5
+[1.9.4]: https://github.com/pacepace/aidc/compare/v1.9.3...v1.9.4
+[1.9.3]: https://github.com/pacepace/aidc/compare/v1.9.2...v1.9.3
 [1.9.2]: https://github.com/pacepace/aidc/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/pacepace/aidc/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/pacepace/aidc/compare/v1.8.3...v1.9.0

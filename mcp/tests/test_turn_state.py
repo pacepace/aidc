@@ -758,3 +758,200 @@ class TestQueuedPromptOnTheAgentListScreen:
                 break
         assert pasted == ["please fix the other bugs"]
         assert tools._last_free_verdict["proj"] == ("", "log_finished")
+
+
+POINTED = "claude-2.1.30x-idle-agent-row-pointed.ansi"
+
+
+class TestSendWhileABackgroundAgentRuns:
+    """Live 2026-10-21, conv 01a15184: the session `metallm` had finished its reply
+    and sat at its prompt while one background agent ran, the mouse resting on that
+    agent's row. A session_send queued as screen_unrecognized and was pasted five
+    minutes later. Claude Code takes typed input in that state, so the prompt goes in
+    now. The pointer is drawn for a hover or for a keyboard selection in the agent
+    list, which the screen cannot tell apart, so Enter is pressed only once the
+    pasted text shows in the input box. Driven through session_send and the real free
+    check; only docker and tmux are patched."""
+
+    def _setup(self, session, monkeypatch, *, lands=True):
+        real_sleep = asyncio.sleep
+        self.pasted, self.keys = [], []
+        idle = (SCREENS / POINTED).read_text()
+        session.screen = idle
+        session.write(FINISHED)
+
+        async def load_paste(container, text, window):
+            self.pasted.append(text)
+            if lands:
+                session.screen = idle.replace("❯\xa0", "❯\xa0" + text, 1)
+            return True
+
+        async def tmux_exec(container, args):
+            if args and args[0] == "send-keys":
+                self.keys.append(args[-1])
+            return 0
+
+        async def no_wait(seconds):
+            await real_sleep(0)
+
+        class Watching:
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
+        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
+        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        app = FastMCP("t")
+        tools.register(app)
+        tools._session_watchers["proj"] = Watching()
+        return app._tool_manager._tools["session_send"].fn
+
+    async def test_a_session_idle_at_its_prompt_takes_the_prompt_now(self, session,
+                                                                     monkeypatch):
+        send = self._setup(session, monkeypatch)
+        res = await send(name="proj", prompt="please look at the parser",
+                         conversation_id="c1")
+        assert res["data"]["status"] == "sent"
+        assert self.pasted == ["please look at the parser"]
+        assert self.keys == ["Enter"]
+
+    async def test_a_paste_that_does_not_show_in_the_box_is_not_submitted(self, session,
+                                                                         monkeypatch):
+        """Focus in the agent list, say: Enter there would open an agent, not send."""
+        send = self._setup(session, monkeypatch, lands=False)
+        res = await send(name="proj", prompt="please look at the parser",
+                         conversation_id="c1")
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert self.keys == []
+        assert res["data"]["status"] == "queued"
+        assert res["data"]["waiting_reason"] == "paste_failing"
+
+    async def test_nothing_is_typed_while_the_agent_list_has_the_keyboard(self, session,
+                                                                         monkeypatch):
+        send = self._setup(session, monkeypatch)
+        session.screen = (SCREENS / "claude-2.1.30x-idle-agent-list-selected.ansi").read_text()
+        res = await send(name="proj", prompt="x", conversation_id="c1")
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert self.pasted == [] and self.keys == []
+        assert res["data"]["status"] == "queued"
+        assert res["data"]["waiting_reason"] == "agent_list_selected"
+
+    async def test_a_paste_that_shows_late_is_submitted_not_pasted_again(self, session,
+                                                                        monkeypatch):
+        """The box drew the paste only after the confirm window: the next pass finds
+        our own text there and presses Enter, instead of holding it as a person's
+        unsent input forever or pasting a second copy."""
+        send = self._setup(session, monkeypatch, lands=False)
+        res = await send(name="proj", prompt="please look at the parser",
+                         conversation_id="c1")
+        assert res["data"]["status"] == "queued" and self.keys == []
+
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if "proj" not in tools._pending_sends:
+                break
+        assert self.pasted == ["please look at the parser"]
+        assert self.keys == ["Enter"]
+        assert "proj" not in tools._pending_sends
+
+    async def test_a_person_typing_after_a_lost_paste_is_still_held(self, session,
+                                                                     monkeypatch):
+        send = self._setup(session, monkeypatch, lands=False)
+        await send(name="proj", prompt="please look at the parser", conversation_id="c1")
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0something else", 1)
+        assert await session.check() == "input_has_text"
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert self.keys == []
+
+    async def test_a_late_paste_nobody_queued_is_not_pasted_on_top_of(self, session,
+                                                                       monkeypatch):
+        """A caller that does not queue (session_run) gave up on paste A; when A
+        shows later, a following send must not paste B after it and submit "A B"."""
+        send = self._setup(session, monkeypatch)
+        tools._unsubmitted_paste["proj"] = "the first prompt"
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
+        assert await session.check() == "input_has_text"
+        res = await send(name="proj", prompt="the second prompt", conversation_id="c1")
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert res["data"]["status"] == "queued"
+        assert self.pasted == [] and self.keys == []
+
+    async def test_a_late_paste_that_is_not_the_queue_head_is_held(self, session,
+                                                                    monkeypatch):
+        self._setup(session, monkeypatch)
+        tools._unsubmitted_paste["proj"] = "the first prompt"
+        tools._pending_sends["proj"] = [ts.QueuedPrompt(text="another prompt",
+                                                        enqueued_at=ts.now_iso())]
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
+        assert await session.check() == "input_has_text"
+
+    async def test_a_running_main_turn_still_queues(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)
+        res = await send(name="proj", prompt="please look at the parser",
+                         conversation_id="c1")
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert res["data"]["status"] == "queued"
+        assert res["data"]["waiting_reason"] == "claude_busy"
+        assert self.pasted == []
+
+
+class TestSendReturnsWithinItsBound:
+    """Live 2026-10-21/22: session_send took 12.6 and 14.7 s to answer, against a
+    _SEND_FREE_WAIT_S of 5. The wait counted polls, not time, so every slow reading
+    of the session lengthened it."""
+
+    async def test_slow_readings_do_not_stretch_the_wait(self, monkeypatch):
+        real_sleep = asyncio.sleep
+        readings = []
+
+        async def slow_check(container, name):
+            readings.append(1)
+            await real_sleep(0.4)
+            return "claude_busy"
+
+        monkeypatch.setattr(tools, "_check_free", slow_check)
+        monkeypatch.setattr(tools, "_FREE_POLL_S", 0.4)
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        reason = await tools._wait_until_free("c", "proj", timeout=0.6)
+        assert loop.time() - start < 0.6 + 0.2
+        assert reason == "claude_busy"
+        assert readings == [1]
+
+    async def test_a_free_first_reading_gets_its_confirming_second(self, monkeypatch):
+        """One slow reading must not turn a free session into "claude_busy": a free
+        reading is always followed by the second one it needs."""
+        real_sleep = asyncio.sleep
+        readings = []
+
+        async def slow_free(container, name):
+            readings.append(1)
+            await real_sleep(0.4)
+            return ""
+
+        monkeypatch.setattr(tools, "_check_free", slow_free)
+        monkeypatch.setattr(tools, "_FREE_POLL_S", 0.1)
+        assert await tools._wait_until_free("c", "proj", timeout=0.3) == ""
+        assert readings == [1, 1]
+
+
+class TestTheFreeCheckLeavesItsScreen:
+    async def test_a_free_verdict_always_comes_with_the_screen_it_read(self, session):
+        """_inject judges the paste against the screen the free check read, so a free
+        verdict without one would let a paste skip its confirmation."""
+        session.write(FINISHED)
+        session.screen = (SCREENS / POINTED).read_text()
+        assert await session.check() == ""
+        assert tools._last_screen_raw["proj"] == session.screen
+
+    async def test_no_free_verdict_without_a_screen(self, session):
+        session.running = False
+        assert await session.check() == "claude_not_running"
+        assert "proj" not in tools._last_screen_raw

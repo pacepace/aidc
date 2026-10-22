@@ -34,6 +34,84 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-22: session_send takes prompts while a background agent runs, and answers promptly
+
+<!-- prawduct: scope=send-while-background-task -->
+
+**Why:** metallm conversation 01a15184, 2026-10-21/22. Session `metallm` finished its reply and
+sat at its prompt with one background agent running. A session_send at 23:56:37 took 14.7 s to
+return "queued" and was pasted 5 min 11 s later; the next send took 12.6 s to return "sent". The
+access log gave the reason: `session_free_check reason=screen_unrecognized turn=idle
+why=log_finished`. The saved capture (`watcher-state/screens/metallm-unrecognized.ansi`) showed
+the agent-list row under the mouse drawn `❯ ◯ general-purpose …`, a pointer `screen.py` did not
+accept. The slow answers came from the orchestrator's unwatch/watch before each send:
+unwatching dropped the cached newest-message stamps of the session's earlier transcripts (28
+files, 775 MB), and the new watcher's first pass re-read them all on the event loop (about 9.3 s
+measured on the real files), during the send's 2.5 s gap between free readings.
+
+**What:** `screen.py` accepts the pointer on agent rows (`agent_pointed`) and recognizes a
+keyboard selection in the list by the key hints that replace the status row (`list_focused`).
+Measured on a local Claude Code 2.1.304: a selected list still takes a multi-character paste into
+the input box, but a single `x` stopped the selected agent. So a focused list holds prompts
+(new waiting reason `agent_list_selected`); with only the pointer, `_inject` pastes and presses
+Enter once the input box shows text, and a paste that shows late is submitted by the drainer
+when it is still the queue head (`_unsubmitted_paste`, `_own_unsent_text`), otherwise held as
+unsent input. A running main turn still queues. `forget_transcripts` keeps the per-file stamps
+(dropping only files that are gone), the sibling scan runs in a worker thread
+(`_newest_of_siblings`, the lock narrowed to the cache), and `_wait_until_free` is bounded on the
+clock as well as in polls, with a free reading always confirmed by a second. Measured on the
+real metallm files after the fix: a drain after unwatch 0.15 s; a cold drain still 9.4 s of wall
+time but at most 0.25 s of event-loop stall. Tests: real screen fixtures (sanitized from the
+live capture), session_send through the real free check for idle+background, focus, late and
+non-queued pastes, the clock bound, and the cache kept across an unwatch.
+
+Reviews: rev-20261022T002658Z-7296f4d7 (0 blocking; observations fixed or accepted, among them
+keystrokes into a focused list and the late-paste wedge), verify-resolutions
+rev-20261022T004233Z-86b4d4f2 (1 blocking: a late session_run paste merged into the next
+prompt; fixed by the queue-head check), rev-20261022T004749Z-5c6761a2 (0 findings). Not done:
+the unsubmitted-paste record is in memory only, so after an MCP restart a late paste is held as
+unsent input (fails safe).
+
+
+## 2026-10-22: the malware blocklist's feeds: URLhaus from a keyless mirror, ThreatFox dropped
+
+<!-- prawduct: scope=malware-feeds-keyless -->
+
+**Why:** found by the v1.9.6 `make smoke` run, 2026-10-22. `https://urlhaus.abuse.ch/downloads/hostfile/`
+and `https://threatfox.abuse.ch/export/csv/recent/` both answer 410 Gone: abuse.ch now requires a
+per-user Auth-Key for every export. The refresher had been building the list from HaGeZi TIF
+alone, and nothing said so, because a refresh that succeeds on one feed still publishes (NET-11).
+The same run's HaGeZi TIF download (about 39 MB) hit curl's 60 s limit at 31 MB under load.
+
+**Decision (Pace, 2026-10-22):** "let's see if we can find suitable replacements for the two
+missing ones please, and if we can't then we drop to just the one." So no Auth-Key is held;
+each feed is replaced by a keyless source where one exists, and dropped where none does.
+- URLhaus: replaced by the malware-filter project's mirror of URLhaus data
+  (`https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt`, falling back to
+  `https://curbengh.github.io/malware-filter/urlhaus-filter-hosts.txt`): hosts format, rebuilt
+  every 12 h, about 1,800 domains.
+- ThreatFox: dropped. No keyless source of its data was found.
+- **Trust shift.** The URLhaus entries now come from a single maintainer's rebuild (curbengh,
+  malware-filter) rather than from abuse.ch. Anything that mirror publishes is denied by squid,
+  and the first request to a listed domain taints the session; under `taint_response: freeze`
+  the dev container is paused. A wrong or hostile entry (a widely used domain) would therefore
+  freeze any session that touches it, and an entry the mirror drops would no longer be blocked.
+  Both mirrors are the same maintainer's, so the fallback covers an outage, not a bad publish.
+  NET-04 and SEC-03 in `docs/requirements.md` are amended to the two feeds and point here;
+  `docs/security-model.md` states the trust shift.
+
+**What:** `proxy/refresher/refresh.sh` fetches the URLhaus mirror (gitlab, then github, the
+fallback logged), drops the ThreatFox fetch, parse and count (summary line now
+`urlhaus=N hagezi=N additions=N`), gives HaGeZi TIF `--max-time 300` (every fetch
+`--connect-timeout 15`), and logs a `WARN <feed>:` line for a feed that failed or yielded 0
+entries. New `tests/unit/test-refresher-feeds.sh` runs the real refresh.sh against a curl stub:
+parsing, the fallback order, the timeouts, the WARN lines, and NET-11's kept list. The smoke now
+waits for the startup refresh to finish (either way) for longer than the refresher's worst case,
+requires it to have succeeded with entries, requires urlhaus and hagezi each above 0, and names
+the missing list instead of requesting an empty domain. Not done: `aidc status` does not show a
+lost feed; filed as #60.
+
+
 ## 2026-10-19: the loop guard no longer drops replies to a person's own prompts
 
 <!-- prawduct: scope=loop-guard-human-turns -->

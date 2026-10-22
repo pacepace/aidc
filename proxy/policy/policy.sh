@@ -9,7 +9,7 @@
 # entries are NOT re-evaluated. One session = one possible taint.
 #
 # Membership tests run directly against the on-disk files (`grep -Fxq`)
-# rather than against an in-memory bash array. The URLhaus + ThreatFox
+# rather than against an in-memory bash array. The URLhaus
 # + HaGeZi-TIF blocklist is ~1.3M lines — loading that into a bash
 # associative array takes ~20s, which caused a race with the smoke test
 # (a one-line append by the refresher would block reloads for that long).

@@ -263,26 +263,37 @@ def newest_message_ts_of(path: Path) -> str:
     """``newest_message_ts`` of the transcript at ``path``, read once per version of
     the file. Raises OSError as ``read_text`` does."""
     path = Path(path)
+    # The lock guards the cache only. Reading and parsing a large file happens outside
+    # it, so a worker thread scanning a session's earlier transcripts never holds up
+    # the event loop's own read of the live one.
+    with path.open("rb") as fh:
+        stamp = _stamp_of(os.fstat(fh.fileno()))
+        with _read_lock:
+            kept = _newest_ts.get(path)
+        if kept is not None and kept[0] == stamp and kept[1]:
+            return kept[2]
+        settled = _settled(stamp)
+        raw = fh.read()
+    newest = newest_message_ts(parse_jsonl(_as_read_text(raw)))
     with _read_lock:
-        kept = _newest_ts.get(path)
-        with path.open("rb") as fh:
-            stamp = _stamp_of(os.fstat(fh.fileno()))
-            if kept is not None and kept[0] == stamp and kept[1]:
-                return kept[2]
-            settled = _settled(stamp)
-            raw = fh.read()
-        newest = newest_message_ts(parse_jsonl(_as_read_text(raw)))
         _newest_ts[path] = (stamp, settled, newest)
-        return newest
+    return newest
 
 
 def forget_transcripts(transcript_dir: Path) -> None:
-    """Drop everything kept for the transcripts in ``transcript_dir``."""
+    """Drop the parsed transcript kept for ``transcript_dir``.
+
+    The newest-message stamp of each earlier transcript is kept: it is one short
+    string per file, and learning it again means reading every one of them (hundreds
+    of megabytes for a long-lived session), which an orchestrator that re-watches
+    before each send paid on every send. Only the stamps of files that are gone are
+    dropped, so the cache holds no more entries than there are transcripts on disk."""
     d = Path(transcript_dir)
     with _read_lock:
-        for kept in (_parsed, _newest_ts):
-            for path in [p for p in kept if p.parent == d]:
-                del kept[path]
+        for path in [p for p in _parsed if p.parent == d]:
+            del _parsed[path]
+        for path in [p for p in _newest_ts if p.parent == d and not p.exists()]:
+            del _newest_ts[path]
 
 
 def _is_skippable(obj: dict) -> bool:

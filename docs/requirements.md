@@ -82,7 +82,7 @@
 | NET-01 | All HTTP/HTTPS egress from the dev container MUST traverse the proxy stack; the container is configured with `HTTP_PROXY` and `HTTPS_PROXY` env vars pointing at the Squid sidecar. | P0 | brief §4, plan-2026-05-21 |
 | NET-02 | The filtering model is **blocklist**, not allowlist. Default policy is permit; named threats are denied. | P0 | plan-2026-05-21 |
 | NET-03 | DNS resolution from the dev container MUST use Quad9 (`9.9.9.9`, `149.112.112.112`) as upstream resolver. | P0 | plan-2026-05-21 |
-| NET-04 | The Squid forward proxy MUST consult a file-backed blocklist refreshed from URLhaus, ThreatFox, and HaGeZi Threat-Intelligence Feeds. | P0 | plan-2026-05-21 |
+| NET-04 | The Squid forward proxy MUST consult a file-backed blocklist refreshed from URLhaus data and HaGeZi Threat-Intelligence Feeds. **Amended 2026-10-22** (was: URLhaus, ThreatFox and HaGeZi, fetched from abuse.ch): abuse.ch now requires a per-user Auth-Key for every export and its URLs answer 410 Gone. By Pace's decision no Auth-Key is held: URLhaus data comes from the malware-filter project's keyless mirror (`malware-filter.gitlab.io`, falling back to `curbengh.github.io`), and ThreatFox, which has no keyless source, is no longer a feed. This moves trust for those entries to a single-maintainer mirror; the decision, its wording and the taint consequence are recorded in `.prawduct/change-log.md` (2026-10-22, malware feeds) and `docs/security-model.md`. | P0 | plan-2026-05-21 |
 | NET-05 | A maintained state-actor TLD policy file MUST block requests to domains under configured TLDs (default: `.ru`, `.cn`, `.by`, `.ir`, `.kp`). | P0 | plan-2026-05-21 |
 | NET-06 | A **refresher sidecar** MUST run alongside Squid in the proxy compose stack: fetch threat feeds on startup and every 6h thereafter, atomically write the blocklist (squid follows it without a reload: NET-16; until 2026-09-22 the refresher signalled squid to reload via a shared PID namespace). | P0 | plan-2026-05-21 |
 | NET-07 | A **policy sidecar** MUST tail Squid's `access.log` in real time, detect malware-list hits, and write a taint flag to a shared volume location readable by `aidc status`. | P0 | plan-2026-05-21 |
@@ -197,7 +197,7 @@
 |----|-------------|----------|--------|
 | SEC-01 | The safety model MUST document mitigations for each named threat: host file modification, remote git push, `curl evil.sh \| bash`, host Docker compromise, and persistent in-image malware. | P0 | brief safety model |
 | SEC-02 | Tainted state MUST be persisted to a shared volume location written by the policy sidecar. | P0 | plan-2026-05-21 |
-| SEC-03 | Taint detection MUST trigger on any malware-list (URLhaus, ThreatFox, HaGeZi-TIF) hit in Squid's `access.log`. | P0 | plan-2026-05-21 |
+| SEC-03 | Taint detection MUST trigger on any malware-list (URLhaus data, HaGeZi-TIF) hit in Squid's `access.log`. **Amended 2026-10-22:** ThreatFox is no longer a feed and URLhaus data comes from the malware-filter mirror (see NET-04). | P0 | plan-2026-05-21 |
 | SEC-04 | State-actor TLD hits MUST be logged. By default they do not trigger taint, but this is configurable per devcontainer. | P0 | plan-2026-05-21 |
 | SEC-05 | Taint response MUST be configurable per devcontainer with three modes: `log` (flag only), `notify` (flag + alert), `freeze` (flag + `docker pause` on dev container). | P0 | plan-2026-05-21 |
 | SEC-06 | Once tainted, a container MUST NOT be "cleaned" or rehabilitated. The only recovery path is `aidc kill` followed by `aidc create`. | P0 | plan-2026-05-21 |

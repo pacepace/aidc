@@ -20,10 +20,11 @@ check() {
 # stale_exceptions <pyproject> <now-epoch> <cooldown-days>: the packages whose
 # exclude-newer-package cutoff is more than <cooldown-days> before <now>, one per line.
 # Reads the inline-table form under [tool.uv] and the [tool.uv.exclude-newer-package]
-# table form. A cutoff it cannot parse is reported too, so a format change fails loudly.
+# table form. A cutoff it cannot parse is reported too, and so is an exception written in
+# any other form (a multi-line inline table, a dotted key), in which it would find no entry.
 stale_exceptions() {
-    local file="$1" now="$2" limit="$3" pkg cutoff epoch
-    awk '
+    local file="$1" now="$2" limit="$3" pkg cutoff epoch entries
+    entries=$(awk '
         /^\[tool\.uv\.exclude-newer-package\]/ { in_tbl = 1; next }
         /^\[/ { in_tbl = 0; in_uv = ($0 ~ /^\[tool\.uv\]/); next }
         in_uv && /^exclude-newer-package[[:space:]]*=/ {
@@ -33,7 +34,13 @@ stale_exceptions() {
             next
         }
         in_tbl && /=/ { print }
-    ' "$file" | while IFS='=' read -r pkg cutoff; do
+    ' "$file")
+    if [ -z "$entries" ] && grep -qE '^[^#]*exclude-newer-package' "$file"; then
+        echo "exclude-newer-package(unparsed)"
+        return 0
+    fi
+    [ -n "$entries" ] || return 0
+    printf '%s\n' "$entries" | while IFS='=' read -r pkg cutoff; do
         pkg=$(printf '%s' "$pkg" | tr -d ' "')
         cutoff=$(printf '%s' "$cutoff" | tr -d ' "')
         if ! epoch=$(date -u -d "$cutoff" +%s 2>/dev/null); then
@@ -98,6 +105,13 @@ exclude-newer = "14 days"
 [tool.uv.exclude-newer-package]
 pyjwt = "$(iso $((now - 30 * day)))"
 EOF
+cat > "$FIXTURES/multiline.toml" <<EOF
+[tool.uv]
+exclude-newer = "14 days"
+exclude-newer-package = {
+    certifi = "$(iso $((now - 2 * day)))",
+}
+EOF
 cat > "$FIXTURES/fresh.toml" <<EOF
 [tool.uv]
 exclude-newer = "14 days"
@@ -107,6 +121,8 @@ check "fixture: a cutoff 20 days old is reported, a 2-day one is not (got: '$(st
     "$([ "$(stale_exceptions "$FIXTURES/old.toml" "$now" 14)" = "certifi" ] && echo yes || echo no)"
 check "fixture: the [tool.uv.exclude-newer-package] table form is read too" \
     "$([ "$(stale_exceptions "$FIXTURES/old-table.toml" "$now" 14)" = "pyjwt" ] && echo yes || echo no)"
+check "fixture: an exception in a form the scan cannot read is reported, not passed" \
+    "$([ "$(stale_exceptions "$FIXTURES/multiline.toml" "$now" 14)" = "exclude-newer-package(unparsed)" ] && echo yes || echo no)"
 check "fixture: a cutoff inside the cooldown is not reported" \
     "$([ -z "$(stale_exceptions "$FIXTURES/fresh.toml" "$now" 14)" ] && echo yes || echo no)"
 

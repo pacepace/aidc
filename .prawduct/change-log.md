@@ -54,7 +54,7 @@ sees allowed to change.
   (2026-10-21T00:00Z, which admits that release and nothing later) with its reason beside it
   in `mcp/pyproject.toml`. The cutoff is a fixed date, so after 2026-11-03 it only holds
   certifi back. tests/unit/test-supply-chain-cooldown.sh fails once any `exclude-newer-package`
-  cutoff is older than the cooldown (from 2026-11-05 for this one, checked with
+  cutoff is older than the cooldown (after 2026-11-04T00:00Z for this one, checked with
   `COOLDOWN_NOW`; its fixtures fail on an old cutoff in both TOML forms), so it cannot be
   forgotten. The built image's bundle was checked: v1.9.6 has the four
   emSign roots, and v1.9.7 has all of them except ECC G3, which is what the advisory's fix does.
@@ -91,7 +91,20 @@ W2) it compares every tool description in full, the open-webhook suffix included
 the resource list and the three template URIs exactly, and reads `aidc://sessions/proj/audit/..`
 over the wire, which must be refused (SDK -32602, or aidc's traversal denial). Mutations
 checked: shortening the suffix fails the tools/list case, and exempting `filename` from the
-SDK's path check while disabling aidc's check fails the traversal case. A full wire dump (initialize, tools/list, resource and
+SDK's path check while disabling aidc's check fails the traversal case.
+
+Smoke did not exercise aidc-mcp before this change. Its only MCP check read the running
+aidc-mcp's port binding to test the egress refusal, so it never sent a request to the server
+or used the image this checkout builds. New step 9a runs `aidc/mcp:<VERSION>` the way `aidc mcp
+start` does (docker socket, the aidc tree read-only, a token file). It uses an ephemeral loopback
+port and its own name, so a serving aidc-mcp is untouched. It then speaks MCP over HTTP with
+curl. The handshake must name aidc at the release version, and a call with no token must get
+401. tools/list must equal published-tools.json (less the opt-in session_create).
+session_list, run by the aidc CLI inside the container, must list the smoke session, and
+session_status must report it tainted. 109 passed, 0 failed. The cooldown scan now also
+reports an `exclude-newer-package` it cannot read (a multi-line inline table, a dotted key)
+instead of passing it. That was Critic observation 1 of rev-20261022T143917Z-169f256c, and a
+new fixture covers it. A full wire dump (initialize, tools/list, resource and
 template lists, a tool call and a tool-argument error) is byte-identical between the two
 SDKs except for serverInfo.version (SDK version -> aidc version) and an empty
 `capabilities.experimental` that 2.x leaves out. New announce tests cover both notify

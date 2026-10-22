@@ -40,7 +40,10 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   The refresher's summary line drops its `threatfox=` count, and it now logs a `WARN <feed>:`
   line when a feed fails or yields no entries. The URLhaus entries now come from a single
   maintainer's mirror rather than from abuse.ch; `docs/security-model.md` explains what that
-  means for tainting.
+  means for tainting. **Existing sessions keep their old refresher**, which now fetches HaGeZi
+  only, until they are recreated with `aidc kill <name>` and `aidc create <name>`. `aidc upgrade`
+  does not move them: it replaces only the dev container and leaves the proxy stack, the
+  refresher included, as it was.
 
 ## [1.9.5] - 2026-10-19
 

@@ -34,6 +34,45 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-22: session_send takes prompts while a background agent runs, and answers promptly
+
+<!-- prawduct: scope=send-while-background-task -->
+
+**Why:** metallm conversation 01a15184, 2026-10-21/22. Session `metallm` finished its reply and
+sat at its prompt with one background agent running. A session_send at 23:56:37 took 14.7 s to
+return "queued" and was pasted 5 min 11 s later; the next send took 12.6 s to return "sent". The
+access log gave the reason: `session_free_check reason=screen_unrecognized turn=idle
+why=log_finished`. The saved capture (`watcher-state/screens/metallm-unrecognized.ansi`) showed
+the agent-list row under the mouse drawn `❯ ◯ general-purpose …`, a pointer `screen.py` did not
+accept. The slow answers came from the orchestrator's unwatch/watch before each send:
+unwatching dropped the cached newest-message stamps of the session's earlier transcripts (28
+files, 775 MB), and the new watcher's first pass re-read them all on the event loop (about 9.3 s
+measured on the real files), during the send's 2.5 s gap between free readings.
+
+**What:** `screen.py` accepts the pointer on agent rows (`agent_pointed`) and recognizes a
+keyboard selection in the list by the key hints that replace the status row (`list_focused`).
+Measured on a local Claude Code 2.1.304: a selected list still takes a multi-character paste into
+the input box, but a single `x` stopped the selected agent. So a focused list holds prompts
+(new waiting reason `agent_list_selected`); with only the pointer, `_inject` pastes and presses
+Enter once the input box shows text, and a paste that shows late is submitted by the drainer
+when it is still the queue head (`_unsubmitted_paste`, `_own_unsent_text`), otherwise held as
+unsent input. A running main turn still queues. `forget_transcripts` keeps the per-file stamps
+(dropping only files that are gone), the sibling scan runs in a worker thread
+(`_newest_of_siblings`, the lock narrowed to the cache), and `_wait_until_free` is bounded on the
+clock as well as in polls, with a free reading always confirmed by a second. Measured on the
+real metallm files after the fix: a drain after unwatch 0.15 s; a cold drain still 9.4 s of wall
+time but at most 0.25 s of event-loop stall. Tests: real screen fixtures (sanitized from the
+live capture), session_send through the real free check for idle+background, focus, late and
+non-queued pastes, the clock bound, and the cache kept across an unwatch.
+
+Reviews: rev-20261022T002658Z-7296f4d7 (0 blocking; observations fixed or accepted, among them
+keystrokes into a focused list and the late-paste wedge), verify-resolutions
+rev-20261022T004233Z-86b4d4f2 (1 blocking: a late session_run paste merged into the next
+prompt; fixed by the queue-head check), rev-20261022T004749Z-5c6761a2 (0 findings). Not done:
+the unsubmitted-paste record is in memory only, so after an MCP restart a late paste is held as
+unsent input (fails safe).
+
+
 ## 2026-10-22: the malware blocklist's feeds: URLhaus from a keyless mirror, ThreatFox dropped
 
 <!-- prawduct: scope=malware-feeds-keyless -->

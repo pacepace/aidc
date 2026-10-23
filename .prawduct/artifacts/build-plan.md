@@ -116,8 +116,8 @@ stop is wanted. Requirements MCP-42, MCP-43.
   target="headless"`, steering text everywhere a caller chooses.
 - [x] **D. Docs and smoke** — design-10 S5/S6 and D6, requirements MCP-40..43, README, CHANGELOG,
   change-log, smoke step.
-- [ ] **E. Release** — `chore(release): aidc v1.9.8`, gates, Critic, PR review (no push).
+- [x] **E. Release** — `chore(release): aidc v1.9.8`, gates, Critic, PR review (no push).
 
 ## Status
 
-Context: Chunks A-D built and committed; release commit 824eaa4; Critic cumulative rev-20261023T000723Z-e59116f0 (6 warnings, 5 fixed and verified, live join run open: needs a logged-in session); smoke 115/0 on this tree; PR review next (no push).
+Context: all chunks done on the branch: release commit 824eaa4; Critic cumulative rev-20261023T000723Z-e59116f0 (6 warnings: 5 fixed and verified, the live join run open, needing a logged-in session); smoke 115/0; PR review 0 blocking. Awaiting the maintainer: push, PR, tag v1.9.8. The plan stays live until the release archives it.

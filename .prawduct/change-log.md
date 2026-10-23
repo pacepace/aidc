@@ -36,9 +36,63 @@
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-23: What a busy session is doing, joining its turn, and headless runs that are fresh, single and stoppable (v1.9.8)
+
+<!-- prawduct: scope=turn-visibility-and-join | release=v1.9.8 -->
+
+**Why:** 2026-10-22, metallm. An orchestrator `session_send` waited 45 minutes (18:33 to 19:18Z)
+behind one turn that a background task's notification had opened, while `session_status`
+named the person's earlier prompt as what the agent was working on. Pace asked that callers be
+able to tell an agent is mid-flight and choose to queue, join or interrupt ("yes" to this design).
+Later that night four `session_invoke` calls left two `claude --print` runs editing the same spec
+23 and 9 minutes after their callers gave up, each resuming the resident agent's whole
+conversation. Pace's rulings: no timeout on session_invoke; one headless run at a time per dev
+container; long work belongs to session_send, and the tool text must say so; metallm probably
+sends nothing when its stop button is pressed, so design for no cancel arriving.
+
+**What:**
+- Turn info (design 10 S5, MCP-40): `transcript.open_turn` finds the open turn's opening line;
+  `turns_view.turn_info` gives `working_on`, `started_by`, `turn_started_at`, `last_activity`
+  on `session_status`, `session_interrupt`'s `was_running`, and a queued or joined
+  `session_send`. A notification line was being read as local-command output (it opens with a
+  tag), so a notification turn looked idle until Claude's first line; it and another session's
+  message now read busy.
+- `session_send(deliver="join")` (MCP-41): pastes into the running turn, `joined_turn`, or
+  queues with `join_declined`. `_prompt_arrived` also releases the send record of a prompt Claude
+  Code held and ran next (`promptSource: "queued"`).
+- Headless runs (design 10 S6, MCP-42/43, new `headless.py` and `disconnect.py`): the wrapper
+  never adds `--continue` to `--print`, and the MCP passes `AIDC_CLAUDE_RESUME=false`; runs are
+  tagged with `AIDC_HEADLESS_RUN`; one per session (`invoke_busy`), counting orphans found in the
+  container; `headless_runs` on `session_status`; stopped in the container on cancel, session
+  close or dropped connection (the SDK does not cancel on the last; measured with a real
+  transport test), and on `session_invoke_async`'s 30-minute limit;
+  `session_interrupt(target="headless")`. Tool descriptions, server instructions and README lead
+  with the rule.
+- Tests: `test_turn_info.py` (fixture with the shapes of the metallm transcript, private words
+  replaced), join and held-prompt cases in `test_turn_state.py`, `test_headless.py` (the
+  in-container scripts against real /proc processes), `test_invoke_cancel_wire.py` (uvicorn and
+  a real HTTP client), wire tests, `tests/unit/test-aidc-claude-resume.sh`, and a smoke step.
+
+**Review:** cumulative Critic rev-20261023T000723Z-e59116f0, 0 blocking and 6 warnings; five
+fixed here (verified, rev-20261023T002708Z-672def60), and the sixth, a live run of a real join,
+is under Not done below: one rule for "a turn is open" (open_turn defers to log_shows_turn_in_progress, with a
+test that they agree at every line of every fixture, and session_send fills the turn fields
+under session_status's rule); a joined prompt's reply now carries the joiner's prompt_origin
+(_prompt_arrived records it when it releases the send record); the unreachable headless_runs
+field of a session_invoke result removed; `stopped` always a list; a failed in-container stop is
+`headless_stop_failed` and `interrupted: false` with the reason, never an empty success. Notes
+also taken: the shared TERM/KILL snippet, the disconnect callback passed in rather than set on
+import, session_queue_cancel's full turn info, a session_invoke_async stopped before it starts
+never starts, _invoke_locks pruned with the session. The smoke step moved ahead of the taint
+step (a tainted session's container is paused and takes no exec).
+
+**Not done:** a live run of a real turn, a join and its reply: no logged-in session exists that
+is not someone's working session (the smoke session and any new one have no Claude login, and no
+long-lived token is configured). The invoke guard is not smoke-checked for the same reason.
+
 ## 2026-10-22: Dependabot advisories cleared, and aidc-mcp moved to MCP SDK 2.3
 
-<!-- prawduct: scope=dependabot-pyjwt-certifi -->
+<!-- prawduct: scope=dependabot-pyjwt-certifi | release=v1.9.7 -->
 
 **Why:** pacepace/aidc had fifteen open Dependabot alerts, all on `mcp/uv.lock` with
 runtime scope: certifi 2026.7.22 (#27, critical: GHSA-6q48-6c7w-9gw2, the
@@ -116,7 +170,7 @@ injected but not advertised. Existing tests changed only in the import rename an
 
 ## 2026-10-22: session_send takes prompts while a background agent runs, and answers promptly
 
-<!-- prawduct: scope=send-while-background-task -->
+<!-- prawduct: scope=send-while-background-task | release=v1.9.6 -->
 
 **Why:** metallm conversation 01a15184, 2026-10-21/22. Session `metallm` finished its reply and
 sat at its prompt with one background agent running. A session_send at 23:56:37 took 14.7 s to
@@ -155,7 +209,7 @@ unsent input (fails safe).
 
 ## 2026-10-22: the malware blocklist's feeds: URLhaus from a keyless mirror, ThreatFox dropped
 
-<!-- prawduct: scope=malware-feeds-keyless -->
+<!-- prawduct: scope=malware-feeds-keyless | release=v1.9.6 -->
 
 **Why:** found by the v1.9.6 `make smoke` run, 2026-10-22. `https://urlhaus.abuse.ch/downloads/hostfile/`
 and `https://threatfox.abuse.ch/export/csv/recent/` both answer 410 Gone: abuse.ch now requires a
@@ -194,7 +248,7 @@ lost feed; filed as #60.
 
 ## 2026-10-19: the loop guard no longer drops replies to a person's own prompts
 
-<!-- prawduct: scope=loop-guard-human-turns -->
+<!-- prawduct: scope=loop-guard-human-turns | release=v1.9.5 -->
 
 **Why:** found reviewing metallm's MCP history, 2026-10-19. The loop guard caps an unbroken run of
 deliveries (more than 20, reset only by a 15-minute idle gap) to stop an orchestrator and a session

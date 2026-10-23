@@ -120,4 +120,4 @@ stop is wanted. Requirements MCP-42, MCP-43.
 
 ## Status
 
-Context: Chunks A-D built and committed; release commit, gates, smoke, Critic and PR review next.
+Context: Chunks A-D built and committed; release commit 824eaa4; Critic cumulative rev-20261023T000723Z-e59116f0 (6 warnings, 5 fixed and verified, live join run open: needs a logged-in session); smoke 115/0 on this tree; PR review next (no push).

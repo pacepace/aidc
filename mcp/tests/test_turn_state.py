@@ -955,3 +955,238 @@ class TestTheFreeCheckLeavesItsScreen:
         session.running = False
         assert await session.check() == "claude_not_running"
         assert "proj" not in tools._last_screen_raw
+
+
+BUSY = "claude-2.1.27x-busy-tool-empty-box.ansi"
+NOTE = ("<task-notification>\n<task-id>a5f3d4d002a7a711d</task-id>\n<status>completed</status>\n"
+        "<summary>Agent \"Map the memory code\" finished</summary>\n</task-notification>")
+# A turn a background task's notification opened, Claude mid-tool (metallm, 2026-10-22).
+NOTIFIED = [*FINISHED,
+            {"type": "user", "uuid": "n1", "timestamp": "2026-09-17T01:40:00.000Z",
+             "promptSource": "system", "origin": {"kind": "task-notification"},
+             "message": {"role": "user", "content": NOTE}},
+            {"type": "assistant", "uuid": "a1", "timestamp": "2026-09-17T01:51:30.000Z",
+             "message": {"role": "assistant", "stop_reason": "tool_use",
+                         "content": [{"type": "tool_use", "id": "t1", "name": "Bash"}]}}]
+JOIN = "what are you on right now?"
+
+
+class TestSendDeliverJoin:
+    """session_send(deliver="join"): a prompt for the turn in flight goes in now and is
+    answered inside it, instead of waiting out a 47-minute turn (metallm, 2026-10-22,
+    Pace's decision that day). Driven through session_send and the real session state;
+    only docker and tmux are patched, and the screens are real captures."""
+
+    def _setup(self, session, monkeypatch, *, screen=BUSY, objs=NOTIFIED, age=1.0):
+        real_sleep = asyncio.sleep
+        self.pasted, self.keys, self.logged = [], [], []
+        session.screen = (SCREENS / screen).read_text()
+        session.write(objs, age=age)
+
+        async def load_paste(container, text, window):
+            self.pasted.append(text)
+            return True
+
+        async def tmux_exec(container, args):
+            if args and args[0] == "send-keys":
+                self.keys.append(args[-1])
+            return 0
+
+        async def no_wait(seconds):
+            await real_sleep(0)
+
+        class Watching:
+            def cancel(self):
+                pass
+
+        real_log = tools.log_event
+
+        def log(kind, **fields):
+            self.logged.append((kind, fields))
+            real_log(kind, **fields)
+
+        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
+        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
+        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(tools, "log_event", log)
+        app = MCPServer("t")
+        tools.register(app)
+        tools._session_watchers["proj"] = Watching()
+        return app._tool_manager._tools["session_send"].fn
+
+    def _stop_drainers(self):
+        for task in tools._pending_drainers.values():
+            task.cancel()
+
+    async def test_join_pastes_into_the_running_turn_and_says_what_it_joined(
+            self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        d = res["data"]
+        assert d["status"] == "joined_turn"
+        assert self.pasted == [JOIN] and self.keys == ["Enter"]
+        assert "proj" not in tools._pending_sends
+        assert d["started_by"] == "background_task"
+        assert d["working_on"].startswith("background task completed: Agent")
+        assert d["turn_started_at"] == "2026-09-17T01:40:00Z"
+        assert d["last_activity"] == {"kind": "tool_use", "name": "Bash",
+                                      "at": "2026-09-17T01:51:30Z"}
+        assert "final answer" in d["delivery"] and "join_declined" not in d
+        assert tools._sent_awaiting_echo["proj"][0] == JOIN
+        assert ("session_send_joined_turn", {"session": "proj", "prompt_len": len(JOIN),
+                                             "why": "log_growing"}) in self.logged
+
+    async def test_a_joined_prompt_arriving_as_a_queued_message_is_matched_once(
+            self, session, monkeypatch):
+        """Claude Code holds the mid-turn paste as a queue-operation and hands it to the
+        turn: the echo hold clears and the send record is given back, since no turn
+        will claim it as its prompt (its answer is in the running turn's reply)."""
+        send = self._setup(session, monkeypatch)
+        await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 1
+        session.write([*NOTIFIED, {"type": "queue-operation", "operation": "enqueue",
+                                   "timestamp": ISO_NOW, "content": JOIN}], age=1.0)
+        assert await session.check() == "claude_busy"
+        assert "proj" not in tools._sent_awaiting_echo
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert [k for k, _ in self.logged].count("session_send_queued_by_claude") == 1
+
+    async def test_the_default_still_queues_and_says_what_the_agent_is_busy_with(
+            self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1")
+        self._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["waiting_reason"] == "claude_busy"
+        assert self.pasted == []
+        assert d["started_by"] == "background_task"
+        assert d["turn_started_at"] == "2026-09-17T01:40:00Z"
+        assert d["last_activity"]["name"] == "Bash"
+        assert "join_declined" not in d
+
+    async def test_join_never_jumps_a_prompt_already_waiting(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        tools._queue_loaded.add("proj")
+        tools._pending_sends["proj"] = [ts.QueuedPrompt(text="earlier", enqueued_at=ts.now_iso())]
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        self._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["join_declined"] == "queued_behind"
+        assert d["queued_behind"] == 1 and self.pasted == []
+        assert [q.text for q in tools._pending_sends["proj"]] == ["earlier", JOIN]
+        assert d["delivery"].startswith("Not joined to the running turn: an earlier prompt")
+
+    async def test_join_never_types_over_a_persons_unsent_text(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch, screen="claude-2.1.27x-typed-unsent.ansi")
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        self._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["join_declined"] == "input_has_text"
+        assert self.pasted == [] and self.keys == []
+
+    @pytest.mark.parametrize("screen,why", [
+        ("claude-2.1.27x-trust-folder.ansi", "claude_not_at_prompt"),
+        ("claude-2.1.27x-shell-after-exit.ansi", "screen_unrecognized"),
+        ("claude-2.1.30x-idle-agent-list-selected.ansi", "agent_list_selected"),
+    ])
+    async def test_join_holds_off_a_screen_it_may_not_type_into(self, session, monkeypatch,
+                                                                 screen, why):
+        send = self._setup(session, monkeypatch, screen=screen)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        self._stop_drainers()
+        assert res["data"]["status"] == "queued" and res["data"]["join_declined"] == why
+        assert self.pasted == []
+
+    async def test_join_holds_while_claude_is_not_running(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        session.running = False
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        self._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["join_declined"] == "claude_not_running"
+        assert d["waiting_reason"] == "claude_not_running" and self.pasted == []
+
+    async def test_join_to_an_idle_session_is_an_ordinary_send(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch, screen="claude-2.1.27x-idle-empty.ansi",
+                           objs=FINISHED, age=100.0)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        d = res["data"]
+        assert d["status"] == "sent" and self.pasted == [JOIN] and self.keys == ["Enter"]
+        assert "started_by" not in d and "join_declined" not in d
+
+    async def test_join_catches_a_turn_that_starts_during_the_wait(self, session, monkeypatch):
+        send = self._setup(session, monkeypatch, screen="claude-2.1.27x-idle-empty.ansi",
+                           objs=FINISHED, age=100.0)
+
+        async def turn_starts(container, name, timeout):
+            session.screen = (SCREENS / BUSY).read_text()
+            session.write(NOTIFIED, age=1.0)
+            return "claude_busy"
+        monkeypatch.setattr(tools, "_wait_until_free", turn_starts)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
+        assert res["data"]["status"] == "joined_turn" and self.pasted == [JOIN]
+
+    async def test_an_unknown_delivery_is_refused_before_anything_happens(
+            self, session, monkeypatch):
+        send = self._setup(session, monkeypatch)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="now")
+        assert res["ok"] is False and res["error_code"] == "invalid_argument"
+        assert self.pasted == [] and "proj" not in tools._pending_sends
+
+    async def test_join_holds_for_an_interrupt_not_reported_yet(self):
+        """The watcher reports an Esc pressed before Claude wrote anything from the
+        transcript's tail; a prompt pasted on top would bury that report."""
+        state = tools.SessionState(True, classify(_screen("idle-empty")), tools.TURN_RUNNING,
+                                   "interrupt_not_reported_yet")
+        assert tools._join_refusal("proj", state) == "interrupt_not_reported_yet"
+        busy = tools.SessionState(True, classify(_screen("busy-tool-empty-box")),
+                                  tools.TURN_RUNNING, "log_growing")
+        assert tools._join_refusal("proj", busy) == ""
+
+    async def test_join_holds_a_session_tainted_under_the_lock(self, session, monkeypatch):
+        self._setup(session, monkeypatch)
+
+        async def tainted(name):
+            return {"at": "2026-10-22T00:00:00Z", "trigger": "blocklist", "domain": "x"}
+        monkeypatch.setattr(tools.sf, "taint_or_none", tainted)
+        assert await tools._join_running_turn("aidc-proj-dev", "proj", JOIN, "") == (
+            "session_tainted")
+        assert self.pasted == []
+
+
+class TestPromptHeldByClaudeCode:
+    async def test_a_prompt_claude_code_held_and_ran_next_gives_its_record_back(self, session):
+        """A prompt pasted as a turn ended is held by Claude Code and run next as a line
+        marked promptSource "queued", which no turn attributes to anyone, so the record
+        would otherwise wait out its 24 h."""
+        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", JOIN)
+        session.write([*FINISHED, {"type": "user", "uuid": "q1", "timestamp": ISO_NOW,
+                                   "promptSource": "queued", "origin": {"kind": "human"},
+                                   "message": {"role": "user", "content": JOIN}}], age=1.0)
+        tools._sent_awaiting_echo["proj"] = (JOIN, NOW - 1)
+        await tools._watch_for_echo("proj", JOIN, NOW - 1)
+        assert "proj" not in tools._sent_awaiting_echo
+        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+
+
+class TestSendDescribesATurnOnlyWhileOneRuns:
+    """session_send fills working_on/started_by/... under session_status's rule: only
+    when the agent is working on a turn. A prompt held for another reason must not be
+    told about a turn that ended."""
+
+    async def test_a_prompt_held_by_unsent_text_at_an_idle_agent_names_no_turn(
+            self, session, monkeypatch):
+        setup = TestSendDeliverJoin()
+        ended_on_error = [*FINISHED, _typed("u1", "go"),
+                          {"type": "assistant", "uuid": "e1", "timestamp": ISO_NOW,
+                           "isApiErrorMessage": True,
+                           "message": {"role": "assistant", "stop_reason": "stop_sequence",
+                                       "content": [{"type": "text", "text": "overloaded"}]}}]
+        send = setup._setup(session, monkeypatch, screen="claude-2.1.27x-typed-unsent.ansi",
+                            objs=ended_on_error, age=100.0)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1")
+        setup._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["waiting_reason"] == "input_has_text"
+        assert (d["working_on"], d["started_by"], d["turn_started_at"], d["last_activity"]) == (
+            "", None, None, None)

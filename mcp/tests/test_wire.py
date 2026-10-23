@@ -150,3 +150,33 @@ def test_an_audit_file_outside_the_audit_dir_is_never_read(client, monkeypatch, 
     else:
         text = msg["result"]["contents"][0]["text"]
         assert json.loads(text) == {"error": "path traversal denied"}, text
+
+
+def test_session_send_offers_deliver_with_queue_as_the_default(client):
+    """deliver is optional and additive: a client that never sends it gets today's
+    queueing, and a schema-validating client sees the two values it may send."""
+    _, sid = _initialize(client)
+    msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
+        "jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}}))
+    send = next(t for t in msg["result"]["tools"] if t["name"] == "session_send")
+    schema = send["inputSchema"]
+    assert schema["properties"]["deliver"]["enum"] == ["queue", "join"]
+    assert schema["properties"]["deliver"]["default"] == "queue"
+    assert "deliver" not in schema.get("required", [])
+    assert set(schema["required"]) == {"name", "prompt"}
+
+
+def test_session_interrupt_offers_target_with_the_agent_as_the_default(client):
+    _, sid = _initialize(client)
+    msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
+        "jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}))
+    tool = next(t for t in msg["result"]["tools"] if t["name"] == "session_interrupt")
+    target = tool["inputSchema"]["properties"]["target"]
+    assert target["enum"] == ["agent", "headless"] and target["default"] == "agent"
+    assert tool["inputSchema"]["required"] == ["name"]
+
+
+def test_the_handshake_steers_long_work_to_session_send(client):
+    result, _ = _initialize(client)
+    assert "session_send" in result["instructions"]
+    assert "session_invoke is only for short, single-shot questions" in result["instructions"]

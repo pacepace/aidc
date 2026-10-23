@@ -2147,3 +2147,111 @@ class TestARewatchDoesNotStallTheServer:
         await _drain(base, state, rec)
         await _drain(base, state, rec)
         assert on_loop and not any(on_loop)
+
+
+class TestAJoinedPromptIsAnsweredInTheRunningTurn:
+    async def test_the_turn_it_joined_is_delivered_once_without_a_terminal_note(self, tmp_path):
+        """session_send(deliver="join"): the prompt reaches the transcript only as a
+        queue-operation and its queued_command attachment, and the answer is part of
+        the running turn's reply. Fixture shapes from metallm, 2026-10-22."""
+        from pathlib import Path
+        evening = [json.loads(ln) for ln in
+                   (Path(__file__).parent / "fixtures" / "claude-2.1.300-notification-turn.jsonl")
+                   .read_text().splitlines()]
+        upto = next(i for i, o in enumerate(evening) if o.get("uuid") == "s2") + 1
+        end = next(i for i, o in enumerate(evening) if o.get("uuid") == "s4") + 1
+        base = tmp_path / "t"; state = tmp_path / "s"
+        _mk_transcript(base, "sess", "sid1", evening[:upto])
+        rec = ContentRecorder()
+        await _drain(base, state, rec)          # baseline past the first turn
+        _mk_transcript(base, "sess", "sid1", evening[:end])
+        await _drain(base, state, rec)
+        await _drain(base, state, rec)
+        assert [t.terminal_uuid for t in rec.turns] == ["a9"]
+        assert rec.turns[0].text.endswith("On your status check: I was on the merge.")
+        assert not rec.turns[0].text.startswith(ts.TERMINAL_PROMPT_NOTE)
+        assert rec.turns[0].prompt_origin != "terminal"
+
+
+class TestAJoinedPromptsReplyIsTheJoiners:
+    async def test_after_a_turn_typed_at_the_terminal_the_reply_is_the_orchestrators(
+            self, tmp_path, monkeypatch):
+        """A person typed the turn before; the orchestrator then joined the next one (a
+        notification's). That turn has no prompt of its own and takes the session's
+        recorded origin, which must be the joiner's, not "terminal"."""
+        from aidc_mcp import tools
+        base = tmp_path / "t"; state = tmp_path / "s"
+        monkeypatch.setattr(tools, "_WATCHER_STATE_DIR", state)
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)                       # baseline past SEED
+        typed = seed + [_typed("u1", "what is the NATS rewrite?"), _assistant("a1", "It is X.")]
+        _mk_transcript(base, "sess", "sid1", typed)
+        await _drain(base, state, rec)
+        assert rec.turns[-1].prompt_origin == "terminal"     # the person's turn
+        joined = "also check the parser"
+        ts.record_sent_prompt(state, "sess", joined)        # what deliver="join" pasted
+        running = typed + [
+            {"type": "user", "uuid": "n1", "promptSource": "system",
+             "origin": {"kind": "task-notification"},
+             "message": {"role": "user", "content": "<task-notification>\\n<status>completed"
+                         "</status>\\n</task-notification>"}},
+            _assistant("a2", None, stop="tool_use"),
+            {"type": "queue-operation", "operation": "enqueue", "content": joined}]
+        assert tools._prompt_arrived("sess", joined, time.time(), running)
+        _mk_transcript(base, "sess", "sid1", running + [_assistant("a3", "Parser checked.")])
+        await _drain(base, state, rec)
+        assert rec.turns[-1].text.endswith("Parser checked.")
+        assert rec.turns[-1].prompt_origin == "orchestrator"
+        assert not rec.turns[-1].text.startswith(ts.TERMINAL_PROMPT_NOTE)
+
+
+class TestAHeadlessRunsTranscriptIsNotTheSessions:
+    """Live, 2026-10-23: a session_invoke wrote its own transcript into the session's
+    project dir (entrypoint "sdk-cli"), the watcher followed it as the newest, and the
+    invoke's answer "1" reached the orchestrator's conversation as the session's reply."""
+
+    @staticmethod
+    def _cli(objs, entry, at="2026-10-23T03:00:00.000Z"):
+        return [{**o, "entrypoint": entry, "timestamp": at} for o in objs]
+
+    async def test_the_watcher_never_delivers_a_headless_runs_answer(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = self._cli([_user("u0", "seed"), _assistant("a0", "SEED")], "cli")
+        _mk_transcript(base, "sess", "sid1", seed, mtime=time.time() - 100)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)                     # baseline on the session's
+        headless = [{"type": "queue-operation", "operation": "enqueue", "content": "q"},
+                    *self._cli([_user("h1", "What does f return?"),
+                                _assistant("h2", "1")], "sdk-cli", "2026-10-23T03:31:00.000Z")]
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):   # what moving over would take
+            _mk_transcript(base, "sess", "sid2", headless, mtime=time.time())
+            await _drain(base, state, rec)
+        assert rec.turns == []
+        _mk_transcript(base, "sess", "sid1", seed + self._cli(
+            [_user("u1", "next"), _assistant("a1", "the session's reply")], "cli",
+            "2026-10-23T03:32:00.000Z"),
+            mtime=time.time() - 50)
+        for _ in range(3):
+            await _drain(base, state, rec)
+        assert len(rec.turns) == 1 and rec.turns[0].text.endswith("the session's reply")
+
+    def test_the_newest_transcript_is_the_sessions_not_a_headless_runs(self, tmp_path):
+        d = tmp_path / "t" / "sess"
+        _mk_transcript(tmp_path / "t", "sess", "sid1",
+                       self._cli([_user("u0", "q")], "cli"), mtime=time.time() - 100)
+        _mk_transcript(tmp_path / "t", "sess", "sid2",
+                       self._cli([_user("h1", "q")], "sdk-cli"), mtime=time.time())
+        assert ts.resolve_active_transcript(d).stem == "sid1"
+        assert ts.resolve_active_transcript(d, prefer_session_id="sid2").stem == "sid1"
+        assert [p.stem for p in ts.session_transcripts(d)] == ["sid1"]
+        assert ts.transcript_kind(d / "sid2.jsonl") == "headless"
+        assert ts.transcript_kind(d / "sid1.jsonl") == "interactive"
+
+    def test_a_transcript_that_names_no_entrypoint_still_counts(self, tmp_path):
+        """Older Claude Code, and the moment before a run's first message."""
+        d = tmp_path / "t" / "sess"
+        _mk_transcript(tmp_path / "t", "sess", "sid1", [_user("u0", "q")])
+        assert ts.transcript_kind(d / "sid1.jsonl") == "unknown"
+        assert ts.resolve_active_transcript(d).stem == "sid1"

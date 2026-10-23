@@ -522,11 +522,17 @@ _COMMAND_TAGS = ("<command-name>", "<command-message>")
 def _is_local_output(obj: dict) -> bool:
     """A user line carrying output Claude Code produced locally: a local slash
     command's stdout, `!` bash-mode input and output, and any wrapper a later Claude
-    Code adds. Claude never replies to these, so they end whatever preceded them."""
+    Code adds. Claude never replies to these, so they end whatever preceded them.
+
+    A prompt Claude Code raised itself also opens with a tag (`<task-notification>`),
+    but Claude runs a turn on it, so it is not local output. Read as one, a turn a
+    background task opened looked idle until Claude wrote its first line, and a paste
+    in that gap went into the new turn (metallm, 2026-10-22 19:19:35-40)."""
     raw_msg = obj.get("message")
     msg = raw_msg if isinstance(raw_msg, dict) else {}
     text = _text_of(msg).strip()
-    return bool(_OPENS_WITH_TAG_RE.match(text)) and not text.startswith(_COMMAND_TAGS)
+    return (bool(_OPENS_WITH_TAG_RE.match(text)) and not text.startswith(_COMMAND_TAGS)
+            and not _is_system_sourced_prompt(obj))
 
 
 # Claude Code writes this isMeta line just before a slash command it runs itself (/clear,
@@ -614,6 +620,18 @@ def _is_system_sourced_prompt(obj: dict) -> bool:
         return True
     origin = obj.get("origin")
     return isinstance(origin, dict) and origin.get("kind") not in (None, "human")
+
+
+# origin.kind of a message another Claude session sent this one (a peer agent, the
+# coordinator). Claude Code writes it as an isMeta user line and Claude runs a turn on it.
+SESSION_MESSAGE_KINDS = frozenset({"peer", "coordinator"})
+
+
+def is_session_message(obj: dict) -> bool:
+    """An isMeta user line carrying another Claude session's message."""
+    origin = obj.get("origin")
+    return (bool(obj.get("isMeta")) and isinstance(origin, dict)
+            and origin.get("kind") in SESSION_MESSAGE_KINDS)
 
 
 def ends_on_turn_end(objs: list[dict]) -> bool:
@@ -916,7 +934,8 @@ def log_shows_turn_in_progress(objs: list[dict]) -> bool:
     """True when the transcript's tail shows Claude still working on a turn.
 
     This is the send path's source of truth for "busy" (design-10 S1). Busy: a
-    prompt with no reply yet, a tool call or tool result, a Stop-hook pushback
+    prompt with no reply yet (a background task's notification and another session's
+    message included: Claude runs a turn on each), a tool call or tool result, a Stop-hook pushback
     Claude has not answered, or a reply whose Stop hooks have not reported yet (in a
     transcript that writes stop records). Not busy: a finished turn, an interrupt, an
     API error, a turn waiting on an interactive-input tool, a local command or its
@@ -943,7 +962,7 @@ def log_shows_turn_in_progress(objs: list[dict]) -> bool:
         msg = raw_msg if isinstance(raw_msg, dict) else {}
         if otype == "user":
             if obj.get("isMeta"):
-                if _is_stop_hook_feedback(obj):
+                if _is_stop_hook_feedback(obj) or is_session_message(obj):
                     return True
                 continue
             if after_summary:
@@ -1009,6 +1028,115 @@ def unanswered_prompt_turn(objs: list[dict]) -> Turn | None:
     if not anchor or not prompts:
         return None
     return Turn(terminal_uuid=anchor, text="", prompts=prompts, interrupted=True)
+
+
+@dataclass(frozen=True)
+class OpenTurn:
+    """The turn the transcript shows open: the line that opened it (None when that line
+    is not in the transcript), when it started, and the newest assistant line in it."""
+
+    opener: dict | None
+    started_at: float | None
+    newest_assistant: dict | None
+
+
+def _meta_opens_turn(obj: dict) -> bool:
+    """An isMeta user line that can open a turn: a message Claude Code hands Claude on
+    its own (another session's message, a notification, an auto-continue). Hook feedback
+    continues a turn, and the local-command caveat precedes a command Claude never
+    answers, so neither opens one."""
+    text = line_text(obj).lstrip()
+    return bool(text) and not text.startswith((STOP_HOOK_FEEDBACK_PREFIX,
+                                               _LOCAL_COMMAND_CAVEAT))
+
+
+def _ends_reply(obj: dict) -> bool:
+    """Whether an assistant line ends a reply: end_turn, an interactive-input tool, or
+    an API error. More may follow (a Stop-hook pushback, a retry); then it did not."""
+    if obj.get("isApiErrorMessage"):
+        return True
+    raw = obj.get("message")
+    msg = raw if isinstance(raw, dict) else {}
+    stop = msg.get("stop_reason")
+    if isinstance(stop, str) and stop in TERMINAL_STOP:
+        return True
+    content = msg.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_use"
+        and b.get("name") in INTERACTIVE_BLOCK_TOOLS for b in content)
+
+
+def open_turn(objs: list[dict]) -> OpenTurn | None:
+    """The turn the transcript shows open, or None when the last one has ended.
+
+    Whether a turn is open is log_shows_turn_in_progress's answer, the one rule the
+    send path, the watcher and session_status use; this only finds what opened it. So
+    the two never disagree: a turn that ended on an API error or an interactive-input
+    tool is over here too.
+
+    One pass over the lines already read. A real prompt opens a turn (back-to-back
+    prompts with no reply between them open the same one, and the newest names it). An
+    isMeta message opens one only when no turn is open or the reply before it had ended:
+    while a turn runs, Claude Code hands it such messages without opening another. A
+    `turn_duration` record, an interrupt marker, or a local command and its output close
+    the turn. A Stop-hook pushback, a tool result and a prompt Claude Code takes into the
+    running turn (a queue-operation and its attachment) change nothing here. Assistant
+    work with no opening line before it is a turn whose opener is not in the transcript.
+    """
+    if not log_shows_turn_in_progress(objs):
+        return None
+    opener: dict | None = None
+    started_at: float | None = None
+    newest: dict | None = None
+    is_open = False
+    saw_assistant = False
+    after_reply = True   # the newest assistant line ended a reply (or there is none)
+    for index, obj in enumerate(objs):
+        otype = obj.get("type")
+        if not isinstance(otype, str) or _is_skippable(obj):
+            continue
+        if otype == "system":
+            if _system_subtype(obj) in (_TURN_DURATION, _LOCAL_COMMAND):
+                is_open = False
+            continue
+        if otype == "assistant":
+            if not is_open:
+                opener, started_at, is_open = None, wall_time(obj), True
+            newest = obj
+            saw_assistant = True
+            after_reply = _ends_reply(obj)
+            continue
+        if otype != "user":
+            continue
+        if obj.get("isMeta"):
+            if _meta_opens_turn(obj) and (not is_open or (saw_assistant and after_reply)):
+                opener, started_at, newest = obj, wall_time(obj), None
+                is_open, saw_assistant, after_reply = True, False, False
+            continue
+        if _is_interrupt_marker(obj):
+            is_open = False
+            continue
+        if not _is_real_user_prompt(obj):
+            continue   # a tool result: the turn goes on
+        if _ends_without_reply(objs, index):
+            is_open = False
+            continue
+        if not (is_open and not saw_assistant):
+            started_at, newest = wall_time(obj), None
+        opener = obj
+        is_open, saw_assistant, after_reply = True, False, False
+    if not is_open:
+        # In progress by the rule above, closed by this scan's reading of the lines:
+        # what opened it cannot be told.
+        return OpenTurn(None, None, None)
+    return OpenTurn(opener, started_at, newest)
+
+
+def line_text(obj: dict) -> str:
+    """The text a transcript line's message carries (its text blocks, or its string
+    content), "" for none. Public: turns_view reads the same lines."""
+    raw_msg = obj.get("message")
+    return _text_of(raw_msg if isinstance(raw_msg, dict) else {})
 
 
 def wall_time(obj: dict) -> float | None:
@@ -1662,6 +1790,61 @@ def newest_message_ts(objs: list[dict]) -> str:
     return newest
 
 
+# A headless run (`claude --print`: session_invoke, session_invoke_async) writes its own
+# transcript into the same project directory as the session's interactive Claude, and
+# the mirror copies it beside the session's. Its lines carry `entrypoint: "sdk-cli"`;
+# the interactive Claude's carry "cli" (measured on Claude Code 2.1.30x, 2026-10-23). It
+# is not the session's conversation: followed as one, the watcher delivered a
+# session_invoke's answer to the orchestrator as the session's reply (live, 2026-10-23).
+_HEADLESS_ENTRYPOINT = "sdk-cli"
+_kind_cache: dict[Path, tuple[_Stamp, str]] = {}
+
+
+def transcript_kind(path: Path) -> str:
+    """"interactive", "headless", or "unknown" (no line says yet), from the first line
+    that names its entrypoint. Read once per version of the file."""
+    path = Path(path)
+    try:
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            with _read_lock:
+                kept = _kind_cache.get(path)
+            if kept is not None and kept[0] == stamp:
+                return kept[1]
+            kind = "unknown"
+            for raw in fh:
+                if b'"entrypoint"' not in raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                entry = obj.get("entrypoint") if isinstance(obj, dict) else None
+                if isinstance(entry, str):
+                    kind = "headless" if entry == _HEADLESS_ENTRYPOINT else "interactive"
+                    break
+    except OSError:
+        return "unknown"
+    if kind != "unknown":
+        with _read_lock:
+            _kind_cache[path] = (stamp, kind)
+    return kind
+
+
+def conversation_files(transcript_dir: Path) -> list[Path]:
+    """The session's own transcripts in the dir: regular top-level *.jsonl files (never
+    symlinks: see resolve_active_transcript) that are not a headless run's. One no line
+    of which names its entrypoint yet counts, as every transcript did before: Claude
+    Code writes the entrypoint on its first message or attachment, so a headless file
+    reads as unknown only in the first moment of the run."""
+    try:
+        candidates = [p for p in Path(transcript_dir).glob("*.jsonl")
+                      if p.is_file() and not p.is_symlink()]
+    except OSError:
+        return []
+    return [p for p in candidates if transcript_kind(p) != "headless"]
+
+
 def session_transcripts(transcript_dir: Path,
                          prefer_session_id: str | None = None) -> list[Path]:
     """Every top-level *.jsonl for the session, the pinned one first and the rest by
@@ -1674,11 +1857,7 @@ def session_transcripts(transcript_dir: Path,
 
     Regular files only, never symlinks: see resolve_active_transcript.
     """
-    d = Path(transcript_dir)
-    try:
-        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
-    except OSError:
-        return []
+    candidates = conversation_files(transcript_dir)
     pinned = [p for p in candidates if prefer_session_id and p.stem == prefer_session_id]
     rest = [p for p in candidates if p not in pinned]
 
@@ -1703,26 +1882,24 @@ def resolve_active_transcript(transcript_dir: Path,
     already tracking prevents that false rotation; mtime is only the fallback for
     the first resolution (no prior session) or once the pinned file truly vanishes.
 
-    Returns None when the dir is absent or empty (session not started / down).
+    Returns None when the dir is absent or empty (session not started / down), or holds
+    only headless runs' transcripts.
     """
     d = Path(transcript_dir)
     if prefer_session_id:
         pinned = d / f"{prefer_session_id}.jsonl"
         try:
-            if pinned.is_file() and not pinned.is_symlink():
+            if (pinned.is_file() and not pinned.is_symlink()
+                    and transcript_kind(pinned) != "headless"):
                 return pinned
         except OSError:
             pass
-    try:
-        # Regular files only — never follow symlinks. The dir is written by an
-        # in-container mirror fed from the adversarial (yolo) dev container, so a
-        # planted symlink (e.g. x.jsonl -> /etc/passwd) must not be read. This
-        # defense lives here, in MCP (trustworthy), not in the mirror.
-        candidates = [
-            p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()
-        ]
-    except OSError:
-        return None
+    # Regular files only — never follow symlinks. The dir is written by an in-container
+    # mirror fed from the adversarial (yolo) dev container, so a planted symlink (e.g.
+    # x.jsonl -> /etc/passwd) must not be read. This defense lives here, in MCP
+    # (trustworthy), not in the mirror. A headless run's transcript is never the
+    # session's (conversation_files).
+    candidates = conversation_files(d)
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)

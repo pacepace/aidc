@@ -98,6 +98,8 @@ async def test_status_says_what_the_agent_is_doing(facts):
     d = res["data"]
     assert d["working"] is True and d["turn"] == "running" and d["why"] == "log_growing"
     assert d["working_on"] == "fix the flaky test"
+    assert d["started_by"] == "prompt" and d["turn_started_at"] == "2026-10-14T09:02:00Z"
+    assert d["last_activity"] is None   # Claude has not written anything on it yet
     assert d["claude_running"] is True
     assert d["repo"] == "/home/u/code/proj" and d["branch"] == "project/fix-1234abcd"
     assert d["head"] == "0123456789ab"
@@ -111,7 +113,34 @@ async def test_status_of_an_idle_session_names_no_work(facts):
     facts["working"] = False
     d = (await _tool("session_status")(name="proj"))["data"]
     assert d["working"] is False and d["working_on"] == ""
+    assert d["started_by"] is None and d["turn_started_at"] is None
+    assert d["last_activity"] is None
     assert d["watched_conversation_id"] is None
+
+
+async def test_status_of_a_turn_a_background_task_opened_names_the_task(facts, tmp_path):
+    """metallm, 2026-10-22: for 47 minutes working_on named the person's prompt the
+    agent had answered before a task notification opened a new turn."""
+    path = tmp_path / "transcripts" / "proj" / "s1.jsonl"
+    lines = path.read_text().splitlines()
+    lines[-1:] = [json.dumps(x) for x in [
+        {"type": "user", "uuid": "n1", "timestamp": "2026-10-14T09:05:00.000Z",
+         "promptSource": "system", "origin": {"kind": "task-notification"},
+         "message": {"role": "user", "content": "<task-notification>\n<task-id>b1</task-id>\n"
+                     "<status>completed</status>\n<summary>Background command \"Run the "
+                     "suite\" completed (exit code 0)</summary>\n</task-notification>"}},
+        {"type": "assistant", "uuid": "a2", "timestamp": "2026-10-14T09:06:00.000Z",
+         "message": {"role": "assistant", "stop_reason": "tool_use",
+                     "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}},
+    ]]
+    path.write_text("\n".join(lines) + "\n")
+    os.utime(path, (OLD, OLD))
+    d = (await _tool("session_status")(name="proj"))["data"]
+    assert d["started_by"] == "background_task"
+    assert d["working_on"] == ('background task completed: Background command "Run the suite" '
+                               "completed (exit code 0) (task b1)")
+    assert d["turn_started_at"] == "2026-10-14T09:05:00Z"
+    assert d["last_activity"] == {"kind": "tool_use", "name": "Bash", "at": "2026-10-14T09:06:00Z"}
 
 
 async def test_status_carries_the_taint_as_a_typed_field(facts):
@@ -149,7 +178,10 @@ async def test_interrupt_says_what_was_running_and_the_state_of_the_tree(facts, 
     monkeypatch.setattr(tools, "_tmux_exec", tmux)
     d = (await _tool("session_interrupt")(name="proj"))["data"]
     assert d["interrupted"] is True
-    assert d["was_running"] == {"why": "log_growing", "working_on": "fix the flaky test"}
+    assert d["was_running"] == {"why": "log_growing", "working_on": "fix the flaky test",
+                                "started_by": "prompt",
+                                "turn_started_at": "2026-10-14T09:02:00Z",
+                                "last_activity": None}
     assert d["tree"] == {"branch": "project/fix-1234abcd", "head": "0123456789ab",
                          "changes": 1, "dirty": ["a.py"]}
     assert sent == [("aidc-proj-dev", ["send-keys", "-t", "main:claude", "Escape"])]
@@ -184,7 +216,9 @@ async def test_queue_cancel_takes_back_one_waiting_prompt(queued):
     assert d["cancelled"] == [{"position": 2, "prompt_preview": "second prompt",
                                "enqueued_at": "2026-10-14T09:01:00Z", "conversation_id": "c-2"}]
     assert d["left"] == 1 and [q.text for q in tools._pending_sends["proj"]] == ["first prompt"]
-    assert d["running"] == {"working": True, "working_on": "fix the flaky test"}
+    assert d["running"] == {"working": True, "working_on": "fix the flaky test",
+                            "started_by": "prompt", "turn_started_at": "2026-10-14T09:02:00Z",
+                            "last_activity": None}
     saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
     assert [q.text for q in saved["proj"]] == ["first prompt"]
 

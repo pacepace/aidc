@@ -54,7 +54,10 @@ def build_app() -> Any:
         instructions=(
             "Control plane for the aidc sandbox. Tools manage sessions "
             "(create / list / status / kill / exec), invoke the in-container "
-            "Claude, read/write files inside sessions, and surface audit data."
+            "Claude, read/write files inside sessions, and surface audit data. "
+            "Give a session's agent any task or anything long (edits, builds, tests, "
+            "multi-step work) with session_send; session_invoke is only for short, "
+            "single-shot questions."
         ),
     )
 
@@ -68,7 +71,10 @@ def build_app() -> Any:
     http_app = app.streamable_http_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
-    return ResumeOnStartup(BearerAuthMiddleware(http_app), app)
+    from aidc_mcp.disconnect import StopInvokeOnDisconnect
+
+    return ResumeOnStartup(BearerAuthMiddleware(
+        StopInvokeOnDisconnect(http_app, tools.stop_invoke_of_gone_client)), app)
 
 
 def main() -> int:

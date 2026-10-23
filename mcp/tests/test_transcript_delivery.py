@@ -2205,3 +2205,53 @@ class TestAJoinedPromptsReplyIsTheJoiners:
         assert rec.turns[-1].text.endswith("Parser checked.")
         assert rec.turns[-1].prompt_origin == "orchestrator"
         assert not rec.turns[-1].text.startswith(ts.TERMINAL_PROMPT_NOTE)
+
+
+class TestAHeadlessRunsTranscriptIsNotTheSessions:
+    """Live, 2026-10-23: a session_invoke wrote its own transcript into the session's
+    project dir (entrypoint "sdk-cli"), the watcher followed it as the newest, and the
+    invoke's answer "1" reached the orchestrator's conversation as the session's reply."""
+
+    @staticmethod
+    def _cli(objs, entry, at="2026-10-23T03:00:00.000Z"):
+        return [{**o, "entrypoint": entry, "timestamp": at} for o in objs]
+
+    async def test_the_watcher_never_delivers_a_headless_runs_answer(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        seed = self._cli([_user("u0", "seed"), _assistant("a0", "SEED")], "cli")
+        _mk_transcript(base, "sess", "sid1", seed, mtime=time.time() - 100)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)                     # baseline on the session's
+        headless = [{"type": "queue-operation", "operation": "enqueue", "content": "q"},
+                    *self._cli([_user("h1", "What does f return?"),
+                                _assistant("h2", "1")], "sdk-cli", "2026-10-23T03:31:00.000Z")]
+        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):   # what moving over would take
+            _mk_transcript(base, "sess", "sid2", headless, mtime=time.time())
+            await _drain(base, state, rec)
+        assert rec.turns == []
+        _mk_transcript(base, "sess", "sid1", seed + self._cli(
+            [_user("u1", "next"), _assistant("a1", "the session's reply")], "cli",
+            "2026-10-23T03:32:00.000Z"),
+            mtime=time.time() - 50)
+        for _ in range(3):
+            await _drain(base, state, rec)
+        assert len(rec.turns) == 1 and rec.turns[0].text.endswith("the session's reply")
+
+    def test_the_newest_transcript_is_the_sessions_not_a_headless_runs(self, tmp_path):
+        d = tmp_path / "t" / "sess"
+        _mk_transcript(tmp_path / "t", "sess", "sid1",
+                       self._cli([_user("u0", "q")], "cli"), mtime=time.time() - 100)
+        _mk_transcript(tmp_path / "t", "sess", "sid2",
+                       self._cli([_user("h1", "q")], "sdk-cli"), mtime=time.time())
+        assert ts.resolve_active_transcript(d).stem == "sid1"
+        assert ts.resolve_active_transcript(d, prefer_session_id="sid2").stem == "sid1"
+        assert [p.stem for p in ts.session_transcripts(d)] == ["sid1"]
+        assert ts.transcript_kind(d / "sid2.jsonl") == "headless"
+        assert ts.transcript_kind(d / "sid1.jsonl") == "interactive"
+
+    def test_a_transcript_that_names_no_entrypoint_still_counts(self, tmp_path):
+        """Older Claude Code, and the moment before a run's first message."""
+        d = tmp_path / "t" / "sess"
+        _mk_transcript(tmp_path / "t", "sess", "sid1", [_user("u0", "q")])
+        assert ts.transcript_kind(d / "sid1.jsonl") == "unknown"
+        assert ts.resolve_active_transcript(d).stem == "sid1"

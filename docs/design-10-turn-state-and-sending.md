@@ -672,6 +672,14 @@ invoke at a time per dev container"; long work belongs to `session_send`.
 - **Fresh.** The wrapper never adds `--continue` to a `--print` / `-p` run
   (`tests/unit/test-aidc-claude-resume.sh`), and the MCP also passes `AIDC_CLAUDE_RESUME=false`,
   which every image's wrapper honours, so sessions on an older image are fresh too.
+- **Its transcript is not the session's.** A headless run writes its own transcript into the
+  session's project directory, beside the interactive Claude's, and the mirror copies it. Its
+  lines carry `entrypoint: "sdk-cli"` (the interactive Claude's carry `"cli"`). Found in the
+  live check (2026-10-23): the watcher followed it as the newest transcript and delivered a
+  `session_invoke` answer to the orchestrator as the session's reply. `transcript.
+  conversation_files` leaves such a file out of every choice of transcript (the active one, the
+  watcher's move to a newer one, `session_resend`'s search, `session_status`). A file no line of
+  which names its entrypoint still counts, as before.
 - **Tagged.** Each run is started with `AIDC_HEADLESS_RUN=<tool>-<id>` in its environment
   (`headless.exec_argv`). Every process it starts inherits it, which is how the MCP finds the
   whole tree inside the container.
@@ -696,7 +704,9 @@ invoke at a time per dev container"; long work belongs to `session_send`.
   call for `http.disconnect` and stops its run (`session_invoke_client_disconnected`,
   `session_invoke_stopped_client_gone`). A client that abandons a call with none of the three
   cannot be seen (metallm's stop button, on the evidence of 23:04Z); the one-at-a-time rule and
-  `headless_runs` are what is left for it, with `session_interrupt(target="headless")`.
+  `headless_runs` are what is left for it, with `session_interrupt(target="headless")`. The
+  call a stop ended says it was stopped, not that claude failed; an `invoke_busy` refusal names
+  the running run's pid as well as its `run_id`.
   `session_invoke_async` keeps its 30-minute limit; past it (or on an error) the run is now
   stopped in the container too, where before only the `docker exec` ended.
 - **A stop that fails says so.** docker failing (not started, no answer in time, a non-zero

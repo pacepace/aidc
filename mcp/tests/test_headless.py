@@ -543,3 +543,42 @@ async def test_an_async_run_stopped_before_it_started_never_starts(docker, monke
     await jobs[0]
     assert docker["procs"] == []
     assert docker["posted"]["ok"] is False and "before it started" in docker["posted"]["content"]
+
+
+# --- found in the live run, 2026-10-23 ----------------------------------------------
+
+
+async def test_a_refusal_names_the_running_runs_pid_too(docker):
+    """Live, 2026-10-23: invoke_busy for a run this server started said "pid None",
+    though session_status showed its pid; a caller should not need the second call."""
+    docker["release_now"] = False
+    first = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit the spec"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    run_id = next(iter(headless._runs))
+    docker["found"] = [{"pid": 8500, "started_at": time.time(), "run_id": run_id,
+                        "prompt": "edit the spec"}]
+    res = await _tool("session_invoke")(name="proj", prompt="also this")
+    assert res["error_code"] == "invoke_busy"
+    assert res["data"]["running"]["pid"] == 8500 and res["data"]["running"]["run_id"] == run_id
+    assert "pid 8500" in res["error"]
+    docker["procs"][0].release.set()
+    await first
+
+
+async def test_an_invoke_stopped_on_request_says_so(docker, monkeypatch):
+    """Live, 2026-10-23: the call a session_interrupt(target="headless") stopped
+    returned "claude failed", which reads as a crash."""
+    async def tree(name):
+        return None
+    monkeypatch.setattr(tools, "_tree", tree)
+    docker["release_now"] = False
+    ctx = type("Ctx", (), {"headers": {"mcp-session-id": "s1"}, "request_id": "9",
+                           "info": staticmethod(lambda chunk: asyncio.sleep(0))})()
+    call = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit", ctx=ctx))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    await _tool("session_interrupt")(name="proj", target="headless")
+    res = await call
+    assert res["ok"] is False and res["error_code"] == "command_failed"
+    assert "stopped" in res["error"] and "session_interrupt" in res["error"]

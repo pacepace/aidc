@@ -207,13 +207,14 @@ async def _claim_headless(name: str, tool: str, prompt: str
     lock = _invoke_locks.setdefault(name, asyncio.Lock())
     async with lock:
         running = headless.tracked(name)
-        if not running:
-            found = await headless.container_runs(f"aidc-{name}-dev")
-            if found is None:
-                # The run's own docker exec fails the same way if the container is
-                # down; if it is only slow to answer, an orphan may go uncounted.
-                log_event("headless_claim_without_listing", session=name, tool=tool)
-            running = headless.merge(name, found)
+        # Read the container either way: when one of this server's runs holds the slot,
+        # it is what gives the refusal that run's pid.
+        found = await headless.container_runs(f"aidc-{name}-dev")
+        if found is None and not running:
+            # The run's own docker exec fails the same way if the container is down;
+            # if it is only slow to answer, an orphan may go uncounted.
+            log_event("headless_claim_without_listing", session=name, tool=tool)
+        running = headless.merge(name, found)
         if running:
             return None, running[0]
         return headless.new_run(name, tool, prompt), None
@@ -2069,12 +2070,8 @@ def _resume_fields(mark: ts.Watermark, seen: float | None) -> dict[str, Any]:
 def _newest_of_siblings(d: Path, sid: str) -> list[tuple[Path, str]]:
     """Each transcript in `d` other than `sid`, with its newest message timestamp.
     Blocking (it may read every earlier transcript): run it in a worker thread."""
-    try:
-        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
-    except OSError:
-        return []
     found = []
-    for p in candidates:
+    for p in ts.conversation_files(d):
         if p.stem == sid:
             continue
         # Every sibling, every poll: read once per version of the file, never again
@@ -3403,7 +3400,11 @@ def register(app: Any) -> None:
             about["warning"] = _INVOKE_LONG_WARNING.format(secs=elapsed)
         stderr_data = b"".join(stderr_buf)
         if proc.returncode != 0:
-            return _envelope_err(stderr_data.decode("utf-8", errors="replace") or "claude failed",
+            said = stderr_data.decode("utf-8", errors="replace")
+            if run.stopped:
+                said = ("the run was stopped (session_interrupt with target \"headless\") "
+                        "before it answered" + (f": {said}" if said else ""))
+            return _envelope_err(said or "claude failed",
                                  {"stdout": "".join(chunks), **about}, code="command_failed")
         return _envelope_ok({"response": "".join(chunks), **about})
 

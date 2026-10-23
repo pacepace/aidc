@@ -1790,6 +1790,61 @@ def newest_message_ts(objs: list[dict]) -> str:
     return newest
 
 
+# A headless run (`claude --print`: session_invoke, session_invoke_async) writes its own
+# transcript into the same project directory as the session's interactive Claude, and
+# the mirror copies it beside the session's. Its lines carry `entrypoint: "sdk-cli"`;
+# the interactive Claude's carry "cli" (measured on Claude Code 2.1.30x, 2026-10-23). It
+# is not the session's conversation: followed as one, the watcher delivered a
+# session_invoke's answer to the orchestrator as the session's reply (live, 2026-10-23).
+_HEADLESS_ENTRYPOINT = "sdk-cli"
+_kind_cache: dict[Path, tuple[_Stamp, str]] = {}
+
+
+def transcript_kind(path: Path) -> str:
+    """"interactive", "headless", or "unknown" (no line says yet), from the first line
+    that names its entrypoint. Read once per version of the file."""
+    path = Path(path)
+    try:
+        with path.open("rb") as fh:
+            stamp = _stamp_of(os.fstat(fh.fileno()))
+            with _read_lock:
+                kept = _kind_cache.get(path)
+            if kept is not None and kept[0] == stamp:
+                return kept[1]
+            kind = "unknown"
+            for raw in fh:
+                if b'"entrypoint"' not in raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                entry = obj.get("entrypoint") if isinstance(obj, dict) else None
+                if isinstance(entry, str):
+                    kind = "headless" if entry == _HEADLESS_ENTRYPOINT else "interactive"
+                    break
+    except OSError:
+        return "unknown"
+    if kind != "unknown":
+        with _read_lock:
+            _kind_cache[path] = (stamp, kind)
+    return kind
+
+
+def conversation_files(transcript_dir: Path) -> list[Path]:
+    """The session's own transcripts in the dir: regular top-level *.jsonl files (never
+    symlinks: see resolve_active_transcript) that are not a headless run's. One no line
+    of which names its entrypoint yet counts, as every transcript did before: Claude
+    Code writes the entrypoint on its first message or attachment, so a headless file
+    reads as unknown only in the first moment of the run."""
+    try:
+        candidates = [p for p in Path(transcript_dir).glob("*.jsonl")
+                      if p.is_file() and not p.is_symlink()]
+    except OSError:
+        return []
+    return [p for p in candidates if transcript_kind(p) != "headless"]
+
+
 def session_transcripts(transcript_dir: Path,
                          prefer_session_id: str | None = None) -> list[Path]:
     """Every top-level *.jsonl for the session, the pinned one first and the rest by
@@ -1802,11 +1857,7 @@ def session_transcripts(transcript_dir: Path,
 
     Regular files only, never symlinks: see resolve_active_transcript.
     """
-    d = Path(transcript_dir)
-    try:
-        candidates = [p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
-    except OSError:
-        return []
+    candidates = conversation_files(transcript_dir)
     pinned = [p for p in candidates if prefer_session_id and p.stem == prefer_session_id]
     rest = [p for p in candidates if p not in pinned]
 
@@ -1831,26 +1882,24 @@ def resolve_active_transcript(transcript_dir: Path,
     already tracking prevents that false rotation; mtime is only the fallback for
     the first resolution (no prior session) or once the pinned file truly vanishes.
 
-    Returns None when the dir is absent or empty (session not started / down).
+    Returns None when the dir is absent or empty (session not started / down), or holds
+    only headless runs' transcripts.
     """
     d = Path(transcript_dir)
     if prefer_session_id:
         pinned = d / f"{prefer_session_id}.jsonl"
         try:
-            if pinned.is_file() and not pinned.is_symlink():
+            if (pinned.is_file() and not pinned.is_symlink()
+                    and transcript_kind(pinned) != "headless"):
                 return pinned
         except OSError:
             pass
-    try:
-        # Regular files only — never follow symlinks. The dir is written by an
-        # in-container mirror fed from the adversarial (yolo) dev container, so a
-        # planted symlink (e.g. x.jsonl -> /etc/passwd) must not be read. This
-        # defense lives here, in MCP (trustworthy), not in the mirror.
-        candidates = [
-            p for p in d.glob("*.jsonl") if p.is_file() and not p.is_symlink()
-        ]
-    except OSError:
-        return None
+    # Regular files only — never follow symlinks. The dir is written by an in-container
+    # mirror fed from the adversarial (yolo) dev container, so a planted symlink (e.g.
+    # x.jsonl -> /etc/passwd) must not be read. This defense lives here, in MCP
+    # (trustworthy), not in the mirror. A headless run's transcript is never the
+    # session's (conversation_files).
+    candidates = conversation_files(d)
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)

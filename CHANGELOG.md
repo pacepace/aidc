@@ -57,6 +57,11 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   rule and `headless_runs` cover that case. `session_invoke` still has no time limit.
   `session_invoke_async` keeps its 30-minute limit, and past it the run is now stopped in the
   container too.
+- **A `session_invoke` answer could be delivered as the session's reply.** A headless run
+  writes its own transcript into the session's project folder, and the reply watcher could take
+  it for the session's newest conversation: the orchestrator then received the invoke's answer
+  as if the agent had said it, and could miss the agent's next reply. Headless runs'
+  transcripts are now never treated as the session's.
 - **`session_status.working_on` named the wrong prompt** during a turn that a background task's
   notification or another session's message started: it showed the person's previous, already
   answered prompt. It now names what opened the turn, saying so when that was not a person.

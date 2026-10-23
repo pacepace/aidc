@@ -13,6 +13,67 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.8] - 2026-10-23
+
+### Added
+- **`session_status` says what a busy agent is working on, and since when.** While the agent
+  is working it now reports `started_by` (`prompt`, `background_task`, `session_message` or
+  `system`), `turn_started_at`, and `last_activity` (the agent's newest step, such as
+  `{"kind": "tool_use", "name": "Bash", "at": "…"}`, so a long silence shows as one).
+  `session_interrupt`'s `was_running` carries the same fields, and so does a `session_send`
+  that queues because the agent is busy, so the caller can decide what to do in one call.
+- **`session_send` can join the turn in flight: `deliver: "join"`.** The prompt is pasted now
+  and the agent takes it in at its next step; the result says `status: "joined_turn"`, and the
+  answer comes in that turn's final reply. Use it for a correction, an answer the agent is
+  waiting for, or "what are you on?". The default, `deliver: "queue"`, is unchanged. A join never
+  jumps a prompt already queued, and holds off, queueing the prompt and naming the reason in
+  `join_declined`, whenever a paste would be unsafe: a dialog, unsent text in the input box,
+  Claude not running, the agent list selected, an interrupt not yet reported.
+- **`session_status` lists the session's headless runs** (`headless_runs`: each
+  `session_invoke` / `session_invoke_async` with its `run_id`, `started_at`, `prompt`, `pid`,
+  and `orphan` for one no call waits on, such as a run left from before an `aidc-mcp` restart).
+- **`session_interrupt` can stop a headless run: `target: "headless"`**, with every process it
+  started, leaving the agent alone. The default, `target: "agent"`, is unchanged.
+
+### Changed
+- **One headless run at a time per session.** While a `session_invoke` or
+  `session_invoke_async` runs (or one is found in the container from before a restart), another
+  is refused at once with the new `error_code: "invoke_busy"`, naming the running one.
+- **The tool descriptions say plainly which tool to use.** `session_invoke` and
+  `session_invoke_async` are for short, single-shot questions; anything long, anything that edits
+  files or runs builds or tests, goes to `session_send`. The server's instructions and the README
+  say the same. A `session_invoke` result now includes `elapsed_s`, with a `warning` when it ran
+  over a minute.
+
+### Fixed
+- **`session_invoke` was not fresh.** The dev image's `aidc-claude` wrapper resumed the
+  project's conversation for headless runs too, so every invoke loaded the resident agent's
+  whole conversation and could act on its work. Headless runs never resume now. The MCP also
+  asks for that explicitly, so sessions on an older image are fresh without an upgrade.
+- **A `session_invoke` its caller gave up on kept running and editing files.** When the call is
+  cancelled, its MCP session closed, or its connection dropped, the run is now stopped inside
+  the container with every process it started, not only the host's `docker exec`, and the stop
+  is logged. A client that abandons a call without any of those cannot be seen; the one-at-a-time
+  rule and `headless_runs` cover that case. `session_invoke` still has no time limit.
+  `session_invoke_async` keeps its 30-minute limit, and past it the run is now stopped in the
+  container too.
+- **A `session_invoke` answer could be delivered as the session's reply.** A headless run
+  writes its own transcript into the session's project folder, and the reply watcher could take
+  it for the session's newest conversation: the orchestrator then received the invoke's answer
+  as if the agent had said it, and could miss the agent's next reply. Headless runs'
+  transcripts are now never treated as the session's. Also, an `invoke_busy` refusal names the
+  running run's pid, and a call stopped with `session_interrupt` says it was stopped rather than
+  "claude failed".
+- **`session_status.working_on` named the wrong prompt** during a turn that a background task's
+  notification or another session's message started: it showed the person's previous, already
+  answered prompt. It now names what opened the turn, saying so when that was not a person.
+- **A paste could land in a turn that had just started.** A background task's notification, or
+  another session's message, read as "idle" until the agent wrote its first line, so a queued
+  prompt pasted in that second went into the new turn instead of waiting for it. Such a turn
+  reads as busy from its first line now.
+- **A prompt Claude Code held and ran as the next turn** kept its send record for 24 hours,
+  where the same words typed by a person would later have been taken for the orchestrator's.
+
 ## [1.9.7] - 2026-10-22
 
 ### Security
@@ -1336,7 +1397,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.7...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.8...HEAD
+[1.9.8]: https://github.com/pacepace/aidc/compare/v1.9.7...v1.9.8
 [1.9.7]: https://github.com/pacepace/aidc/compare/v1.9.6...v1.9.7
 [1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6
 [1.9.5]: https://github.com/pacepace/aidc/compare/v1.9.4...v1.9.5

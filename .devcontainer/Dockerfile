@@ -338,7 +338,14 @@ case "$mode" in
         exit 2
         ;;
 esac
-if [ "${AIDC_CLAUDE_RESUME:-true}" = "true" ]; then
+# A headless run (--print / -p: session_invoke, session_invoke_async) is a fresh
+# Claude, never a resume: with --continue it would load the resident agent's whole
+# conversation and could act on its work (metallm, 2026-10-22).
+resume="${AIDC_CLAUDE_RESUME:-true}"
+for arg in "$@"; do
+    case "$arg" in --print|-p) resume=false ;; esac
+done
+if [ "$resume" = "true" ]; then
     # A transcript holding a message, not just a transcript: see
     # aidc_has_resumable_conversation.
     . /usr/local/bin/aidc-claude-state-install.sh

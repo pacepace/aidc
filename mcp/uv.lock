@@ -21,7 +21,7 @@ constraints = [
 
 [[package]]
 name = "aidc-mcp"
-version = "1.9.7"
+version = "1.9.8"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

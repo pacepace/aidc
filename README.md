@@ -549,13 +549,13 @@ From the other machine, point an MCP client at `http://<your-overlay-ip>:7878/mc
 
 ### Driving sessions from an orchestrator
 
-The MCP server is built for an orchestrating agent that runs somewhere else on your overlay network and talks to sessions over MCP. Tasks that take minutes should not block the orchestrator's request, so two tools finish asynchronously and deliver their result by POSTing to a callback endpoint the orchestrator exposes.
+The MCP server is built for an orchestrating agent that runs somewhere else on your overlay network and talks to sessions over MCP. **The rule: give a session's agent any task, and anything long, with `session_send`** (edits, builds, test suites, dev processes, multi-step work). `session_invoke` and `session_invoke_async` are only for short, single-shot questions ("what does function X return?"). Replies that take a while are delivered by POSTing to a callback endpoint the orchestrator exposes.
 
 **The callback contract:**
 
 1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
-2. The agent calls `session_invoke_async(name, prompt, conversation_id)` (or `session_send`, below). The call returns immediately.
-3. aidc runs the task in the named session container (`session_invoke_async` runs `aidc-claude --print <prompt>` with a 30-minute cap).
+2. The agent calls `session_send(name, prompt)` (below), or `session_invoke_async(name, prompt, conversation_id)` for a short single-shot question. The call returns immediately.
+3. aidc hands the prompt to the session's agent (`session_send`), or runs the question in the named session container (`session_invoke_async` runs a fresh `aidc-claude --print <prompt>`, stopped after 30 minutes).
 4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"person"|"orchestrator"|"", "interrupted": true|false}` (plus `"sent_by"` with a `"person"` origin: whoever `session_send`'s `sent_by` named) (plus `"speaker": "human"|"agent"` with `metallm.send_speaker: true`). Two callbacks are notices rather than replies and carry `error_code`: `"prompt_dropped"` for a queued prompt whose session was removed before it could be pasted, and `"prompt_waiting"`, sent once, for a queued prompt that has waited 10 minutes (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
 5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 
@@ -572,18 +572,20 @@ metallm:
 
 **Step 3 — Register aidc as an MCP server in the orchestrator:** URL `http://<your-overlay-ip>:7878/mcp`, bearer from `aidc mcp token show`. aidc reads the same token from `~/.config/aidc/mcp-token` at call time when it POSTs back, so `aidc mcp token rotate` takes effect on the next callback.
 
-**Step 4 — Verify.** Ask the orchestrator's agent to call `session_invoke_async` with a short task on a running session. It confirms the launch; when the task finishes the result appears in the conversation without further prompting.
+**Step 4 — Verify.** Ask the orchestrator's agent to call `session_invoke_async` with a short question on a running session. It confirms the launch; when the task finishes the result appears in the conversation without further prompting.
 
 **Notes:**
 - Use `session_status` before calling `session_invoke_async` to confirm the target session is alive.
 - If `metallm.callback_url` is not set, the tool returns an error immediately rather than silently losing the result.
-- Tasks that finish within the orchestrator's response window are better served by `session_invoke` (synchronous). Use async for anything that might take more than a minute or two.
+- A short question whose answer is needed inline is `session_invoke` (synchronous). Anything that may take more than about a minute, or that edits files or runs builds or tests, is `session_send`, not either invoke.
+- One headless run at a time per session: while a `session_invoke` or `session_invoke_async` runs, another is refused with `error_code: "invoke_busy"`, naming the run (its `run_id`, `started_at`, `prompt`, `pid`). `session_status` lists runs under `headless_runs`, including one left from before an `aidc-mcp` restart (`orphan: true`), and `session_interrupt` with `target: "headless"` stops one with every process it started.
+- A headless run is a fresh Claude: it never resumes the session's conversation. `session_invoke` has no time limit. If the caller cancels the call (`notifications/cancelled`), closes its MCP session, or drops the connection, the run is stopped in the container. A client that abandons a call without any of those cannot be seen; the one-at-a-time rule and `headless_runs` cover that case.
 
 ### Interactive sessions from an orchestrator
 
-`session_invoke` and `session_invoke_async` run `claude --print` — headless, no UI, result as text. For work that builds a conversation thread, needs visible progress, or spans many turns: use the session tools.
+`session_invoke` and `session_invoke_async` run a fresh `claude --print` — headless, no UI, result as text — and are only for short, single-shot questions. For any task, anything long, work that builds a conversation thread, needs visible progress, or spans many turns: use the session tools.
 
-**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. An orchestrator relaying a person's message sets `sent_by` to name them, and the reply comes back with `prompt_origin: "person"` and that `sent_by`. Claude's reply is delivered back into the orchestrator's conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session cannot take it yet (Claude is mid-turn, someone has unsent text in Claude's input box, Claude is restarting, or the paste did not land), the prompt is queued and pasted as soon as the session is free; the return says `queued` with a `waiting_reason`, and `session_status` lists what is still waiting and why. A queued prompt is never dropped: it survives an `aidc-mcp` restart and leaves the queue only when pasted or when the session is killed or re-created (then it is kept in the MCP's dead-letter dir, and the conversation that sent it gets a `prompt_dropped` callback). The webhook survives a restart too: a reply written while the MCP was down still arrives, once. While a prompt waits on someone's unsent text, the session's tmux status line says so.
+**`session_send(name, prompt)`** — injects a prompt into an interactive Claude session in the named container and returns immediately with a send-confirmation. An orchestrator relaying a person's message sets `sent_by` to name them, and the reply comes back with `prompt_origin: "person"` and that `sent_by`. Claude's reply is delivered back into the orchestrator's conversation by the transcript watcher (auto-started on first send) when the turn finishes — non-blocking, so the conversation stays free while the session works. The reply arrives via the webhook callback, not in the tool's return value. For a multi-turn sequence, call it repeatedly. If the session cannot take it yet (Claude is mid-turn, someone has unsent text in Claude's input box, Claude is restarting, or the paste did not land), the prompt is queued and pasted as soon as the session is free; the return says `queued` with a `waiting_reason` and what the agent is busy with (`working_on`, `started_by`, `turn_started_at`, `last_activity`, as `session_status` shows them), and `session_status` lists what is still waiting and why. With `deliver: "join"` a prompt for the work in flight is pasted into the running turn instead (`status: "joined_turn"`); its answer comes in that turn's reply. A join never jumps a prompt already queued, and holds off whenever a plain send would (a dialog, unsent text, Claude not running), saying why in `join_declined`. A queued prompt is never dropped: it survives an `aidc-mcp` restart and leaves the queue only when pasted or when the session is killed or re-created (then it is kept in the MCP's dead-letter dir, and the conversation that sent it gets a `prompt_dropped` callback). The webhook survives a restart too: a reply written while the MCP was down still arrives, once. While a prompt waits on someone's unsent text, the session's tmux status line says so.
 
 **`session_resend(name)`** — re-delivers the session's most recent reply when a callback was lost (a dropped POST, an MCP restart at the wrong moment). It refuses to re-post a reply the orchestrator already acknowledged and returns the content to the caller instead, so it can never inject a duplicate.
 
@@ -613,9 +615,9 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 
 | Tool | Use when |
 |---|---|
-| `session_invoke` | Short one-off, answer needed inline — blocks until done (no conversation memory) |
-| `session_invoke_async` | Headless fire-and-forget (e.g. a scheduled/skill job); result delivered back into the orchestrator's conversation, no conversation memory |
-| `session_send` | Live back-and-forth with a session — non-blocking; reply delivered into the conversation via webhook. Call repeatedly for a multi-turn sequence |
+| `session_send` | Any task and anything long: edits, builds, tests, multi-step work, back-and-forth with the session's agent — non-blocking; reply delivered into the conversation via webhook. Call repeatedly for a multi-turn sequence |
+| `session_invoke` | A short, single-shot question whose answer is needed inline ("what does function X return?") — blocks until done; a fresh Claude, one at a time per session |
+| `session_invoke_async` | A short, single-shot question whose answer can land in the conversation later; a fresh Claude, one at a time per session |
 
 ## Reference
 

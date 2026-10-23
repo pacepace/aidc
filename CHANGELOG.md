@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.8] - 2026-10-23
+
 ### Added
 - **`session_status` says what a busy agent is working on, and since when.** While the agent
   is working it now reports `started_by` (`prompt`, `background_task`, `session_message` or
@@ -1388,7 +1390,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.7...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.8...HEAD
+[1.9.8]: https://github.com/pacepace/aidc/compare/v1.9.7...v1.9.8
 [1.9.7]: https://github.com/pacepace/aidc/compare/v1.9.6...v1.9.7
 [1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6
 [1.9.5]: https://github.com/pacepace/aidc/compare/v1.9.4...v1.9.5

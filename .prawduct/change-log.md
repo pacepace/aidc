@@ -36,7 +36,7 @@
 
 ## 2026-10-23: What a busy session is doing, joining its turn, and headless runs that are fresh, single and stoppable (v1.9.8)
 
-<!-- prawduct: scope=turn-visibility-and-join -->
+<!-- prawduct: scope=turn-visibility-and-join | release=v1.9.8 -->
 
 **Why:** 2026-10-22, metallm. An orchestrator `session_send` waited 45 minutes (18:33 to 19:18Z)
 behind one turn that a background task's notification had opened, while `session_status`

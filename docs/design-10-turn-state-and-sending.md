@@ -9,7 +9,7 @@ a dev container's tmux `claude` window:
   how it avoids typing over a person's unsent text, and how the per-session queue holds prompts
   until they land.
 
-**Requirements implemented:** MCP-24 .. MCP-30 and MCP-32 .. MCP-37 (`docs/requirements.md`). Extends MCP-15..19 and
+**Requirements implemented:** MCP-24 .. MCP-30, MCP-32 .. MCP-37 and MCP-40 .. MCP-43 (`docs/requirements.md`). Extends MCP-15..19 and
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
 **Status:** designed and built 2026-09-17 (branch `feature/turn-state`). D4's `speaker` is built
@@ -78,6 +78,9 @@ below fails safe when a line is missing or unrecognized.
 | Esc **before** Claude has written anything writes **nothing**: the prompt line stays with no reply, and the prompt text is put back into the input box on screen | container |
 | A background task finishing writes a `user` line `<task-notification>…` with `promptSource: "system"` and `origin.kind: "task-notification"`, and Claude runs a new turn on it | container |
 | A prompt submitted while Claude is working is not written as a `user` line. Claude Code writes a `queue-operation` enqueue carrying its text, removes it at the next tool boundary, and answers it inside the running turn | container |
+| That removal is a `queue-operation` `remove` with `reason: "absorbed_mid_turn"`, followed by an `attachment` of type `queued_command` carrying the prompt. If the turn ends first, Claude Code runs the prompt as the next turn, written as a `user` line with `promptSource: "queued"` | metallm transcript, Claude Code 2.1.300, 2026-10-22 |
+| A notification line opens with `<task-notification>`; read as local output it made a notification turn look idle until Claude's first line, and a paste in that gap joined the new turn | metallm, 2026-10-22 19:19:35-40 |
+| A message from another Claude session is an `isMeta` `user` line with `origin.kind` `peer` (or `coordinator`), and Claude runs a turn on it | host transcripts, 2026-10-22 |
 
 Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md`.
 
@@ -275,8 +278,9 @@ missing a code or uses one outside the set:
 | `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |
 | `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry |
 | `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call |
+| `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` |
 
-`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope` or `tainted`. Every other condition, a failed paste included, queues the prompt. The
+`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
 metallm side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 
@@ -596,6 +600,104 @@ is true once its conversation has been told it is still waiting (D5).
 Prompt text is stored as the queue receives it (already newline-flattened by `session_send`).
 Same trust level as the existing send record and dead-letter files, which already store prompts.
 
+### S5. What a busy session is doing, and joining its turn (MCP-40, MCP-41)
+
+2026-10-22, metallm: an orchestrator's prompt waited 45 minutes (`claude_busy`) behind one
+turn a background task's notification had opened, while `session_status.working_on` named the
+person's previous prompt, answered before the turn began. `working_on` was the newest prompt
+`human_prompt_text` attributes to a person, and that skips every prompt Claude Code raises
+itself. Pace decided the same day that callers should see what a turn is and be able to join it.
+
+**The open turn** (`transcript.open_turn`) is found by one pass over the transcript already
+read: a real prompt opens a turn (back-to-back prompts with no reply between them are one turn,
+named by the newest); an `isMeta` message (another session's message, an auto-continue) opens one
+only when no turn is open or the reply before it had ended; a `turn_duration` record, an interrupt
+marker, or a local command closes it. A Stop-hook pushback, a tool result, and a prompt Claude
+Code takes into the running turn (its queue-operation and `queued_command` attachment) change
+nothing. Assistant work with no opening line before it is a turn whose opener is not in the
+transcript.
+
+**What a caller reads** (`turns_view.turn_info`), on `session_status` while `working`, on
+`session_interrupt`'s `was_running`, and on a `session_send` that queued or joined:
+
+| Field | Meaning |
+|---|---|
+| `working_on` | The prompt's words when a person or `session_send` opened the turn (redacted, cut to 300); otherwise what started it, said as such: `background task completed: <summary> (task <id>)`, `a message from another Claude session (<from>)`, `something Claude Code started itself, not a prompt`, `a turn whose opening line is not in the transcript`. A system wrapper is never shown as a person's words. |
+| `started_by` | `prompt` (a person's or `session_send`'s; `promptSource` typed, queued, suggestion_accepted or sdk, origin human or none), `background_task` (`origin.kind` task-notification, or a `<task-notification>` body), `session_message` (`origin.kind` peer or coordinator), `system` (anything else). Measured over every transcript on the build host: these cover every provenance seen. |
+| `turn_started_at` | The opening line's time, UTC. |
+| `last_activity` | `{kind: tool_use|text|thinking, name: <tool, for tool_use>, at}` from the newest assistant line of the turn; null before Claude writes anything. A long gap is a stall or one long tool call. |
+
+Not working, `working_on` is `""` and the rest null. The five `session_send_queued_by_claude`
+events that evening were pastes that landed as a turn started. One cause was the notification
+line itself: it opens with a tag, and `_is_local_output` took it for local-command output, so
+`log_shows_turn_in_progress` read idle until Claude's first line. A prompt Claude Code raised
+itself is no longer local output, and an `isMeta` session message at the tail reads busy too.
+
+**`session_send(deliver="join")`.** `"queue"` (the default) is unchanged. `"join"` takes one
+reading of the session (`_join_running_turn`, under the send lock): idle, it sends as usual
+(and, if a turn starts during the usual two-reading wait, tries the join once more); running, it
+pastes now through `_inject`, with its send record and echo hold, and returns `status:
+"joined_turn"`. The two-reading wait exists to keep a prompt out of a turn just starting, which is
+what joining asks for. Claude Code holds the paste as a queue-operation and hands it to the turn
+at its next tool boundary; `_prompt_arrived` sees the queue-operation, gives the send record back
+(no turn will claim the prompt) and logs `session_send_queued_by_claude`. The answer comes in the
+running turn's final reply, delivered as any reply. If the turn ends first, Claude Code runs the
+prompt next as a `promptSource: "queued"` line, which no turn attributes; `_prompt_arrived` gives
+that record back too.
+
+A join is declined, and the prompt queued as `"queue"` would, with `join_declined` naming why,
+when: a prompt is already queued for the session (`queued_behind`: order is kept, a join never
+jumps the queue); Claude is not running (`claude_not_running`); a dialog or unknown screen
+(`claude_not_at_prompt`, `screen_unrecognized`); the agent list has the keyboard
+(`agent_list_selected`); someone has unsent text in the box (`input_has_text`); an interrupt the
+watcher has not reported yet (`interrupt_not_reported_yet`: a prompt on top would bury the
+report, S1); the session became tainted under the lock (`session_tainted`; a tainted session is
+refused at the door already); or the paste failed (`paste_failing`).
+
+### S6. Headless runs: fresh, one at a time, visible, stopped (MCP-42, MCP-43)
+
+2026-10-22, metallm: four `session_invoke` calls (22:48-23:04Z) left two `claude --print` runs
+going 23 and 9 minutes later, both editing the same spec file; the caller had given up on the
+first and sent a correction. Each resumed the resident agent's whole conversation, because the
+image's `aidc-claude` wrapper added `--continue` to every launch with a conversation to resume,
+headless included, while the tool promised a fresh Claude. Nothing an orchestrator could call
+showed them. Pace's rulings that night: no timeout on `session_invoke`; "only allow one session
+invoke at a time per dev container"; long work belongs to `session_send`.
+
+- **Fresh.** The wrapper never adds `--continue` to a `--print` / `-p` run
+  (`tests/unit/test-aidc-claude-resume.sh`), and the MCP also passes `AIDC_CLAUDE_RESUME=false`,
+  which every image's wrapper honours, so sessions on an older image are fresh too.
+- **Tagged.** Each run is started with `AIDC_HEADLESS_RUN=<tool>-<id>` in its environment
+  (`headless.exec_argv`). Every process it starts inherits it, which is how the MCP finds the
+  whole tree inside the container.
+- **One at a time per session.** `_claim_headless` checks and claims under a per-session lock:
+  a run this server started counts, and so does any `claude --print` found in the container
+  (`headless.container_runs` reads `/proc`), so a run left from before an `aidc-mcp` restart, or
+  started any other way, holds the session too. A second call is refused at once with
+  `invoke_busy`. `session_invoke_async` claims before it returns.
+- **Visible.** `session_status.headless_runs` lists each run: `{run_id, started_at, tool,
+  prompt, pid, orphan}` (prompt redacted, cut to 120; `orphan`: no request of this server waits
+  on it). A queued or joined `session_send` lists this server's runs in `headless_runs`, and a
+  `session_invoke` result lists any other still going, with `elapsed_s` and, past a minute, a
+  `warning` that long work belongs to `session_send`.
+- **Stopped when nobody waits.** `session_invoke` has no timeout. When its handler is cancelled
+  or reading the answer fails, the run is stopped in a task of its own: every process carrying its
+  tag gets SIGTERM, then SIGKILL after 3 s (`headless.stop`), then the host's `docker exec` is
+  killed; logged as `session_invoke_cancelled` with the pids. Measured on MCP SDK 2.3 with the
+  2025-11-25 protocol (`tests/test_invoke_cancel_wire.py`, real uvicorn and HTTP client): the SDK
+  cancels the handler on `notifications/cancelled` and on a session `DELETE`, but not when the
+  client drops the connection. `disconnect.StopInvokeOnDisconnect` watches each `session_invoke`
+  call for `http.disconnect` and stops its run (`session_invoke_client_disconnected`,
+  `session_invoke_stopped_client_gone`). A client that abandons a call with none of the three
+  cannot be seen (metallm's stop button, on the evidence of 23:04Z); the one-at-a-time rule and
+  `headless_runs` are what is left for it, with `session_interrupt(target="headless")`.
+  `session_invoke_async` keeps its 30-minute limit; past it (or on an error) the run is now
+  stopped in the container too, where before only the `docker exec` ended.
+- **Stopped on request.** `session_interrupt` takes `target`: `"agent"` (the default, Esc to the
+  agent as before) or `"headless"`, which stops the session's headless run: one this server waits
+  on through its own call (which then returns), a tagged orphan by its tag, an untagged one by
+  its pid and every process below it (`headless.stop_tree`).
+
 ---
 
 ## Out of scope
@@ -619,5 +721,10 @@ Same trust level as the existing send record and dead-letter files, which alread
   `_drop_prompts_of_removed_session`, `_notify_dropped`, `resume_on_startup`, `resume_watchers`,
   `session_run`, `session_resend`);
   `mcp/src/aidc_mcp/screen.py` (`classify`).
+- Turn info and join (S5): `transcript.open_turn`, `turns_view.turn_info`,
+  `tools._join_running_turn`, `tools._join_refusal`.
+- Headless runs (S6): `mcp/src/aidc_mcp/headless.py`, `mcp/src/aidc_mcp/disconnect.py`,
+  `tools._claim_headless`, `tools._stop_headless`, `tools._interrupt_headless`; the wrapper in
+  `.devcontainer/Dockerfile` (`aidc-claude`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.
 - MetaLLM callback contract: `api/src/api/v1/internal/callback.py` in the metallm repo.

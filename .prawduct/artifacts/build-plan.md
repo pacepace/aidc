@@ -52,6 +52,7 @@ never shown as words.]
   `turn_started_at`, `last_activity` — on `session_status`, `session_interrupt` and a queued
   `session_send`.
 - **MCP-41** (new): `session_send(deliver="join")`.
+- **MCP-42**, **MCP-43** (new): headless runs (see "Scope widened").
 
 ## Design decisions
 
@@ -80,17 +81,43 @@ never shown as words.]
   `human_prompt_text` does not attribute), so a joined prompt that lands just after its turn ends
   leaves no stale record.]
 
+## Scope widened (2026-10-22/23, coordinator relaying Pace)
+
+Three session_invoke defects found live in metallm (22:48-23:04Z), with Pace's rulings: (1)
+headless invokes resumed the project's conversation (`--continue` in the `aidc-claude` wrapper);
+(2) nobody could see running headless runs; (3) an abandoned invoke kept its in-container run
+editing files. Rulings: no timeout on session_invoke; kill the in-container tree on cancel or
+disconnect; "only allow one session invoke at a time per dev container"; the tool text leads with
+"session_invoke is for SHORT, single-shot questions … session_send is the place for long things";
+metallm probably sends no cancel, so the guard and visibility are the primary net, and an explicit
+stop is wanted. Requirements MCP-42, MCP-43.
+
+- [DECISION: runs are tagged with `AIDC_HEADLESS_RUN=<tool>-<id>` so the whole in-container tree
+  is found by its inherited environment; untagged `claude --print` processes are found by
+  cmdline and stopped by pid tree.]
+- [DECISION: the MCP passes `AIDC_CLAUDE_RESUME=false` as well as fixing the wrapper, so
+  sessions on an older image are fresh without `aidc upgrade`.]
+- [DECISION: a dropped connection is caught by an ASGI layer (`disconnect.py`), because SDK 2.3
+  on the 2025-era wire cancels on `notifications/cancelled` and DELETE but not on disconnect
+  (measured).]
+- [DECISION: orphans are shown and stoppable (`session_interrupt target="headless"`), not killed
+  automatically at startup; that would be a behaviour Pace has not ruled on.]
+
 ## Chunks
 
-- [ ] **A. Turn info** — `turns_view.open_turn` / `turn_info`; `working_on` fixed; status,
-  interrupt and queued send carry the fields. Tests first (`test_turns_view_open_turn`,
-  `test_session_report`).
-- [ ] **B. deliver="join"** — `session_send` argument, join checks under the send lock,
-  `joined_turn`; `_prompt_arrived` dequeued case; descriptions, `published-tools.json`, wire test.
-- [ ] **C. Docs and smoke** — design-10 S5, requirements MCP-40/41, CHANGELOG, change-log,
-  smoke step.
-- [ ] **D. Release** — `chore(release): aidc v1.9.8`, gates, Critic, PR review (no push).
+- [x] **A. Turn info** — `transcript.open_turn`, `turns_view.turn_info`; `working_on` fixed;
+  status, interrupt and queued send carry the fields; notification/session-message turns busy
+  from their first line.
+- [x] **B. deliver="join"** — `session_send` argument, join checks under the send lock,
+  `joined_turn`; `_prompt_arrived` held-prompt case; descriptions, `published-tools.json`, wire
+  test.
+- [x] **C. Headless runs** — fresh (wrapper + env), tagged, one at a time (`invoke_busy`),
+  `headless_runs`, stop on cancel/close/disconnect/async limit, `session_interrupt
+  target="headless"`, steering text everywhere a caller chooses.
+- [x] **D. Docs and smoke** — design-10 S5/S6 and D6, requirements MCP-40..43, README, CHANGELOG,
+  change-log, smoke step.
+- [ ] **E. Release** — `chore(release): aidc v1.9.8`, gates, Critic, PR review (no push).
 
 ## Status
 
-Context: starting Chunk A (tests first).
+Context: Chunks A-D built and committed; release commit, gates, smoke, Critic and PR review next.

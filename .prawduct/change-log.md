@@ -34,6 +34,47 @@
      deliverable omitted from the body ships invisibly, and no tag ever
      caught that either. -->
 
+## 2026-10-23: What a busy session is doing, joining its turn, and headless runs that are fresh, single and stoppable (v1.9.8)
+
+<!-- prawduct: scope=turn-visibility-and-join -->
+
+**Why:** 2026-10-22, metallm. An orchestrator `session_send` waited 45 minutes (18:33 to 19:18Z)
+behind one turn that a background task's notification had opened, while `session_status`
+named the person's earlier prompt as what the agent was working on. Pace asked that callers be
+able to tell an agent is mid-flight and choose to queue, join or interrupt ("yes" to this design).
+Later that night four `session_invoke` calls left two `claude --print` runs editing the same spec
+23 and 9 minutes after their callers gave up, each resuming the resident agent's whole
+conversation. Pace's rulings: no timeout on session_invoke; one headless run at a time per dev
+container; long work belongs to session_send, and the tool text must say so; metallm probably
+sends nothing when its stop button is pressed, so design for no cancel arriving.
+
+**What:**
+- Turn info (design 10 S5, MCP-40): `transcript.open_turn` finds the open turn's opening line;
+  `turns_view.turn_info` gives `working_on`, `started_by`, `turn_started_at`, `last_activity`
+  on `session_status`, `session_interrupt`'s `was_running`, and a queued or joined
+  `session_send`. A notification line was being read as local-command output (it opens with a
+  tag), so a notification turn looked idle until Claude's first line; it and another session's
+  message now read busy.
+- `session_send(deliver="join")` (MCP-41): pastes into the running turn, `joined_turn`, or
+  queues with `join_declined`. `_prompt_arrived` also releases the send record of a prompt Claude
+  Code held and ran next (`promptSource: "queued"`).
+- Headless runs (design 10 S6, MCP-42/43, new `headless.py` and `disconnect.py`): the wrapper
+  never adds `--continue` to `--print`, and the MCP passes `AIDC_CLAUDE_RESUME=false`; runs are
+  tagged with `AIDC_HEADLESS_RUN`; one per session (`invoke_busy`), counting orphans found in the
+  container; `headless_runs` on `session_status`; stopped in the container on cancel, session
+  close or dropped connection (the SDK does not cancel on the last; measured with a real
+  transport test), and on `session_invoke_async`'s 30-minute limit;
+  `session_interrupt(target="headless")`. Tool descriptions, server instructions and README lead
+  with the rule.
+- Tests: `test_turn_info.py` (fixture with the shapes of the metallm transcript, private words
+  replaced), join and held-prompt cases in `test_turn_state.py`, `test_headless.py` (the
+  in-container scripts against real /proc processes), `test_invoke_cancel_wire.py` (uvicorn and
+  a real HTTP client), wire tests, `tests/unit/test-aidc-claude-resume.sh`, and a smoke step.
+
+**Not done:** a smoke check of a real turn, join and reply: the smoke session has no Claude
+login. The invoke guard is not smoke-checked because the smoke session is tainted by the time
+aidc-mcp runs.
+
 ## 2026-10-22: Dependabot advisories cleared, and aidc-mcp moved to MCP SDK 2.3
 
 <!-- prawduct: scope=dependabot-pyjwt-certifi -->

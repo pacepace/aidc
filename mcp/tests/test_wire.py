@@ -164,3 +164,19 @@ def test_session_send_offers_deliver_with_queue_as_the_default(client):
     assert schema["properties"]["deliver"]["default"] == "queue"
     assert "deliver" not in schema.get("required", [])
     assert set(schema["required"]) == {"name", "prompt"}
+
+
+def test_session_interrupt_offers_target_with_the_agent_as_the_default(client):
+    _, sid = _initialize(client)
+    msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
+        "jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}))
+    tool = next(t for t in msg["result"]["tools"] if t["name"] == "session_interrupt")
+    target = tool["inputSchema"]["properties"]["target"]
+    assert target["enum"] == ["agent", "headless"] and target["default"] == "agent"
+    assert tool["inputSchema"]["required"] == ["name"]
+
+
+def test_the_handshake_steers_long_work_to_session_send(client):
+    result, _ = _initialize(client)
+    assert "session_send" in result["instructions"]
+    assert "session_invoke is only for short, single-shot questions" in result["instructions"]

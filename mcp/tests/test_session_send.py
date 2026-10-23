@@ -929,3 +929,28 @@ async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, m
     wiring.idle_ok = True
     await _let_drainer_run("proj")
     assert [c[1] for c in wiring.paste_calls] == ["do the thing"]
+
+
+async def test_a_queued_send_names_a_headless_run_going_in_the_session(wiring):
+    """A session_invoke works in the same tree as the agent: a caller deciding whether
+    to wait, join or interrupt is told about it (metallm, 2026-10-22)."""
+    from aidc_mcp import headless
+    _, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    headless.new_run("proj", "session_invoke", "edit the spec")
+    res = await send(name="proj", prompt="next", conversation_id="c1")
+    runs = res["data"]["headless_runs"]
+    assert [(r["tool"], r["prompt"]) for r in runs] == [("session_invoke", "edit the spec")]
+    for task in tools._pending_drainers.values():
+        task.cancel()
+
+
+async def test_a_send_with_no_headless_run_says_nothing_about_one(wiring):
+    _, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    res = await send(name="proj", prompt="next", conversation_id="c1")
+    assert "headless_runs" not in res["data"]
+    for task in tools._pending_drainers.values():
+        task.cancel()

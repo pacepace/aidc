@@ -790,6 +790,42 @@ assert "session_list, run by the aidc CLI inside aidc-mcp, lists $SESSION" \
     "printf '%s' \"\$MCP_LIST\" | jq -e --arg s '${SESSION}' '.ok and (.data.raw | test(\"(^|\\\\n)\" + \$s + \" \"))'"
 assert "session_status reports $SESSION, tainted" \
     "printf '%s' \"\$MCP_STATUS\" | jq -e --arg s '${SESSION}' '.ok and (.data.raw | contains(\"aidc session: \" + \$s)) and (.data.tainted | not | not)'"
+assert "session_status names no open turn and no headless run on a session nobody prompted" \
+    "printf '%s' \"\$MCP_STATUS\" | jq -e '.ok and .data.started_by == null and .data.turn_started_at == null and .data.headless_runs == []'"
+
+# Headless runs (design 10 S6), against the real dev image: its aidc-claude wrapper
+# never resumes a --print run, and aidc-mcp sees a `claude --print` it did not start
+# (as after a restart) and stops it with every process below it. The session is
+# tainted by now, so session_invoke itself is refused; its guard and cancellation are
+# covered by mcp/tests. No Claude login is needed: the stand-ins are plain processes.
+# shellcheck disable=SC2016  # expanded inside the container, not here
+dev_exec 'mkdir -p /tmp/aidc-smoke-h/.local/bin /tmp/aidc-smoke-h/repo
+    p=/tmp/aidc-smoke-h/.claude/projects/$(printf %s /tmp/aidc-smoke-h/repo | LC_ALL=C sed "s/[^a-zA-Z0-9]/-/g")
+    mkdir -p "$p" && echo "{\"type\":\"user\"}" > "$p/s.jsonl"' >/dev/null 2>&1 || true
+# A stub claude that records the arguments the wrapper gives it.
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > /tmp/aidc-smoke-h/seen' \
+    | docker exec -i -u vscode "aidc-${SESSION}-dev" bash -c \
+        'cat > /tmp/aidc-smoke-h/.local/bin/claude && chmod +x /tmp/aidc-smoke-h/.local/bin/claude' \
+    >/dev/null 2>&1 || true
+assert "the image's aidc-claude resumes an interactive launch" \
+    "dev_exec 'cd /tmp/aidc-smoke-h/repo && HOME=/tmp/aidc-smoke-h aidc-claude && grep -qx -- --continue /tmp/aidc-smoke-h/seen'"
+assert "the image's aidc-claude never resumes a headless --print run" \
+    "dev_exec 'cd /tmp/aidc-smoke-h/repo && HOME=/tmp/aidc-smoke-h aidc-claude --print q && grep -qx -- --print /tmp/aidc-smoke-h/seen && ! grep -qx -- --continue /tmp/aidc-smoke-h/seen'"
+dev_exec 'rm -rf /tmp/aidc-smoke-h' >/dev/null 2>&1 || true
+# A stand-in headless claude, untagged, with a child, as one left before a restart.
+docker exec -d -u vscode "aidc-${SESSION}-dev" \
+    bash -c 'exec -a /home/vscode/.local/bin/claude bash -c "sleep 300; true" --print "smoke: edit the spec"'
+sleep 1
+# shellcheck disable=SC2034  # read inside the eval'd assert strings below
+MCP_STATUS=$(mcp_tool session_status "{\"name\":\"${SESSION}\"}" || true)
+assert "session_status lists a claude --print it did not start as an orphan headless run" \
+    "printf '%s' \"\$MCP_STATUS\" | jq -e '[.data.headless_runs[] | select(.orphan and .prompt == \"smoke: edit the spec\" and (.pid | type) == \"number\")] | length == 1'"
+# shellcheck disable=SC2034
+MCP_STOP=$(mcp_tool session_interrupt "{\"name\":\"${SESSION}\",\"target\":\"headless\"}" || true)
+assert "session_interrupt target headless stops it" \
+    "printf '%s' \"\$MCP_STOP\" | jq -e '.ok and .data.interrupted and (.data.pids | length) >= 2'"
+assert "and nothing of it is left running in the container" \
+    "! dev_exec 'ps -eo args= | grep -v grep | grep -q -e \"smoke: edit the spec\" -e \"sleep 300; true\"'"
 docker rm -f "$MCP_SMOKE" >/dev/null 2>&1 || true
 echo
 

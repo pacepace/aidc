@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aidc_mcp import session_facts, tools
+from aidc_mcp import headless, session_facts, tools
 from aidc_mcp import transcript as ts
 
 
@@ -18,6 +18,24 @@ def _no_real_docker_for_facts(monkeypatch):
     """session_facts asks docker for a session's taint, audit dir and repository on
     most calls. No test reaches a real docker through it."""
     monkeypatch.setattr(session_facts, "run_docker", no_docker)
+
+
+async def no_headless_processes(container):
+    """What a session's container shows when no headless claude runs in it."""
+    return []
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker_for_headless(monkeypatch):
+    """session_status, session_invoke and the invoke guard look for `claude --print`
+    processes in the container. No test reaches a real docker through it, and none
+    sees another test's runs."""
+    monkeypatch.setattr(headless, "container_runs", no_headless_processes)
+    headless._runs.clear()
+    tools._invokes_in_flight.clear()
+    yield
+    headless._runs.clear()
+    tools._invokes_in_flight.clear()
 
 
 @pytest.fixture

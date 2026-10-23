@@ -28,7 +28,7 @@ import httpx
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from aidc_mcp import repo, scope, session_mcp
+from aidc_mcp import disconnect, headless, repo, scope, session_mcp
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
@@ -178,6 +178,138 @@ def fire(coro: Any) -> None:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+# A session_invoke longer than this gets a warning in its result: long work belongs to
+# session_send (Pace, 2026-10-22: "the agent shouldn't be using session invoke for
+# things that run for a long time").
+_INVOKE_LONG_S = 60.0
+# session_invoke_async's limit: past it the run is stopped and the failure delivered.
+_ASYNC_INVOKE_TIMEOUT_S = 1800.0
+_INVOKE_LONG_WARNING = (
+    "This session_invoke ran {secs:.0f} s. session_invoke is for short, single-shot "
+    "questions; anything long, anything that edits files or runs builds or tests, goes "
+    "to the session's agent with session_send.")
+
+
+# One headless run per session container at a time (Pace, 2026-10-22: "only allow one
+# session invoke at a time per dev container"). The lock makes the check and the
+# claim one step, so two calls arriving together cannot both find the session free.
+_invoke_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _claim_headless(name: str, tool: str, prompt: str
+                          ) -> tuple[headless.Run | None, dict[str, Any] | None]:
+    """Claim the session's one headless slot for a new run: (the run, None), or
+    (None, the run already going). A run this server started counts, and so does any
+    `claude --print` found in the container: one left from before an aidc-mcp restart,
+    or started some other way."""
+    lock = _invoke_locks.setdefault(name, asyncio.Lock())
+    async with lock:
+        running = headless.tracked(name)
+        if not running:
+            running = headless.merge(name, await headless.container_runs(f"aidc-{name}-dev"))
+        if running:
+            return None, running[0]
+        return headless.new_run(name, tool, prompt), None
+
+
+def _invoke_busy(name: str, tool: str, running: dict[str, Any]) -> dict[str, Any]:
+    log_event("tool_call", tool=f"{tool}_refused", session=name, reason="invoke_busy",
+              running_tool=running.get("tool"), running_since=running.get("started_at"),
+              orphan=running.get("orphan"))
+    return _envelope_err(
+        f"A headless run is already going in session '{name}' (one at a time per session): "
+        f"{running.get('tool') or 'claude --print'} since {running.get('started_at')}, "
+        f"prompt: {running.get('prompt')!r} (run {running.get('run_id')}, pid "
+        f"{running.get('pid')}). Wait for it to finish (session_status shows it under "
+        "headless_runs); if nobody needs it any more, stop it with session_interrupt and "
+        'target "headless"; and give long work to the session\'s agent with session_send.',
+        {"running": running}, code="invoke_busy")
+
+
+# The session_invoke calls in flight, by (MCP session id, JSON-RPC request id), so the
+# transport layer can stop one whose client dropped the connection (disconnect.py).
+_invokes_in_flight: dict[tuple[str, str], tuple[str, headless.Run, Any]] = {}
+
+
+def _stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
+    entry = _invokes_in_flight.pop((session_id, request_id), None)
+    if entry is None:
+        return
+    container, run, proc = entry
+    log_event("session_invoke_client_disconnected", session=run.session, run_id=run.run_id)
+    fire(_stop_headless(container, run, proc, "session_invoke_stopped_client_gone"))
+
+
+disconnect.on_disconnect = _stop_invoke_of_gone_client
+
+
+def _call_key(ctx: Context | None) -> tuple[str, str] | None:
+    """(MCP session id, request id) of the request `ctx` serves, when it has both."""
+    if ctx is None:
+        return None
+    try:
+        headers = ctx.headers or {}
+        return headers.get("mcp-session-id", ""), ctx.request_id
+    except (ValueError, AttributeError):
+        return None
+
+
+# session_interrupt's `target`.
+INTERRUPT_AGENT = "agent"
+INTERRUPT_HEADLESS = "headless"
+
+
+async def _interrupt_headless(name: str, container: str) -> dict[str, Any]:
+    """session_interrupt(target="headless"): stop the session's headless run, whoever
+    started it. One this server is waiting on is stopped through its own call, which
+    then returns; one left from before a restart is found in the container."""
+    tree = await _tree(name)
+    running = headless.merge(name, await headless.container_runs(container))
+    if not running:
+        log_event("tool_call", tool="session_interrupt", session=name, target="headless",
+                  interrupted=False)
+        return _envelope_ok({"session": name, "interrupted": False, "target": "headless",
+                             "stopped": None, "pids": [], "tree": tree,
+                             "note": "no headless run was going"})
+    pids: list[int] = []
+    for rec in running:
+        mine = next((r for r in headless.runs_of(name) if r.run_id == rec["run_id"]), None)
+        if mine is not None:
+            entry = next((e for e in _invokes_in_flight.values() if e[1] is mine), None)
+            pids += await headless.stop(container, mine)
+            if entry is not None and entry[2].returncode is None:
+                try:
+                    entry[2].kill()
+                except ProcessLookupError:
+                    pass
+        elif rec["run_id"]:
+            pids += await headless.stop_tagged(container, rec["run_id"])
+        elif rec["pid"] is not None:
+            pids += await headless.stop_tree(container, rec["pid"])
+    log_event("tool_call", tool="session_interrupt", session=name, target="headless",
+              interrupted=True, runs=[r["run_id"] for r in running], pids=pids)
+    return _envelope_ok({"session": name, "interrupted": True, "target": "headless",
+                         "stopped": running[0] if len(running) == 1 else running,
+                         "pids": pids, "tree": tree})
+
+
+async def _stop_headless(container: str, run: headless.Run, proc: Any, event: str) -> None:
+    """Stop a headless run whose caller is gone: its whole process tree in the
+    container (the docker exec's own exit leaves claude running there), then the host's
+    docker exec. Logged as `event` with the pids stopped."""
+    ran_s = round(time.time() - run.started_at, 1)
+    try:
+        pids = await headless.stop(container, run)
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        headless.forget(run)
+    log_event(event, session=run.session, run_id=run.run_id, pids=pids, ran_s=ran_s)
 
 
 # ---- shared claude session helpers -----------------------------------------
@@ -2643,6 +2775,7 @@ ERROR_CODES = frozenset({
     "out_of_scope",        # a scoped server refusing another session
     "create_not_allowed",  # session_create on a scoped server
     "invalid_argument",    # a required argument is missing or invalid
+    "invoke_busy",         # session_invoke(_async): a headless run is already going there
     "not_configured",      # the aidc config lacks what the call needs (callback_url)
     "cli_failed",          # an aidc CLI call exited non-zero
     "command_failed",      # a command inside the session failed (file_get, claude, ...)
@@ -3050,8 +3183,12 @@ def register(app: Any) -> None:
         these are "" and null. Also last_reply_at (when its newest reply finished, UTC),
         repo and branch (and head),
         tainted ({at, trigger, domain} or null: a tainted session takes no more work),
-        audit_dir, watched_conversation_id (where its replies are delivered), and
-        `send_queue`: prompts sent with session_send that wait to be pasted, and why.
+        audit_dir, watched_conversation_id (where its replies are delivered),
+        `send_queue`: prompts sent with session_send that wait to be pasted, and why, and
+        `headless_runs`: session_invoke / session_invoke_async runs going in the session
+        ({run_id, started_at, tool, prompt, pid, orphan}; orphan: no request is waiting
+        on it, e.g. one left from before an aidc-mcp restart; session_interrupt with
+        target "headless" stops it).
         `raw` is the CLI's own report: container health, which is not activity.
         """
         log_event("tool_call", tool="session_status", session=name)
@@ -3060,14 +3197,17 @@ def register(app: Any) -> None:
         result = await asyncio.to_thread(_run_cli, ["status", name])
         if result["exit"] != 0:
             return _envelope_err(result["stderr"] or "status failed", result, code="cli_failed")
-        report = await _session_report(name)
+        report, found = await asyncio.gather(
+            _session_report(name), headless.container_runs(f"aidc-{name}-dev"))
         # Prompts sent to the session and not pasted yet, each with why it waits.
         queue = [{"prompt_preview": q.text[:120], "enqueued_at": q.enqueued_at,
                   "waiting_reason": q.waiting_reason,
                   "waiting_because": _WAITING_EXPLAINED.get(q.waiting_reason, ""),
                   "paste_attempts": q.paste_attempts}
                  for q in _pending_sends.get(name, [])]
-        return _envelope_ok({**report, "send_queue": queue, "raw": result["stdout"]})
+        return _envelope_ok({**report, "send_queue": queue,
+                             "headless_runs": headless.merge(name, found),
+                             "raw": result["stdout"]})
 
     # --- session_kill (intentionally NOT advertised as an MCP tool) -----
     #
@@ -3124,16 +3264,29 @@ def register(app: Any) -> None:
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Run ONE prompt in a session and BLOCK until the answer comes back (headless, fast).
+        """For SHORT, single-shot questions only. Anything long goes to session_send.
 
-        WHEN TO USE: a quick one-off (under ~1 min) whose answer you need inline before
-        you can continue — e.g. a single test or check that should hold up the
-        conversation until it's done.
-        WHEN NOT: you want to ASK the session's resident agent (the one with the project's
-        context loaded) a question or task -> use session_send; this runs a FRESH Claude
-        that knows nothing about the session's prior work. A long fire-and-forget job ->
-        use session_invoke_async. Each call is a fresh headless run with no memory of
-        prior turns. Returns the answer text; relay it verbatim, do not summarize.
+        Asks a FRESH headless Claude in the session one question and BLOCKS until it
+        answers. It is NOT for running dev processes, builds or test suites, editing
+        files, multi-step work, or anything that may take more than about a minute: hand
+        those to the session's agent with session_send, which does not block and reports
+        back over the webhook.
+
+        WHEN TO USE: a quick question about the code whose answer you need inline — "what
+        does function X return?", "which file defines the retry policy?", "is there a test
+        for Y?".
+        WHEN NOT: "run the tests", "amend the spec", "implement the endpoint", "fix the
+        build" -> session_send. A question for the session's resident agent, the one that
+        knows the session's work -> session_send; this Claude knows nothing of it and does
+        not resume the session's conversation.
+
+        One headless run at a time per session (this and session_invoke_async): while one
+        is going, another is refused at once with error_code "invoke_busy", naming it.
+        There is no time limit; if you cancel the call, the run is stopped in the
+        session. The result says how long it took (elapsed_s), with a warning when
+        that was over a minute, and lists in headless_runs any other headless run still
+        going in the session. Returns the answer text; relay it verbatim, do not
+        summarize.
 
         Args:
             name: the aidc session to run in (see session_list for running sessions).
@@ -3141,11 +3294,41 @@ def register(app: Any) -> None:
         """
         log_event("tool_call", tool="session_invoke", session=name, prompt_len=len(prompt))
         container = f"aidc-{name}-dev"
-        # `aidc-claude` is the in-container wrapper that respects AIDC_CLAUDE_MODE.
-        argv = ["docker", "exec", "-u", "vscode", container, "aidc-claude", "--print", prompt]
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        run, running = await _claim_headless(name, "session_invoke", prompt)
+        if run is None:
+            return _invoke_busy(name, "session_invoke", running or {})
+        # `aidc-claude` is the in-container wrapper that respects AIDC_CLAUDE_MODE; the
+        # run is tagged and never resumes the session's conversation (headless.py).
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *headless.exec_argv(container, run),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+        except BaseException:
+            headless.forget(run)
+            raise
+        key = _call_key(ctx)
+        if key is not None:
+            _invokes_in_flight[key] = (container, run, proc)
+        try:
+            return await _finish_invoke(container, run, proc, ctx)
+        except BaseException as exc:
+            # The caller is gone (it cancelled the request, or its session closed), or
+            # reading the answer failed. There is no timeout (Pace, 2026-10-22), so
+            # this is the one way a run nobody waits for ends early: stopped in the
+            # container, in a task of its own, since this one may be being cancelled.
+            fire(_stop_headless(container, run, proc,
+                                "session_invoke_cancelled"
+                                if isinstance(exc, asyncio.CancelledError)
+                                else "session_invoke_failed_stopped"))
+            raise
+        finally:
+            if key is not None:
+                _invokes_in_flight.pop(key, None)
+
+    async def _finish_invoke(container: str, run: headless.Run, proc: Any,
+                             ctx: Context | None) -> dict[str, Any]:
+        """Stream a started session_invoke's answer and build its result."""
         assert proc.stdout is not None
         assert proc.stderr is not None
         stdout_reader = proc.stdout
@@ -3176,11 +3359,20 @@ def register(app: Any) -> None:
             if not stderr_task.done():
                 stderr_task.cancel()
         await proc.wait()
+        headless.forget(run)
+        elapsed = time.time() - run.started_at
+        # What else is running headless in the session: the caller re-sending a
+        # correction learns its earlier run is still going.
+        about: dict[str, Any] = {"elapsed_s": round(elapsed, 1)}
+        if elapsed > _INVOKE_LONG_S:
+            about["warning"] = _INVOKE_LONG_WARNING.format(secs=elapsed)
+        if others := headless.tracked(run.session):
+            about["headless_runs"] = others
         stderr_data = b"".join(stderr_buf)
         if proc.returncode != 0:
             return _envelope_err(stderr_data.decode("utf-8", errors="replace") or "claude failed",
-                                 {"stdout": "".join(chunks)}, code="command_failed")
-        return _envelope_ok({"response": "".join(chunks)})
+                                 {"stdout": "".join(chunks), **about}, code="command_failed")
+        return _envelope_ok({"response": "".join(chunks), **about})
 
     # --- session_invoke_async --------------------------------------------
 
@@ -3192,16 +3384,22 @@ def register(app: Any) -> None:
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         conversation_id: Annotated[str, Field(description=_CONV_ID_DESC)],
     ) -> dict[str, Any]:
-        """Fire a headless one-shot into a session and return immediately; the result is
-        delivered back to THIS conversation when done. No conversation memory — each call
-        is independent.
+        """For SHORT, single-shot questions only. Anything long goes to session_send.
 
-        WHEN TO USE: a self-contained job you want to launch and forget — e.g. a
-        scheduled or skill-driven task — where the reply just needs to land back here
-        eventually and continuity across turns does not matter.
-        WHEN NOT: a back-and-forth with the live session, where context must carry across
-        turns -> use session_send (also non-blocking, but keeps the session's context);
-        you need the answer inline right now -> use session_invoke.
+        Fires one question at a FRESH headless Claude in the session and returns at once;
+        the answer is delivered back to THIS conversation when done. Like session_invoke,
+        it is NOT for running dev processes, builds or test suites, editing files,
+        multi-step work, or anything long: those go to the session's agent with
+        session_send.
+
+        WHEN TO USE: a self-contained question whose answer can land here later — e.g. a
+        scheduled check such as "what version does the lockfile pin for X?".
+        WHEN NOT: "run the tests", "amend the spec", "implement…", or any back-and-forth
+        with the session -> session_send; you need the answer inline -> session_invoke.
+        Each call is a fresh Claude with no memory of the session's work. One headless
+        run at a time per session (this and session_invoke): while one is going, another
+        is refused at once with error_code "invoke_busy". A run still going after 30
+        minutes is stopped.
 
         Args:
             name: the aidc session to run in.
@@ -3224,18 +3422,22 @@ def register(app: Any) -> None:
             prompt_len=len(prompt),
         )
 
-        _ASYNC_TIMEOUT_SECONDS = 1800  # 30 minutes max
+        container = f"aidc-{name}-dev"
+        # Claimed here, before the call returns, so a second call is refused at once.
+        run, running = await _claim_headless(name, "session_invoke_async", prompt)
+        if run is None:
+            return _invoke_busy(name, "session_invoke_async", running or {})
 
         async def _run_and_notify() -> None:
-            container = f"aidc-{name}-dev"
-            argv = ["docker", "exec", "-u", "vscode", container, "aidc-claude", "--print", prompt]
+            started: list[Any] = []
             try:
                 async def _exec() -> tuple[str, bool]:
                     proc = await asyncio.create_subprocess_exec(
-                        *argv,
+                        *headless.exec_argv(container, run),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
+                    started.append(proc)
                     # communicate() drains stdout+stderr concurrently, so a child that
                     # fills the stderr pipe buffer before exiting can't deadlock us.
                     stdout_data, stderr_data = await proc.communicate()
@@ -3246,13 +3448,21 @@ def register(app: Any) -> None:
                         )
                     return stdout_data.decode("utf-8", errors="replace"), True
 
-                content, ok = await asyncio.wait_for(_exec(), timeout=_ASYNC_TIMEOUT_SECONDS)
+                content, ok = await asyncio.wait_for(_exec(), timeout=_ASYNC_INVOKE_TIMEOUT_S)
             except TimeoutError:
-                content = f"session_invoke_async timed out after {_ASYNC_TIMEOUT_SECONDS}s"
+                content = f"session_invoke_async timed out after {_ASYNC_INVOKE_TIMEOUT_S:.0f}s"
                 ok = False
+                # The docker exec ending leaves claude running in the container: stop
+                # it there, or it goes on editing with nobody to report to.
+                await _stop_headless(container, run, started[0] if started else None,
+                                     "session_invoke_async_timed_out")
             except Exception as exc:  # prawduct:allow prawduct/broad-except -- captured as failure
                 content = f"session_invoke_async error: {exc}"
                 ok = False
+                await _stop_headless(container, run, started[0] if started else None,
+                                     "session_invoke_async_failed_stopped")
+            finally:
+                headless.forget(run)
 
             log_event("tool_call", tool="session_invoke_async_complete", session=name, ok=ok)
             # Same delivery path, same instrumentation rationale as the watcher:
@@ -3321,7 +3531,9 @@ def register(app: Any) -> None:
             "enum": [DELIVER_QUEUE, DELIVER_JOIN]})] = DELIVER_QUEUE,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Ask the live Claude agent running in a session a question, or hand it a task —
+        """The place for anything long or that does work: tasks, edits, builds, tests.
+
+        Ask the live Claude agent running in a session a question, or hand it a task —
         and get its reply back. The agent has the project loaded in its context, so to
         learn about or change the code in a session, ASK IT here rather than inspecting
         the repo yourself with session_exec / file_get. Returns immediately; the agent's
@@ -3329,8 +3541,10 @@ def register(app: Any) -> None:
         talking to the user while it works.
 
         WHEN TO USE: the default way to interact with a session — any question or task for
-        the agent inside it ("what does X do?", "fix the failing test", an ongoing
-        back-and-forth), especially when the turn may take a while.
+        the agent inside it ("what does X do?", "fix the failing test", "run the tests",
+        "amend the spec", "implement…", an ongoing back-and-forth), and always for
+        anything long, anything that edits files or runs builds or tests: session_invoke
+        is only for short, single-shot questions.
         WHEN NOT: YOU want to run a shell command or read a file directly (git/npm/build,
         raw inspection) -> use session_exec / file_get; you need a one-off answer inline
         and the session's loaded context does NOT matter -> use session_invoke (headless,
@@ -3583,6 +3797,10 @@ def register(app: Any) -> None:
              **({"waiting_reason": wait_reason} if queued_depth else {}),
              **({"join_declined": join_declined} if join_declined else {}),
              **turn,
+             # Headless runs (session_invoke) this server has going in the session:
+             # they work in the same tree as the agent.
+             **({"headless_runs": runs} if status != "sent" and (
+                 runs := headless.tracked(name)) else {}),
              **({"watched_conversation_id": watched} if watched else {}),
              "window": _SESSION_WINDOW, "delivery": delivery}
         )
@@ -4020,17 +4238,37 @@ def register(app: Any) -> None:
 
     @app.tool()
     @_scoped
-    async def session_interrupt(name: Annotated[str, Field(description=_NAME_DESC)]
-                                ) -> dict[str, Any]:
-        """Stop the session's coding agent in the middle of its turn (it gets Esc).
+    async def session_interrupt(
+        name: Annotated[str, Field(description=_NAME_DESC)],
+        target: Annotated[str, Field(description=(
+            '"agent" (default): the session\'s coding agent, mid-turn. "headless": the '
+            "session_invoke / session_invoke_async run going in the session."),
+            json_schema_extra={"enum": [INTERRUPT_AGENT, INTERRUPT_HEADLESS]})
+        ] = INTERRUPT_AGENT,
+    ) -> dict[str, Any]:
+        """Stop the session's coding agent in the middle of its turn (it gets Esc), or,
+        with target "headless", the headless run going in the session.
 
         This stops work mid-edit, and it is the person's call: what it changed so far
         stays in the working tree, uncommitted. Returns interrupted, was_running (why it
         was judged working, and session_status's working_on, started_by, turn_started_at
         and last_activity for the turn it stopped) and tree (branch, head, how many paths
         are changed, the first 20). With nothing running it does nothing and says so.
+
+        target "headless" stops the session_invoke / session_invoke_async run going in
+        the session (there is one at a time), with every process it started, and leaves
+        the agent alone: for a run you no longer want, or one whose caller went away
+        (session_status lists it under headless_runs, and "invoke_busy" names it).
+        Returns interrupted, stopped (that run: run_id, started_at, tool, prompt, pid,
+        orphan), pids (the processes stopped) and tree.
         """
         container = f"aidc-{name}-dev"
+        target = (target or INTERRUPT_AGENT).strip()
+        if target not in (INTERRUPT_AGENT, INTERRUPT_HEADLESS):
+            return _envelope_err(f'target must be "{INTERRUPT_AGENT}" or "{INTERRUPT_HEADLESS}", '
+                                 f"not {target!r}", code="invalid_argument")
+        if target == INTERRUPT_HEADLESS:
+            return await _interrupt_headless(name, container)
         state = await _session_state(container, name)
         objs, _, _ = _session_transcript(name)
         tree = await _tree(name)

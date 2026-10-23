@@ -608,8 +608,11 @@ person's previous prompt, answered before the turn began. `working_on` was the n
 `human_prompt_text` attributes to a person, and that skips every prompt Claude Code raises
 itself. Pace decided the same day that callers should see what a turn is and be able to join it.
 
-**The open turn** (`transcript.open_turn`) is found by one pass over the transcript already
-read: a real prompt opens a turn (back-to-back prompts with no reply between them are one turn,
+**The open turn** (`transcript.open_turn`). Whether a turn is open is
+`log_shows_turn_in_progress`'s answer (S1), the one rule the send path, the watcher and
+`session_status` use, so the turn fields never describe a turn that ended on an API error or a
+question to the user; a test checks the two agree at every line of every fixture. What opened it
+is found by one pass over the transcript already read: a real prompt opens a turn (back-to-back prompts with no reply between them are one turn,
 named by the newest); an `isMeta` message (another session's message, an auto-continue) opens one
 only when no turn is open or the reply before it had ended; a `turn_duration` record, an interrupt
 marker, or a local command closes it. A Stop-hook pushback, a tool result, and a prompt Claude
@@ -618,7 +621,9 @@ nothing. Assistant work with no opening line before it is a turn whose opener is
 transcript.
 
 **What a caller reads** (`turns_view.turn_info`), on `session_status` while `working`, on
-`session_interrupt`'s `was_running`, and on a `session_send` that queued or joined:
+`session_interrupt`'s `was_running`, on `session_queue_cancel`'s `running`, and on a
+`session_send` that joined or queued as `claude_busy` (a prompt held for any other reason gets the
+empty values, under the same rule as `session_status`):
 
 | Field | Meaning |
 |---|---|
@@ -677,9 +682,10 @@ invoke at a time per dev container"; long work belongs to `session_send`.
   `invoke_busy`. `session_invoke_async` claims before it returns.
 - **Visible.** `session_status.headless_runs` lists each run: `{run_id, started_at, tool,
   prompt, pid, orphan}` (prompt redacted, cut to 120; `orphan`: no request of this server waits
-  on it). A queued or joined `session_send` lists this server's runs in `headless_runs`, and a
-  `session_invoke` result lists any other still going, with `elapsed_s` and, past a minute, a
-  `warning` that long work belongs to `session_send`.
+  on it). A queued or joined `session_send` lists this server's runs in `headless_runs`. A
+  `session_invoke` result carries `elapsed_s` and, past a minute, a
+  `warning` that long work belongs to `session_send`. (It lists no other run: the guard
+  refuses a second one.)
 - **Stopped when nobody waits.** `session_invoke` has no timeout. When its handler is cancelled
   or reading the answer fails, the run is stopped in a task of its own: every process carrying its
   tag gets SIGTERM, then SIGKILL after 3 s (`headless.stop`), then the host's `docker exec` is
@@ -693,10 +699,18 @@ invoke at a time per dev container"; long work belongs to `session_send`.
   `headless_runs` are what is left for it, with `session_interrupt(target="headless")`.
   `session_invoke_async` keeps its 30-minute limit; past it (or on an error) the run is now
   stopped in the container too, where before only the `docker exec` ended.
+- **A stop that fails says so.** docker failing (not started, no answer in time, a non-zero
+  exit such as a paused container) is `headless.DockerFailed`, never an empty answer. A failed
+  stop is logged as `headless_stop_failed` with docker's error, and the run then shows as an
+  orphan; a claim made when the container could not be listed is logged as
+  `headless_claim_without_listing`.
 - **Stopped on request.** `session_interrupt` takes `target`: `"agent"` (the default, Esc to the
-  agent as before) or `"headless"`, which stops the session's headless run: one this server waits
-  on through its own call (which then returns), a tagged orphan by its tag, an untagged one by
-  its pid and every process below it (`headless.stop_tree`).
+  agent as before) or `"headless"`, which stops the session's headless runs: one this server
+  waits on through its own call (which then returns), a tagged orphan by its tag, an untagged one
+  by its pid and every process below it (`headless.stop_tree`). It returns `stopped`, always a
+  list of the runs, and `pids`; `interrupted` is false, with a `note` saying why, when no run was
+  found, the container could not be read, or a stop could not be carried out. A
+  `session_invoke_async` stopped before its `docker exec` started is never started.
 
 ---
 

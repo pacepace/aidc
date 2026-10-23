@@ -5,8 +5,8 @@ tool call on `notifications/cancelled` and when the session is closed, but not w
 the client simply drops the connection: the handler runs on with nobody to answer
 (measured on SDK 2.3, tests/test_invoke_cancel_wire.py). A blocking session_invoke
 would then keep its claude run editing files in the container. This ASGI layer
-watches each `tools/call` of session_invoke for the connection going away and tells
-tools to stop that call's run.
+watches each `tools/call` of session_invoke for the connection going away and calls
+back with that call's (MCP session id, JSON-RPC request id).
 """
 
 from __future__ import annotations
@@ -16,15 +16,6 @@ import json
 from collections.abc import Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-
-
-def _nothing(session_id: str, request_id: str) -> None:
-    return None
-
-
-# What to call with (MCP session id, JSON-RPC request id) when a watched call's client
-# disconnects. tools sets it when it is imported; a no-op until then.
-on_disconnect: Callable[[str, str], None] = _nothing
 
 _WATCHED_TOOLS = frozenset({"session_invoke"})
 
@@ -47,8 +38,8 @@ def watched_call(scope: Scope, body: bytes) -> tuple[str, str] | None:
     return headers.get("mcp-session-id", ""), str(msg["id"])
 
 
-def _replaying(body: bytes, receive: Receive) -> Receive:
-    """`receive` with the already-read body handed out first."""
+def _replaying(body: bytes, rest: Receive) -> Receive:
+    """A receive that hands out the already-read body first, then defers to `rest`."""
     replayed = False
 
     async def again() -> Message:
@@ -56,13 +47,14 @@ def _replaying(body: bytes, receive: Receive) -> Receive:
         if not replayed:
             replayed = True
             return {"type": "http.request", "body": body, "more_body": False}
-        return await receive()
+        return await rest()
     return again
 
 
 class StopInvokeOnDisconnect:
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, on_disconnect: Callable[[str, str], None]) -> None:
         self.app = app
+        self.on_disconnect = on_disconnect
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http" or scope.get("method") != "POST":
@@ -81,14 +73,11 @@ class StopInvokeOnDisconnect:
         if key is None:
             await self.app(scope, _replaying(body, receive), send)
             return
+        # This layer now owns `receive`: it reads it for the disconnect, and the app
+        # hears of the disconnect through `gone`.
         gone = asyncio.Event()
-        replayed = False
 
-        async def replay() -> Message:
-            nonlocal replayed
-            if not replayed:
-                replayed = True
-                return {"type": "http.request", "body": body, "more_body": False}
+        async def disconnected() -> Message:
             await gone.wait()
             return {"type": "http.disconnect"}
 
@@ -96,10 +85,10 @@ class StopInvokeOnDisconnect:
             while (await receive()).get("type") != "http.disconnect":
                 pass
             gone.set()
-            on_disconnect(*key)
+            self.on_disconnect(*key)
 
         watcher = asyncio.create_task(watch())
         try:
-            await self.app(scope, replay, send)
+            await self.app(scope, _replaying(body, disconnected), send)
         finally:
             watcher.cancel()

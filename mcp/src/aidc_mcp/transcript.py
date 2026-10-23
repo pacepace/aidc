@@ -1069,6 +1069,11 @@ def _ends_reply(obj: dict) -> bool:
 def open_turn(objs: list[dict]) -> OpenTurn | None:
     """The turn the transcript shows open, or None when the last one has ended.
 
+    Whether a turn is open is log_shows_turn_in_progress's answer, the one rule the
+    send path, the watcher and session_status use; this only finds what opened it. So
+    the two never disagree: a turn that ended on an API error or an interactive-input
+    tool is over here too.
+
     One pass over the lines already read. A real prompt opens a turn (back-to-back
     prompts with no reply between them open the same one, and the newest names it). An
     isMeta message opens one only when no turn is open or the reply before it had ended:
@@ -1078,6 +1083,8 @@ def open_turn(objs: list[dict]) -> OpenTurn | None:
     running turn (a queue-operation and its attachment) change nothing here. Assistant
     work with no opening line before it is a turn whose opener is not in the transcript.
     """
+    if not log_shows_turn_in_progress(objs):
+        return None
     opener: dict | None = None
     started_at: float | None = None
     newest: dict | None = None
@@ -1119,7 +1126,9 @@ def open_turn(objs: list[dict]) -> OpenTurn | None:
         opener = obj
         is_open, saw_assistant, after_reply = True, False, False
     if not is_open:
-        return None
+        # In progress by the rule above, closed by this scan's reading of the lines:
+        # what opened it cannot be told.
+        return OpenTurn(None, None, None)
     return OpenTurn(opener, started_at, newest)
 
 

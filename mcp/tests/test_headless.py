@@ -22,6 +22,9 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import headless, tools
 
+# The real listing: conftest stands it in for every test, and this one needs it.
+_REAL_CONTAINER_RUNS = headless.container_runs
+
 
 def _tool(name):
     app = MCPServer("t")
@@ -211,6 +214,7 @@ def docker(monkeypatch):
         return list(state["found"])
 
     async def stop(container, run):
+        run.stopped = True   # as headless.stop does, before it reaches docker
         state["stopped"].append(("run", run.run_id))
         return [101]
 
@@ -381,7 +385,7 @@ async def test_interrupting_the_headless_run_stops_a_call_still_waiting(docker, 
     res = await _tool("session_interrupt")(name="proj", target="headless")
     d = res["data"]
     assert d["interrupted"] is True and d["target"] == "headless"
-    assert d["stopped"]["run_id"] == run_id and d["pids"] == [101]
+    assert [r["run_id"] for r in d["stopped"]] == [run_id] and d["pids"] == [101]
     assert docker["procs"][0].killed
     assert (await call)["ok"] is False    # the call it stopped returns
 
@@ -404,7 +408,7 @@ async def test_interrupting_with_no_headless_run_does_nothing(docker, monkeypatc
     monkeypatch.setattr(tools, "_tree", tree)
     d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
     assert d["interrupted"] is False and d["note"] == "no headless run was going"
-    assert docker["stopped"] == []
+    assert d["stopped"] == [] and docker["stopped"] == []
 
 
 async def test_an_unknown_interrupt_target_is_refused(docker):
@@ -426,3 +430,116 @@ def test_the_descriptions_lead_with_the_rule():
             assert example in t[name].description, (name, example)
     assert "anything long" in t["session_send"].description.splitlines()[0]
     assert "session_invoke is only for short" in " ".join(t["session_send"].description.split())
+
+
+# --- a stop that fails is said to have failed -------------------------------------
+
+
+async def test_docker_failing_is_an_error_not_an_empty_answer(monkeypatch):
+    async def no_docker(*args, **kwargs):
+        raise FileNotFoundError("docker")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_docker)
+    with pytest.raises(headless.DockerFailed):
+        await headless.stop_tagged("aidc-proj-dev", "session_invoke-aa")
+    with pytest.raises(headless.DockerFailed):
+        await headless.stop_tree("aidc-proj-dev", 77)
+    run = headless.new_run("proj", "session_invoke", "q")
+    with pytest.raises(headless.DockerFailed):
+        await headless.stop("aidc-proj-dev", run)
+    assert run.stopped   # so a run not started yet never starts
+
+
+async def test_a_paused_or_gone_container_lists_as_unknown_not_as_empty(monkeypatch):
+    """A tainted session's container is paused: nothing can be listed in it, which is
+    not the same as nothing running."""
+    async def failing(*args, **kwargs):
+        raise headless.DockerFailed("docker exited 1: container is paused")
+    monkeypatch.setattr(headless, "_docker", failing)
+    assert await _REAL_CONTAINER_RUNS("aidc-proj-dev") is None
+
+
+async def test_an_interrupt_whose_stop_fails_says_it_did_not_interrupt(docker, monkeypatch):
+    async def tree(name):
+        return None
+    monkeypatch.setattr(tools, "_tree", tree)
+
+    async def failing(container, run_id):
+        raise headless.DockerFailed("docker exited 1: container is paused")
+    monkeypatch.setattr(headless, "stop_tagged", failing)
+    docker["found"] = [{"pid": 77, "started_at": 1.0, "run_id": "session_invoke-aa",
+                        "prompt": "x"}]
+    d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
+    assert d["interrupted"] is False and "paused" in d["note"]
+    assert d["stopped"][0]["run_id"] == "session_invoke-aa"
+    assert "headless_stop_failed" in [k for k, _ in docker["events"]]
+
+
+async def test_an_interrupt_that_cannot_read_the_container_says_so(docker, monkeypatch):
+    async def tree(name):
+        return None
+    monkeypatch.setattr(tools, "_tree", tree)
+
+    async def unreadable(container):
+        return None
+    monkeypatch.setattr(headless, "container_runs", unreadable)
+    d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
+    assert d["interrupted"] is False and "could not be read" in d["note"]
+
+
+async def test_a_cancelled_invoke_whose_stop_fails_is_logged_as_failed(docker, monkeypatch):
+    async def failing(container, run):
+        raise headless.DockerFailed("docker did not answer within 23 s")
+    monkeypatch.setattr(headless, "stop", failing)
+    docker["release_now"] = False
+    task = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(20):
+        await asyncio.sleep(0)
+    kinds = [k for k, _ in docker["events"]]
+    assert "headless_stop_failed" in kinds and "session_invoke_cancelled" not in kinds
+    assert docker["procs"][0].killed
+
+
+async def test_a_claim_made_without_a_container_listing_is_logged(docker, monkeypatch):
+    async def unreadable(container):
+        return None
+    monkeypatch.setattr(headless, "container_runs", unreadable)
+    assert (await _tool("session_invoke")(name="proj", prompt="q"))["ok"] is True
+    assert "headless_claim_without_listing" in [k for k, _ in docker["events"]]
+
+
+async def test_an_async_run_stopped_before_it_started_never_starts(docker, monkeypatch):
+    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_load_token", lambda: "t")
+
+    async def tree(name):
+        return None
+    monkeypatch.setattr(tools, "_tree", tree)
+    jobs = []
+    monkeypatch.setattr(tools, "fire", lambda coro: jobs.append(coro))
+
+    class _Http:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json, headers):
+            docker["posted"] = json
+            return type("R", (), {"is_success": True, "status_code": 202, "text": ""})()
+
+    monkeypatch.setattr(tools.httpx, "AsyncClient", _Http)
+    await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
+    d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
+    assert d["interrupted"] is True
+    await jobs[0]
+    assert docker["procs"] == []
+    assert docker["posted"]["ok"] is False and "before it started" in docker["posted"]["content"]

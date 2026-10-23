@@ -2171,3 +2171,37 @@ class TestAJoinedPromptIsAnsweredInTheRunningTurn:
         assert rec.turns[0].text.endswith("On your status check: I was on the merge.")
         assert not rec.turns[0].text.startswith(ts.TERMINAL_PROMPT_NOTE)
         assert rec.turns[0].prompt_origin != "terminal"
+
+
+class TestAJoinedPromptsReplyIsTheJoiners:
+    async def test_after_a_turn_typed_at_the_terminal_the_reply_is_the_orchestrators(
+            self, tmp_path, monkeypatch):
+        """A person typed the turn before; the orchestrator then joined the next one (a
+        notification's). That turn has no prompt of its own and takes the session's
+        recorded origin, which must be the joiner's, not "terminal"."""
+        from aidc_mcp import tools
+        base = tmp_path / "t"; state = tmp_path / "s"
+        monkeypatch.setattr(tools, "_WATCHER_STATE_DIR", state)
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)                       # baseline past SEED
+        typed = seed + [_typed("u1", "what is the NATS rewrite?"), _assistant("a1", "It is X.")]
+        _mk_transcript(base, "sess", "sid1", typed)
+        await _drain(base, state, rec)
+        assert rec.turns[-1].prompt_origin == "terminal"     # the person's turn
+        joined = "also check the parser"
+        ts.record_sent_prompt(state, "sess", joined)        # what deliver="join" pasted
+        running = typed + [
+            {"type": "user", "uuid": "n1", "promptSource": "system",
+             "origin": {"kind": "task-notification"},
+             "message": {"role": "user", "content": "<task-notification>\\n<status>completed"
+                         "</status>\\n</task-notification>"}},
+            _assistant("a2", None, stop="tool_use"),
+            {"type": "queue-operation", "operation": "enqueue", "content": joined}]
+        assert tools._prompt_arrived("sess", joined, time.time(), running)
+        _mk_transcript(base, "sess", "sid1", running + [_assistant("a3", "Parser checked.")])
+        await _drain(base, state, rec)
+        assert rec.turns[-1].text.endswith("Parser checked.")
+        assert rec.turns[-1].prompt_origin == "orchestrator"
+        assert not rec.turns[-1].text.startswith(ts.TERMINAL_PROMPT_NOTE)

@@ -40,6 +40,9 @@ class Run:
     tool: str
     prompt: str
     started_at: float = field(default_factory=time.time)
+    # Set when it is stopped (stop), so one stopped before its docker exec started is
+    # never started.
+    stopped: bool = False
 
 
 # In memory only: a run's own task is what reports it, and that task does not survive
@@ -111,18 +114,9 @@ for d in /proc/[0-9]*; do
 done
 '''
 
-# Stops every process carrying RUN_ENV=$1: SIGTERM, then SIGKILL for any left after
-# the grace. Prints the pids it signalled, one per line.
-_KILL_SCRIPT = r'''
-want="$RUN_ENV=$1"
-pids=()
-for d in /proc/[0-9]*; do
-  mapfile -d '' -t e < "$d/environ" 2>/dev/null || continue
-  for v in "${e[@]}"; do
-    if [ "$v" = "$want" ]; then pids+=("${d#/proc/}"); break; fi
-  done
-done
-[ "${#pids[@]}" -eq 0 ] && exit 0
+# Signals the pids in the array `pids`: SIGTERM, then SIGKILL for any left after the
+# grace ($2 s). Prints the pids it signalled, one per line. Shared by both stop scripts.
+_TERM_THEN_KILL = r'''
 kill -TERM "${pids[@]}" 2>/dev/null
 alive=("${pids[@]}")
 for _ in $(seq "$2"); do
@@ -136,10 +130,21 @@ done
 printf '%s\n' "${pids[@]}"
 '''
 
+# Stops every process carrying RUN_ENV=$1.
+_KILL_SCRIPT = r'''
+want="$RUN_ENV=$1"
+pids=()
+for d in /proc/[0-9]*; do
+  mapfile -d '' -t e < "$d/environ" 2>/dev/null || continue
+  for v in "${e[@]}"; do
+    if [ "$v" = "$want" ]; then pids+=("${d#/proc/}"); break; fi
+  done
+done
+[ "${#pids[@]}" -eq 0 ] && exit 0
+''' + _TERM_THEN_KILL
 
 # Stops the process $1 and every process below it: for a headless claude that carries
-# no RUN_ENV (one started before this server tagged its runs). SIGTERM, the grace
-# ($2 s), then SIGKILL. Prints the pids it signalled.
+# no RUN_ENV (one started before this server tagged its runs).
 _KILL_TREE_SCRIPT = r'''
 pids=("$1")
 while :; do
@@ -155,33 +160,31 @@ while :; do
   pids+=("${more[@]}")
 done
 kill -0 "$1" 2>/dev/null || exit 0
-kill -TERM "${pids[@]}" 2>/dev/null
-alive=("${pids[@]}")
-for _ in $(seq "$2"); do
-  sleep 1
-  left=()
-  for p in "${alive[@]}"; do kill -0 "$p" 2>/dev/null && left+=("$p"); done
-  alive=("${left[@]}")
-  [ "${#alive[@]}" -eq 0 ] && break
-done
-[ "${#alive[@]}" -gt 0 ] && kill -KILL "${alive[@]}" 2>/dev/null
-printf '%s\n' "${pids[@]}"
-'''
+''' + _TERM_THEN_KILL
 
 
-async def _docker(*args: str, timeout: float = 20.0) -> tuple[int, bytes]:
+class DockerFailed(RuntimeError):
+    """docker could not run the command in the container: it could not be started,
+    did not answer in time, or exited non-zero. The message says which."""
+
+
+async def _docker(*args: str, timeout: float = 20.0) -> bytes:
+    """The command's stdout. :raises DockerFailed: on any failure, with its stderr."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    except OSError:
-        return -1, b""
+            "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except OSError as exc:
+        raise DockerFailed(f"docker could not be started: {exc}") from exc
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError as exc:
         proc.kill()
         await proc.wait()
-        return -1, b""
-    return proc.returncode or 0, out
+        raise DockerFailed(f"docker did not answer within {timeout:.0f} s") from exc
+    if proc.returncode:
+        said = err.decode("utf-8", errors="replace").strip()[:300]
+        raise DockerFailed(f"docker exited {proc.returncode}: {said or 'no message'}")
+    return out
 
 
 def parse_listing(raw: bytes, now: float) -> list[dict[str, Any]]:
@@ -203,10 +206,11 @@ def parse_listing(raw: bytes, now: float) -> list[dict[str, Any]]:
 
 async def container_runs(container: str) -> list[dict[str, Any]] | None:
     """Every headless claude process in the container, or None when docker could not
-    say (the container is down, or docker did not answer)."""
-    rc, out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
+    say (the container is down, paused, or docker did not answer)."""
+    try:
+        out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
                             "bash", "-c", _LIST_SCRIPT)
-    if rc != 0:
+    except DockerFailed:
         return None
     return parse_listing(out, time.time())
 
@@ -231,28 +235,30 @@ def merge(session: str, found: list[dict[str, Any]] | None) -> list[dict[str, An
 
 
 async def stop(container: str, run: Run) -> list[int]:
-    """Stop every process of `run` in the container. The pids signalled; [] when none
-    was found (it had ended) or docker could not be reached."""
+    """Stop every process of `run` in the container, and mark it stopped so a run not
+    started yet never starts. The pids signalled; [] when none was found (it had ended,
+    or had not started). :raises DockerFailed: when the stop could not be carried out."""
+    run.stopped = True
     return await stop_tagged(container, run.run_id)
 
 
 async def stop_tagged(container: str, run_id: str) -> list[int]:
-    """Stop every process in the container carrying RUN_ENV=run_id."""
-    rc, out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
-                            "bash", "-c", _KILL_SCRIPT, "kill-run", run_id,
-                            str(_TERM_GRACE_S), timeout=_TERM_GRACE_S + 20.0)
-    return _pids(rc, out)
+    """Stop every process in the container carrying RUN_ENV=run_id.
+    :raises DockerFailed:"""
+    out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
+                        "bash", "-c", _KILL_SCRIPT, "kill-run", run_id,
+                        str(_TERM_GRACE_S), timeout=_TERM_GRACE_S + 20.0)
+    return _pids(out)
 
 
 async def stop_tree(container: str, pid: int) -> list[int]:
-    """Stop the process `pid` in the container and everything below it."""
-    rc, out = await _docker("exec", "-u", "vscode", container, "bash", "-c",
-                            _KILL_TREE_SCRIPT, "kill-tree", str(pid), str(_TERM_GRACE_S),
-                            timeout=_TERM_GRACE_S + 20.0)
-    return _pids(rc, out)
+    """Stop the process `pid` in the container and everything below it.
+    :raises DockerFailed:"""
+    out = await _docker("exec", "-u", "vscode", container, "bash", "-c",
+                        _KILL_TREE_SCRIPT, "kill-tree", str(pid), str(_TERM_GRACE_S),
+                        timeout=_TERM_GRACE_S + 20.0)
+    return _pids(out)
 
 
-def _pids(rc: int, out: bytes) -> list[int]:
-    if rc != 0:
-        return []
+def _pids(out: bytes) -> list[int]:
     return [int(p) for p in out.decode().split() if p.isdigit()]

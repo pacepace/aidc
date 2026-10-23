@@ -71,9 +71,22 @@ sends nothing when its stop button is pressed, so design for no cancel arriving.
   in-container scripts against real /proc processes), `test_invoke_cancel_wire.py` (uvicorn and
   a real HTTP client), wire tests, `tests/unit/test-aidc-claude-resume.sh`, and a smoke step.
 
-**Not done:** a smoke check of a real turn, join and reply: the smoke session has no Claude
-login. The invoke guard is not smoke-checked because the smoke session is tainted by the time
-aidc-mcp runs.
+**Review:** cumulative Critic rev-20261023T000723Z-e59116f0, 0 blocking and 6 warnings; five
+fixed here (verified, rev-20261023T002708Z-672def60), and the sixth, a live run of a real join,
+is under Not done below: one rule for "a turn is open" (open_turn defers to log_shows_turn_in_progress, with a
+test that they agree at every line of every fixture, and session_send fills the turn fields
+under session_status's rule); a joined prompt's reply now carries the joiner's prompt_origin
+(_prompt_arrived records it when it releases the send record); the unreachable headless_runs
+field of a session_invoke result removed; `stopped` always a list; a failed in-container stop is
+`headless_stop_failed` and `interrupted: false` with the reason, never an empty success. Notes
+also taken: the shared TERM/KILL snippet, the disconnect callback passed in rather than set on
+import, session_queue_cancel's full turn info, a session_invoke_async stopped before it starts
+never starts, _invoke_locks pruned with the session. The smoke step moved ahead of the taint
+step (a tainted session's container is paused and takes no exec).
+
+**Not done:** a live run of a real turn, a join and its reply: no logged-in session exists that
+is not someone's working session (the smoke session and any new one have no Claude login, and no
+long-lived token is configured). The invoke guard is not smoke-checked for the same reason.
 
 ## 2026-10-22: Dependabot advisories cleared, and aidc-mcp moved to MCP SDK 2.3
 

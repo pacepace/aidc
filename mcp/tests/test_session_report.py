@@ -216,7 +216,9 @@ async def test_queue_cancel_takes_back_one_waiting_prompt(queued):
     assert d["cancelled"] == [{"position": 2, "prompt_preview": "second prompt",
                                "enqueued_at": "2026-10-14T09:01:00Z", "conversation_id": "c-2"}]
     assert d["left"] == 1 and [q.text for q in tools._pending_sends["proj"]] == ["first prompt"]
-    assert d["running"] == {"working": True, "working_on": "fix the flaky test"}
+    assert d["running"] == {"working": True, "working_on": "fix the flaky test",
+                            "started_by": "prompt", "turn_started_at": "2026-10-14T09:02:00Z",
+                            "last_activity": None}
     saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
     assert [q.text for q in saved["proj"]] == ["first prompt"]
 

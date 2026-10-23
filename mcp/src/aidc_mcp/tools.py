@@ -22,13 +22,13 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 import httpx
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from aidc_mcp import disconnect, headless, repo, scope, session_mcp
+from aidc_mcp import headless, repo, scope, session_mcp
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
@@ -208,7 +208,12 @@ async def _claim_headless(name: str, tool: str, prompt: str
     async with lock:
         running = headless.tracked(name)
         if not running:
-            running = headless.merge(name, await headless.container_runs(f"aidc-{name}-dev"))
+            found = await headless.container_runs(f"aidc-{name}-dev")
+            if found is None:
+                # The run's own docker exec fails the same way if the container is
+                # down; if it is only slow to answer, an orphan may go uncounted.
+                log_event("headless_claim_without_listing", session=name, tool=tool)
+            running = headless.merge(name, found)
         if running:
             return None, running[0]
         return headless.new_run(name, tool, prompt), None
@@ -228,21 +233,28 @@ def _invoke_busy(name: str, tool: str, running: dict[str, Any]) -> dict[str, Any
         {"running": running}, code="invoke_busy")
 
 
+class _InFlight(NamedTuple):
+    """A session_invoke call waiting on its run."""
+
+    container: str
+    run: headless.Run
+    proc: Any
+
+
 # The session_invoke calls in flight, by (MCP session id, JSON-RPC request id), so the
 # transport layer can stop one whose client dropped the connection (disconnect.py).
-_invokes_in_flight: dict[tuple[str, str], tuple[str, headless.Run, Any]] = {}
+_invokes_in_flight: dict[tuple[str, str], _InFlight] = {}
 
 
-def _stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
+def stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
+    """disconnect.StopInvokeOnDisconnect's callback: the client of that call is gone."""
     entry = _invokes_in_flight.pop((session_id, request_id), None)
     if entry is None:
         return
-    container, run, proc = entry
-    log_event("session_invoke_client_disconnected", session=run.session, run_id=run.run_id)
-    fire(_stop_headless(container, run, proc, "session_invoke_stopped_client_gone"))
-
-
-disconnect.on_disconnect = _stop_invoke_of_gone_client
+    log_event("session_invoke_client_disconnected", session=entry.run.session,
+              run_id=entry.run.run_id)
+    fire(_stop_headless(entry.container, entry.run, entry.proc,
+                        "session_invoke_stopped_client_gone"))
 
 
 def _call_key(ctx: Context | None) -> tuple[str, str] | None:
@@ -256,58 +268,75 @@ def _call_key(ctx: Context | None) -> tuple[str, str] | None:
         return None
 
 
+def _kill_host_exec(proc: Any) -> None:
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 # session_interrupt's `target`.
 INTERRUPT_AGENT = "agent"
 INTERRUPT_HEADLESS = "headless"
 
 
 async def _interrupt_headless(name: str, container: str) -> dict[str, Any]:
-    """session_interrupt(target="headless"): stop the session's headless run, whoever
-    started it. One this server is waiting on is stopped through its own call, which
-    then returns; one left from before a restart is found in the container."""
+    """session_interrupt(target="headless"): stop the session's headless runs, whoever
+    started them. One this server is waiting on is stopped through its own call, which
+    then returns; one left from before a restart is found in the container. A stop
+    docker could not carry out is reported as not interrupted, with why."""
     tree = await _tree(name)
-    running = headless.merge(name, await headless.container_runs(container))
+    found = await headless.container_runs(container)
+    running = headless.merge(name, found)
+    base = {"session": name, "target": "headless", "tree": tree}
     if not running:
+        note = ("no headless run was going" if found is not None else
+                "the container's processes could not be read (is the session running?), "
+                "so no headless run could be found")
         log_event("tool_call", tool="session_interrupt", session=name, target="headless",
-                  interrupted=False)
-        return _envelope_ok({"session": name, "interrupted": False, "target": "headless",
-                             "stopped": None, "pids": [], "tree": tree,
-                             "note": "no headless run was going"})
+                  interrupted=False, listed=found is not None)
+        return _envelope_ok({**base, "interrupted": False, "stopped": [], "pids": [],
+                             "note": note})
     pids: list[int] = []
+    failed: list[str] = []
     for rec in running:
         mine = next((r for r in headless.runs_of(name) if r.run_id == rec["run_id"]), None)
-        if mine is not None:
-            entry = next((e for e in _invokes_in_flight.values() if e[1] is mine), None)
-            pids += await headless.stop(container, mine)
-            if entry is not None and entry[2].returncode is None:
-                try:
-                    entry[2].kill()
-                except ProcessLookupError:
-                    pass
-        elif rec["run_id"]:
-            pids += await headless.stop_tagged(container, rec["run_id"])
-        elif rec["pid"] is not None:
-            pids += await headless.stop_tree(container, rec["pid"])
+        try:
+            if mine is not None:
+                pids += await headless.stop(container, mine)
+                _kill_host_exec(next((e.proc for e in _invokes_in_flight.values()
+                                      if e.run is mine), None))
+            elif rec["run_id"]:
+                pids += await headless.stop_tagged(container, rec["run_id"])
+            elif rec["pid"] is not None:
+                pids += await headless.stop_tree(container, rec["pid"])
+        except headless.DockerFailed as exc:
+            failed.append(str(exc))
+            log_event("headless_stop_failed", session=name, run_id=rec["run_id"],
+                      pid=rec["pid"], error=str(exc))
     log_event("tool_call", tool="session_interrupt", session=name, target="headless",
-              interrupted=True, runs=[r["run_id"] for r in running], pids=pids)
-    return _envelope_ok({"session": name, "interrupted": True, "target": "headless",
-                         "stopped": running[0] if len(running) == 1 else running,
-                         "pids": pids, "tree": tree})
+              interrupted=not failed, runs=[r["run_id"] for r in running], pids=pids)
+    data = {**base, "interrupted": not failed, "stopped": running, "pids": pids}
+    if failed:
+        data["note"] = "the stop could not be carried out: " + "; ".join(failed)
+    return _envelope_ok(data)
 
 
 async def _stop_headless(container: str, run: headless.Run, proc: Any, event: str) -> None:
     """Stop a headless run whose caller is gone: its whole process tree in the
     container (the docker exec's own exit leaves claude running there), then the host's
-    docker exec. Logged as `event` with the pids stopped."""
+    docker exec. Logged as `event` with the pids stopped, or as headless_stop_failed
+    with docker's error; the run then shows in session_status as an orphan."""
     ran_s = round(time.time() - run.started_at, 1)
     try:
         pids = await headless.stop(container, run)
+    except headless.DockerFailed as exc:
+        log_event("headless_stop_failed", session=run.session, run_id=run.run_id,
+                  reason=event, ran_s=ran_s, error=str(exc))
+        return
     finally:
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        _kill_host_exec(proc)
         headless.forget(run)
     log_event(event, session=run.session, run_id=run.run_id, pids=pids, ran_s=ran_s)
 
@@ -942,12 +971,18 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
     else:
         return True
     try:
-        consumed = ts.consume_sent_prompt(_WATCHER_STATE_DIR, session, text)
+        by = ts.take_sent_prompt(_WATCHER_STATE_DIR, session, text)
+        if by is not None and event == "session_send_queued_by_claude":
+            # The answer comes in a turn with no prompt of its own (the running one, or
+            # the next one Claude Code runs it in), which takes the session's recorded
+            # origin: make that this prompt's, not the earlier turn's.
+            ts.record_prompt_origin(_WATCHER_STATE_DIR, session,
+                                    "person" if by else "orchestrator", sent_by=by)
     except OSError as exc:
         log_event("session_send_record_release_failed", session=session,
                   error_type=type(exc).__name__, error=repr(exc))
     else:
-        if consumed:
+        if by is not None:
             log_event(event, session=session, prompt_len=len(text))
     return True
 
@@ -1509,6 +1544,9 @@ def _forget_session_send_state(name: str) -> None:
     _waiting_notice_shown.discard(name)
     _reported_interrupts.pop(name, None)
     _session_instances.pop(name, None)
+    lock = _invoke_locks.get(name)
+    if lock is not None and not lock.locked():
+        del _invoke_locks[name]
     for path in (_working_seen_path(name), _reported_interrupt_path(name)):
         try:
             path.unlink(missing_ok=True)
@@ -3284,8 +3322,7 @@ def register(app: Any) -> None:
         is going, another is refused at once with error_code "invoke_busy", naming it.
         There is no time limit; if you cancel the call, the run is stopped in the
         session. The result says how long it took (elapsed_s), with a warning when
-        that was over a minute, and lists in headless_runs any other headless run still
-        going in the session. Returns the answer text; relay it verbatim, do not
+        that was over a minute. Returns the answer text; relay it verbatim, do not
         summarize.
 
         Args:
@@ -3309,7 +3346,7 @@ def register(app: Any) -> None:
             raise
         key = _call_key(ctx)
         if key is not None:
-            _invokes_in_flight[key] = (container, run, proc)
+            _invokes_in_flight[key] = _InFlight(container, run, proc)
         try:
             return await _finish_invoke(container, run, proc, ctx)
         except BaseException as exc:
@@ -3361,13 +3398,9 @@ def register(app: Any) -> None:
         await proc.wait()
         headless.forget(run)
         elapsed = time.time() - run.started_at
-        # What else is running headless in the session: the caller re-sending a
-        # correction learns its earlier run is still going.
         about: dict[str, Any] = {"elapsed_s": round(elapsed, 1)}
         if elapsed > _INVOKE_LONG_S:
             about["warning"] = _INVOKE_LONG_WARNING.format(secs=elapsed)
-        if others := headless.tracked(run.session):
-            about["headless_runs"] = others
         stderr_data = b"".join(stderr_buf)
         if proc.returncode != 0:
             return _envelope_err(stderr_data.decode("utf-8", errors="replace") or "claude failed",
@@ -3432,6 +3465,8 @@ def register(app: Any) -> None:
             started: list[Any] = []
             try:
                 async def _exec() -> tuple[str, bool]:
+                    if run.stopped:   # session_interrupt(target="headless") came first
+                        return "session_invoke_async was stopped before it started", False
                     proc = await asyncio.create_subprocess_exec(
                         *headless.exec_argv(container, run),
                         stdout=asyncio.subprocess.PIPE,
@@ -3787,9 +3822,13 @@ def register(app: Any) -> None:
         reply_goes = "nowhere" if not watching else "elsewhere" if elsewhere else "here"
         status = "joined_turn" if joined else "queued" if queued_depth else "sent"
         # What the agent is busy with, so a caller whose prompt waits (or joined) can
-        # decide what to do next without another call: the fields session_status gives.
-        # A prompt sent to an idle session has no turn to describe.
-        turn = tv.turn_info(_session_transcript(name)[0]) if status != "sent" else {}
+        # decide what to do next without another call: the fields session_status gives,
+        # under its rule: only while the agent is working on a turn (the prompt joined
+        # it, or waits because of it). A prompt held for any other reason, or sent to an
+        # idle session, has no turn to describe.
+        busy = joined or (queued_depth and wait_reason == "claude_busy")
+        turn = (tv.turn_info(_session_transcript(name)[0]) if busy
+                else tv.NO_TURN if status != "sent" else {})
         return _envelope_ok(
             {"status": status, "session": name,
              "reply_goes": reply_goes,
@@ -4259,8 +4298,9 @@ def register(app: Any) -> None:
         the session (there is one at a time), with every process it started, and leaves
         the agent alone: for a run you no longer want, or one whose caller went away
         (session_status lists it under headless_runs, and "invoke_busy" names it).
-        Returns interrupted, stopped (that run: run_id, started_at, tool, prompt, pid,
-        orphan), pids (the processes stopped) and tree.
+        Returns interrupted (false, with a note saying why, when the stop could not be
+        carried out), stopped (a list of the runs: run_id, started_at, tool, prompt,
+        pid, orphan), pids (the processes stopped) and tree.
         """
         container = f"aidc-{name}-dev"
         target = (target or INTERRUPT_AGENT).strip()
@@ -4339,7 +4379,8 @@ def register(app: Any) -> None:
                   cancelled=len(cancelled), left=len(queue))
         data: dict[str, Any] = {
             "session": name, "cancelled": cancelled, "left": len(queue),
-            "running": {"working": working, "working_on": tv.working_on(objs) if working else ""}}
+            "running": {"working": working,
+                        **(tv.turn_info(objs) if working else tv.NO_TURN)}}
         if not cancelled:
             data["note"] = "no prompt was waiting"
         return _envelope_ok(data)

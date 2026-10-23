@@ -209,11 +209,6 @@ def turn_info(objs: list[dict], cap: int = 300) -> dict[str, Any]:
             "last_activity": _activity(turn.newest_assistant)}
 
 
-def working_on(objs: list[dict], cap: int = 300) -> str:
-    """What the open turn is working on (turn_info's working_on), "" with none open."""
-    return str(turn_info(objs, cap)["working_on"])
-
-
 class UnknownTurn(ValueError):
     """since_uuid names no completed turn in the transcript."""
 

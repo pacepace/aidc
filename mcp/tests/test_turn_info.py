@@ -144,7 +144,8 @@ def test_a_prompt_sent_through_remote_control_or_held_by_claude_code_is_a_prompt
 
 def test_an_auto_continue_is_claude_code_starting_the_turn_itself():
     cont = _user("Continue from where you left off.", "m1", isMeta=True)
-    info = tv.turn_info(FINISHED + [cont])
+    work = _asst([{"type": "tool_use", "name": "Read", "id": "t"}], "a1", stop="tool_use")
+    info = tv.turn_info(FINISHED + [cont, work])
     assert info["started_by"] == "system"
     assert info["working_on"] == "something Claude Code started itself, not a prompt"
 
@@ -202,3 +203,44 @@ def test_started_by_is_always_one_of_the_documented_values(cut):
     info = tv.turn_info(_through(cut))
     assert info["started_by"] in (None, *tv.STARTED_BY)
     assert (info["started_by"] is None) == (info == tv.NO_TURN)
+
+
+# --- one rule for "a turn is open" ---------------------------------------------------
+
+_ENDINGS = {
+    "api error": FINISHED + [
+        _user("go", "u1"),
+        {"type": "assistant", "uuid": "e1", "timestamp": "2026-10-22T10:01:00.000Z",
+         "isApiErrorMessage": True,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "overloaded"}],
+                     "stop_reason": "stop_sequence"}}],
+    "interactive question": FINISHED + [
+        _user("go", "u1"),
+        _asst([{"type": "tool_use", "name": "AskUserQuestion", "id": "q",
+                "input": {"questions": []}}], "a1", stop="tool_use")],
+    "auto-continue at rest": FINISHED + [_user("Continue from where you left off.", "m1",
+                                               isMeta=True)],
+}
+
+
+def _every_cut():
+    real = [json.loads(ln) for ln in (FIXTURES / "claude-2.1.274-pushback-interrupt-task.jsonl")
+            .read_text().splitlines()]
+    for name, objs in (("evening", EVENING), ("2.1.274", real), *_ENDINGS.items()):
+        for n in range(len(objs) + 1):
+            yield f"{name}[:{n}]", objs[:n]
+
+
+@pytest.mark.parametrize("label,objs", list(_every_cut()), ids=lambda v: v if isinstance(
+    v, str) else "")
+def test_turn_info_and_the_busy_verdict_never_disagree(label, objs):
+    """The send path and session_status decide "working" with log_shows_turn_in_progress;
+    turn_info must describe a turn exactly when that says one is open, or a caller is
+    told about a turn that has ended (an API error, a question to the user)."""
+    assert (ts.open_turn(objs) is None) == (not ts.log_shows_turn_in_progress(objs)), label
+    assert (tv.turn_info(objs) == tv.NO_TURN) == (not ts.log_shows_turn_in_progress(objs)), label
+
+
+def test_a_turn_that_ended_on_an_api_error_or_a_question_is_not_open():
+    for name in ("api error", "interactive question"):
+        assert tv.turn_info(_ENDINGS[name]) == tv.NO_TURN, name

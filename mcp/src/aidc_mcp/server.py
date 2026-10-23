@@ -73,7 +73,8 @@ def build_app() -> Any:
     )
     from aidc_mcp.disconnect import StopInvokeOnDisconnect
 
-    return ResumeOnStartup(BearerAuthMiddleware(StopInvokeOnDisconnect(http_app)), app)
+    return ResumeOnStartup(BearerAuthMiddleware(
+        StopInvokeOnDisconnect(http_app, tools.stop_invoke_of_gone_client)), app)
 
 
 def main() -> int:

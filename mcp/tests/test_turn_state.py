@@ -1167,3 +1167,26 @@ class TestPromptHeldByClaudeCode:
         await tools._watch_for_echo("proj", JOIN, NOW - 1)
         assert "proj" not in tools._sent_awaiting_echo
         assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+
+
+class TestSendDescribesATurnOnlyWhileOneRuns:
+    """session_send fills working_on/started_by/... under session_status's rule: only
+    when the agent is working on a turn. A prompt held for another reason must not be
+    told about a turn that ended."""
+
+    async def test_a_prompt_held_by_unsent_text_at_an_idle_agent_names_no_turn(
+            self, session, monkeypatch):
+        setup = TestSendDeliverJoin()
+        ended_on_error = [*FINISHED, _typed("u1", "go"),
+                          {"type": "assistant", "uuid": "e1", "timestamp": ISO_NOW,
+                           "isApiErrorMessage": True,
+                           "message": {"role": "assistant", "stop_reason": "stop_sequence",
+                                       "content": [{"type": "text", "text": "overloaded"}]}}]
+        send = setup._setup(session, monkeypatch, screen="claude-2.1.27x-typed-unsent.ansi",
+                            objs=ended_on_error, age=100.0)
+        res = await send(name="proj", prompt=JOIN, conversation_id="c1")
+        setup._stop_drainers()
+        d = res["data"]
+        assert d["status"] == "queued" and d["waiting_reason"] == "input_has_text"
+        assert (d["working_on"], d["started_by"], d["turn_started_at"], d["last_activity"]) == (
+            "", None, None, None)

@@ -61,7 +61,9 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   writes its own transcript into the session's project folder, and the reply watcher could take
   it for the session's newest conversation: the orchestrator then received the invoke's answer
   as if the agent had said it, and could miss the agent's next reply. Headless runs'
-  transcripts are now never treated as the session's.
+  transcripts are now never treated as the session's. Also, an `invoke_busy` refusal names the
+  running run's pid, and a call stopped with `session_interrupt` says it was stopped rather than
+  "claude failed".
 - **`session_status.working_on` named the wrong prompt** during a turn that a background task's
   notification or another session's message started: it showed the person's previous, already
   answered prompt. It now names what opened the turn, saying so when that was not a person.

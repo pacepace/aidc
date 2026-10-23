@@ -75,7 +75,7 @@ sends nothing when its stop button is pressed, so design for no cancel arriving.
 
 **Review:** cumulative Critic rev-20261023T000723Z-e59116f0, 0 blocking and 6 warnings; five
 fixed here (verified, rev-20261023T002708Z-672def60), and the sixth, a live run of a real join,
-is under Not done below: one rule for "a turn is open" (open_turn defers to log_shows_turn_in_progress, with a
+done afterwards (Live check, below): one rule for "a turn is open" (open_turn defers to log_shows_turn_in_progress, with a
 test that they agree at every line of every fixture, and session_send fills the turn fields
 under session_status's rule); a joined prompt's reply now carries the joiner's prompt_origin
 (_prompt_arrived records it when it releases the send record); the unreachable headless_runs
@@ -86,9 +86,28 @@ import, session_queue_cancel's full turn info, a session_invoke_async stopped be
 never starts, _invoke_locks pruned with the session. The smoke step moved ahead of the taint
 step (a tainted session's container is paused and takes no exec).
 
-**Not done:** a live run of a real turn, a join and its reply: no logged-in session exists that
-is not someone's working session (the smoke session and any new one have no Claude login, and no
-long-lived token is configured). The invoke guard is not smoke-checked for the same reason.
+**Live check** (2026-10-23, the review's sixth warning, now done): a throwaway session
+`joinlive` created with Pace's long-lived token (installed for that create only, then removed),
+driven through aidc/mcp:v1.9.8 on a loopback port with a local webhook. Background-task turns read
+`started_by: background_task` with their summary and start time; a foreground turn read `prompt`
+with `last_activity` Bash. `deliver="join"` returned `joined_turn`; the transcript showed the
+queue-operation enqueue (03:30:20) and its `absorbed_mid_turn` removal (03:31:12); the MCP logged
+`session_send_joined_turn` and `session_send_queued_by_claude`; the turn's final reply carried
+`JOIN-ANSWER=42` to the webhook with `prompt_origin: orchestrator`. A `deliver="queue"` send waited
+as `claude_busy` and was answered as its own turn. `session_invoke` answered in 10 s; a second one
+was refused `invoke_busy`; `session_interrupt(target="headless")` stopped a run and its tree
+(three pids), leaving no `claude --print` in the container.
+
+It found one defect, fixed in 6875690 with tests: a headless run's transcript (entrypoint
+`sdk-cli`, written beside the session's) was followed by the watcher as the newest, and the
+invoke's answer reached the webhook as the session's reply; it is now never taken for the
+session's. Also: `invoke_busy` names the running run's pid, and a stopped invoke says it was
+stopped. Re-checked live on a rebuilt image: no invoke answer reached the webhook, the session's
+reply did, and no transcript move was logged. Verify-resolutions rev-20261023T034235Z-36a8e86a:
+0 findings.
+
+**Not done:** the invoke guard and a join are not in `make smoke` (its session has no Claude
+login); they were checked live as above.
 
 ## 2026-10-22: Dependabot advisories cleared, and aidc-mcp moved to MCP SDK 2.3
 

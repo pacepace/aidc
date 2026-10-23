@@ -120,4 +120,4 @@ stop is wanted. Requirements MCP-42, MCP-43.
 
 ## Status
 
-Context: all chunks done on the branch: release commit 824eaa4; Critic cumulative rev-20261023T000723Z-e59116f0 (6 warnings: 5 fixed and verified, the live join run open, needing a logged-in session); smoke 115/0; PR review 0 blocking. Awaiting the maintainer: push, PR, tag v1.9.8. The plan stays live until the release archives it.
+Context: all chunks done on the branch: release commit 824eaa4; Critic cumulative rev-20261023T000723Z-e59116f0 (6 warnings, all resolved; the live join run done 2026-10-23 and its one finding fixed in 6875690, verified rev-20261023T034235Z-36a8e86a); smoke 115/0; PR review 0 blocking. Awaiting the maintainer: push, PR, tag v1.9.8. The plan stays live until the release archives it.

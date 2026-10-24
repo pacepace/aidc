@@ -139,6 +139,9 @@ EGRESS_FLAGS=()
 if [ -n "$EGRESS_HOST_IP" ]; then
     EGRESS_FLAGS=(--egress-tcp "${EGRESS_HOST_IP}:${EGRESS_PORT}")
 fi
+# A copy an older aidc left in /tmp for an earlier session of this name is stale;
+# create must clear it (checked below with the compose file's place).
+printf 'stale\n' > "/tmp/aidc-${SESSION}.yaml"
 "$AIDC" create "$SESSION" --repo "$TMP_REPO" --profile multi --trust-repo-config \
     ${EGRESS_FLAGS[@]+"${EGRESS_FLAGS[@]}"} 2>&1 | tee "$CREATE_OUT"
 # Extract audit dir from the 'audit:   <path>' line in create output.
@@ -158,6 +161,21 @@ case "$AUDIT_DIR" in
         ;;
 esac
 echo "audit:   $AUDIT_DIR"
+# The compose file upgrade, network and kill read back lives in state, not /tmp,
+# which a reboot or a cleanup empties.
+COMPOSE_STATE="${HOME}/.local/state/aidc/sessions/${SESSION}.yaml"
+assert "the session's compose file is kept in state" \
+    "test -s \"$COMPOSE_STATE\""
+assert "the compose file is private (0600)" \
+    "[ \"\$(stat -c %a \"$COMPOSE_STATE\")\" = 600 ]"
+assert "no compose file in /tmp (a stale one is cleared)" \
+    "test ! -e /tmp/aidc-${SESSION}.yaml"
+# upgrade reads the file back before anything else; on a fresh session it then finds
+# nothing to do. Before, a cleared /tmp made it refuse here.
+assert "aidc upgrade finds the compose file" \
+    "\"$AIDC\" upgrade \"$SESSION\" --yes 2>&1 | grep -q 'nothing to do'"
+assert "create names the state path" \
+    "grep -qE \"compose:[[:space:]]+${COMPOSE_STATE}\\\$\" \"$CREATE_OUT\""
 echo
 
 # --- step 2: isolation ----------------------------------------------------
@@ -857,6 +875,8 @@ assert "live egress relays removed" \
     "! docker ps -a --format '{{.Names}}' | grep -q \"aidc-${SESSION}-egressx-\""
 assert "the session's networks are gone" \
     "! docker network ls --format '{{.Name}}' | grep -q \"^aidc-${SESSION}-\""
+assert "the session's compose file is removed" \
+    "test ! -e \"$COMPOSE_STATE\""
 echo
 
 # --- step 11: audit dir populated after kill ------------------------------

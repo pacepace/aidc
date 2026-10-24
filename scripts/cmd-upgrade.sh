@@ -75,9 +75,11 @@ session_exists "$NAME" || die "no such session: $NAME"
 
 DEV_CT="$(container_name "$NAME" dev)"
 PROJECT="$(compose_project_name "$NAME")"
-COMPOSE_FILE="/tmp/aidc-${NAME}.yaml"
+COMPOSE_FILE=$(aidc_session_compose_file "$NAME")
 
-[ -f "$COMPOSE_FILE" ] || die "rendered compose file not found at ${COMPOSE_FILE} (was the session created on this host? use 'aidc kill' + 'aidc create' instead)"
+# Sessions created before v1.9.9 kept it in /tmp, and a reboot or a disk cleanup may
+# have taken it: nothing else records how the session was made, so recreate it.
+[ -f "$COMPOSE_FILE" ] || die "session ${NAME} has no compose file (looked for $(aidc_session_compose_path "$NAME") and $(aidc_legacy_compose_path "$NAME")); it was probably in /tmp and cleared. Recreate the session: aidc kill ${NAME} && aidc create ${NAME} ..."
 
 # Idempotency check: compare current dev container's image digest to the
 # tag's digest. If equal, no work to do.

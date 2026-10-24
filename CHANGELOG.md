@@ -13,6 +13,28 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.9] - 2026-10-24
+
+### Fixed
+- **A session's compose file is no longer kept in `/tmp`.** `aidc create` renders it to
+  `~/.local/state/aidc/sessions/<name>.yaml` (mode 0600, in a 0700 directory), where a reboot
+  or a disk cleanup cannot take it. `aidc upgrade`, `aidc network` and `aidc kill` read it from
+  there for the session's whole life. Before, they read `/tmp/aidc-<name>.yaml`, and once that
+  was gone `upgrade` refused and the only way forward was `kill` + `create`.
+- A session made by an earlier aidc whose `/tmp` copy still exists has it moved into place the
+  first time `upgrade` or `network` reads it. A session whose copy is already gone
+  still has to be recreated, and `aidc upgrade` now says so, naming both places it looked.
+- A session created through aidc-mcp (`session_create`) wrote the file inside the server
+  container's own `/tmp`, so the host never had it and could not upgrade that session at all.
+  It now lands in the host path, owned by the operator.
+- `aidc kill` on a session whose containers are already gone removes its leftover compose
+  file, which carries the session's secrets.
+- A session created through aidc-mcp now has its audit files (the config snapshot,
+  `meta.json`, the Claude state seed) handed to the operator. They were left owned by root:
+  the ownership fix was given the path inside the server container, which it could not map.
+- Going back to v1.9.8 or earlier: those versions look only in `/tmp`, so copy each
+  `~/.local/state/aidc/sessions/<name>.yaml` to `/tmp/aidc-<name>.yaml` first.
+
 ## [1.9.8] - 2026-10-23
 
 ### Added
@@ -1397,7 +1419,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.8...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.9...HEAD
+[1.9.9]: https://github.com/pacepace/aidc/compare/v1.9.8...v1.9.9
 [1.9.8]: https://github.com/pacepace/aidc/compare/v1.9.7...v1.9.8
 [1.9.7]: https://github.com/pacepace/aidc/compare/v1.9.6...v1.9.7
 [1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6

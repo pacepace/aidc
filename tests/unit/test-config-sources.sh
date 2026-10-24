@@ -266,6 +266,29 @@ eq "a chown it cannot do stops the create instead of leaving it unwritable" "ref
 out=$(mkdir_host "/elsewhere/x" "/host/state|$SCRATCH/mnt" /home/pace)
 eq "a path outside every mount is refused" "refused" "$out"
 
+# aidc_fix_host_owner takes the HOST path and must chown where this process reaches it.
+# With the mount at a different path (the audit dir is /var/aidc-audit inside aidc-mcp),
+# a chown of the host spelling changes nothing, and the in-container spelling matches no
+# mapping at all: either way the files stay root-owned on the host.
+fix_owner() {
+    # $1 = path given, $2 = mounts, $3 = host home
+    # shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+    env -i PATH="$SCRATCH/bin:$TEST_PATH" AIDC_NO_YQ="$AIDC_NO_YQ" AIDC_ROOT="$AIDC_ROOT" HOME="$SCRATCH/container" \
+        AIDC_HOST_HOME="$3" AIDC_MCP_MOUNTS="$2" STUB_STATE="$STUB_STATE" \
+        bash -c '
+            . "$AIDC_ROOT/scripts/lib/config.sh"
+            aidc_fix_host_owner "$1" && printf ok || printf failed' _ "$1"
+}
+mkdir -p "$SCRATCH/mnt/audit/s1"
+: > "$STUB_STATE/chowns"
+out=$(fix_owner "/host/audit/s1" "/host/audit|$SCRATCH/mnt/audit" /home/pace)
+eq "fix_host_owner succeeds for a mapped host path" "ok" "$out"
+eq "and chowns where it is mounted, not the host spelling" \
+    "4242:4242 $SCRATCH/mnt/audit/s1" "$(head -1 "$STUB_STATE/chowns")"
+: > "$STUB_STATE/chowns"
+out=$(fix_owner "/host/audit/s1" "/host/audit|$SCRATCH/mnt/audit" "")
+eq "on the host (no AIDC_HOST_HOME) it chowns nothing" "ok|0" "$out|$(wc -l < "$STUB_STATE/chowns" | tr -d ' ')"
+
 # SEC-09: a workspace/repo config is writable from inside the session it configures,
 # so what it asks for that would widen the sandbox is set aside, not applied.
 mkdir -p "$SCRATCH/trust/home/.config/aidc" "$SCRATCH/trust/repo/.aidc"

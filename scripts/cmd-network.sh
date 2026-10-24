@@ -84,7 +84,7 @@ session_exists "$NAME" || die "no such session: $NAME (try: aidc list)"
 
 DEV_CT="$(container_name "$NAME" dev)"
 OWN_NET="$(aidc_session_network "$NAME")"
-COMPOSE_FILE="/tmp/aidc-${NAME}.yaml"
+COMPOSE_FILE=$(aidc_session_compose_file "$NAME")
 
 # Declared-vs-adhoc classification lives in lib/network.sh so this command and
 # `aidc upgrade` (which drops the adhoc ones) agree on what each word means.

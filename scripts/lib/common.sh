@@ -286,6 +286,76 @@ aidc_retire_auth_bridge() {
           "${dir}/auth-bridge.disabled" "${dir}/auth-bridge.last-hash"
 }
 
+# Where a session's rendered compose file lives on the host. It is the only record of
+# how the session was created, and `aidc upgrade`, `aidc network` and `aidc kill` read it
+# back for the session's whole life, so it is kept with the operator's state rather
+# than in /tmp, which a reboot or a disk cleanup empties and then leaves the session
+# impossible to upgrade. The path is built from the host home alone (not
+# XDG_STATE_HOME) because `aidc create` also runs inside aidc-mcp, whose environment
+# carries the host home (AIDC_HOST_HOME) but not the host's XDG settings, and both
+# must name the same file.
+aidc_session_compose_path() {
+    printf '%s/.local/state/aidc/sessions/%s.yaml' "${AIDC_HOST_HOME:-$HOME}" "$1"
+}
+
+# Where an aidc before v1.9.9 rendered it.
+aidc_legacy_compose_path() {
+    printf '/tmp/aidc-%s.yaml' "$1"
+}
+
+# The compose file session $1 has now, without moving anything: the state copy, else a
+# /tmp copy left by an older aidc, else the state path (callers test -f). For `kill`,
+# which is about to delete it.
+aidc_session_compose_find() {
+    local new legacy
+    new=$(aidc_session_compose_path "$1")
+    legacy=$(aidc_legacy_compose_path "$1")
+    if [ ! -f "$new" ] && [ -f "$legacy" ]; then
+        printf '%s' "$legacy"
+    else
+        printf '%s' "$new"
+    fi
+}
+
+# Remove every copy of session $1's compose file (it carries the session's secrets).
+# Prints the paths it removed, space-separated, or nothing.
+aidc_remove_session_compose() {
+    local f removed=""
+    for f in "$(aidc_session_compose_path "$1")" "$(aidc_legacy_compose_path "$1")"; do
+        [ -f "$f" ] || continue
+        if rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
+            removed="${removed:+${removed} }${f}"
+        else
+            printf '[aidc] warning: could not remove %s; it holds the session secrets, delete it by hand\n' "$f" >&2
+        fi
+    done
+    printf '%s' "$removed"
+}
+
+# The compose file to read for session $1: the state copy, after first moving a
+# /tmp copy left by an older aidc into place so the next cleanup of /tmp cannot take
+# it. Prints the state path whether or not the file exists (callers test -f), or the
+# /tmp path when it could not be moved. A library function: reports on stderr and
+# never calls die (see the shell-libraries learnings).
+aidc_session_compose_file() {
+    local name="$1" new legacy
+    new=$(aidc_session_compose_path "$name")
+    legacy=$(aidc_session_compose_find "$name")
+    if [ "$legacy" != "$new" ]; then
+        if ( umask 0077; mkdir -p "$(dirname "$new")" ) 2>/dev/null \
+                && cp -p "$legacy" "$new" 2>/dev/null && chmod 600 "$new"; then
+            rm -f "$legacy"
+            printf '[aidc] moved session %s compose file from %s to %s\n' "$name" "$legacy" "$new" >&2
+        else
+            rm -f "$new" 2>/dev/null
+            printf '[aidc] warning: could not move %s to %s; using it where it is\n' "$legacy" "$new" >&2
+            printf '%s' "$legacy"
+            return 0
+        fi
+    fi
+    printf '%s' "$new"
+}
+
 # A compose file rendered before v1.5.0 bind-mounts the host's Claude login
 # into the dev container. `aidc upgrade` reuses that file, and the new image
 # reads /home/vscode/.claude/.credentials.json -- exactly where the old mount

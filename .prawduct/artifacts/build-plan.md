@@ -55,8 +55,10 @@ recreated. Pace (2026-10-24): "move session setup files out of /tmp".
 
 ### Chunk 02: Release
 
-- [ ] `chore(release): aidc v1.9.9`, gates, Critic, PR review.
+- [x] `chore(release): aidc v1.9.9`, gates, Critic, PR review.
 
 ## Status
 
-Context: chunk A built and unit-tested, live write probe done; smoke and Critic next.
+Context: chunk 01 committed 0632d6e; Critic rev-20261024T155949Z-b666655a (1 blocking, fixed;
+verified rev-20261024T160932Z-ecb02f1e); unit suite and smoke 121/0 green; live aidc-mcp write
+probe done. Release commit next; the plan stays live until the release archives it.

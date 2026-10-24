@@ -13,6 +13,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+## [1.9.9] - 2026-10-24
+
 ### Fixed
 - **A session's compose file is no longer kept in `/tmp`.** `aidc create` renders it to
   `~/.local/state/aidc/sessions/<name>.yaml` (mode 0600, in a 0700 directory), where a reboot
@@ -1412,7 +1414,8 @@ A broad v1.0.0-readiness spring-clean.
 
 <!-- Pre-1.0 versions have no link definitions: their tags exist only in the
      private pre-release history, so compare links would 404. -->
-[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.8...HEAD
+[Unreleased]: https://github.com/pacepace/aidc/compare/v1.9.9...HEAD
+[1.9.9]: https://github.com/pacepace/aidc/compare/v1.9.8...v1.9.9
 [1.9.8]: https://github.com/pacepace/aidc/compare/v1.9.7...v1.9.8
 [1.9.7]: https://github.com/pacepace/aidc/compare/v1.9.6...v1.9.7
 [1.9.6]: https://github.com/pacepace/aidc/compare/v1.9.5...v1.9.6

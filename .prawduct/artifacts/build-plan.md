@@ -59,6 +59,7 @@ recreated. Pace (2026-10-24): "move session setup files out of /tmp".
 
 ## Status
 
-Context: chunk 01 committed 0632d6e; Critic rev-20261024T155949Z-b666655a (1 blocking, fixed;
-verified rev-20261024T160932Z-ecb02f1e); unit suite and smoke 121/0 green; live aidc-mcp write
-probe done. Release commit next; the plan stays live until the release archives it.
+Context: chunk 01 0632d6e, release commit e3d4a16, then the cumulative review's fixes
+(fix_host_owner maps its path; tests for it and for upgrade's missing-file error). Critic
+rev-20261024T155949Z-b666655a (1 blocking, fixed) and cumulative rev-20261024T161845Z-22f09fbe
+(0 blocking); PR review 0 blocking. The plan stays live until the release archives it.

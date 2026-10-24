@@ -322,9 +322,11 @@ aidc_session_compose_find() {
 aidc_remove_session_compose() {
     local f removed=""
     for f in "$(aidc_session_compose_path "$1")" "$(aidc_legacy_compose_path "$1")"; do
-        if [ -f "$f" ]; then
-            rm -f "$f"
+        [ -f "$f" ] || continue
+        if rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
             removed="${removed:+${removed} }${f}"
+        else
+            printf '[aidc] warning: could not remove %s; it holds the session secrets, delete it by hand\n' "$f" >&2
         fi
     done
     printf '%s' "$removed"
@@ -338,8 +340,8 @@ aidc_remove_session_compose() {
 aidc_session_compose_file() {
     local name="$1" new legacy
     new=$(aidc_session_compose_path "$name")
-    legacy=$(aidc_legacy_compose_path "$name")
-    if [ ! -f "$new" ] && [ -f "$legacy" ]; then
+    legacy=$(aidc_session_compose_find "$name")
+    if [ "$legacy" != "$new" ]; then
         if ( umask 0077; mkdir -p "$(dirname "$new")" ) 2>/dev/null \
                 && cp -p "$legacy" "$new" 2>/dev/null && chmod 600 "$new"; then
             rm -f "$legacy"

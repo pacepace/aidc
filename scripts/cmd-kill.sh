@@ -41,8 +41,8 @@ validate_session_name "$NAME"
 require_docker
 aidc_retire_auth_bridge
 if ! session_exists "$NAME"; then
-    # No containers, but its compose file (which carries its secrets and, unlike the
-    # /tmp copy before v1.9.9, outlives a reboot) or a network may be left over.
+    # No containers, but its compose file (which carries its secrets and outlives a
+    # reboot) or a network may be left over.
     LEFT_FILES=$(aidc_remove_session_compose "$NAME")
     [ -n "$LEFT_FILES" ] && info "removed the leftover compose file: ${LEFT_FILES}"
     # A network may be left over (from a kill that could not remove
@@ -85,7 +85,7 @@ remove_adhoc_forwards "$NAME" "cleaning up adhoc port-forwards"
 aidc_egress_remove_adhoc "$NAME" "cleaning up live TCP egress relays"
 
 # `docker compose down` needs the file we rendered at create time. If it's
-# gone (a pre-v1.9.9 session whose /tmp copy was cleared), `-p $PROJECT` with no file still works for
+# gone (an older session whose /tmp copy was cleared), `-p $PROJECT` with no file still works for
 # stop+rm of named containers but won't catch volumes; try both.
 info "stopping compose project $PROJECT"
 if [ -f "$COMPOSE_FILE" ]; then

@@ -1082,7 +1082,7 @@ fi
 # Files written into the audit dir after it was created (the config snapshot, meta.json,
 # the Claude state seed) belong to whoever owns the tree, not to whatever user this
 # process happens to be: see aidc_mkdir_host.
-aidc_fix_host_owner "$AUDIT_WRITE"
+aidc_fix_host_owner "$AUDIT_DIR"
 
 # ---- summary -----------------------------------------------------------------
 

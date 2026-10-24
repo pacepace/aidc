@@ -54,6 +54,9 @@ without it. Pace: "move session setup files out of /tmp".
 - `kill` removes every copy, also for a session with no containers left (exit 0, where it
   said "no such session" before).
 - One owner for the path, lookup and removal: `scripts/lib/common.sh`.
+- `aidc_fix_host_owner` chowns the path this process reaches (the mount inside aidc-mcp), and
+  create passes it the host audit path. It had been given `/var/aidc-audit/...`, which maps to
+  nothing, so a session_create's audit files stayed root-owned on the host.
 
 **Verification:** `tests/unit/test-session-compose-path.sh` (paths, migration, unmovable
 fallback, find/remove, kill on a file-only session against a docker stub); smoke 121/0 with
@@ -63,7 +66,9 @@ its own path: the host saw the file pace:pace 0600 in a 0700 directory.
 
 **Review:** Critic rev-20261024T155949Z-b666655a: one blocking (kill's new branch untested),
 fixed; seven observations fixed, five accepted. verify-resolutions rev-20261024T160932Z-ecb02f1e:
-resolved, nothing new.
+resolved, nothing new. Cumulative rev-20261024T161845Z-22f09fbe: 0 blocking; the owner-mapping
+warning fixed with a test that fails on the old code, the upgrade error now tested, the rest
+fixed or accepted. PR review: 0 blocking; CHANGELOG wording and a downgrade note fixed.
 
 **Still broken:** a session whose /tmp copy is already gone (handmcp, metallm here) still
 needs `aidc kill` + `aidc create` once.

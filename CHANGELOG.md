@@ -13,6 +13,21 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Fixed
+- **A session's compose file is no longer kept in `/tmp`.** `aidc create` renders it to
+  `~/.local/state/aidc/sessions/<name>.yaml` (mode 0600, in a 0700 directory), where a reboot
+  or a disk cleanup cannot take it. `aidc upgrade`, `aidc network` and `aidc kill` read it from
+  there for the session's whole life. Before, they read `/tmp/aidc-<name>.yaml`, and once that
+  was gone `upgrade` refused and the only way forward was `kill` + `create`.
+- A session made by an earlier aidc whose `/tmp` copy still exists has it moved into place the
+  first time `upgrade`, `network` or `kill` reads it. A session whose copy is already gone
+  still has to be recreated, and `aidc upgrade` now says so, naming both places it looked.
+- A session created through aidc-mcp (`session_create`) wrote the file inside the server
+  container's own `/tmp`, so the host never had it and could not upgrade that session at all.
+  It now lands in the host path, owned by the operator.
+- `aidc kill` on a session whose containers are already gone removes its leftover compose
+  file, which carries the session's secrets.
+
 ## [1.9.8] - 2026-10-23
 
 ### Added

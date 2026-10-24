@@ -646,7 +646,17 @@ info "transcript mirror: ${MCP_TRANSCRIPTS_DIR} -> dev:/var/aidc/transcript-out"
 
 # ---- render compose ----------------------------------------------------------
 
-COMPOSE_OUT="/tmp/aidc-${NAME}.yaml"
+# Kept with the operator's state for the session's whole life: upgrade, network and
+# kill read it back (aidc_session_compose_path says why not /tmp). Made through
+# aidc_mkdir_host, so a create run inside aidc-mcp writes it where the host reads it,
+# owned by the operator.
+COMPOSE_HOST=$(aidc_session_compose_path "$NAME")
+aidc_mkdir_host "$(dirname "$COMPOSE_HOST")" || \
+    die "cannot create $(dirname "$COMPOSE_HOST") for the session's compose file"
+chmod 0700 "$AIDC_LOCAL_PATH"
+COMPOSE_OUT="${AIDC_LOCAL_PATH}/$(basename "$COMPOSE_HOST")"
+# A file an older aidc left in /tmp for an earlier session of this name is stale.
+rm -f "$(aidc_legacy_compose_path "$NAME")"
 
 export SESSION="$NAME"
 export PROFILE="$AIDC_PROFILE"
@@ -981,9 +991,9 @@ EOFCO
 fi
 export OVERLAY_VOLUMES_DECLARATIONS OVERLAY_VOLUMES_MOUNTS
 
-# The rendered compose embeds CLAUDE_CODE_OAUTH_TOKEN (and other secrets) and
-# lives in world-readable /tmp. Create it 0600 in a umask subshell BEFORE any
-# secret is written, so it never exists world-readable even briefly. Re-asserted
+# The rendered compose embeds CLAUDE_CODE_OAUTH_TOKEN (and other secrets). Create it
+# 0600 in a umask subshell BEFORE any secret is written, so it never exists
+# world-readable even briefly, whatever its directory allows. Re-asserted
 # after the yq splice below (which rewrites the file in place and can reset mode).
 ( umask 0077
   "$AIDC_ROOT/proxy/compose-render.sh" \
@@ -1011,6 +1021,9 @@ fi
 # Re-assert 0600: yq -i rewrites the file in place, which can reset its mode to
 # the umask default (0644). The file carries CLAUDE_CODE_OAUTH_TOKEN.
 chmod 600 "$COMPOSE_OUT"
+# Written by root inside aidc-mcp: give it to the operator, who upgrades and kills.
+aidc_fix_host_owner "$COMPOSE_HOST" || \
+    die "the session's compose file ${COMPOSE_HOST} could not be given to its owner"
 
 # ---- bring up the stack ------------------------------------------------------
 
@@ -1093,6 +1106,6 @@ Session '${NAME}' created.
   audit:      ${AUDIT_DIR}
   memory:     ${HOST_CLAUDE_PROJECT_DIR}
 ${CLAUDE_AUTH_LINE}
-  compose:    ${COMPOSE_OUT}
+  compose:    ${COMPOSE_HOST}
 Attach with: aidc attach ${NAME}
 EOF

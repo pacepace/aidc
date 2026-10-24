@@ -129,10 +129,12 @@ from an upgrade. Two ways to apply it:
 - `aidc kill` + `aidc create`. This loses the session's volumes (Claude login, the container's home
   directory, images built inside it).
 - **Recreate only the session's proxy**, which leaves the dev container and its volumes untouched.
-  After `aidc rebuild` at the new version, edit `/tmp/aidc-<session>.yaml`: set the `squid`
+  After `aidc rebuild` at the new version, edit `~/.local/state/aidc/sessions/<session>.yaml`
+  (for a session made before v1.9.9, run `aidc network <session> ls` once first: it moves the
+  session's `/tmp/aidc-<session>.yaml` there): set the `squid`
   service's image to the new tag, and add `AIDC_MCP_DENY: "<bind_address>:<port>"` under its
   `environment`. Then run
-  `docker compose -p aidc-<session> -f /tmp/aidc-<session>.yaml up -d --no-deps --force-recreate squid`.
+  `docker compose -p aidc-<session> -f ~/.local/state/aidc/sessions/<session>.yaml up -d --no-deps --force-recreate squid`.
   Proxied traffic stops for about 20 s while squid restarts and turns healthy.
 
 Verified 2026-09-17 on rc images:

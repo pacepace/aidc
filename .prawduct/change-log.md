@@ -36,6 +36,43 @@
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-24: A session's compose file outlives /tmp (v1.9.9)
+
+<!-- prawduct: scope=session-compose-in-state | release=v1.9.9 -->
+
+**Why:** 2026-10-24, neither live session on this host could be upgraded. handmcp (v1.9.5) and
+metallm (v1.9.0) had lost `/tmp/aidc-<name>.yaml`, most likely when /tmp was cleared to free
+disk. That file is the only record of how a session was created, and `aidc upgrade` refuses
+without it. Pace: "move session setup files out of /tmp".
+
+**What:**
+- `aidc create` renders to `~/.local/state/aidc/sessions/<name>.yaml` (0600, dir 0700) through
+  aidc_mkdir_host, so a create inside aidc-mcp lands operator-owned at the host path. Before,
+  that create wrote into the server container's own /tmp. A stale /tmp copy is cleared.
+- `upgrade` and `network` read the state copy, moving a surviving /tmp copy into place first.
+  `upgrade`'s error for a lost file names both places and says to recreate.
+- `kill` removes every copy, also for a session with no containers left (exit 0, where it
+  said "no such session" before).
+- One owner for the path, lookup and removal: `scripts/lib/common.sh`.
+- `aidc_fix_host_owner` chowns the path this process reaches (the mount inside aidc-mcp), and
+  create passes it the host audit path. It had been given `/var/aidc-audit/...`, which maps to
+  nothing, so a session_create's audit files stayed root-owned on the host.
+
+**Verification:** `tests/unit/test-session-compose-path.sh` (paths, migration, unmovable
+fallback, find/remove, kill on a file-only session against a docker stub); smoke 121/0 with
+new checks for the place, the mode, a stale /tmp copy cleared, an `aidc upgrade` read-back, and
+removal at kill. Live probe in an aidc-mcp-image container as root with the home mounted at
+its own path: the host saw the file pace:pace 0600 in a 0700 directory.
+
+**Review:** Critic rev-20261024T155949Z-b666655a: one blocking (kill's new branch untested),
+fixed; seven observations fixed, five accepted. verify-resolutions rev-20261024T160932Z-ecb02f1e:
+resolved, nothing new. Cumulative rev-20261024T161845Z-22f09fbe: 0 blocking; the owner-mapping
+warning fixed with a test that fails on the old code, the upgrade error now tested, the rest
+fixed or accepted. PR review: 0 blocking; CHANGELOG wording and a downgrade note fixed.
+
+**Still broken:** a session whose /tmp copy is already gone (handmcp, metallm here) still
+needs `aidc kill` + `aidc create` once.
+
 ## 2026-10-23: What a busy session is doing, joining its turn, and headless runs that are fresh, single and stoppable (v1.9.8)
 
 <!-- prawduct: scope=turn-visibility-and-join | release=v1.9.8 -->

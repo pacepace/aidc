@@ -353,7 +353,9 @@ aidc_mkdir_host() {
     export AIDC_HOST_OWNER
 }
 
-# Give files written into a host dir the owner of the tree that dir belongs to. The
+# Give files written into a host dir the owner of the tree that dir belongs to. $1 is the
+# HOST path; the chown runs on where this process reaches it (the mount inside aidc-mcp),
+# because a mount at another path (/var/aidc-audit) has no host spelling in here. The
 # owner is read for THIS path, not carried from whatever aidc_mkdir_host was called last:
 # the audit dir and the state dir are different mounts and can have different owners.
 aidc_fix_host_owner() {
@@ -363,7 +365,7 @@ aidc_fix_host_owner() {
     [ -n "${AIDC_LOCAL_MOUNT:-}" ] || return 0
     owner=$(stat -c '%u:%g' "$AIDC_LOCAL_MOUNT" 2>/dev/null || true)
     [ -n "$owner" ] && [ "$owner" != "$(id -u):$(id -g)" ] || return 0
-    if ! chown -R "$owner" "$path" 2>/dev/null; then
+    if ! chown -R "$owner" "$AIDC_LOCAL_PATH" 2>/dev/null; then
         printf '[aidc] error: could not give %s to %s; files there may be unreadable to you\n' \
             "$path" "$owner" >&2
         return 1

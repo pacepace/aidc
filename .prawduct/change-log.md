@@ -36,6 +36,61 @@
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-25: Batch on free, stable prompt ids, cancel by id
+
+<!-- prawduct: scope=batch-on-free-cancel-by-id -->
+
+**Why:** asked by the metallm session, approved by Pace 2026-10-25. While a session is busy the
+person's and the agent's prompts pile up in the send queue, and each went in on its own idle as
+its own turn. A queued prompt could only be taken back by position, which moves as the queue
+drains, and the reply never said which prompts it answered or when they went in.
+
+**What:**
+- Batch on free (design 10 S7, MCP-44): the drainer pastes every prompt waiting when the session
+  frees up as one message, in send order, joined by `" [next message] "` (`_BATCH_SEPARATOR`;
+  not a newline, which the tmux paste would turn into Enter). One send record per paste carries
+  the batch (each prompt's `prompt_id`, `sent_by`, `conversation_id`, and `pasted_at`). The
+  watcher sends it as `prompts` and `pasted_at` on the reply, and the prompt-origin record
+  carries it to the turn's continuations. `_next_batch` is the one place a later per-prompt
+  delivery choice would go; none is added.
+- Reply routing: one webhook per session, unchanged, so one batch gets one reply to the
+  watching conversation. A person's prompt in the batch makes it the person's reply (`sent_by`,
+  last one that names a person); `prompts` gives each prompt's own sender and conversation.
+- Prompt ids (MCP-45): `QueuedPrompt.prompt_id`, persisted (a queue saved without ids gets
+  fresh ones on load), made once in `session_send` before it chooses send, join or queue, and
+  returned on every status. `session_status` lists it per waiting prompt; the send dead-letter
+  file records it.
+- `session_queue_cancel(prompt_id=...)`: `outcome` cancelled / already_pasted (with
+  `pasted_at`, from `<session>.pasted-prompts.json`, the last 500 pasted ids) / unknown, decided
+  under the send lock the drainer chooses and pastes its batch under. A batch pasted into the
+  box but not yet submitted is the session's: the drainer submits exactly that batch, and a
+  cancel of one of its prompts is already_pasted. `_unsubmitted_paste` now holds (text, prompt
+  ids) so that is checked by id, not by matching the queue head's text. `position` keeps
+  working and reports `outcome` too.
+- Callback body (D5): `prompts` and `pasted_at` added; `prompt_dropped`/`prompt_waiting`
+  notices carry `prompts` for their prompt. Docs: design 10 D5, S4, new S7; requirements
+  MCP-44/45; README; CHANGELOG.
+
+**Tests changed, not weakened:** the three tests that asserted one paste per queued prompt
+(`test_queued_prompts_are_injected_in_order_when_the_turn_ends`, the restart-resume and the
+saved-queue-first tests) now assert the same order inside one batched paste, which is the
+change asked for. Exact callback bodies in `test_roundtrip.py` and the cancel result in
+`test_session_report.py` gained the new fields. Tests that set `_unsubmitted_paste`, call
+`_join_running_turn` or patch `take_sent_prompt` follow the new shapes and names.
+
+**New tests:** batch order and mixed senders, the next batch after one went in, ids on sent
+and queued returns, cancel before paste left out of the batch, a cancel arriving during the
+paste waits and says too late, a cancel that holds the lock first keeps its prompt out, cancel
+after paste, unknown id, position and both-arguments, a failed batch paste kept whole, the
+batch reply routed with `prompts`/`pasted_at` end to end, a continuation naming the batch, a
+late-drawn batch submitted as it was with a later prompt waiting, legacy queue ids, the
+pasted-id store. Mutation-checked: with the cancel's lock removed, the during-paste test fails;
+with the batch chosen before the drainer takes the lock, the lock-first test fails.
+
+**Open for metallm:** `prompts` is a new callback field beside the requested `pasted_at`;
+D5 says body changes are agreed with the metallm session, which should confirm it reads
+`prompts` for per-prompt attribution.
+
 ## 2026-10-24: A session's compose file outlives /tmp (v1.9.9)
 
 <!-- prawduct: scope=session-compose-in-state | release=v1.9.9 -->

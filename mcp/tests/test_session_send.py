@@ -317,7 +317,8 @@ async def test_queues_instead_of_dropping_when_session_busy(wiring):
 
 
 async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
-    """The drainer injects the backlog once the pane frees up, oldest first."""
+    """The drainer injects the backlog once the pane frees up, oldest first, as one
+    message: every prompt queued while the session was busy goes in together."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
@@ -331,7 +332,7 @@ async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
     wiring.idle_ok = True
     await _let_drainer_run("proj")
 
-    assert [text for _, text, _ in wiring.paste_calls] == ["first", "second"]
+    assert [text for _, text, _ in wiring.paste_calls] == ["first [next message] second"]
     assert _sent_enter(wiring.tmux_calls)
     assert "proj" not in tools._pending_sends
 
@@ -467,6 +468,9 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
     assert [(q.text, q.waiting_reason) for q in saved["proj"]] == [
         ("first", "input_has_text"), ("second", "queued_behind")]
+    # The ids session_send returned survive the restart, so a cancel by id still works.
+    assert [q.prompt_id for q in saved["proj"]] == [
+        q.prompt_id for q in tools._pending_sends["proj"]]
 
     # The MCP restarts: in-memory state is gone, the file is not.
     for task in tools._pending_drainers.values():
@@ -479,7 +483,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     wiring.idle_ok = True
     await tools.resume_send_queues()
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["first", "second"]
+    assert [text for _, text, _ in wiring.paste_calls] == ["first [next message] second"]
     assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
 
 
@@ -621,7 +625,7 @@ async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring
     await tools.resume_send_queues()
     await _let_drainer_run("proj", ticks=100)
 
-    assert [text for _, text, _ in wiring.paste_calls] == ["saved", "new"]
+    assert [text for _, text, _ in wiring.paste_calls] == ["saved [next message] new"]
 
 
 async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_paste(wiring):
@@ -954,3 +958,247 @@ async def test_a_send_with_no_headless_run_says_nothing_about_one(wiring):
     assert "headless_runs" not in res["data"]
     for task in tools._pending_drainers.values():
         task.cancel()
+
+
+# --- batch on free, prompt ids, cancel by id ------------------------------------
+# While the session is busy every send queues; when it is next free, the drainer
+# pastes every waiting prompt as ONE message, in send order, joined by
+# _BATCH_SEPARATOR. Each prompt has a stable id, which session_queue_cancel takes;
+# the cancel is decided under the send lock the drainer chooses and pastes its batch
+# under, so a prompt is in the pasted batch or cancelled, never both.
+
+def _cancel_tool(app):
+    return app._tool_manager._tools["session_queue_cancel"].fn
+
+
+@pytest.fixture
+def idle_state(monkeypatch):
+    """session_queue_cancel reports what the agent is doing; nothing is running."""
+    async def state(container, name):
+        return tools.SessionState(True, None, tools.TURN_IDLE, "turn_ended")
+    monkeypatch.setattr(tools, "_session_state", state)
+
+
+_THREE = ["[from the agent] first", "[from pace] second", "[from the agent] third"]
+
+
+async def _queue_three(send):
+    """Three sends into a busy session: the caller's, a person's, the caller's."""
+    a = await send(name="proj", prompt=_THREE[0], conversation_id="c1")
+    b = await send(name="proj", prompt=_THREE[1], conversation_id="c1", sent_by="pace")
+    c = await send(name="proj", prompt=_THREE[2], conversation_id="c1")
+    return [r["data"]["prompt_id"] for r in (a, b, c)]
+
+
+async def test_every_prompt_queued_while_busy_goes_in_as_one_paste_in_send_order(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+    assert not wiring.paste_calls
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+
+    joined = " [next message] ".join(_THREE)
+    assert [text for _, text, _ in wiring.paste_calls] == [joined]
+    enters = [a for _, a in wiring.tmux_calls if a[0] == "send-keys" and a[-1] == "Enter"]
+    assert len(enters) == 1
+    assert "proj" not in tools._pending_sends
+    # One send record for the one paste. A person's prompt is in the batch, so the
+    # reply goes back as the person's, and the batch names every prompt with its own
+    # sender, in send order.
+    entry = ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", joined)
+    assert entry["by"] == "pace"
+    assert entry["batch"]["prompts"] == [
+        {"prompt_id": ids[0], "sent_by": "", "conversation_id": "c1"},
+        {"prompt_id": ids[1], "sent_by": "pace", "conversation_id": "c1"},
+        {"prompt_id": ids[2], "sent_by": "", "conversation_id": "c1"}]
+    assert ts.wall_time({"timestamp": entry["batch"]["pasted_at"]}) is not None
+
+
+async def test_a_prompt_queued_after_a_batch_went_in_goes_in_the_next_one(wiring):
+    """Multi-hop: the batch that went in is gone from the queue; what queues during
+    the turn it opened waits, and goes in on its own when that turn ends."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="one", conversation_id="c1")
+    await send(name="proj", prompt="two", conversation_id="c1")
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    wiring.idle_ok = False
+    await send(name="proj", prompt="three", conversation_id="c1")
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == ["one [next message] two", "three"]
+
+
+async def test_every_send_returns_a_stable_prompt_id(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    sent = await send(name="proj", prompt="now", conversation_id="c1")
+    assert sent["data"]["status"] == "sent" and sent["data"]["prompt_id"].startswith("p-")
+
+    wiring.idle_ok = False
+    queued = await send(name="proj", prompt="later", conversation_id="c1")
+    assert queued["data"]["status"] == "queued"
+    assert queued["data"]["prompt_id"] == tools._pending_sends["proj"][0].prompt_id
+    assert queued["data"]["prompt_id"] != sent["data"]["prompt_id"]
+    for task in tools._pending_drainers.values():
+        task.cancel()
+
+
+async def test_a_prompt_cancelled_before_the_paste_is_left_out_of_the_batch(wiring, idle_state):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+
+    res = await _cancel_tool(app)(name="proj", prompt_id=ids[1])
+    assert res["ok"] is True
+    d = res["data"]
+    assert d["outcome"] == "cancelled" and d["prompt_id"] == ids[1]
+    assert [c["prompt_id"] for c in d["cancelled"]] == [ids[1]] and d["left"] == 2
+
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert [text for _, text, _ in wiring.paste_calls] == [
+        f"{_THREE[0]} [next message] {_THREE[2]}"]
+    dead = [json.loads(p.read_text()) for p in
+            (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")]
+    assert [(x["prompt_id"], x["reason"]) for x in dead] == [(ids[1], "cancelled")]
+
+
+async def test_cancelling_a_prompt_already_pasted_says_too_late(wiring, idle_state):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+
+    d = (await _cancel_tool(app)(name="proj", prompt_id=ids[0]))["data"]
+    assert d["outcome"] == "already_pasted" and d["cancelled"] == []
+    entry = ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", wiring.paste_calls[0][1])
+    assert d["pasted_at"] == entry["batch"]["pasted_at"]
+    assert d["note"].startswith("too late")
+
+
+async def test_cancelling_an_unknown_prompt_id_says_unknown(wiring, idle_state):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="waiting", conversation_id="c1")
+
+    d = (await _cancel_tool(app)(name="proj", prompt_id="p-nosuchprompt00"))["data"]
+    assert d["outcome"] == "unknown" and d["cancelled"] == []
+    assert [q.text for q in tools._pending_sends["proj"]] == ["waiting"]
+    for task in tools._pending_drainers.values():
+        task.cancel()
+
+
+async def test_cancel_takes_a_position_or_a_prompt_id_not_both(wiring, idle_state):
+    app, _ = _make_send()
+    res = await _cancel_tool(app)(name="proj", position=1, prompt_id="p-x")
+    assert res["ok"] is False and res["error_code"] == "invalid_argument"
+
+
+async def test_cancel_by_position_still_takes_back_that_prompt(wiring, idle_state):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+    d = (await _cancel_tool(app)(name="proj", position=3))["data"]
+    assert d["outcome"] == "cancelled" and [c["prompt_id"] for c in d["cancelled"]] == [ids[2]]
+    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ids[:2]
+    for task in tools._pending_drainers.values():
+        task.cancel()
+
+
+def _in_batch_xor_cancelled(pasted: list[str], text: str, outcome: str) -> None:
+    """The invariant: the prompt is in the pasted text, or its cancel said cancelled."""
+    in_batch = any(text in p for p in pasted)
+    assert in_batch != (outcome == "cancelled"), (pasted, outcome)
+
+
+async def test_a_cancel_arriving_during_the_paste_waits_for_it_and_says_too_late(
+        wiring, idle_state, monkeypatch):
+    """The drainer holds the send lock from choosing its batch to the end of the paste;
+    a cancel for a prompt in that batch waits, then finds it pasted."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+
+    in_paste, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_paste(container, text, window):
+        wiring.paste_calls.append((container, text, window))
+        in_paste.set()
+        await release.wait()
+        return True
+    monkeypatch.setattr(tools, "_load_and_paste", slow_paste)
+
+    wiring.idle_ok = True
+    for _ in range(200):
+        await _REAL_SLEEP(0)
+        if in_paste.is_set():
+            break
+    assert in_paste.is_set()
+    cancel = asyncio.create_task(_cancel_tool(app)(name="proj", prompt_id=ids[1]))
+    for _ in range(20):
+        await _REAL_SLEEP(0)
+    assert not cancel.done()      # held behind the paste
+    release.set()
+    d = (await cancel)["data"]
+    await _let_drainer_run("proj")
+
+    pasted = [text for _, text, _ in wiring.paste_calls]
+    assert d["outcome"] == "already_pasted"
+    _in_batch_xor_cancelled(pasted, _THREE[1], d["outcome"])
+    assert "proj" not in tools._pending_sends
+
+
+async def test_a_cancel_that_gets_the_lock_first_keeps_its_prompt_out_of_the_batch(
+        wiring, idle_state):
+    """The other order: the cancel is decided first, and the drainer chooses its batch
+    only once it holds the lock, so the cancelled prompt is not in it."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+
+    lock = tools._session_send_locks["proj"]
+    await lock.acquire()
+    cancel = asyncio.create_task(_cancel_tool(app)(name="proj", prompt_id=ids[1]))
+    await _REAL_SLEEP(0)
+    wiring.idle_ok = True          # the drainer finds the session free and waits for
+    for _ in range(50):            # the lock, behind the cancel
+        await _REAL_SLEEP(0)
+    assert not wiring.paste_calls
+    lock.release()
+    d = (await cancel)["data"]
+    await _let_drainer_run("proj")
+
+    pasted = [text for _, text, _ in wiring.paste_calls]
+    assert d["outcome"] == "cancelled"
+    assert pasted == [f"{_THREE[0]} [next message] {_THREE[2]}"]
+    _in_batch_xor_cancelled(pasted, _THREE[1], d["outcome"])
+
+
+async def test_a_failed_batch_paste_keeps_every_prompt_and_its_order(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    ids = await _queue_three(send)
+    wiring.paste_ok = False
+    wiring.idle_ok = True
+    for _ in range(50):
+        await _REAL_SLEEP(0)
+    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ids
+    assert all(q.paste_attempts >= 1 for q in tools._pending_sends["proj"])
+    wiring.paste_ok = True
+    await _let_drainer_run("proj", ticks=300)
+    assert "proj" not in tools._pending_sends
+    assert wiring.paste_calls[-1][1] == " [next message] ".join(_THREE)

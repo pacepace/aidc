@@ -1504,6 +1504,29 @@ class TestPersistedSendQueue:
         queues, _ = load_send_queues(tmp_path)
         assert [q.sent_by for q in queues["proj"]] == ["u-1", ""]
 
+    def test_a_queued_prompt_keeps_its_id_and_one_saved_without_gets_one(self, tmp_path):
+        """A queue saved before prompts had ids still loads, each prompt with an id of
+        its own, so it can be cancelled by id."""
+        save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t", prompt_id="p-x")])
+        assert [q.prompt_id for q in load_send_queues(tmp_path)[0]["proj"]] == ["p-x"]
+        path = send_queue_path(tmp_path, "proj")
+        path.write_text(json.dumps({"session": "proj", "prompts": [
+            {"text": "a", "enqueued_at": "t"}, {"text": "b", "enqueued_at": "t"}]}))
+        ids = [q.prompt_id for q in load_send_queues(tmp_path)[0]["proj"]]
+        assert all(i.startswith("p-") for i in ids) and len(set(ids)) == 2
+
+    def test_pasted_ids_are_remembered_newest_last_and_capped(self, tmp_path):
+        from aidc_mcp import transcript as tsm
+        tsm.record_pasted_ids(tmp_path, "proj", ["p-a", "p-b"], "2026-10-25T10:00:00Z")
+        assert tsm.pasted_at_of(tmp_path, "proj", "p-b") == "2026-10-25T10:00:00Z"
+        assert tsm.pasted_at_of(tmp_path, "proj", "p-zz") == ""
+        tsm.record_pasted_ids(tmp_path, "proj",
+                              [f"p-{i}" for i in range(tsm._PASTED_IDS_MAX)], "later")
+        assert tsm.pasted_at_of(tmp_path, "proj", "p-a") == ""
+        assert tsm.pasted_at_of(tmp_path, "proj", "p-0") == "later"
+        tsm.pasted_ids_path(tmp_path, "proj").write_text("{not json")
+        assert tsm.pasted_at_of(tmp_path, "proj", "p-0") == ""
+
     def test_empty_queue_removes_the_file(self, tmp_path):
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])
         save_send_queue(tmp_path, "proj", [])

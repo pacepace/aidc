@@ -13,6 +13,23 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Changed
+- **Prompts queued while a session is busy go in together.** When the session is next free,
+  aidc pastes every waiting prompt as one message, in send order, with `" [next message] "`
+  between them (a newline would submit the first one alone), instead of one prompt per turn.
+  The person's and the agent's prompts go in the same batch.
+
+### Added
+- **`prompt_id` on every `session_send` return**, queued or sent, stable for that prompt and kept
+  across an `aidc-mcp` restart.
+- **`session_queue_cancel(name, prompt_id)`** takes back that one prompt and answers `outcome`:
+  `cancelled`, `already_pasted` (too late, with `pasted_at`) or `unknown`. A prompt is either in
+  the pasted batch or cancelled, never both. `position` still works.
+- **The reply callback names the prompts it answers**: `prompts` (`prompt_id`, `sent_by`,
+  `conversation_id`, in paste order) and `pasted_at`, the time their batch was pasted. The
+  `prompt_dropped` and `prompt_waiting` notices carry `prompts` for their one prompt.
+  `session_status`'s `send_queue` lists each waiting prompt's `prompt_id`.
+
 ## [1.9.9] - 2026-10-24
 
 ### Fixed

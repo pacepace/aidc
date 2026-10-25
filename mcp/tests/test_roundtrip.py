@@ -232,10 +232,16 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     assert len(h.metallm.posts) == 1
     post = h.metallm.posts[0]
     assert post["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
-    # prompt_origin: the prompt matched the one session_send injected above.
-    assert post["json"] == {"content": "foo() returns the answer.", "ok": True,
-                            "source": "agent_watch", "session": "proj",
-                            "prompt_origin": "orchestrator", "interrupted": False}
+    # prompt_origin: the prompt matched the one session_send injected above, and the
+    # reply names it (prompts) with the time it was pasted.
+    body = dict(post["json"])
+    pasted_at = body.pop("pasted_at")
+    assert ts.wall_time({"timestamp": pasted_at}) is not None
+    assert body == {"content": "foo() returns the answer.", "ok": True,
+                    "source": "agent_watch", "session": "proj",
+                    "prompt_origin": "orchestrator", "interrupted": False,
+                    "prompts": [{"prompt_id": res["data"]["prompt_id"], "sent_by": "",
+                                 "conversation_id": "conv-1"}]}
     assert post["headers"]["Authorization"] == "Bearer tok"
 
     # Exactly-once: re-draining (the watcher polls repeatedly) does NOT re-deliver.
@@ -298,6 +304,62 @@ async def test_multi_turn_back_and_forth_each_reply_once(harness):
     await h.drain()
 
     assert [p["json"]["content"] for p in h.metallm.posts] == ["A1", "A2"]
+
+
+async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_conversation(harness):
+    """Prompts queued while the session was busy go in as one paste, so one turn
+    answers them all. The reply goes where the session's webhook points (one per
+    session, conv-1 here), with every prompt of the batch in `prompts` (its id, who
+    it was sent for, which conversation sent it) and the time the batch was pasted.
+    A person's prompt in the batch makes it the person's reply. The next reply names
+    only its own prompt."""
+    h = harness
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="q1", conversation_id="conv-1")
+    transcript = [_user("u1", "q1"), _assistant("a1", "A1")]
+    _agent_writes(h.base, "proj", "sid-A", transcript)
+    await h.drain()
+
+    # Three prompts waited out a turn: the orchestrator's, one it sent for a person,
+    # and one from a conversation that does not hold the webhook.
+    now = ts.now_iso()
+    tools._queue_loaded.add("proj")
+    tools._pending_sends["proj"] = [
+        ts.QueuedPrompt("[agent] two", now, conversation_id="conv-1",
+                        session_instance="id-1", prompt_id="p-two"),
+        ts.QueuedPrompt("[from pace] three", now, conversation_id="conv-1",
+                        session_instance="id-1", sent_by="pace", prompt_id="p-three"),
+        ts.QueuedPrompt("[agent] four", now, conversation_id="conv-2",
+                        session_instance="id-1", prompt_id="p-four")]
+    await tools._drain_pending_sends("aidc-proj-dev", "proj")
+    joined = "[agent] two [next message] [from pace] three [next message] [agent] four"
+    assert h.paste_calls[-1] == joined
+
+    transcript += [_user("u2", joined), _assistant("a2", "BATCH ANSWER")]
+    _agent_writes(h.base, "proj", "sid-A", transcript)
+    await h.drain()
+    post = h.metallm.posts[-1]
+    assert post["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
+    body = post["json"]
+    assert body["content"] == "BATCH ANSWER"
+    assert (body["prompt_origin"], body["sent_by"]) == ("person", "pace")
+    assert body["prompts"] == [
+        {"prompt_id": "p-two", "sent_by": "", "conversation_id": "conv-1"},
+        {"prompt_id": "p-three", "sent_by": "pace", "conversation_id": "conv-1"},
+        {"prompt_id": "p-four", "sent_by": "", "conversation_id": "conv-2"}]
+    assert body["pasted_at"] == ts.pasted_at_of(h.state, "proj", "p-four")
+    assert ts.wall_time({"timestamp": body["pasted_at"]}) is not None
+
+    res = await h.send(name="proj", prompt="q5", conversation_id="conv-1")
+    transcript += [_user("u3", "q5"), _assistant("a3", "A5")]
+    _agent_writes(h.base, "proj", "sid-A", transcript)
+    await h.drain()
+    last = h.metallm.posts[-1]["json"]
+    assert last["content"] == "A5" and last["prompt_origin"] == "orchestrator"
+    assert last["prompts"] == [{"prompt_id": res["data"]["prompt_id"], "sent_by": "",
+                                "conversation_id": "conv-1"}]
+    assert "sent_by" not in last
+    assert len(h.metallm.posts) == 3
 
 
 async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
@@ -456,7 +518,8 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
     h = harness
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("first", LONG_AGO, waiting_reason="input_has_text",
-                        conversation_id="conv-1", session_instance="id-1"),
+                        conversation_id="conv-1", session_instance="id-1",
+                        prompt_id="p-first"),
         ts.QueuedPrompt("second", LONG_AGO, waiting_reason="queued_behind",
                         conversation_id="conv-1", session_instance="id-1"),
         ts.QueuedPrompt("just now", ts.now_iso(), waiting_reason="queued_behind",
@@ -475,7 +538,8 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
     assert {k: v for k, v in first.items() if k != "content"} == {
         "ok": True, "source": "agent_watch", "session": "proj",
         "prompt_origin": "orchestrator", "interrupted": False,
-        "error_code": "prompt_waiting"}
+        "error_code": "prompt_waiting",
+        "prompts": [{"prompt_id": "p-first", "sent_by": "", "conversation_id": "conv-1"}]}
     assert first["content"].startswith(
         "[Still waiting: this prompt has been queued for the session 'proj' for ")
     assert ("because someone has unsent text in Claude's input box" in first["content"])
@@ -506,7 +570,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
     h = harness
     tools._pending_sends["proj"] = [
         ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
-                        session_instance="id-1"),
+                        session_instance="id-1", prompt_id="p-eight"),
         ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
     h.session_state = tools.SESSION_GONE
 
@@ -519,7 +583,8 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
                     "could be pasted. It was never seen by the agent.]\n\nreply EIGHT"),
         "ok": False, "source": "agent_watch", "session": "proj",
         "prompt_origin": "orchestrator", "interrupted": False,
-        "error_code": "prompt_dropped"}]
+        "error_code": "prompt_dropped",
+        "prompts": [{"prompt_id": "p-eight", "sent_by": "", "conversation_id": "conv-1"}]}]
     assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
     assert len(list((h.state / "dead-letter").glob("send__proj__*.json"))) == 2
 

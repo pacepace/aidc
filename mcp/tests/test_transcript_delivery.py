@@ -1754,6 +1754,29 @@ class TestTerminalPromptAttribution:
         await _drain(base, state, rec)
         assert [(t.prompt_origin, t.sent_by) for t in rec.turns] == [("person", "u-1"), ("person", "u-1")]
 
+    async def test_a_continuation_of_a_batch_turn_names_the_same_batch(self, tmp_path):
+        """The reply that finishes a pasted batch's work may come in a continuation
+        with no prompt of its own; it names the batch's prompts and paste time too, and
+        the next prompted turn without a batch names none."""
+        base, state, rec, seed = await self._seeded(tmp_path)
+        batch = {"pasted_at": "2026-10-25T10:00:00Z",
+                 "prompts": [{"prompt_id": "p-a", "sent_by": "", "conversation_id": "conv"},
+                             {"prompt_id": "p-b", "sent_by": "u-1", "conversation_id": "c2"}]}
+        ts.record_sent_prompt(state, "sess", "a [next message] b", sent_by="u-1", batch=batch)
+        note = {"type": "user", "uuid": "u2", "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "a [next message] b"), _assistant("a1", "Running."),
+            note, _assistant("a2", "412 passed."),
+            _typed("u3", "typed by hand"), _assistant("a3", "Hi."),
+        ])
+        await _drain(base, state, rec)
+        assert [(t.pasted_at, t.batch) for t in rec.turns] == [
+            (batch["pasted_at"], tuple(batch["prompts"])),
+            (batch["pasted_at"], tuple(batch["prompts"])),
+            ("", ())]
+
     async def test_the_orchestrators_next_prompt_is_not_the_persons(self, tmp_path):
         base, state, rec, seed = await self._seeded(tmp_path)
         ts.record_sent_prompt(state, "sess", "run the suite", sent_by="u-1")
@@ -1855,7 +1878,7 @@ class TestTerminalPromptAttribution:
         updated the prompt is treated as the MCP's own (no note)."""
         base, state, rec, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
-        with patch("aidc_mcp.tools.ts.take_sent_prompt", side_effect=OSError("ro")):
+        with patch("aidc_mcp.tools.ts.take_sent_entry", side_effect=OSError("ro")):
             await _drain(base, state, rec)
         assert rec.turns[0].text == "R"
         assert rec.turns[0].prompt_origin == "orchestrator"

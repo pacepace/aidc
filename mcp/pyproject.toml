@@ -1,6 +1,6 @@
 [project]
 name = "aidc-mcp"
-version = "1.9.9"
+version = "1.9.10"
 description = "aidc control plane: MCP server exposing aidc CLI as tools + resources"
 requires-python = ">=3.14"
 dependencies = [

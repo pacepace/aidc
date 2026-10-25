@@ -1020,10 +1020,17 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
         if entry is not None and by is not None and event == "session_send_queued_by_claude":
             # The answer comes in a turn with no prompt of its own (the running one, or
             # the next one Claude Code runs it in), which takes the session's recorded
-            # origin: make that this prompt's, not the earlier turn's.
-            ts.record_prompt_origin(_WATCHER_STATE_DIR, session,
-                                    "person" if by else "orchestrator", sent_by=by,
-                                    batch=entry.get("batch"))
+            # origin: make that this prompt's, not the earlier turn's. Taken into the
+            # running turn, that turn keeps the batch it opened with, and the reply it
+            # ends with names the joined prompt after its own (_with_joined); run next
+            # on its own, the next turn answers this prompt alone.
+            joined = line.get("type") == "queue-operation"
+            ts.record_prompt_origin(
+                _WATCHER_STATE_DIR, session, "person" if by else "orchestrator", sent_by=by,
+                batch=(ts.last_prompt_batch(_WATCHER_STATE_DIR, session) if joined
+                       else entry.get("batch")))
+            if joined and entry.get("batch"):
+                ts.record_joined_batch(_WATCHER_STATE_DIR, session, entry["batch"])
     except OSError as exc:
         log_event("session_send_record_release_failed", session=session,
                   error_type=type(exc).__name__, error=repr(exc))
@@ -1159,6 +1166,35 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...],
     return typed, sent_by, batch
 
 
+def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | None:
+    """`batch` with every prompt joined into the turn since (deliver="join") after its
+    own, each once; they are answered in this reply. The turn's continuations then name
+    them too. pasted_at stays the turn's own paste, or the first join's without one."""
+    try:
+        joined = ts.take_joined_batches(state_dir, session)
+    except OSError as exc:
+        log_event("transcript_joined_record_failed", session=session,
+                  error_type=type(exc).__name__, error=repr(exc))
+        return batch
+    if not joined:
+        return batch
+    merged = {"pasted_at": batch["pasted_at"] if batch else joined[0]["pasted_at"],
+              "prompts": list(batch["prompts"]) if batch else []}
+    seen = {p["prompt_id"] for p in merged["prompts"]}
+    for b in joined:
+        for p in b["prompts"]:
+            if p["prompt_id"] not in seen:
+                seen.add(p["prompt_id"])
+                merged["prompts"].append(p)
+    origin, sent_by = ts.last_prompt_origin(state_dir, session)
+    try:
+        ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=merged)
+    except OSError as exc:
+        log_event("transcript_origin_record_failed", session=session,
+                  error_type=type(exc).__name__, error=repr(exc))
+    return merged
+
+
 def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
                          batch: dict | None,
                          state_dir: Path) -> tuple[str, str, dict | None]:
@@ -1223,8 +1259,7 @@ async def _inject(container: str, text: str, window: str, *, session: str,
     _unsubmitted_paste.pop(session, None)
     await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
     batch = ({"pasted_at": ts.now_iso(),
-              "prompts": [{"prompt_id": q.prompt_id, "sent_by": q.sent_by,
-                           "conversation_id": q.conversation_id} for q in prompts]}
+              "prompts": [q.batch_entry() for q in prompts]}
              if prompts else None)
     _record_sent(session, text, sent_by, batch)
     # Until the transcript shows this prompt, a follow-up's free check must read the
@@ -1325,6 +1360,11 @@ async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
 
 
 def _persist_queue(name: str) -> None:
+    # The batch in the box is saved with the queue, so a restart still knows it is the
+    # session's (_load_persisted_queue_once restores it).
+    in_box = set(_batch_in_box(name))
+    for q in _pending_sends.get(name, []):
+        q.in_box = q.prompt_id in in_box
     try:
         ts.save_send_queue(_WATCHER_STATE_DIR, name, _pending_sends.get(name, []))
     except OSError as exc:
@@ -1486,9 +1526,8 @@ def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
-                        conversation_id: str = "", paste_attempts: int = 0,
-                        sent_by: str = "", prompt_id: str = "") -> int:
+async def _enqueue_send(name: str, container: str, prompt: ts.QueuedPrompt,
+                        reason: str) -> int:
     """Queue a prompt for pasting when the session frees up; returns queue depth.
 
     Returns 0 when the queue is at _PENDING_MAX_DEPTH and the prompt was refused.
@@ -1501,11 +1540,9 @@ async def _enqueue_send(name: str, container: str, prompt: str, reason: str, *,
     queue = _pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
-    queue.append(ts.QueuedPrompt(text=prompt, enqueued_at=ts.now_iso(),
-                                 paste_attempts=paste_attempts,
-                                 conversation_id=conversation_id,
-                                 session_instance=instance, sent_by=sent_by,
-                                 prompt_id=prompt_id or ts.new_prompt_id()))
+    prompt.session_instance = instance
+    queue.append(prompt)
+    _persist_queue(name)
     await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
     _spawn_drainer(container, name)
     return len(queue)
@@ -1549,8 +1586,7 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
         turn = ts.Turn(terminal_uuid=f"{error_code}-{digest}", text=f"{note}\n\n{q.text}",
                        ok=error_code != "prompt_dropped", prompt_origin="orchestrator",
                        error_code=error_code,
-                       batch=({"prompt_id": q.prompt_id, "sent_by": q.sent_by,
-                               "conversation_id": q.conversation_id},))
+                       batch=(q.batch_entry(),))
 
         async def post_fn(t: ts.Turn, attempt: int, cid: str = q.conversation_id) -> bool:
             return await _post_turn(base, cid, t, attempt=attempt, session=name)
@@ -1690,6 +1726,16 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
         _persist_queue(name)
         return
     _pending_sends[name] = saved + _pending_sends.get(name, [])
+    in_box = []
+    for q in saved:
+        if not q.in_box:
+            break
+        in_box.append(q)
+    if in_box and name not in _unsubmitted_paste:
+        # A batch was pasted into the box and not submitted when the MCP stopped: it is
+        # still the session's to submit as it is, and not a person's unsent text.
+        _unsubmitted_paste[name] = (_BATCH_SEPARATOR.join(q.text for q in in_box),
+                                    tuple(q.prompt_id for q in in_box))
     if saved[0].waiting_reason == "input_has_text":
         # The tmux option outlives the MCP; remember it is showing, so the drainer
         # clears it when the prompt goes in.
@@ -2555,6 +2601,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         if not already_delivered:
             origin, sent_by, batch = _carry_prompt_origin(session, turn, origin, sent_by,
                                                           batch, state_dir)
+            if deliverable:
+                batch = _with_joined(session, batch, state_dir)
         outgoing = dataclasses.replace(
             turn,
             text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
@@ -3785,9 +3833,9 @@ def register(app: Any) -> None:
 
         queued_depth = 0
         sanitized = prompt.replace("\n", " ").strip()
-        # The prompt as one queue entry, whether it goes in now or waits: its id is
-        # what this call returns, what session_queue_cancel takes and what the reply's
-        # `prompts` names, so it is the same id on every path.
+        # The prompt as one queue entry, whether it goes in now or waits (then this
+        # object is what is queued): its id is what this call returns, what
+        # session_queue_cancel takes and what the reply's `prompts` names.
         prompt_conversation = conversation_id or _watched_conversation(name)
         this_prompt = ts.QueuedPrompt(text=sanitized, enqueued_at=ts.now_iso(),
                                       conversation_id=prompt_conversation, sent_by=sent_by)
@@ -3844,11 +3892,8 @@ def register(app: Any) -> None:
                 log_event("tool_call", tool="session_send_paste_failed", session=name,
                           prompt_len=len(prompt))
             if wait_reason:
-                queued_depth = await _enqueue_send(
-                    name, container, sanitized, wait_reason,
-                    conversation_id=prompt_conversation,
-                    paste_attempts=attempts, sent_by=sent_by,
-                    prompt_id=this_prompt.prompt_id)
+                this_prompt.paste_attempts = attempts
+                queued_depth = await _enqueue_send(name, container, this_prompt, wait_reason)
                 if queued_depth == 0:
                     log_event("tool_call", tool="session_send_failed", session=name,
                               prompt_len=len(prompt), reason="queue_full",
@@ -4497,7 +4542,8 @@ def register(app: Any) -> None:
                     outcome = "already_pasted" if pasted_at else "unknown"
             elif position is None:
                 taken = [(i, q) for i, q in listed if q.prompt_id not in in_box]
-                outcome = "cancelled" if taken else "nothing_waiting"
+                outcome = ("cancelled" if taken else "already_pasted" if listed
+                           else "nothing_waiting")
             elif 1 <= position <= len(queue):
                 taken = [listed[position - 1]]
                 if taken[0][1].prompt_id in in_box:

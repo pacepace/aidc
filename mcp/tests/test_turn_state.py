@@ -917,6 +917,43 @@ class TestSendWhileABackgroundAgentRuns:
         assert self.keys == ["Enter"]
         assert set(self.pasted) == {"please look at the parser"}
 
+    async def test_a_batch_left_in_the_box_is_still_the_sessions_after_a_restart(
+            self, session, monkeypatch):
+        """aidc-mcp restarts while a late-drawn paste sits unsubmitted in the box: the
+        prompt is still pasted, so a cancel says too late (it must not take back text
+        that is in the box), and the restarted drainer submits it rather than holding
+        it as a person's unsent text or pasting it again."""
+        send = self._setup(session, monkeypatch, lands=False)
+        first = await send(name="proj", prompt="please look at the parser",
+                           conversation_id="c1")
+        pid = first["data"]["prompt_id"]
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        saved = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+        assert [(q.prompt_id, q.in_box) for q in saved] == [(pid, True)]
+
+        # The restart: everything in memory is gone; the screen still shows the paste.
+        tools._pending_sends.clear()
+        tools._pending_drainers.clear()
+        tools._queue_loaded.clear()
+        tools._unsubmitted_paste.clear()
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        pasted_before = len(self.pasted)
+
+        app = MCPServer("t")
+        tools.register(app)
+        d = (await app._tool_manager._tools["session_queue_cancel"].fn(
+            name="proj", prompt_id=pid))["data"]
+        assert d["outcome"] == "already_pasted" and d["cancelled"] == []
+        for _ in range(300):
+            await asyncio.sleep(0)
+            if "proj" not in tools._pending_sends:
+                break
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert "proj" not in tools._pending_sends
+        assert self.keys == ["Enter"] and len(self.pasted) == pasted_before
+
     async def test_a_running_main_turn_still_queues(self, session, monkeypatch):
         send = self._setup(session, monkeypatch)
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)

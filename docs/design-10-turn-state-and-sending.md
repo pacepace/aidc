@@ -210,7 +210,7 @@ the metallm session and written here before either side builds it.
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
 | `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. Sent only on replies, and only with `metallm.send_speaker: true` (D4), which stays off until MetaLLM's record-without-wake change is deployed. | MCP-27 |
 | `error_code` | string | Present only on a callback that is not a reply, naming what it is: `"prompt_dropped"` (a failure, `ok: false`) or `"prompt_waiting"` (a status, `ok: true`), both below. It never says anything `content` does not. | MCP-33, MCP-36 |
-| `prompts` | list | The `session_send` prompts the turn answers, in paste order, each `{"prompt_id", "sent_by", "conversation_id"}` (`sent_by` `""` for the caller's own; `conversation_id` the conversation that sent it, which may differ from the one this callback goes to). One entry for a prompt pasted alone, several for a batch (S7). A continuation carries its turn's. Absent when no paste of the MCP's opened the turn (a prompt typed at the pane, a task notification with nothing before it) and on `session_resend`. On `prompt_dropped` and `prompt_waiting` it names the one prompt the notice is about. | MCP-44 |
+| `prompts` | list | The `session_send` prompts the turn answers, in paste order, each `{"prompt_id", "sent_by", "conversation_id"}` (`sent_by` `""` for the caller's own; `conversation_id` the conversation that sent it, which may differ from the one this callback goes to). One entry for a prompt pasted alone, several for a batch (S7); a prompt joined into the running turn (`deliver: "join"`) follows the turn's own in the reply that turn ends with. A continuation carries its turn's. Absent when no paste of the MCP's opened the turn (a prompt typed at the pane, a task notification with nothing before it) and on `session_resend`. On `prompt_dropped` and `prompt_waiting` it names the one prompt the notice is about. | MCP-44 |
 | `pasted_at` | string | ISO UTC time the batch carrying those prompts was pasted (the latest paste, when one turn answers several). Present exactly when `prompts` is, on replies. | MCP-44 |
 
 **A prompt that will never be pasted** (MCP-33). A queued prompt leaves the queue unpasted only
@@ -593,11 +593,12 @@ has had, and the last recorded waiting reason. File:
     { "text": "...", "enqueued_at": "2026-09-17T11:58:02Z",
       "paste_attempts": 0, "waiting_reason": "input_has_text",
       "conversation_id": "...", "session_instance": "...", "waiting_notified": false,
-      "sent_by": "", "prompt_id": "p-0123456789abcdef" } ] }
+      "sent_by": "", "prompt_id": "p-0123456789abcdef", "in_box": false } ] }
 ```
 
 `prompt_id` is the id `session_send` returned (a queue saved before ids existed gets fresh ones
-on load); `conversation_id` is where to report the prompt if it is dropped (`""` without a webhook);
+on load); `in_box` is true while the prompt is part of a batch pasted into the input box and
+not yet submitted (S7), so a restart still treats it as pasted; `conversation_id` is where to report the prompt if it is dropped (`""` without a webhook);
 `session_instance` is the session's network id when the prompt was accepted; `waiting_notified`
 is true once its conversation has been told it is still waiting (D5).
 
@@ -756,18 +757,27 @@ the person's reply, as for a turn answering several prompts) and the batch itsel
 prompt's `prompt_id`, `sent_by`, `conversation_id`, and `pasted_at`). The watcher matches the
 turn's prompt to that record as it always did and sends the batch as `prompts` and `pasted_at`
 (D5). The prompt-origin record carries the batch too, so the continuation that finishes the
-work names the same prompts. The receiver attributes per prompt from `prompts`.
+work names the same prompts. A prompt joined into a running turn (`deliver: "join"`) is
+answered in the reply that turn ends with: when `_prompt_arrived` sees Claude Code take it in
+(its queue-operation), its batch waits in `<session>.joined-batches.json`, and the next reply
+delivered names it after the turn's own prompts (`_with_joined`). A join that Claude Code runs
+next as its own turn (`promptSource: "queued"`) becomes that turn's batch instead. The receiver
+attributes per prompt from `prompts`.
 
 **Cancel by id.** `session_queue_cancel(prompt_id=...)` takes back that prompt only and
 answers `outcome`: `cancelled`; `already_pasted`, with `pasted_at` (from
 `<session>.pasted-prompts.json`, the last 500 pasted ids, so it holds across a restart); or
 `unknown`. `position` keeps working (`outcome: "cancelled"` too), and with neither every
-waiting prompt is taken back (`"cancelled"`, or `"nothing_waiting"`); both at once is
+waiting prompt is taken back (`"cancelled"`; `"already_pasted"` when the only ones queued are a
+batch in the box; `"nothing_waiting"`); both at once is
 `invalid_argument`. Atomic against the paste: the drainer chooses its batch and pastes it while
 holding the session's send lock, and the cancel decides under the same lock, so a prompt is in
 the pasted batch or cancelled, never both. A batch pasted into the box and not yet submitted
 (the late-draw case of S2) counts as pasted: the drainer submits exactly that batch, whatever
 queued since waits, and a cancel of one of its prompts is `already_pasted` (`pasted_at` null).
+That state is saved with the queue (`in_box`, S4) and restored when the queue is loaded, so after
+an `aidc-mcp` restart the batch is still the session's: the drainer submits the text it finds in
+the box, and a cancel still says `already_pasted`.
 
 ## Out of scope
 

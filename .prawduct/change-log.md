@@ -87,9 +87,44 @@ late-drawn batch submitted as it was with a later prompt waiting, legacy queue i
 pasted-id store. Mutation-checked: with the cancel's lock removed, the during-paste test fails;
 with the batch chosen before the drainer takes the lock, the lock-first test fails.
 
-**Open for metallm:** `prompts` is a new callback field beside the requested `pasted_at`;
-D5 says body changes are agreed with the metallm session, which should confirm it reads
-`prompts` for per-prompt attribution.
+**Review fixes:** cumulative Critic rev-20261025T061335Z-87e7a73a: 0 blocking, 4 warnings,
+7 notes. Fixed:
+- A batch left unsubmitted in the input box is saved with the queue (`QueuedPrompt.in_box`,
+  mirrored from `_unsubmitted_paste` on every save) and restored on load. After an aidc-mcp
+  restart a cancel of it is still already_pasted, and the drainer submits the text it finds
+  in the box. Test: `test_a_batch_left_in_the_box_is_still_the_sessions_after_a_restart`. It
+  fails with the restore removed.
+- A prompt joined into a running turn (`deliver="join"`, seen as Claude Code's
+  queue-operation) keeps its batch in `<session>.joined-batches.json`. The next delivered reply
+  names it after the turn's own prompts (`_with_joined`), where before the turn's opening batch
+  overwrote it. A join that Claude Code runs as its own next turn becomes that turn's batch.
+  Test: `test_a_turn_opened_by_a_paste_names_a_prompt_joined_into_it_too`. It fails with the
+  merge removed.
+- Cancel-all with only an in-box batch queued answers already_pasted (was nothing_waiting).
+- `QueuedPrompt.batch_entry()` builds the per-prompt record at both sites. `_enqueue_send`
+  queues the `QueuedPrompt` that `session_send` built, so the comment that called it "one queue
+  entry" is now true. `session_status`'s `send_queue` `prompt_id` has a test.
+
+Accepted: R-9 (`prompts` is additive, and metallm's confirmation is a release step, below),
+R-10 (no open backlog item is in this area) and R-11 (the records pass found the entry
+accurate).
+
+**Live run (2026-10-25):** this branch's `aidc_mcp` ran in-process against a throwaway
+session, `batchprobe`, created with `aidc create` and killed afterwards. It used the real
+docker exec, tmux and transcript mirror, and callbacks went to a local HTTP sink, never
+metallm. P0 was sent and opened a turn. While that turn ran, P1 (the agent's, 59 chars) and P2
+(sent_by `pace-probe`, about 2.6k chars) both queued. When the session was free they went in
+as one paste of 2683 chars, which the input box showed as `[Pasted text #1]`. The transcript's
+prompt line fingerprint-matched the recorded joined text. No send record was left over, and
+there was no terminal-typed note. Callbacks: P0's reply was `prompt_origin: orchestrator` with
+`prompts` naming P0 alone. The batch reply ("ALPHA ... BRAVO") was `prompt_origin: person`,
+`sent_by: pace-probe`, with `prompts` naming [P1, P2] in order, each with its own `sent_by`,
+plus `pasted_at`. The probe's mirrored transcripts and Claude project dir were removed. No
+existing session was touched.
+
+**Open for metallm:** `prompts` is a new callback field beside the requested `pasted_at`.
+D5 says body changes are agreed with the metallm session, so that session should confirm it
+reads `prompts` for per-prompt attribution before release.
 
 ## 2026-10-24: A session's compose file outlives /tmp (v1.9.9)
 

@@ -26,7 +26,8 @@ Each release also has full notes on the [GitHub releases page](https://github.co
   `cancelled`, `already_pasted` (too late, with `pasted_at`) or `unknown`. A prompt is either in
   the pasted batch or cancelled, never both. `position` still works.
 - **The reply callback names the prompts it answers**: `prompts` (`prompt_id`, `sent_by`,
-  `conversation_id`, in paste order) and `pasted_at`, the time their batch was pasted. The
+  `conversation_id`, in paste order) and `pasted_at`, the time their batch was pasted. A prompt
+  joined into a running turn (`deliver: "join"`) is named by the reply that turn ends with. The
   `prompt_dropped` and `prompt_waiting` notices carry `prompts` for their one prompt.
   `session_status`'s `send_queue` lists each waiting prompt's `prompt_id`.
 

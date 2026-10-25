@@ -1640,6 +1640,17 @@ class QueuedPrompt:
     # Stable id session_send returns, so the caller can cancel this prompt alone
     # (session_queue_cancel) and match it to the reply that answers it.
     prompt_id: str = field(default_factory=lambda: new_prompt_id())
+    # True while this prompt is part of a batch pasted into Claude's input box and not
+    # yet submitted (tools._unsubmitted_paste). Persisted so that, after an aidc-mcp
+    # restart, the batch is still the session's: the drainer submits it as it is, and a
+    # cancel of it is "already pasted" rather than taking back text left in the box.
+    in_box: bool = False
+
+    def batch_entry(self) -> dict[str, str]:
+        """What a batch records about this prompt, and the reply callback's
+        ``prompts`` carries (BATCH_PROMPT_KEYS)."""
+        return {"prompt_id": self.prompt_id, "sent_by": self.sent_by,
+                "conversation_id": self.conversation_id}
 
 
 def new_prompt_id() -> str:
@@ -1684,7 +1695,8 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     session_instance=str(e.get("session_instance", "")),
                                     waiting_notified=e.get("waiting_notified") is True,
                                     sent_by=str(e.get("sent_by", "")),
-                                    prompt_id=str(e.get("prompt_id") or new_prompt_id()))
+                                    prompt_id=str(e.get("prompt_id") or new_prompt_id()),
+                                    in_box=e.get("in_box") is True)
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
@@ -1796,6 +1808,45 @@ def take_sent_entry(base_dir: Path, session: str, text: str, *,
             _save_sent_prompts(base_dir, session, entries)
             return e
     return None
+
+
+# --- joined batches ------------------------------------------------------------
+#
+# A prompt pasted into a running turn (session_send deliver="join") is answered inside
+# that turn, which opened with prompts of its own. Its batch waits here, per session,
+# until the watcher delivers the next reply, which names it after the turn's own.
+
+def joined_batches_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{slug(session)}.joined-batches.json"
+
+
+def record_joined_batch(base_dir: Path, session: str, batch: dict) -> None:
+    """Remember a joined prompt's batch for the next delivered reply. Atomic write."""
+    valid = _valid_batch(batch)
+    if not valid:
+        return
+    pending = take_joined_batches(base_dir, session, remove=False)
+    pending.append(valid)
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = joined_batches_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps(pending[-_SENT_PROMPTS_MAX:]), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def take_joined_batches(base_dir: Path, session: str, *, remove: bool = True) -> list[dict]:
+    """The joined batches waiting for a reply, oldest first, removed unless
+    ``remove`` is False. A missing or corrupt file is none (never raises on read)."""
+    path = joined_batches_path(base_dir, session)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        data = []
+    out = [b for b in (_valid_batch(x) for x in data) if b] if isinstance(data, list) else []
+    if remove and out:
+        path.unlink(missing_ok=True)
+    return out
 
 
 # --- pasted prompt ids ----------------------------------------------------------

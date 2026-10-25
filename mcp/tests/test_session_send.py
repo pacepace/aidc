@@ -549,7 +549,8 @@ async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enque
         return tools.SESSION_EXISTS, "id-1"
 
     monkeypatch.setattr(tools, "_session_instance", session_instance)
-    await tools._enqueue_send("proj", "aidc-proj-dev", "new", "claude_busy")
+    await tools._enqueue_send("proj", "aidc-proj-dev", ts.QueuedPrompt("new", ts.now_iso()),
+                              "claude_busy")
     assert [q.text for q in tools._pending_sends["proj"]] == ["kept", "new"]
 
 
@@ -664,11 +665,13 @@ async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeyp
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "ok", "stderr": ""})
     tools._pending_sends["proj"] = [
-        ts.QueuedPrompt("x" * 300, "2026-09-17T02:00:00Z", 2, "paste_failing")]
+        ts.QueuedPrompt("x" * 300, "2026-09-17T02:00:00Z", 2, "paste_failing",
+                        prompt_id="p-waiting")]
 
     res = await status(name="proj")
 
     [entry] = res["data"]["send_queue"]
+    assert entry["prompt_id"] == "p-waiting"
     assert entry["prompt_preview"] == "x" * 120
     assert entry["waiting_reason"] == "paste_failing"
     assert "failing" in entry["waiting_because"]
@@ -1114,6 +1117,18 @@ async def test_cancel_by_position_still_takes_back_that_prompt(wiring, idle_stat
     assert [q.prompt_id for q in tools._pending_sends["proj"]] == ids[:2]
     for task in tools._pending_drainers.values():
         task.cancel()
+
+
+async def test_cancel_all_leaves_a_batch_in_the_box_and_says_so(wiring, idle_state):
+    """A batch pasted into the box and not submitted is the session's: taking back every
+    waiting prompt leaves it, and the answer says it is too late, not that nothing waits."""
+    app, _ = _make_send()
+    tools._queue_loaded.add("proj")
+    tools._pending_sends["proj"] = [ts.QueuedPrompt("in the box", ts.now_iso(), prompt_id="p-a")]
+    tools._unsubmitted_paste["proj"] = ("in the box", ("p-a",))
+    d = (await _cancel_tool(app)(name="proj"))["data"]
+    assert d["outcome"] == "already_pasted" and d["cancelled"] == []
+    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ["p-a"]
 
 
 def _in_batch_xor_cancelled(pasted: list[str], text: str, outcome: str) -> None:

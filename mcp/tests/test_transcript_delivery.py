@@ -1754,6 +1754,37 @@ class TestTerminalPromptAttribution:
         await _drain(base, state, rec)
         assert [(t.prompt_origin, t.sent_by) for t in rec.turns] == [("person", "u-1"), ("person", "u-1")]
 
+    async def test_a_turn_opened_by_a_paste_names_a_prompt_joined_into_it_too(self, tmp_path):
+        """deliver="join" pastes into the running turn, which answers the joined prompt
+        in the reply it ends with. That reply names the turn's own paste and then the
+        joined prompt; the next reply does not name the joined one again."""
+        from aidc_mcp import tools
+        base, state = tmp_path / "t", tools._WATCHER_STATE_DIR
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        own = {"pasted_at": "2026-10-25T10:00:00Z",
+               "prompts": [{"prompt_id": "p-open", "sent_by": "", "conversation_id": "conv"}]}
+        join = {"pasted_at": "2026-10-25T10:01:00Z",
+                "prompts": [{"prompt_id": "p-join", "sent_by": "u-1", "conversation_id": "conv"}]}
+        ts.record_sent_prompt(state, "sess", "open the task", batch=own)
+        ts.record_sent_prompt(state, "sess", "also check the docs", sent_by="u-1", batch=join)
+        queued = {"type": "queue-operation", "operation": "enqueue",
+                  "content": "also check the docs"}
+        running = seed + [_typed("u1", "open the task"), queued]
+        assert tools._prompt_arrived("sess", "also check the docs", 0.0, running)
+
+        _mk_transcript(base, "sess", "sid1", running + [_assistant("a1", "Done, docs too.")])
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "sid1", running + [
+            _assistant("a1", "Done, docs too."), _typed("u2", "typed by hand"),
+            _assistant("a2", "Hi.")])
+        await _drain(base, state, rec)
+        assert [[p["prompt_id"] for p in t.batch] for t in rec.turns] == [
+            ["p-open", "p-join"], []]
+        assert rec.turns[0].pasted_at == own["pasted_at"]
+
     async def test_a_continuation_of_a_batch_turn_names_the_same_batch(self, tmp_path):
         """The reply that finishes a pasted batch's work may come in a continuation
         with no prompt of its own; it names the batch's prompts and paste time too, and

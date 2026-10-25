@@ -38,7 +38,7 @@
 
 ## 2026-10-25: Batch on free, stable prompt ids, cancel by id
 
-<!-- prawduct: scope=batch-on-free-cancel-by-id -->
+<!-- prawduct: scope=batch-on-free-cancel-by-id | release=v1.9.10 -->
 
 **Why:** asked by the metallm session, approved by Pace 2026-10-25. While a session is busy the
 person's and the agent's prompts pile up in the send queue, and each went in on its own idle as

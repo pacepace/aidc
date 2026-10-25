@@ -205,15 +205,18 @@ def queued(facts, monkeypatch):
     monkeypatch.setattr(tools, "_session_instance", instance)
     tools._queue_loaded.add("proj")
     tools._pending_sends["proj"] = [
-        ts.QueuedPrompt("first prompt", "2026-10-14T09:00:00Z", conversation_id="c-1"),
-        ts.QueuedPrompt("second prompt", "2026-10-14T09:01:00Z", conversation_id="c-2"),
+        ts.QueuedPrompt("first prompt", "2026-10-14T09:00:00Z", conversation_id="c-1",
+                        prompt_id="p-1"),
+        ts.QueuedPrompt("second prompt", "2026-10-14T09:01:00Z", conversation_id="c-2",
+                        prompt_id="p-2"),
     ]
     tools._persist_queue("proj")
 
 
 async def test_queue_cancel_takes_back_one_waiting_prompt(queued):
     d = (await _tool("session_queue_cancel")(name="proj", position=2))["data"]
-    assert d["cancelled"] == [{"position": 2, "prompt_preview": "second prompt",
+    assert d["outcome"] == "cancelled"
+    assert d["cancelled"] == [{"prompt_id": "p-2", "position": 2, "prompt_preview": "second prompt",
                                "enqueued_at": "2026-10-14T09:01:00Z", "conversation_id": "c-2"}]
     assert d["left"] == 1 and [q.text for q in tools._pending_sends["proj"]] == ["first prompt"]
     assert d["running"] == {"working": True, "working_on": "fix the flaky test",

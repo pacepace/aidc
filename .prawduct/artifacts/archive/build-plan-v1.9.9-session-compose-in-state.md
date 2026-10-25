@@ -3,7 +3,7 @@ artifact: build-plan
 version: 1
 scope: session-compose-in-state
 branch: fix/session-compose-in-state
-lifecycle: active
+lifecycle: archived
 ---
 
 # Build Plan — a session's compose file outlives /tmp

@@ -872,7 +872,7 @@ class TestSendWhileABackgroundAgentRuns:
         """A caller that does not queue (session_run) gave up on paste A; when A
         shows later, a following send must not paste B after it and submit "A B"."""
         send = self._setup(session, monkeypatch)
-        tools._unsubmitted_paste["proj"] = "the first prompt"
+        tools._unsubmitted_paste["proj"] = ("the first prompt", ())
         session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
         assert await session.check() == "input_has_text"
         res = await send(name="proj", prompt="the second prompt", conversation_id="c1")
@@ -884,11 +884,75 @@ class TestSendWhileABackgroundAgentRuns:
     async def test_a_late_paste_that_is_not_the_queue_head_is_held(self, session,
                                                                     monkeypatch):
         self._setup(session, monkeypatch)
-        tools._unsubmitted_paste["proj"] = "the first prompt"
+        tools._unsubmitted_paste["proj"] = ("the first prompt", ("p-first",))
         tools._pending_sends["proj"] = [ts.QueuedPrompt(text="another prompt",
                                                         enqueued_at=ts.now_iso())]
         session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
         assert await session.check() == "input_has_text"
+
+    async def test_a_late_paste_is_submitted_as_it_was_and_what_queued_after_waits(
+            self, session, monkeypatch):
+        """A prompt pasted into the box late is the session's: a cancel of it is too
+        late, and a prompt sent meanwhile is not added to it (the box already holds
+        the text); it goes in on its own afterwards."""
+        send = self._setup(session, monkeypatch, lands=False)
+        first = await send(name="proj", prompt="please look at the parser",
+                           conversation_id="c1")
+        second = await send(name="proj", prompt="and the lexer", conversation_id="c1")
+        assert second["data"]["status"] == "queued"
+        cancel = MCPServer("t")
+        tools.register(cancel)
+        d = (await cancel._tool_manager._tools["session_queue_cancel"].fn(
+            name="proj", prompt_id=first["data"]["prompt_id"]))["data"]
+        assert d["outcome"] == "already_pasted" and d["note"].endswith("being submitted")
+
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        for _ in range(300):
+            await asyncio.sleep(0)
+            if tools._queue_ids("proj") == [second["data"]["prompt_id"]]:
+                break
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert tools._queue_ids("proj") == [second["data"]["prompt_id"]]
+        assert self.keys == ["Enter"]
+        assert set(self.pasted) == {"please look at the parser"}
+
+    async def test_a_batch_left_in_the_box_is_still_the_sessions_after_a_restart(
+            self, session, monkeypatch):
+        """aidc-mcp restarts while a late-drawn paste sits unsubmitted in the box: the
+        prompt is still pasted, so a cancel says too late (it must not take back text
+        that is in the box), and the restarted drainer submits it rather than holding
+        it as a person's unsent text or pasting it again."""
+        send = self._setup(session, monkeypatch, lands=False)
+        first = await send(name="proj", prompt="please look at the parser",
+                           conversation_id="c1")
+        pid = first["data"]["prompt_id"]
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        saved = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+        assert [(q.prompt_id, q.in_box) for q in saved] == [(pid, True)]
+
+        # The restart: everything in memory is gone; the screen still shows the paste.
+        tools._pending_sends.clear()
+        tools._pending_drainers.clear()
+        tools._queue_loaded.clear()
+        tools._unsubmitted_paste.clear()
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        pasted_before = len(self.pasted)
+
+        app = MCPServer("t")
+        tools.register(app)
+        d = (await app._tool_manager._tools["session_queue_cancel"].fn(
+            name="proj", prompt_id=pid))["data"]
+        assert d["outcome"] == "already_pasted" and d["cancelled"] == []
+        for _ in range(300):
+            await asyncio.sleep(0)
+            if "proj" not in tools._pending_sends:
+                break
+        for task in tools._pending_drainers.values():
+            task.cancel()
+        assert "proj" not in tools._pending_sends
+        assert self.keys == ["Enter"] and len(self.pasted) == pasted_before
 
     async def test_a_running_main_turn_still_queues(self, session, monkeypatch):
         send = self._setup(session, monkeypatch)
@@ -1149,7 +1213,8 @@ class TestSendDeliverJoin:
         async def tainted(name):
             return {"at": "2026-10-22T00:00:00Z", "trigger": "blocklist", "domain": "x"}
         monkeypatch.setattr(tools.sf, "taint_or_none", tainted)
-        assert await tools._join_running_turn("aidc-proj-dev", "proj", JOIN, "") == (
+        assert await tools._join_running_turn(
+            "aidc-proj-dev", "proj", ts.QueuedPrompt(JOIN, ts.now_iso())) == (
             "session_tainted")
         assert self.pasted == []
 

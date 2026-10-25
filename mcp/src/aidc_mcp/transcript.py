@@ -122,6 +122,12 @@ class Turn:
     # was typed at the terminal, "agent" otherwise. Sent only when the aidc setting
     # metallm.send_speaker is on (design 10 D4).
     speaker: str = field(default="", compare=False)
+    # Set by the watcher at delivery time from the send record: the time the batch
+    # this turn answers was pasted (ISO UTC), and that batch's prompts in paste order
+    # as ``{"prompt_id", "sent_by", "conversation_id"}``. Empty for a turn no paste of
+    # the MCP's opened. Delivery metadata, not what the turn is.
+    pasted_at: str = field(default="", compare=False)
+    batch: tuple[dict, ...] = field(default=(), compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -1512,8 +1518,35 @@ def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
             continue
         if now - at <= _SENT_PROMPTS_TTL_S:
             by = e.get("by")
-            out.append({"fp": e["fp"], "at": at, "by": by if isinstance(by, str) else ""})
+            entry = {"fp": e["fp"], "at": at, "by": by if isinstance(by, str) else ""}
+            batch = _valid_batch(e.get("batch"))
+            if batch:
+                entry["batch"] = batch
+            out.append(entry)
     return out
+
+
+#: What a batch records about each prompt in it, and what the reply callback's
+#: ``prompts`` carries.
+BATCH_PROMPT_KEYS = ("prompt_id", "sent_by", "conversation_id")
+
+
+def _valid_batch(raw: object) -> dict | None:
+    """A send record's or origin record's ``batch`` as ``{"pasted_at": str,
+    "prompts": [{"prompt_id", "sent_by", "conversation_id"}]}``, or None when it is
+    missing or not that shape (an entry written before batches existed)."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("pasted_at"), str):
+        return None
+    prompts = raw.get("prompts")
+    if not isinstance(prompts, list):
+        return None
+    clean = []
+    for p in prompts:
+        if not (isinstance(p, dict) and isinstance(p.get("prompt_id"), str)):
+            return None
+        clean.append({k: p[k] if isinstance(p.get(k), str) else ""
+                      for k in BATCH_PROMPT_KEYS})
+    return {"pasted_at": raw["pasted_at"], "prompts": clean}
 
 
 def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> None:
@@ -1537,17 +1570,30 @@ PROMPT_ORIGINS = ("terminal", "person", "orchestrator")
 
 
 def record_prompt_origin(base_dir: Path, session: str, origin: str, *, sent_by: str = "",
-                         now_fn=time.time) -> None:
+                         batch: dict | None = None, now_fn=time.time) -> None:
     """Remember whose prompt ``session``'s latest prompted turn answered (one of
-    PROMPT_ORIGINS, and for "person" who sent it), so a continuation of that turn
-    can say so. Atomic write (temp + rename), matching save_watermark."""
+    PROMPT_ORIGINS, and for "person" who sent it), and the pasted batch it answered
+    (see _valid_batch; None when no batch of the MCP's opened it), so a continuation
+    of that turn can say so. Atomic write (temp + rename), matching save_watermark."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     path = prompt_origin_path(base, session)
     tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps({"origin": origin, "sent_by": sent_by, "at": now_fn()}),
-                   encoding="utf-8")
+    record: dict = {"origin": origin, "sent_by": sent_by, "at": now_fn()}
+    if batch:
+        record["batch"] = batch
+    tmp.write_text(json.dumps(record), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def last_prompt_batch(base_dir: Path, session: str) -> dict | None:
+    """The pasted batch ``session``'s latest prompted turn answered, or None (none on
+    record, or a missing or corrupt file; never raises)."""
+    try:
+        data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return _valid_batch(data.get("batch")) if isinstance(data, dict) else None
 
 
 def last_prompt_origin(base_dir: Path, session: str) -> tuple[str, str]:
@@ -1591,6 +1637,25 @@ class QueuedPrompt:
     # session_send's ``sent_by``: the person the caller sent it for, "" for the
     # caller's own prompt. Recorded with the paste, so the reply says whose it is.
     sent_by: str = ""
+    # Stable id session_send returns, so the caller can cancel this prompt alone
+    # (session_queue_cancel) and match it to the reply that answers it.
+    prompt_id: str = field(default_factory=lambda: new_prompt_id())
+    # True while this prompt is part of a batch pasted into Claude's input box and not
+    # yet submitted (tools._unsubmitted_paste). Persisted so that, after an aidc-mcp
+    # restart, the batch is still the session's: the drainer submits it as it is, and a
+    # cancel of it is "already pasted" rather than taking back text left in the box.
+    in_box: bool = False
+
+    def batch_entry(self) -> dict[str, str]:
+        """What a batch records about this prompt, and the reply callback's
+        ``prompts`` carries (BATCH_PROMPT_KEYS)."""
+        return {"prompt_id": self.prompt_id, "sent_by": self.sent_by,
+                "conversation_id": self.conversation_id}
+
+
+def new_prompt_id() -> str:
+    """A fresh prompt id: "p-" and 16 hex digits, unique for any practical queue."""
+    return "p-" + os.urandom(8).hex()
 
 
 def send_queue_path(base_dir: Path, session: str) -> Path:
@@ -1629,7 +1694,9 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     conversation_id=str(e.get("conversation_id", "")),
                                     session_instance=str(e.get("session_instance", "")),
                                     waiting_notified=e.get("waiting_notified") is True,
-                                    sent_by=str(e.get("sent_by", "")))
+                                    sent_by=str(e.get("sent_by", "")),
+                                    prompt_id=str(e.get("prompt_id") or new_prompt_id()),
+                                    in_box=e.get("in_box") is True)
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
@@ -1692,14 +1759,19 @@ def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
 
 
 def record_sent_prompt(base_dir: Path, session: str, text: str, *, sent_by: str = "",
-                       now_fn=time.time) -> None:
+                       batch: dict | None = None, now_fn=time.time) -> None:
     """Remember that the MCP injected ``text`` into ``session``'s pane, for the
-    person ``sent_by`` names ("" when it is the caller's own). Call only after the
-    paste succeeded, so a prompt that never reached Claude is not on record to
-    mis-claim a person's identical words later."""
+    person ``sent_by`` names ("" when it is the caller's own), and the batch of
+    prompts the paste carried (``{"pasted_at", "prompts"}``, see _valid_batch), which
+    the reply is matched back to. Call only after the paste succeeded, so a prompt
+    that never reached Claude is not on record to mis-claim a person's identical
+    words later."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
-    entries.append({"fp": prompt_fingerprint(text), "at": now, "by": sent_by})
+    entry: dict = {"fp": prompt_fingerprint(text), "at": now, "by": sent_by}
+    if batch:
+        entry["batch"] = batch
+    entries.append(entry)
     del entries[:-_SENT_PROMPTS_MAX]
     _save_sent_prompts(base_dir, session, entries)
 
@@ -1719,6 +1791,14 @@ def take_sent_prompt(base_dir: Path, session: str, text: str, *,
     Removes ONE entry per call so the orchestrator sending the same words twice
     ("continue") is matched twice, and a person typing those words a third time
     is not."""
+    entry = take_sent_entry(base_dir, session, text, now_fn=now_fn)
+    return None if entry is None else entry["by"]
+
+
+def take_sent_entry(base_dir: Path, session: str, text: str, *,
+                    now_fn=time.time) -> dict | None:
+    """take_sent_prompt, returning the whole entry: ``by``, and ``batch`` when the
+    paste carried one."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
     fp = prompt_fingerprint(text)
@@ -1726,8 +1806,96 @@ def take_sent_prompt(base_dir: Path, session: str, text: str, *,
         if e["fp"] == fp:
             del entries[i]
             _save_sent_prompts(base_dir, session, entries)
-            return e["by"]
+            return e
     return None
+
+
+# --- joined batches ------------------------------------------------------------
+#
+# A prompt pasted into a running turn (session_send deliver="join") is answered inside
+# that turn, which opened with prompts of its own. Its batch waits here, per session,
+# until the watcher delivers the next reply, which names it after the turn's own.
+
+def joined_batches_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{slug(session)}.joined-batches.json"
+
+
+def record_joined_batch(base_dir: Path, session: str, batch: dict) -> None:
+    """Remember a joined prompt's batch for the next delivered reply. Atomic write."""
+    valid = _valid_batch(batch)
+    if not valid:
+        return
+    pending = take_joined_batches(base_dir, session, remove=False)
+    pending.append(valid)
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = joined_batches_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps(pending[-_SENT_PROMPTS_MAX:]), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def take_joined_batches(base_dir: Path, session: str, *, remove: bool = True) -> list[dict]:
+    """The joined batches waiting for a reply, oldest first, removed unless
+    ``remove`` is False. A missing or corrupt file is none (never raises on read)."""
+    path = joined_batches_path(base_dir, session)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        data = []
+    out = [b for b in (_valid_batch(x) for x in data) if b] if isinstance(data, list) else []
+    if remove and out:
+        path.unlink(missing_ok=True)
+    return out
+
+
+# --- pasted prompt ids ----------------------------------------------------------
+#
+# Which prompt ids have been pasted, and when, so session_queue_cancel answers a
+# prompt that already went in "too late" rather than "unknown", across a restart too.
+# Per session, newest last, capped.
+
+_PASTED_IDS_MAX = 500
+
+
+def pasted_ids_path(base_dir: Path, session: str) -> Path:
+    return Path(base_dir) / f"{slug(session)}.pasted-prompts.json"
+
+
+def _load_pasted_ids(base_dir: Path, session: str) -> list[dict]:
+    try:
+        data = json.loads(pasted_ids_path(base_dir, session).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict) and isinstance(e.get("id"), str)
+            and isinstance(e.get("at"), str)]
+
+
+def record_pasted_ids(base_dir: Path, session: str, prompt_ids: Sequence[str],
+                      pasted_at: str) -> None:
+    """Remember that these prompts were pasted at ``pasted_at``. Atomic write."""
+    if not prompt_ids:
+        return
+    entries = _load_pasted_ids(base_dir, session)
+    entries.extend({"id": i, "at": pasted_at} for i in prompt_ids)
+    del entries[:-_PASTED_IDS_MAX]
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    path = pasted_ids_path(base, session)
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def pasted_at_of(base_dir: Path, session: str, prompt_id: str) -> str:
+    """When the prompt ``prompt_id`` was pasted into ``session``, or "" when it is
+    not on record. A missing or corrupt file is "" (never raises)."""
+    for e in reversed(_load_pasted_ids(base_dir, session)):
+        if e["id"] == prompt_id:
+            return e["at"]
+    return ""
 
 
 def consume_sent_prompt(base_dir: Path, session: str, text: str, *,

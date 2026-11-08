@@ -37,6 +37,11 @@ def _user(uuid, text):
             "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
 
 
+def _sent(text, conversation_id="conv-1"):
+    """`text` as session_send pastes it (and so as the transcript echoes it)."""
+    return ts.frame_prompt(text, conversation_id=conversation_id)
+
+
 def _assistant(uuid, text, stop="end_turn"):
     return {"type": "assistant", "uuid": uuid,
             "message": {"role": "assistant", "content": [{"type": "text", "text": text}],
@@ -213,7 +218,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     assert res["ok"] is True
     assert res["data"]["status"] == "sent"
     assert "proj" in tools._session_watchers          # webhook opened
-    assert h.paste_calls == ["what does foo() do?"]    # prompt actually injected
+    assert h.paste_calls == [_sent("what does foo() do?")]    # prompt actually injected
     # Baseline anchored forward with nothing to skip (fresh session).
     mark = ts.load_watermark(h.state, "proj", "conv-1")
     assert mark.last_delivered_uuid == ""
@@ -221,7 +226,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     # The agent (deterministic, no AI) produces its reply: the injected prompt +
     # a KNOWN assistant answer land in a brand-new transcript file.
     _agent_writes(h.base, "proj", "sid-A", [
-        _user("u1", "what does foo() do?"),
+        _user("u1", h.paste_calls[-1]),
         _assistant("a1", "foo() returns the answer."),
     ])
 
@@ -276,7 +281,7 @@ async def test_forward_only_backlog_not_replayed_only_new_reply(harness):
     _agent_writes(h.base, "proj", "sid-A", [
         _user("u1", "old q1"), _assistant("old1", "OLD ANSWER 1"),
         _user("u2", "old q2"), _assistant("old2", "OLD ANSWER 2"),
-        _user("u3", "new question"), _assistant("a3", "THE NEW ANSWER"),
+        _user("u3", _sent("new question")), _assistant("a3", "THE NEW ANSWER"),
     ])
     await h.drain()
 
@@ -292,14 +297,14 @@ async def test_multi_turn_back_and_forth_each_reply_once(harness):
 
     # Turn 1.
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "A1")])
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "A1")])
     await h.drain()
 
     # Turn 2 (watcher already open — no re-baseline, continues forward).
     await h.send(name="proj", prompt="q2", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [
-        _user("u1", "q1"), _assistant("a1", "A1"),
-        _user("u2", "q2"), _assistant("a2", "A2"),
+        _user("u1", _sent("q1")), _assistant("a1", "A1"),
+        _user("u2", _sent("q2")), _assistant("a2", "A2"),
     ])
     await h.drain()
 
@@ -316,7 +321,7 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    transcript = [_user("u1", "q1"), _assistant("a1", "A1")]
+    transcript = [_user("u1", _sent("q1")), _assistant("a1", "A1")]
     _agent_writes(h.base, "proj", "sid-A", transcript)
     await h.drain()
 
@@ -351,7 +356,7 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     assert ts.wall_time({"timestamp": body["pasted_at"]}) is not None
 
     res = await h.send(name="proj", prompt="q5", conversation_id="conv-1")
-    transcript += [_user("u3", "q5"), _assistant("a3", "A5")]
+    transcript += [_user("u3", _sent("q5")), _assistant("a3", "A5")]
     _agent_writes(h.base, "proj", "sid-A", transcript)
     await h.drain()
     last = h.metallm.posts[-1]["json"]
@@ -372,7 +377,7 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
     (h.base / "proj").mkdir(parents=True)
 
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q"), _assistant("a1", "UNDELIVERABLE")])
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q")), _assistant("a1", "UNDELIVERABLE")])
     await h.drain()
 
     dead = list((h.state / "dead-letter").glob("*.json"))
@@ -397,7 +402,7 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     for task in tools._session_watchers.values():
         task.cancel()
     tools._session_watchers.clear()
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "reply SEVEN"),
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("reply SEVEN")),
                                             _assistant("a1", "SEVEN")])
 
     await tools.resume_on_startup(h.app)
@@ -466,7 +471,7 @@ async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
     monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
-    objs = [_user("u1", "from the orchestrator"), _assistant("a1", "ONE")]
+    objs = [_user("u1", _sent("from the orchestrator")), _assistant("a1", "ONE")]
     assert (await _deliver_turn(h, objs))["speaker"] == "agent"
 
     objs += [_user("u2", "typed by a person"), _assistant("a2", "TWO")]
@@ -476,7 +481,7 @@ async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
     # Mixed: one prompt from each. The typed one is in the content; the turn is the
     # agent's.
     await h.send(name="proj", prompt="orchestrator again", conversation_id="conv-1")
-    objs += [_user("u3", "orchestrator again"), _user("u4", "and a person"),
+    objs += [_user("u3", _sent("orchestrator again")), _user("u4", "and a person"),
              _assistant("a3", "THREE")]
     body = await _deliver_turn(h, objs)
     assert (body["speaker"], body["prompt_origin"]) == ("agent", "terminal")
@@ -634,7 +639,7 @@ async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [
-        _user("u1", "q1"), _assistant("a1", "ANSWER ONE"),
+        _user("u1", _sent("q1")), _assistant("a1", "ANSWER ONE"),
         _user("u2", "q2"), _assistant("a2", "ANSWER TWO"),
     ])
     await h.drain()
@@ -663,7 +668,7 @@ async def test_resend_tool_returns_the_text_inline_instead_of_duplicating(harnes
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "ANSWER")])
     await h.drain()
 
     res = await h.resend_tool(name="proj", conversation_id="conv-1")
@@ -800,7 +805,7 @@ async def test_force_reposts_an_already_delivered_reply(harness):
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "ANSWER")])
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "ANSWER")])
     await h.drain()
     assert len(h.metallm.posts) == 1
 

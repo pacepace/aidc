@@ -153,7 +153,9 @@ def _describe(opener: dict | None, by: str) -> str:
     if opener is None:
         return "a turn whose opening line is not in the transcript"
     if by == "prompt":
-        return _person_words(opener).strip()
+        # A prompt aidc pasted opens with its provenance header; the turn is about
+        # what follows it.
+        return ts.unframed(_person_words(opener).strip())
     if by == "background_task":
         text = ts.line_text(opener)
         status = _tag(text, "status") or "finished"

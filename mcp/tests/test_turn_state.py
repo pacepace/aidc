@@ -24,6 +24,11 @@ NOW = 1_789_609_900.0   # 2026-09-17T01:51:40Z
 ISO_NOW = "2026-09-17T01:51:40.000Z"
 
 
+def _f(text, conversation_id="c1"):
+    """`text` as session_send pastes it: framed with its provenance header."""
+    return ts.frame_prompt(text, conversation_id=conversation_id)
+
+
 def _screen(name):
     return (SCREENS / f"claude-2.1.27x-{name}.ansi").read_text()
 
@@ -756,7 +761,7 @@ class TestQueuedPromptOnTheAgentListScreen:
             await real_sleep(0)
             if "proj" not in tools._pending_sends:
                 break
-        assert pasted == ["please fix the other bugs"]
+        assert pasted == [_f("please fix the other bugs")]
         assert tools._last_free_verdict["proj"] == ("", "log_finished")
 
 
@@ -812,7 +817,7 @@ class TestSendWhileABackgroundAgentRuns:
         res = await send(name="proj", prompt="please look at the parser",
                          conversation_id="c1")
         assert res["data"]["status"] == "sent"
-        assert self.pasted == ["please look at the parser"]
+        assert self.pasted == [_f("please look at the parser")]
         assert self.keys == ["Enter"]
 
     async def test_a_paste_that_does_not_show_in_the_box_is_not_submitted(self, session,
@@ -848,12 +853,12 @@ class TestSendWhileABackgroundAgentRuns:
                          conversation_id="c1")
         assert res["data"]["status"] == "queued" and self.keys == []
 
-        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         for _ in range(200):
             await asyncio.sleep(0)
             if "proj" not in tools._pending_sends:
                 break
-        assert self.pasted == ["please look at the parser"]
+        assert self.pasted == [_f("please look at the parser")]
         assert self.keys == ["Enter"]
         assert "proj" not in tools._pending_sends
 
@@ -906,7 +911,7 @@ class TestSendWhileABackgroundAgentRuns:
             name="proj", prompt_id=first["data"]["prompt_id"]))["data"]
         assert d["outcome"] == "already_pasted" and d["note"].endswith("being submitted")
 
-        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         for _ in range(300):
             await asyncio.sleep(0)
             if tools._queue_ids("proj") == [second["data"]["prompt_id"]]:
@@ -915,7 +920,7 @@ class TestSendWhileABackgroundAgentRuns:
             task.cancel()
         assert tools._queue_ids("proj") == [second["data"]["prompt_id"]]
         assert self.keys == ["Enter"]
-        assert set(self.pasted) == {"please look at the parser"}
+        assert set(self.pasted) == {_f("please look at the parser")}
 
     async def test_a_batch_left_in_the_box_is_still_the_sessions_after_a_restart(
             self, session, monkeypatch):
@@ -937,7 +942,7 @@ class TestSendWhileABackgroundAgentRuns:
         tools._pending_drainers.clear()
         tools._queue_loaded.clear()
         tools._unsubmitted_paste.clear()
-        session.screen = session.screen.replace("❯\xa0", "❯\xa0please look at the parser", 1)
+        session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         pasted_before = len(self.pasted)
 
         app = MCPServer("t")
@@ -1033,6 +1038,7 @@ NOTIFIED = [*FINISHED,
              "message": {"role": "assistant", "stop_reason": "tool_use",
                          "content": [{"type": "tool_use", "id": "t1", "name": "Bash"}]}}]
 JOIN = "what are you on right now?"
+JOIN_SENT = ts.frame_prompt(JOIN, conversation_id="c1")   # JOIN as session_send pastes it
 
 
 class TestSendDeliverJoin:
@@ -1088,7 +1094,7 @@ class TestSendDeliverJoin:
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
         d = res["data"]
         assert d["status"] == "joined_turn"
-        assert self.pasted == [JOIN] and self.keys == ["Enter"]
+        assert self.pasted == [JOIN_SENT] and self.keys == ["Enter"]
         assert "proj" not in tools._pending_sends
         assert d["started_by"] == "background_task"
         assert d["working_on"].startswith("background task completed: Agent")
@@ -1096,8 +1102,8 @@ class TestSendDeliverJoin:
         assert d["last_activity"] == {"kind": "tool_use", "name": "Bash",
                                       "at": "2026-09-17T01:51:30Z"}
         assert "final answer" in d["delivery"] and "join_declined" not in d
-        assert tools._sent_awaiting_echo["proj"][0] == JOIN
-        assert ("session_send_joined_turn", {"session": "proj", "prompt_len": len(JOIN),
+        assert tools._sent_awaiting_echo["proj"][0] == JOIN_SENT
+        assert ("session_send_joined_turn", {"session": "proj", "prompt_len": len(JOIN_SENT),
                                              "why": "log_growing"}) in self.logged
 
     async def test_a_joined_prompt_arriving_as_a_queued_message_is_matched_once(
@@ -1109,7 +1115,7 @@ class TestSendDeliverJoin:
         await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
         assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 1
         session.write([*NOTIFIED, {"type": "queue-operation", "operation": "enqueue",
-                                   "timestamp": ISO_NOW, "content": JOIN}], age=1.0)
+                                   "timestamp": ISO_NOW, "content": JOIN_SENT}], age=1.0)
         assert await session.check() == "claude_busy"
         assert "proj" not in tools._sent_awaiting_echo
         assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
@@ -1138,6 +1144,7 @@ class TestSendDeliverJoin:
         assert d["status"] == "queued" and d["join_declined"] == "queued_behind"
         assert d["queued_behind"] == 1 and self.pasted == []
         assert [q.text for q in tools._pending_sends["proj"]] == ["earlier", JOIN]
+        assert tools._pending_sends["proj"][1].paste() == JOIN_SENT
         assert d["delivery"].startswith("Not joined to the running turn: an earlier prompt")
 
     async def test_join_never_types_over_a_persons_unsent_text(self, session, monkeypatch):
@@ -1175,7 +1182,7 @@ class TestSendDeliverJoin:
                            objs=FINISHED, age=100.0)
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
         d = res["data"]
-        assert d["status"] == "sent" and self.pasted == [JOIN] and self.keys == ["Enter"]
+        assert d["status"] == "sent" and self.pasted == [JOIN_SENT] and self.keys == ["Enter"]
         assert "started_by" not in d and "join_declined" not in d
 
     async def test_join_catches_a_turn_that_starts_during_the_wait(self, session, monkeypatch):
@@ -1188,7 +1195,7 @@ class TestSendDeliverJoin:
             return "claude_busy"
         monkeypatch.setattr(tools, "_wait_until_free", turn_starts)
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
-        assert res["data"]["status"] == "joined_turn" and self.pasted == [JOIN]
+        assert res["data"]["status"] == "joined_turn" and self.pasted == [JOIN_SENT]
 
     async def test_an_unknown_delivery_is_refused_before_anything_happens(
             self, session, monkeypatch):

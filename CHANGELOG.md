@@ -13,6 +13,25 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Upgrading
+- **Takes effect when `aidc-mcp` is updated and restarted.** Sessions need no kill or create.
+  A prompt queued by the earlier `aidc-mcp` gets its header when the queue is loaded, unless it
+  is already in a session's input box.
+
+### Changed
+- **A pasted prompt says who sent it.** Every prompt `session_send` pastes opens with
+  `[Sent through aidc by <sender>, from conversation <id>. Not typed at this terminal.]`, then a
+  space and the prompt, so the session's Claude never reads an orchestrator's or a person's send
+  as typed at its terminal. The sender is "the orchestrator", or "a person, through the
+  orchestrator" when `sent_by` is set; the conversation is the call's own `conversation_id`. In a
+  batch each prompt keeps its own header. A prompt starting with `/` or `!`, or an empty one, goes
+  in as given. Queue previews, dead letters, notices and `working_on` show the prompt, not the
+  header. Design 10 S8.
+
+### Added
+- **`sender_label` on `session_send`**: optional, names the sender in the header (one line,
+  brackets removed, at most 120 characters). Declared in the input schema.
+
 ## [1.9.10] - 2026-10-25
 
 ### Upgrading

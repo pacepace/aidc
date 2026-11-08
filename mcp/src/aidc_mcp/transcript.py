@@ -1610,6 +1610,58 @@ def last_prompt_origin(base_dir: Path, session: str) -> tuple[str, str]:
     return data["origin"], sent_by if isinstance(sent_by, str) else ""
 
 
+# --- provenance header (design-10 S8) ----------------------------------------------
+#
+# A pasted prompt and a typed one look the same to the session's Claude, which then
+# reads an orchestrator's or a person's send as its own person typing at the terminal.
+# So every prompt aidc pastes for a caller opens with one line saying who sent it.
+# It is one line, joined to the text by a space: the paste is not bracketed, so a
+# newline in it would submit the header alone.
+
+SENDER_LABEL_MAX = 120
+PROVENANCE_OPENER = "[Sent through aidc by "
+_PROVENANCE_CLOSER = ". Not typed at this terminal.] "
+# Text Claude Code reads as a command rather than a prompt (a slash command, a shell
+# line). A header in front would turn it into a prompt, so it goes in as given.
+_COMMAND_PREFIXES = ("/", "!")
+
+
+def clean_sender_label(label: str | None) -> str:
+    """A caller's sender label as the header carries it: one line, no brackets (which
+    would let a label close the header early and write text after it), at most
+    SENDER_LABEL_MAX characters."""
+    text = " ".join((label or "").replace("[", " ").replace("]", " ").split())
+    return text[:SENDER_LABEL_MAX].rstrip()
+
+
+def provenance_header(sender_label: str, sent_by: str, conversation_id: str) -> str:
+    """The line that opens a prompt aidc pastes: who sent it, from which conversation."""
+    sender = (clean_sender_label(sender_label)
+              or ("a person, through the orchestrator" if sent_by else "the orchestrator"))
+    conversation = f", from conversation {conversation_id}" if conversation_id else ""
+    return f"{PROVENANCE_OPENER}{sender}{conversation}{_PROVENANCE_CLOSER.rstrip()}"
+
+
+def frame_prompt(text: str, *, sender_label: str = "", sent_by: str = "",
+                 conversation_id: str = "") -> str:
+    """`text` (already one line) as aidc pastes it: the provenance header, a space,
+    then the text as given. A command (a leading "/" or "!") is not framed, and nor is
+    an empty prompt, which would otherwise submit a turn holding only the header."""
+    if not text.strip() or text.startswith(_COMMAND_PREFIXES):
+        return text
+    return f"{provenance_header(sender_label, sent_by, conversation_id)} {text}"
+
+
+def unframed(text: str) -> str:
+    """`text` without a provenance header in front, for showing what a turn is about
+    (working_on). Text that does not open with one comes back as it is."""
+    if text.startswith(PROVENANCE_OPENER):
+        end = text.find(_PROVENANCE_CLOSER)
+        if end != -1:
+            return text[end + len(_PROVENANCE_CLOSER):]
+    return text
+
+
 # --- persisted send queue (design-10 S4, MCP-30) -----------------------------------
 #
 # Prompts accepted for a session and not yet pasted. A persisted format locks in a
@@ -1637,6 +1689,13 @@ class QueuedPrompt:
     # session_send's ``sent_by``: the person the caller sent it for, "" for the
     # caller's own prompt. Recorded with the paste, so the reply says whose it is.
     sent_by: str = ""
+    # session_send's ``sender_label``, cleaned: who the provenance header names.
+    sender_label: str = ""
+    # What is pasted: `text` with its provenance header (design-10 S8), made once when
+    # the prompt is accepted. `text` stays the caller's prompt, for every preview,
+    # notice and dead letter. "" pastes `text` as it is (a prompt made before the
+    # header, or already in the input box unframed). Read it through paste().
+    paste_text: str = ""
     # Stable id session_send returns, so the caller can cancel this prompt alone
     # (session_queue_cancel) and match it to the reply that answers it.
     prompt_id: str = field(default_factory=lambda: new_prompt_id())
@@ -1645,6 +1704,11 @@ class QueuedPrompt:
     # restart, the batch is still the session's: the drainer submits it as it is, and a
     # cancel of it is "already pasted" rather than taking back text left in the box.
     in_box: bool = False
+
+    def paste(self) -> str:
+        """The text that goes into the pane, and that the send record, the echo hold
+        and an unsubmitted paste are matched against."""
+        return self.paste_text or self.text
 
     def batch_entry(self) -> dict[str, str]:
         """What a batch records about this prompt, and the reply callback's
@@ -1678,6 +1742,18 @@ def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt
     os.replace(tmp, path)
 
 
+def _persisted_paste_text(entry: dict) -> str:
+    """A persisted prompt's paste_text. An entry this version wrote has the key; one
+    without it was queued before the provenance header existed and is framed now,
+    unless it already sits in Claude's input box unframed (submitted as it stands)."""
+    if "paste_text" in entry:
+        return str(entry["paste_text"])
+    if entry.get("in_box") is True:
+        return ""
+    return frame_prompt(str(entry["text"]), sent_by=str(entry.get("sent_by", "")),
+                        conversation_id=str(entry.get("conversation_id", "")))
+
+
 def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], list[Path]]:
     """Every persisted queue under `base_dir` as {session: prompts}, plus the files
     that could not be read (left in place, for a person to look at)."""
@@ -1695,6 +1771,8 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                                     session_instance=str(e.get("session_instance", "")),
                                     waiting_notified=e.get("waiting_notified") is True,
                                     sent_by=str(e.get("sent_by", "")),
+                                    sender_label=str(e.get("sender_label", "")),
+                                    paste_text=_persisted_paste_text(e),
                                     prompt_id=str(e.get("prompt_id") or new_prompt_id()),
                                     in_box=e.get("in_box") is True)
                        for e in data["prompts"]]

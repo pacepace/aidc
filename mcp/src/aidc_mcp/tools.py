@@ -55,6 +55,13 @@ _SENT_BY_DESC = (
     "Set by the orchestrator when the prompt is a person's, not its own: who sent it. "
     "Leave this unset."
 )
+_SENDER_LABEL_DESC = (
+    "Optional: who is sending, as the session should read it (one line, at most "
+    f"{ts.SENDER_LABEL_MAX} characters), e.g. \"Saoirse (an agent)\". aidc opens every "
+    "prompt it pastes with a line naming the sender, so the session never reads it as "
+    "typed at its terminal; without this it names \"the orchestrator\", or \"a person, "
+    "through the orchestrator\" when sent_by is set."
+)
 # session_send's `deliver`: what to do with a prompt sent while the agent is mid-turn.
 DELIVER_QUEUE = "queue"
 DELIVER_JOIN = "join"
@@ -930,12 +937,12 @@ async def _join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt)
     if refusal:
         log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
         return refusal
-    if not await _inject(container, prompt.text, _SESSION_WINDOW, session=name,
+    if not await _inject(container, prompt.paste(), _SESSION_WINDOW, session=name,
                          sent_by=prompt.sent_by, prompts=[prompt]):
         log_event("session_send_join_declined", session=name, reason="paste_failing",
                   why=state.why)
         return "paste_failing"
-    log_event("session_send_joined_turn", session=name, prompt_len=len(prompt.text),
+    log_event("session_send_joined_turn", session=name, prompt_len=len(prompt.paste()),
               why=state.why)
     return "joined"
 
@@ -1450,7 +1457,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     return
                 batch = _next_batch(name)
                 head = batch[0]
-                text = _BATCH_SEPARATOR.join(q.text for q in batch)
+                text = _BATCH_SEPARATOR.join(q.paste() for q in batch)
                 if await sf.taint_or_none(name) is not None:
                     # A prompt accepted before the session was tainted is never pasted
                     # into it: it waits, saying why, until the person kills the session
@@ -1734,7 +1741,7 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
     if in_box and name not in _unsubmitted_paste:
         # A batch was pasted into the box and not submitted when the MCP stopped: it is
         # still the session's to submit as it is, and not a person's unsent text.
-        _unsubmitted_paste[name] = (_BATCH_SEPARATOR.join(q.text for q in in_box),
+        _unsubmitted_paste[name] = (_BATCH_SEPARATOR.join(q.paste() for q in in_box),
                                     tuple(q.prompt_id for q in in_box))
     if saved[0].waiting_reason == "input_has_text":
         # The tmux option outlives the MCP; remember it is showing, so the drainer
@@ -3705,6 +3712,7 @@ def register(app: Any) -> None:
         prompt: Annotated[str, Field(description=_PROMPT_DESC)],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
         sent_by: Annotated[str | None, Field(description=_SENT_BY_DESC)] = None,
+        sender_label: Annotated[str | None, Field(description=_SENDER_LABEL_DESC)] = None,
         deliver: Annotated[str, Field(description=_DELIVER_DESC, json_schema_extra={
             "enum": [DELIVER_QUEUE, DELIVER_JOIN]})] = DELIVER_QUEUE,
         ctx: Context | None = None,
@@ -3775,7 +3783,8 @@ def register(app: Any) -> None:
 
         Args:
             name: the aidc session to talk to (see the open-webhook list below).
-            prompt: the message to send.
+            prompt: the message to send. It is pasted after one line saying who sent it
+                (see sender_label), so the agent knows it was not typed at its terminal.
             deliver: "queue" (default) or "join", see above.
         """
         # Who the prompt is for: the reply comes back with prompt_origin "person"
@@ -3784,7 +3793,8 @@ def register(app: Any) -> None:
         sent_by = (sent_by or "").strip()
         deliver = (deliver or DELIVER_QUEUE).strip()
         log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
-                  sent_by=sent_by, deliver=deliver)
+                  sent_by=sent_by, sender_label=ts.clean_sender_label(sender_label),
+                  deliver=deliver)
         if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
             return _envelope_err(f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
                                  f"not {deliver!r}", code="invalid_argument")
@@ -3837,8 +3847,18 @@ def register(app: Any) -> None:
         # object is what is queued): its id is what this call returns, what
         # session_queue_cancel takes and what the reply's `prompts` names.
         prompt_conversation = conversation_id or _watched_conversation(name)
-        this_prompt = ts.QueuedPrompt(text=sanitized, enqueued_at=ts.now_iso(),
-                                      conversation_id=prompt_conversation, sent_by=sent_by)
+        # Framed here, once, so every path that pastes it (now, joined into a running
+        # turn, or later from the queue) and everything that matches the paste against
+        # the transcript afterwards (the send record, the echo hold, an unsubmitted
+        # paste) sees the same text (paste()); `text` stays the prompt, for previews.
+        # The header names the call's own conversation, never the webhook's: that is
+        # where the reply goes, not who sent it.
+        label = ts.clean_sender_label(sender_label)
+        this_prompt = ts.QueuedPrompt(
+            text=sanitized, enqueued_at=ts.now_iso(), conversation_id=prompt_conversation,
+            sent_by=sent_by, sender_label=label,
+            paste_text=ts.frame_prompt(sanitized, sender_label=label, sent_by=sent_by,
+                                       conversation_id=conversation_id or ""))
         wait_reason = ""
         attempts = 0
         async with lock:
@@ -3882,7 +3902,7 @@ def register(app: Any) -> None:
                     # Idle at the first reading, and a turn started during the wait.
                     await try_join()
             if (not joined and not wait_reason
-                    and not await _inject(container, sanitized, _SESSION_WINDOW,
+                    and not await _inject(container, this_prompt.paste(), _SESSION_WINDOW,
                                           session=name, sent_by=sent_by,
                                           prompts=[this_prompt])):
                 # A paste that did not land is a fact about one attempt, not about the
@@ -4024,6 +4044,7 @@ def register(app: Any) -> None:
             Field(description="The ordered list of prompts to send, run one after another."),
         ],
         conversation_id: Annotated[str | None, Field(description=_CONV_ID_DESC)] = None,
+        sender_label: Annotated[str | None, Field(description=_SENDER_LABEL_DESC)] = None,
     ) -> dict[str, Any]:
         """Send a FIXED list of prompts to a session in order; return the full transcript.
 
@@ -4052,6 +4073,7 @@ def register(app: Any) -> None:
                                  code="invalid_argument")
 
         log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
+        label = ts.clean_sender_label(sender_label)
 
         # NB: session_run does NOT auto-start a transcript watcher (contrast
         # session_send). It delivers the transcript inline as its return value; a
@@ -4083,9 +4105,13 @@ def register(app: Any) -> None:
                     return _envelope_err(err, {"completed_turns": transcript},
                                          code="session_not_ready")
 
-                sanitized = turn_prompt.replace("\n", " ").strip()
+                # Framed like a session_send prompt; the reply is then found by the
+                # framed text, which is what the transcript holds.
+                pasted = ts.frame_prompt(turn_prompt.replace("\n", " ").strip(),
+                                         sender_label=label,
+                                         conversation_id=conversation_id or "")
                 sent_at = time.time()
-                if not await _inject(container, sanitized, _SESSION_WINDOW, session=name):
+                if not await _inject(container, pasted, _SESSION_WINDOW, session=name):
                     # Not retried: if the paste shows in the box later, it stays there
                     # as unsent input, held like a person's (see _own_unsent_text).
                     _unsubmitted_paste.pop(name, None)
@@ -4099,7 +4125,7 @@ def register(app: Any) -> None:
                     return _envelope_err(err, {"completed_turns": transcript},
                                          code="turn_not_finished")
 
-                response = _reply_from_transcript(name, sanitized, sent_at)
+                response = _reply_from_transcript(name, pasted, sent_at)
 
                 transcript.append({"turn": i + 1, "prompt": turn_prompt, "response": response})
 

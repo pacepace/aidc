@@ -30,6 +30,11 @@ async def _let_drainer_run(session: str, ticks: int = 50) -> None:
             return
 
 
+def _f(text, conversation_id="c1", sent_by=""):
+    """`text` as session_send pastes it: framed with its provenance header."""
+    return ts.frame_prompt(text, conversation_id=conversation_id, sent_by=sent_by)
+
+
 def _make_send():
     app = MCPServer("t")
     tools.register(app)
@@ -125,14 +130,14 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     assert "response" not in res["data"]  # reply comes via webhook, not inline
     assert "webhook" in res["data"]["delivery"]
     # Prompt pasted with newlines flattened to spaces, then Enter sent.
-    assert wiring.paste_calls[0][1] == "line one line two"
+    assert wiring.paste_calls[0][1] == _f("line one line two")
     assert _sent_enter(wiring.tmux_calls)
     # Non-blocking contract: two consecutive free readings before the paste, and no
     # pane capture of a reply.
     assert wiring.free_checks == 2
     assert wiring.captured is False
     # Until the transcript shows the prompt, a follow-up send reads the session busy.
-    assert tools._sent_awaiting_echo["proj"][0] == "line one line two"
+    assert tools._sent_awaiting_echo["proj"][0] == _f("line one line two")
 
 
 async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring):
@@ -288,7 +293,7 @@ async def test_claude_not_running_holds_the_prompt_instead_of_refusing(wiring):
 
     wiring.claude_running = True
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+    assert [text for _, text, _ in wiring.paste_calls] == [_f("hello")]
 
 
 async def test_queues_instead_of_dropping_when_session_busy(wiring):
@@ -332,7 +337,7 @@ async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
     wiring.idle_ok = True
     await _let_drainer_run("proj")
 
-    assert [text for _, text, _ in wiring.paste_calls] == ["first [next message] second"]
+    assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
     assert _sent_enter(wiring.tmux_calls)
     assert "proj" not in tools._pending_sends
 
@@ -380,7 +385,7 @@ async def test_a_long_busy_turn_never_costs_the_prompt(wiring):
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+    assert [text for _, text, _ in wiring.paste_calls] == [_f("hello")]
 
 
 async def test_spawn_drainer_does_not_start_a_second_one(wiring):
@@ -411,7 +416,7 @@ async def test_claude_stopping_holds_the_queue(wiring):
     wiring.claude_running = True
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+    assert [text for _, text, _ in wiring.paste_calls] == [_f("hello")]
 
 
 async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
@@ -483,7 +488,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     wiring.idle_ok = True
     await tools.resume_send_queues()
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["first [next message] second"]
+    assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
     assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
 
 
@@ -626,7 +631,7 @@ async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring
     await tools.resume_send_queues()
     await _let_drainer_run("proj", ticks=100)
 
-    assert [text for _, text, _ in wiring.paste_calls] == ["saved [next message] new"]
+    assert [text for _, text, _ in wiring.paste_calls] == [f"saved [next message] {_f('new')}"]
 
 
 async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_paste(wiring):
@@ -696,7 +701,7 @@ async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
     wiring.paste_ok = True
     await _let_drainer_run("proj", ticks=100)
     assert "proj" not in tools._pending_sends
-    assert [text for _, text, _ in wiring.paste_calls][-1] == "hello"
+    assert [text for _, text, _ in wiring.paste_calls][-1] == _f("hello")
     assert _sent_enter(wiring.tmux_calls)
 
 
@@ -712,7 +717,7 @@ async def test_direct_send_records_the_injected_prompt(wiring):
     await send(name="proj", prompt="fix the\nfailing test", conversation_id="c1")
 
     # Recorded in its pasted (newline-folded) form; matching is whitespace-insensitive.
-    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "fix the failing test")
+    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("fix the failing test"))
 
 
 async def test_queued_send_records_only_once_injected(wiring):
@@ -721,11 +726,11 @@ async def test_queued_send_records_only_once_injected(wiring):
     wiring.idle_ok = False
 
     await send(name="proj", prompt="later", conversation_id="c1")
-    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")  # not yet
+    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later"))  # not yet
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later")
+    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later"))
 
 
 async def test_a_send_for_a_person_records_who_it_was_for(wiring):
@@ -734,7 +739,7 @@ async def test_a_send_for_a_person_records_who_it_was_for(wiring):
 
     await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by=" u-1 ")
 
-    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "run the tests") == "u-1"
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("run the tests", sent_by="u-1")) == "u-1"
 
 
 async def test_a_queued_send_for_a_person_keeps_who_it_was_for(wiring):
@@ -747,7 +752,7 @@ async def test_a_queued_send_for_a_person_keeps_who_it_was_for(wiring):
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "later") == "u-1"
+    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later", sent_by="u-1")) == "u-1"
 
 
 async def test_inject_is_the_single_recording_point(wiring):
@@ -800,7 +805,7 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
     wiring.session_state = tools.SESSION_EXISTS
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["hello"]
+    assert [text for _, text, _ in wiring.paste_calls] == [_f("hello")]
 
 
 async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
@@ -935,7 +940,7 @@ async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, m
     await send(name="proj", prompt="do the thing", conversation_id="c1")
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert [c[1] for c in wiring.paste_calls] == ["do the thing"]
+    assert [c[1] for c in wiring.paste_calls] == [_f("do the thing")]
 
 
 async def test_a_queued_send_names_a_headless_run_going_in_the_session(wiring):
@@ -983,6 +988,8 @@ def idle_state(monkeypatch):
 
 
 _THREE = ["[from the agent] first", "[from pace] second", "[from the agent] third"]
+# _THREE as each is pasted: the second is sent for a person (pace).
+_THREE_SENT = [_f(_THREE[0]), _f(_THREE[1], sent_by="pace"), _f(_THREE[2])]
 
 
 async def _queue_three(send):
@@ -1003,7 +1010,7 @@ async def test_every_prompt_queued_while_busy_goes_in_as_one_paste_in_send_order
     wiring.idle_ok = True
     await _let_drainer_run("proj")
 
-    joined = " [next message] ".join(_THREE)
+    joined = " [next message] ".join(_THREE_SENT)
     assert [text for _, text, _ in wiring.paste_calls] == [joined]
     enters = [a for _, a in wiring.tmux_calls if a[0] == "send-keys" and a[-1] == "Enter"]
     assert len(enters) == 1
@@ -1034,7 +1041,7 @@ async def test_a_prompt_queued_after_a_batch_went_in_goes_in_the_next_one(wiring
     await send(name="proj", prompt="three", conversation_id="c1")
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert [text for _, text, _ in wiring.paste_calls] == ["one [next message] two", "three"]
+    assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('one')} [next message] {_f('two')}", _f("three")]
 
 
 async def test_every_send_returns_a_stable_prompt_id(wiring):
@@ -1067,7 +1074,7 @@ async def test_a_prompt_cancelled_before_the_paste_is_left_out_of_the_batch(wiri
     wiring.idle_ok = True
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [
-        f"{_THREE[0]} [next message] {_THREE[2]}"]
+        f"{_THREE_SENT[0]} [next message] {_THREE_SENT[2]}"]
     dead = [json.loads(p.read_text()) for p in
             (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")]
     assert [(x["prompt_id"], x["reason"]) for x in dead] == [(ids[1], "cancelled")]
@@ -1198,7 +1205,7 @@ async def test_a_cancel_that_gets_the_lock_first_keeps_its_prompt_out_of_the_bat
 
     pasted = [text for _, text, _ in wiring.paste_calls]
     assert d["outcome"] == "cancelled"
-    assert pasted == [f"{_THREE[0]} [next message] {_THREE[2]}"]
+    assert pasted == [f"{_THREE_SENT[0]} [next message] {_THREE_SENT[2]}"]
     _in_batch_xor_cancelled(pasted, _THREE[1], d["outcome"])
 
 
@@ -1216,4 +1223,146 @@ async def test_a_failed_batch_paste_keeps_every_prompt_and_its_order(wiring):
     wiring.paste_ok = True
     await _let_drainer_run("proj", ticks=300)
     assert "proj" not in tools._pending_sends
-    assert wiring.paste_calls[-1][1] == " [next message] ".join(_THREE)
+    assert wiring.paste_calls[-1][1] == " [next message] ".join(_THREE_SENT)
+
+
+# --- the provenance header on what session_send pastes (design-10 S8) --------------
+# The header's wording and cleaning are pinned in test_send_provenance.py; these drive
+# the tool, so the paste, the batch, the send record and the echo hold carry it.
+
+_ORCH = "[Sent through aidc by the orchestrator. Not typed at this terminal.]"
+_ORCH_C1 = ("[Sent through aidc by the orchestrator, from conversation c1. "
+            "Not typed at this terminal.]")
+_PERSON_C1 = ("[Sent through aidc by a person, through the orchestrator, from conversation "
+              "c1. Not typed at this terminal.]")
+_SAOIRSE_C1 = ("[Sent through aidc by Saoirse (an agent), from conversation c1. "
+               "Not typed at this terminal.]")
+
+
+def _pasted(w):
+    return [text for _, text, _ in w.paste_calls]
+
+
+async def test_session_send_pastes_the_orchestrators_prompt_framed(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    res = await send(name="proj", prompt="line one\nline two", conversation_id="c1")
+    assert res["ok"] is True
+    assert _pasted(wiring) == [f"{_ORCH_C1} line one line two"]
+
+
+async def test_session_send_pastes_a_persons_prompt_framed(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by="pace")
+    assert _pasted(wiring) == [f"{_PERSON_C1} run the tests"]
+
+
+async def test_session_send_pastes_the_callers_sender_label(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    await send(name="proj", prompt="vote e", conversation_id="c1", sent_by="pace",
+               sender_label="Saoirse (an agent)")
+    assert _pasted(wiring) == [f"{_SAOIRSE_C1} vote e"]
+
+
+async def test_session_send_without_a_conversation_still_names_the_sender(wiring):
+    app, send = _make_send()
+    await send(name="proj", prompt="hello")
+    assert _pasted(wiring) == [f"{_ORCH} hello"]
+
+
+async def test_session_send_pastes_a_command_unframed(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    await send(name="proj", prompt="/clear", conversation_id="c1")
+    assert _pasted(wiring) == ["/clear"]
+
+
+async def test_session_send_declares_sender_label():
+    """metallm passes sender_label only when aidc declares it."""
+    app, _ = _make_send()
+    props = app._tool_manager._tools["session_send"].parameters["properties"]
+    assert "sender_label" in props
+    assert props["sender_label"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+
+
+async def test_a_batch_keeps_each_prompts_own_header(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="first", conversation_id="c1")
+    await send(name="proj", prompt="second", conversation_id="c1", sent_by="pace")
+    await send(name="proj", prompt="third", conversation_id="c1",
+               sender_label="Saoirse (an agent)")
+    assert not wiring.paste_calls
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert _pasted(wiring) == [" [next message] ".join(
+        (f"{_ORCH_C1} first", f"{_PERSON_C1} second", f"{_SAOIRSE_C1} third"))]
+
+
+async def test_a_queued_prompt_is_framed_once_not_again_at_the_paste(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    wiring.idle_ok = False
+    await send(name="proj", prompt="later", conversation_id="c1")
+    wiring.idle_ok = True
+    await _let_drainer_run("proj")
+    assert _pasted(wiring) == [f"{_ORCH_C1} later"]
+    assert _pasted(wiring)[0].count("[Sent through aidc by ") == 1
+
+
+async def test_the_echo_hold_and_the_send_record_hold_the_framed_text(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    await send(name="proj", prompt="fix the parser", conversation_id="c1")
+    framed = f"{_ORCH_C1} fix the parser"
+    assert tools._sent_awaiting_echo["proj"][0] == framed
+    assert ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", framed) is not None
+
+
+async def test_the_paste_itself_adds_nothing(wiring):
+    """Framing happens where a caller's prompt is accepted. The paste path writes what
+    it is given, so nothing that reaches the terminal by any other way is changed."""
+    await tools._inject("aidc-proj-dev", "typed at the terminal", tools._SESSION_WINDOW,
+                        session="proj")
+    assert _pasted(wiring) == ["typed at the terminal"]
+
+
+async def test_a_queued_prompts_preview_is_the_prompt_not_the_header(wiring, monkeypatch):
+    """The header is ~124 characters with a real conversation id: a preview cut from the
+    pasted text would show only it, and every waiting prompt would look the same."""
+    app, send = _make_send()
+    status = app._tool_manager._tools["session_status"].fn
+    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+        "exit": 0, "stdout": "ok", "stderr": ""})
+    tools._session_watchers["proj"] = _StubTask()
+    conv = "0193f3a2-7c1e-7b55-9a0d-2f4e8c6b1a77"
+    wiring.idle_ok = False
+    await send(name="proj", prompt="fix the parser", conversation_id=conv)
+    await send(name="proj", prompt="then run the tests", conversation_id=conv)
+    res = await status(name="proj")
+    assert [e["prompt_preview"] for e in res["data"]["send_queue"]] == [
+        "fix the parser", "then run the tests"]
+    # What waits to be pasted is still framed.
+    assert [q.paste() for q in tools._pending_sends["proj"]][0].startswith(
+        f"[Sent through aidc by the orchestrator, from conversation {conv}.")
+
+
+async def test_the_header_names_the_calls_conversation_never_the_webhooks(wiring):
+    """A send with no conversation_id to a session another conversation watches is
+    not from that conversation: the reply goes there, but it did not send it."""
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watcher", "http://metallm.local")
+    await send(name="proj", prompt="hello")
+    assert _pasted(wiring) == [f"{_ORCH} hello"]
+    assert tools._watched_conversation("proj") == "c-watcher"
+
+
+async def test_an_empty_prompt_pastes_no_header(wiring):
+    app, send = _make_send()
+    tools._session_watchers["proj"] = _StubTask()
+    await send(name="proj", prompt="  \n ", conversation_id="c1")
+    assert all("[Sent through aidc" not in text for text in _pasted(wiring))

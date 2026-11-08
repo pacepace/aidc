@@ -779,6 +779,60 @@ That state is saved with the queue (`in_box`, S4) and restored when the queue is
 an `aidc-mcp` restart the batch is still the session's: the drainer submits the text it finds in
 the box, and a cancel still says `already_pasted`.
 
+### S8. A pasted prompt says who sent it
+
+2026-11-08, asked by the metallm session and approved by Pace. A pasted prompt and a typed one
+look the same to the session's Claude, so an orchestrator's send, or one it made for a person,
+read as the session's own person typing at the terminal (live 2026-11-07 18:39:44Z: an agent's
+vote prompt was answered as the person's). The sender the orchestrator writes into its own text
+(`[from the agent]`) does not say the prompt came from outside the terminal.
+
+**The header.** Every prompt `session_send` pastes opens with one line, then a space, then the
+prompt as given:
+
+    [Sent through aidc by <sender>, from conversation <conversation_id>. Not typed at this terminal.] <prompt>
+
+- `<sender>` is the caller's `sender_label` when it gives one, else `the orchestrator` (no
+  `sent_by`), else `a person, through the orchestrator`.
+- `, from conversation <id>` only when the call gave a `conversation_id`. Never the session's
+  webhook's: that is where the reply goes, not who sent the prompt. The id is the orchestrator's
+  opaque conversation id, the one already in the callback URL; it grants nothing on its own
+  (the callback needs aidc's bearer token), and it lets the session say which conversation
+  asked.
+- `sender_label` is cleaned to one line, its `[` and `]` taken out (a bracket would let a label
+  close the header and write text after it), and cut at 120 characters. A label that cleans to
+  nothing names the default sender.
+- One line and a space rather than a header line and a blank line: the paste is not bracketed,
+  so a newline would submit the header alone (S7).
+- A prompt that starts with `/` or `!` goes in as given. Claude Code reads those as a slash
+  command or a shell line, and a header in front would turn them into a prompt. An empty
+  prompt is not framed either: a header alone would be submitted as a turn.
+
+**Framed once.** `session_send` frames the prompt when it makes the prompt's queue entry, before
+it chooses between pasting now, joining the running turn and queueing. The entry keeps the
+caller's prompt as `text` and the framed form as `paste_text`; every path pastes `paste()`, and
+the send record, the echo hold (S1) and an unsubmitted paste (S2) all match that in the
+transcript. The drainer pastes each entry's `paste()`, so a batch (S7) keeps each prompt's own
+header. What a caller is shown stays the prompt: `session_status` and `session_queue_cancel`
+previews, dead letters, and the `prompt_waiting` / `prompt_dropped` notices all read `text`, and
+`working_on` takes the header off the turn's opening prompt. `_inject` and `_load_and_paste` add nothing: nothing reaches the pane any
+other way framed, and what the person types is never touched. `session_run` (not advertised)
+frames its turns the same way and takes `sender_label` too. `session_resend` pastes nothing.
+
+**What is recorded.** The queue entry keeps the cleaned label as `sender_label` and the framed
+text as `paste_text`, beside `sent_by` (S4). The callback payload (D5) does not change:
+`prompts` still carries `prompt_id`, `sent_by` and `conversation_id`, and a notice's content
+carries the prompt as sent.
+
+**A queue saved before the header.** Every entry this version saves has a `paste_text` key. One
+without it was queued by an earlier `aidc-mcp` and is framed when the queue is loaded, unless
+it is already in the input box (`in_box`), which is submitted as it stands. Such an entry's
+`conversation_id` may be the webhook's (S4 records the conversation the reply goes to), so its
+header can name that one.
+
+**Schema.** `sender_label` is declared in `session_send`'s input schema, so an orchestrator can
+pass it only when the aidc it talks to declares it.
+
 ## Out of scope
 
 - A channel into Claude other than the pane. None is known that feeds a running interactive

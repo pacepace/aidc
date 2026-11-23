@@ -118,3 +118,9 @@ about 16 concurrent sessions on ranch-dev01 (EPYC 7452, 64 threads, about 500 GB
 
 Each cluster session is guaranteed 2 CPUs and 8 GB of memory by default and may use more (up to
 16 CPUs and 32 GB) when the node has room. Both are settable at create.
+
+## 2026-11-23: New users are added by one admin command, and bring their own secrets
+
+An admin creates a new user's area with one command (for example `aidc user add brooks`). The
+new user then adds their own SSH key, GitHub login and Claude accounts, so the admin never
+handles another user's secrets.

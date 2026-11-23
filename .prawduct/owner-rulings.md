@@ -152,3 +152,11 @@ sessions and repos: one place to approve, and one view of every branch and workt
 The first time the git container's Claude works with a repo, it checks the GitHub settings (no
 force pushes, merge commits only) and offers to turn on any that are missing, applying them only
 with the user's OK.
+
+## 2026-11-23: No VMs for sessions; Docker inside sessions stays, without privileged mode if possible
+
+Sessions do not run in VMs (Kata rejected: VMs inside Kubernetes are trouble, slow, and cannot
+share the GPU). Docker inside sessions is a core need: bringing up a real program needs
+databases, NATS and other services in containers, and testing leans on testcontainers. Explore
+Sysbox and rootless Docker/Podman as ways to give sessions Docker without privileged mode.
+Also: the owner's phone is on ZeroTier, so it can reach ranch addresses for testing.

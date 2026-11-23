@@ -146,3 +146,9 @@ able to do this, which rests on them never reaching the MCP server.
 
 Each user has one trusted git container, whose Claude handles git for all of that user's
 sessions and repos: one place to approve, and one view of every branch and worktree to clean up.
+
+## 2026-11-23: The git container checks GitHub repo protections and offers to turn them on
+
+The first time the git container's Claude works with a repo, it checks the GitHub settings (no
+force pushes, merge commits only) and offers to turn on any that are missing, applying them only
+with the user's OK.

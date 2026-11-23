@@ -61,3 +61,5 @@ uses it. Fallback if that breaks (earlier trouble came from sharing one login in
 aidc at once): each session logs in on its own. Users have several Claude accounts each, so
 managing accounts must be easy; look at Jean-Claude (github.com/MikeVeerman/jean-claude, account
 profiles) and similar tools before designing this.
+Refined: a running session must be able to switch Claude accounts mid-work, because accounts run
+out of usage quota during the work.

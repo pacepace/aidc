@@ -124,3 +124,8 @@ Each cluster session is guaranteed 2 CPUs and 8 GB of memory by default and may 
 An admin creates a new user's area with one command (for example `aidc user add brooks`). The
 new user then adds their own SSH key, GitHub login and Claude accounts, so the admin never
 handles another user's secrets.
+
+## 2026-11-23: Git mode defaults to "ask", and each user can change their default
+
+New sessions start in the mode where the git container asks the user before each push or PR.
+Each user can set a different default for their own sessions, and change it per session.

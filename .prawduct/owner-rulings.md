@@ -160,3 +160,15 @@ share the GPU). Docker inside sessions is a core need: bringing up a real progra
 databases, NATS and other services in containers, and testing leans on testcontainers. Explore
 Sysbox and rootless Docker/Podman as ways to give sessions Docker without privileged mode.
 Also: the owner's phone is on ZeroTier, so it can reach ranch addresses for testing.
+
+## 2026-11-23: Sessions run under Sysbox; GPUs reach pods through CDI
+
+Sessions run under Sysbox (0.7.2 on ranch-dev01; owner approved the cooldown exception for its
+GPU passthrough and security fixes). Measured 2026-11-23 on ranch-dev01: in an unprivileged
+Sysbox pod (`hostUsers: false`, root mapped to an unprivileged host uid) `docker run`, compose
+with postgres and NATS, and a testcontainers test all pass, and the RTX 3080 is visible
+(`nvidia-smi -L`). The node needed an AppArmor local rule letting fusermount3 mount under
+/var/lib/sysboxfs. The cluster's NVIDIA device plugin now hands GPUs to pods through CDI
+(the.ranch #246), so any runtime gets the GPU. Rootless Docker was tried and dropped: it needed
+the AppArmor userns restriction lifted, a smaller ID range and a tun device plugin, and still
+did not run.

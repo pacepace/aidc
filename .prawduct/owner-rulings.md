@@ -53,3 +53,11 @@ Confirmed: each user has their own code volume; users never share one.
 
 Each user's aidc MCP server runs in the cluster in that user's area, so sessions keep running
 and replies keep arriving while the user's laptop sleeps.
+
+## 2026-11-23: Claude login is set up once per user, not per session (preferred)
+
+Preferred: each user's Claude login is set up once, in their area, and every session they start
+uses it. Fallback if that breaks (earlier trouble came from sharing one login inside and outside
+aidc at once): each session logs in on its own. Users have several Claude accounts each, so
+managing accounts must be easy; look at Jean-Claude (github.com/MikeVeerman/jean-claude, account
+profiles) and similar tools before designing this.

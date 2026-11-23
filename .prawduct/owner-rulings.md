@@ -33,3 +33,6 @@ worktree of that repo on the user's disk.
 
 The trusted git container is responsible for keeping branches and worktrees tidy: it actively
 cleans up the stale branches and worktrees agents leave behind.
+Refined: merged branches and their worktrees are deleted. Anything else left behind (unmerged,
+unpushed, orphaned) is flagged for investigation right away, not left to sit, because the
+longer it rots the harder it is to sort out.

@@ -72,3 +72,12 @@ owner syncs it today with iCloud. iCloud is preferred for ease but not required.
 Refined: use Syncthing (works on Mac, Linux and Windows; Windows users work inside WSL). Folder
 layout below the home directory is the same on every machine; only the home directory itself
 differs (`/Users/<name>` on Mac, `/home/<name>` on Linux and WSL).
+
+## 2026-11-23: One conversation history per repo across every machine
+
+A repo's Claude conversations, memory and related state are one shared history across the
+cluster, Mac, Linux and WSL; native Windows (no WSL) is a bonus. The differing home directories
+must be handled so the same repo maps to the same history everywhere. Using Jean-Claude is not
+required: building our own equivalent is acceptable if that is simpler than fitting around it.
+Brooks confirmed (2026-11-23) that Jean-Claude switches accounts by quitting and relaunching under
+another profile, and `--continue` does not follow across profiles.

@@ -129,3 +129,12 @@ handles another user's secrets.
 
 New sessions start in the mode where the git container asks the user before each push or PR.
 Each user can set a different default for their own sessions, and change it per session.
+
+## 2026-11-23: The git container runs Claude Code, and approvals happen in its terminal
+
+The trusted git container runs Claude Code with the git rules. In "ask" mode it waits in its aidc
+terminal for the user to approve, the same way Claude Code asks for permission today. Agent's
+design note (direction, not yet ruled): that Claude reads text written by sandboxed sessions
+(commit messages, diffs, requests), which could try to talk it into breaking a rule, so the hard
+rules (no force-push, merge commits only, no attribution) are also blocked by code it cannot
+override, not only by its instructions.

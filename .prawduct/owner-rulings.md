@@ -138,3 +138,6 @@ design note (direction, not yet ruled): that Claude reads text written by sandbo
 (commit messages, diffs, requests), which could try to talk it into breaking a rule, so the hard
 rules (no force-push, merge commits only, no attribution) are also blocked by code it cannot
 override, not only by its instructions.
+Refined: an orchestrator the user drives (such as metallm) can give that approval through the
+aidc MCP server, by sending it to the git container's Claude. Sandboxed sessions must never be
+able to do this, which rests on them never reaching the MCP server.

@@ -63,3 +63,9 @@ managing accounts must be easy; look at Jean-Claude (github.com/MikeVeerman/jean
 profiles) and similar tools before designing this.
 Refined: a running session must be able to switch Claude accounts mid-work, because accounts run
 out of usage quota during the work.
+
+## 2026-11-23: Conversations and memory survive account switches and sync to other workstations
+
+Switching a session's Claude account must never lose its conversation, memory or other Claude
+state. That state also syncs between the cluster and the user's other workstations, the way the
+owner syncs it today with iCloud. iCloud is preferred for ease but not required.

@@ -108,3 +108,8 @@ branches and conversation intact, and Claude picks up where it left off.
 A session's published port is reached through a tunnel aidc opens to the machine the user is on.
 On request it can also be exposed on the home network at a stable address, so it can be tested
 from other devices such as a phone.
+
+## 2026-11-23: Expected load is 4-8 sessions per user at once
+
+Each user runs about 4-8 sessions at the same time, so with two users, sizing plans for up to
+about 16 concurrent sessions on ranch-dev01 (EPYC 7452, 64 threads, about 500 GB RAM).

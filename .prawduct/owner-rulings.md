@@ -102,3 +102,9 @@ another.
 
 When the node running sessions reboots, aidc brings each session back on its own, with its files,
 branches and conversation intact, and Claude picks up where it left off.
+
+## 2026-11-23: Session ports reach the user by tunnel, and optionally the home network
+
+A session's published port is reached through a tunnel aidc opens to the machine the user is on.
+On request it can also be exposed on the home network at a stable address, so it can be tested
+from other devices such as a phone.

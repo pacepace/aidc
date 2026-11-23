@@ -48,3 +48,8 @@ The other users (first: Brooks, who also has access to the ranch nodes) are trus
 between users is about not tripping over each other and each acting under their own GitHub
 identity, not about walling them off from each other.
 Confirmed: each user has their own code volume; users never share one.
+
+## 2026-11-23: One aidc MCP server per user, in the cluster
+
+Each user's aidc MCP server runs in the cluster in that user's area, so sessions keep running
+and replies keep arriving while the user's laptop sleeps.

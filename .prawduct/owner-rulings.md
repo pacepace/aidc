@@ -97,3 +97,8 @@ no GPU by default.
 A user starts and drives their cluster sessions from any of their machines (Mac, Linux, WSL) with
 the same `aidc` commands as today; a session created from one machine can be attached to from
 another.
+
+## 2026-11-23: Sessions come back after a node reboot
+
+When the node running sessions reboots, aidc brings each session back on its own, with its files,
+branches and conversation intact, and Claude picks up where it left off.

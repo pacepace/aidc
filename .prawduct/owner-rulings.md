@@ -91,3 +91,9 @@ user, is a setting. Each user sets the order their accounts are used in, and tha
 
 A session gets the shared GPU only when asked for at create (for example `--gpu`); sessions have
 no GPU by default.
+
+## 2026-11-23: Cluster sessions are driven from any of the user's machines
+
+A user starts and drives their cluster sessions from any of their machines (Mac, Linux, WSL) with
+the same `aidc` commands as today; a session created from one machine can be attached to from
+another.

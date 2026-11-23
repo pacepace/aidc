@@ -36,3 +36,8 @@ cleans up the stale branches and worktrees agents leave behind.
 Refined: merged branches and their worktrees are deleted. Anything else left behind (unmerged,
 unpushed, orphaned) is flagged for investigation right away, not left to sit, because the
 longer it rots the harder it is to sort out.
+
+## 2026-11-23: The user edits through VS Code, attached to a pod
+
+The user views and edits their cluster-side code with VS Code attached to a pod that mounts
+their disk, the same way aidc's dev containers are used from VS Code today.

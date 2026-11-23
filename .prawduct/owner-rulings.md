@@ -41,3 +41,9 @@ longer it rots the harder it is to sort out.
 
 The user views and edits their cluster-side code with VS Code attached to a pod that mounts
 their disk, the same way aidc's dev containers are used from VS Code today.
+
+## 2026-11-23: Users are trusted peers
+
+The other users (first: Brooks, who also has access to the ranch nodes) are trusted. Separation
+between users is about not tripping over each other and each acting under their own GitHub
+identity, not about walling them off from each other.

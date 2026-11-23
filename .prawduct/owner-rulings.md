@@ -47,3 +47,4 @@ their disk, the same way aidc's dev containers are used from VS Code today.
 The other users (first: Brooks, who also has access to the ranch nodes) are trusted. Separation
 between users is about not tripping over each other and each acting under their own GitHub
 identity, not about walling them off from each other.
+Confirmed: each user has their own code volume; users never share one.

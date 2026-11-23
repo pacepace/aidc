@@ -86,3 +86,8 @@ another profile, and `--continue` does not follow across profiles.
 
 Whether a session switches Claude accounts automatically when one runs out, or waits for the
 user, is a setting. Each user sets the order their accounts are used in, and that order matters.
+
+## 2026-11-23: GPU only on request
+
+A session gets the shared GPU only when asked for at create (for example `--gpu`); sessions have
+no GPU by default.

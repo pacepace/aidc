@@ -81,3 +81,8 @@ must be handled so the same repo maps to the same history everywhere. Using Jean
 required: building our own equivalent is acceptable if that is simpler than fitting around it.
 Brooks confirmed (2026-11-23) that Jean-Claude switches accounts by quitting and relaunching under
 another profile, and `--continue` does not follow across profiles.
+
+## 2026-11-23: Account switching is configurable and ordered
+
+Whether a session switches Claude accounts automatically when one runs out, or waits for the
+user, is a setting. Each user sets the order their accounts are used in, and that order matters.

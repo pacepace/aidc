@@ -70,3 +70,8 @@ mcp/tests/scratch/
 .prawduct/.test-report.xml.scope.json
 .prawduct/.critic-review-dispatch.json
 .prawduct/.pr-review-dispatch.json
+
+# Prawduct session files
+.prawduct/.native-reviews/
+.prawduct/.pr-body.md
+.prawduct/.session-activity.json

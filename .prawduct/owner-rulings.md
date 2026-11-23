@@ -69,3 +69,6 @@ out of usage quota during the work.
 Switching a session's Claude account must never lose its conversation, memory or other Claude
 state. That state also syncs between the cluster and the user's other workstations, the way the
 owner syncs it today with iCloud. iCloud is preferred for ease but not required.
+Refined: use Syncthing (works on Mac, Linux and Windows; Windows users work inside WSL). Folder
+layout below the home directory is the same on every machine; only the home directory itself
+differs (`/Users/<name>` on Mac, `/home/<name>` on Linux and WSL).

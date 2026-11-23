@@ -141,3 +141,8 @@ override, not only by its instructions.
 Refined: an orchestrator the user drives (such as metallm) can give that approval through the
 aidc MCP server, by sending it to the git container's Claude. Sandboxed sessions must never be
 able to do this, which rests on them never reaching the MCP server.
+
+## 2026-11-23: One git container (and its Claude) per user
+
+Each user has one trusted git container, whose Claude handles git for all of that user's
+sessions and repos: one place to approve, and one view of every branch and worktree to clean up.

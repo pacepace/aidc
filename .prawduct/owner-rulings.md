@@ -28,3 +28,8 @@ in code, not only in instructions.
 
 Two sessions on the same repo never share a working folder: each session works in its own git
 worktree of that repo on the user's disk.
+
+## 2026-11-23: The git container owns cleanup of branches and worktrees
+
+The trusted git container is responsible for keeping branches and worktrees tidy: it actively
+cleans up the stale branches and worktrees agents leave behind.

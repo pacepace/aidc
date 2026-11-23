@@ -23,3 +23,8 @@ Who triggers git operations is a mode, ranging from "always ask the human" to "t
 decides by the rules". Agent's addition (accepted as design direction, not yet ruled): the git
 container never runs hooks or repo-level config from the shared disk, and enforces the hard rules
 in code, not only in instructions.
+
+## 2026-11-23: Each session gets its own git worktree
+
+Two sessions on the same repo never share a working folder: each session works in its own git
+worktree of that repo on the user's disk.

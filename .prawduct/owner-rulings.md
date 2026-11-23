@@ -113,3 +113,8 @@ from other devices such as a phone.
 
 Each user runs about 4-8 sessions at the same time, so with two users, sizing plans for up to
 about 16 concurrent sessions on ranch-dev01 (EPYC 7452, 64 threads, about 500 GB RAM).
+
+## 2026-11-23: Session size defaults to 2 CPUs and 8 GB, settable per session
+
+Each cluster session is guaranteed 2 CPUs and 8 GB of memory by default and may use more (up to
+16 CPUs and 32 GB) when the node has room. Both are settable at create.

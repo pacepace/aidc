@@ -407,7 +407,7 @@ notify() {
     if "$AIDC_GIT_NOTIFY" "$1" </dev/null >/dev/null 2>&1; then
         printf '%s\n' "$1" > work/notified; log "${1} handed to the git agent"
     else
-        log "${1} not handed to the git agent (its Claude is not running); it waits in git-requests list"
+        log "${1} not handed to the git agent (its Claude is not running or not set up yet); it waits in git-requests list"
     fi
 }
 

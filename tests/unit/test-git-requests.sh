@@ -36,7 +36,7 @@ cat > "$S/bin/gitctl" <<'STUB'
 #!/usr/bin/env bash
 d=$(dirname "$0")
 { printf '%q ' "$@"; echo; } >> "$d/gitctl.log"
-[ "${G_FAIL:-}" = "$1" ] && { echo "gitctl: refused: no GitHub login (gitctl login)" >&2; exit 1; }
+[ "${G_FAIL:-}" = "$1" ] && { echo "${G_MSG:-gitctl: refused: no GitHub login (gitctl login)}" >&2; exit 1; }
 case "$1" in
     push) echo "pushed $3 $(git -C "$2" rev-parse "refs/heads/$3")" ;;
     pr-create) cat "$6" > "$d/title.seen"; cat "$8" > "$d/body.seen"; echo "https://github.com/o/r/pull/12" ;;
@@ -134,8 +134,12 @@ assert_eq "a merge runs at once, then tidies" "done|pr-merge $P 12 |tidy $P " "$
 assert_has "the tidy report reaches the session" "unpushed 2 other" "$(jq -r .output "$REQ/results/$id.json")"
 reset_calls; id=$(newid); put "$id" "$(req "$id" push)"
 OUT=$(G_FAIL=push AIDC_GIT_MODE=rules bash "$GR" once 2>&1)
-assert_eq "a verb that fails (no login) fails the request, with gitctl's reason" "failed|gitctl: refused: no GitHub login (gitctl login)" \
+assert_eq "a verb that fails fails the request, with gitctl's reason" "failed|gitctl: refused: no GitHub login (gitctl login)" \
     "$(state "$id")|$(jq -r .message "$REQ/results/$id.json")"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push)"
+OUT=$(G_FAIL=push G_MSG="fatal: could not read Username for 'https://github.com': terminal prompts disabled" AIDC_GIT_MODE=rules bash "$GR" once 2>&1)
+assert_eq "no GitHub login is said plainly, with what the user runs" \
+    "the git container is not logged in to GitHub (the user runs: aidc git login)" "$(jq -r .message "$REQ/results/$id.json")"
 OUT=$(AIDC_GIT_MODE=yolo bash "$GR" once 2>&1)
 id=$(newid); put "$id" "$(req "$id" push)"; reset_calls
 OUT=$(AIDC_GIT_MODE=yolo bash "$GR" once 2>&1)
@@ -210,6 +214,10 @@ assert_eq "a request and its result older than 30 days are deleted together" "no
 assert_eq "so are an old result alone and an old file left in requests/" "no no" \
     "$([ -e "$REQ/results/$orph.json" ] && echo yes || echo no) $([ -e "$REQ/requests/.stale.tmp" ] && echo yes || echo no)"
 assert_eq "a fresh one is kept" pending "$(state "$fresh")"
+head -c 1100000 /dev/zero | tr '\0' 'x' | fold -w 100 > "$REQ/work/requests.log"
+gr once
+assert_eq "the request log is trimmed to its last 2000 lines once it passes 1 MiB" yes \
+    "$([ "$(wc -l < "$REQ/work/requests.log")" -le 2000 ] && [ "$(stat -c %s "$REQ/work/requests.log")" -lt 300000 ] && echo yes || echo no)"
 jq '.state = "running"' "$REQ/results/$fresh.json" > "$S/r.json" && cp "$S/r.json" "$REQ/results/$fresh.json"
 reset_calls
 timeout 4 bash "$GR" watch >/dev/null 2>&1
@@ -290,6 +298,22 @@ assert_has "the stand-in is installed as gh" "COPY gh-standin.sh         /usr/lo
 hook=$(AIDC_GIT_REQUESTS="$REQ" bash "$AIDC_ROOT/.devcontainer/pre-push-hook.sh" 2>&1); rc=$?
 assert_eq "git push in a session still fails" 1 "$rc"
 assert_has "and on Kubernetes says how to ask the git container instead" "gh pr create" "$hook"
+# The image's system config, as its Dockerfile writes it, with the helper on PATH.
+printf '#!/bin/sh\nexec sh "%s" "$@"\n' "$AIDC_ROOT/.devcontainer/git-remote-aidc.sh" > "$S/bin/git-remote-aidc"; chmod +x "$S/bin/git-remote-aidc"
+: > "$S/sysgit"
+grep -o 'git config --system --add url[^\\&]*' "$AIDC_ROOT/.devcontainer/Dockerfile" | while read -r cmd; do
+    eval "GIT_CONFIG_SYSTEM=\"\$S/sysgit\" $cmd"
+done
+assert_eq "the image rewrites GitHub push URLs (https, git@, ssh://) to the aidc helper" 3 "$(grep -c pushInsteadOf "$S/sysgit")"
+OUT=$(cd "$P" && PATH="$S/bin:$PATH" GIT_CONFIG_SYSTEM="$S/sysgit" GIT_TERMINAL_PROMPT=0 \
+    timeout 20 git push origin feat 2>&1); rc=$?
+assert_eq "git push to GitHub in a session fails at once, without contacting GitHub" "failed no" \
+    "$([ "$rc" != 0 ] && echo failed || echo ok) $(printf '%s' "$OUT" | grep -qi 'could not\|username\|resolve' && echo yes || echo no)"
+assert_has "and explains the request flow on Kubernetes" "gh pr create" "$OUT"
+OUT=$(cd "$P" && env -u AIDC_GIT_REQUESTS PATH="$S/bin:$PATH" GIT_CONFIG_SYSTEM="$S/sysgit" timeout 20 git push origin feat 2>&1)
+assert_has "or, on Docker, to push from the host" "push from the host machine" "$OUT"
+assert_eq "fetch URLs are not rewritten" "https://github.com/o/r" \
+    "$(cd "$P" && GIT_CONFIG_SYSTEM="$S/sysgit" git remote get-url origin)"
 um=$(grep -n 'umask 002' "$AIDC_ROOT/.devcontainer/user-main.sh")
 assert_has "sessions on Kubernetes make group-writable files (the git container tidies them)" '[ "${AIDC_BACKEND:-}" = kubernetes ] && umask 002' "$um"
 assert_eq "set before tmux and Claude start (they inherit it)" yes \

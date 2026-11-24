@@ -48,13 +48,14 @@ MODE="${AIDC_GIT_MODE:-ask}"
 case "$MODE" in ask|rules) ;; *) MODE=ask ;; esac
 # Requests and results are kept 30 days, then deleted: nothing piles up unnoticed.
 EXPIRE_MIN=$((30 * 24 * 60))
-MAX_REQUEST_BYTES=262144 MAX_TITLE_BYTES=256 MAX_BODY_BYTES=65536 MAX_OUTPUT_BYTES=65536
+MAX_LOG_BYTES=1048576 MAX_REQUEST_BYTES=262144 MAX_TITLE_BYTES=256 MAX_BODY_BYTES=65536 MAX_OUTPUT_BYTES=65536
 PROTECTED_BRANCHES="main master develop"
 
 die() { printf 'git-requests: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '/^#   git-requests/s/^#   //p' "$self"; }
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-log() { printf '%s %s\n' "$(now)" "$*" >> work/requests.log 2>/dev/null || true; printf '%s %s\n' "$(now)" "$*"; }
+# The watcher's own record, in work/ (trimmed by expire).
+log() { printf '%s %s\n' "$(now)" "$*" >> work/requests.log 2>/dev/null || true; }
 # Text a session wrote, on its way to a terminal or a result: no control characters but
 # newline and tab, and no more than a cap.
 printable() { LC_ALL=C tr -d '\000-\010\013-\037\177' | head -c "${1:-$MAX_OUTPUT_BYTES}"; }
@@ -78,7 +79,8 @@ enter() {
         if [ -n "$SESSION_GID" ] && [ "$d" != work ] && [ "$(stat -c %g "$d")" != "$SESSION_GID" ]; then
             chgrp "$SESSION_GID" "$d" || die "cannot give ${d}/ to the session group"
         fi
-        [ "$(stat -c %a "$d")" = "${want#0}" ] || chmod "$want" "$d" || die "cannot set ${d}/'s mode"
+        # The folder's setgid bit (inherited, keeps the session group) is not part of the check.
+        (( (8#$(stat -c %a "$d") & 8#1777) == 8#$want )) || chmod "$want" "$d" || die "cannot set ${d}/'s mode"
     done
 }
 
@@ -300,7 +302,12 @@ run() {
             *) result "$id" "done" "read" ;;
         esac
     else
-        result "$id" failed "$(printf '%s\n' "$out" | grep -v '^$' | tail -n1 | printable 300)"
+        # No login is the usual first failure: say it plainly, not in git's or gh's words.
+        case "$R_OUTPUT$out" in
+            *"could not read Username for 'https://github.com'"*|*"gh auth login"*)
+                result "$id" failed "the git container is not logged in to GitHub (the user runs: aidc git login)" ;;
+            *) result "$id" failed "$(printf '%s\n' "$out" | grep -v '^$' | tail -n1 | printable 300)" ;;
+        esac
     fi
     rmdir -- "work/${id}.lock" 2>/dev/null || true
     [ "$rc" = 0 ]
@@ -349,6 +356,13 @@ expire() {
         rm -rf -- "work/${id}.json" "work/${id}.lock" "work/${id}.title" "work/${id}.body" "results/${id}.json"
     done < <(find work -maxdepth 1 -type f -name '*.json' -mmin +"$EXPIRE_MIN" -print0 2>/dev/null)
     find results -maxdepth 1 \( -type f -o -type l \) -mmin +"$EXPIRE_MIN" -delete 2>/dev/null || true
+    # The logs keep their last lines only (work/'s, and the main process's copy of the watcher's
+    # errors).
+    for f in work/requests.log "${HOME:-/home/git}/.cache/gitctl/requests.log"; do
+        if [ -f "$f" ] && [ "$(stat -c %s -- "$f")" -gt "$MAX_LOG_BYTES" ]; then
+            tail -n 2000 -- "$f" > "${f}.tmp" && mv -f -- "${f}.tmp" "$f"
+        fi
+    done
 }
 
 once() {

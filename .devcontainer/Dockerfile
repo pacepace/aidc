@@ -464,7 +464,13 @@ COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
 COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
 COPY gh-standin.sh         /usr/local/bin/gh
-RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/aidc-post-create.sh \
+COPY git-remote-aidc.sh    /usr/local/bin/git-remote-aidc
+# git push to GitHub goes to git-remote-aidc, which explains how to push from a session and
+# pushes nothing (without it git asks GitHub first and fails for a login, before the hook).
+RUN git config --system --add url.aidc::https://github.com/.pushInsteadOf https://github.com/ \
+    && git config --system --add url.aidc::https://github.com/.pushInsteadOf git@github.com: \
+    && git config --system --add url.aidc::https://github.com/.pushInsteadOf ssh://git@github.com/
+RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/git-remote-aidc /usr/local/bin/aidc-post-create.sh \
                 /usr/local/bin/aidc-tmux-start.sh \
                 /usr/local/bin/aidc-entrypoint.sh \
                 /usr/local/bin/aidc-user-main.sh \

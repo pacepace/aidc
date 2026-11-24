@@ -185,7 +185,8 @@ refuses anything but a plain file, checks every field (known fields only, a work
 disk with a GitHub origin, branch names, no protected branch, title and body without
 attribution or control characters), and then, by `kubernetes.git_mode`: rules runs it through
 gitctl at once; ask holds it as pending for `aidc git approve|deny` (reads run at once in both).
-Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
+A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
+nothing and says to use `gh pr create`. Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
 restart is reported as interrupted, never retried. Requests and results are deleted after 30
 days. In ask mode the request is also handed to `AIDC_GIT_NOTIFY` when set: the git agent's
 Claude takes it from there in a later step (`git-requests prompt <id>` is its text), asking

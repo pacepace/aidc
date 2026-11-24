@@ -90,6 +90,11 @@ case "$*" in
     *"get deployment git"*) [ "${K_NO_DEP:-}" = 1 ] || echo "deployment.apps/git" ;;
     *"exec git-7d9f-abc -c git -- sh -c"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'error: unable to upgrade connection' >&2; exit 1; }
+        if [ -n "${K_STATUS_REAL:-}" ]; then
+            # The status script itself, run here against fake gitctl and git-requests.
+            while [ "$1" != -- ]; do shift; done; shift 3
+            PATH="$K_STATUS_REAL:$PATH" exec sh -c "$1"
+        fi
         echo "github=${K_GH:-no}"; echo "waiting=${K_WAITING:-0}"
         [ "${K_NO_STORAGE:-}" = 1 ] || { echo "storage-copies ${K_COPIES:-1048576}"; echo "storage-bundles ${K_BUNDLES:-0}"; } ;;
     *"get networkpolicy -o name"*)
@@ -252,11 +257,19 @@ assert_has "a confirmed GitHub login is yes" "github:   logged in" "$out"
 assert_not_has "no SSH key row (the login is gh over https)" "ssh key" "$out"
 assert_has "the git mode is shown (ask by default)" "mode:     ask" "$out"
 assert_has "no waiting requests is none" "requests: none" "$out"
+mkdir -p "$SCRATCH/fake"
+printf '#!/bin/sh\ncase "$1" in status) echo no ;; storage) echo "copies 0"; echo "bundles 0" ;; esac\n' > "$SCRATCH/fake/gitctl"
+printf '#!/bin/sh\necho "ID  RECEIVED"\n[ -z "$FAKE_ROWS" ] || printf "%%b\\n" "$FAKE_ROWS"\n' > "$SCRATCH/fake/git-requests"
+chmod +x "$SCRATCH/fake/gitctl" "$SCRATCH/fake/git-requests"
+out=$(K_STATUS_REAL="$SCRATCH/fake" run git status)
+assert_has "the status script in the container: no waiting requests is none, not unknown" "requests: none" "$out"
+out=$(K_STATUS_REAL="$SCRATCH/fake" FAKE_ROWS='a x\nb y' run git status)
+assert_has "and two are two" "requests: 2 waiting" "$out"
 out=$(K_WAITING=3 run git status)
 assert_has "waiting requests are counted, with where to see them" "requests: 3 waiting for your approval (aidc git requests)" "$out"
 assert_has "the egress policy is reported enforced" "egress:   enforced" "$out"
 out=$(run git status)
-assert_has "no login is no, with what to do" "github:   not logged in (aidc git attach" "$out"
+assert_has "no login is no, with what to do" "github:   not logged in (aidc git login)" "$out"
 out=$(K_GH=stored run git status)
 assert_has "a stored login GitHub did not confirm is unknown, not no" \
     "github:   unknown (GitHub did not confirm the login)" "$out"

@@ -45,11 +45,12 @@ if [ "$rc" = 0 ]; then
         case "$(gitctl status 2>/dev/null)" in
             yes) echo "github=yes" ;; no) echo "github=no" ;; unknown) echo "github=stored" ;;
         esac
-        n=$(git-requests list 2>/dev/null | tail -n +2 | grep -c .) && echo "waiting=${n}"
+        # Only a list that printed its header counts; grep -c exits 1 on zero rows.
+        if l=$(git-requests list 2>/dev/null); then echo "waiting=$(printf "%s\n" "$l" | tail -n +2 | grep -c . || true)"; fi
         gitctl storage 2>/dev/null | sed "s/^/storage-/"' </dev/null 2>/dev/null || true)
     case "$(printf '%s\n' "$out" | sed -n 's/^github=//p')" in
         yes) github="logged in" ;;
-        no) github="not logged in (aidc git attach, then: gitctl login)" ;;
+        no) github="not logged in (aidc git login)" ;;
         stored) github="unknown (GitHub did not confirm the login)" ;;
     esac
     n=$(printf '%s\n' "$out" | sed -n 's/^waiting=//p')

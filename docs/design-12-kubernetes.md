@@ -6,7 +6,7 @@ the sandbox, how sessions get Docker and the GPU without privileged mode, how eg
 fenced, how ports reach the user, and how Claude logins, account switching and conversation
 history work across the cluster and the user's own machines.
 
-**Requirements implemented:** K8S-01 … K8S-24 (new, `docs/requirements.md`). Carries over NET-01,
+**Requirements implemented:** K8S-01 … K8S-25 (new, `docs/requirements.md`). Carries over NET-01,
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** design. Owner rulings of 2026-11-23 are recorded in `.prawduct/owner-rulings.md`.
@@ -154,6 +154,9 @@ Sysbox included.
 
 Rootless Docker and Podman were tried and dropped: they needed the AppArmor user-namespace
 restriction lifted, a smaller ID range and a tun device plugin, and still did not run.
+
+Sessions come with testament installed (K8S-25), so tests can run through Brooks's test
+runner; its coordinator is the.ranch `apps/testament`.
 
 Default size: 2 CPU and 8 GB guaranteed, may burst to 16 CPU and 32 GB; both settable at create
 (K8S-19). Expected load is 4–8 sessions per user.

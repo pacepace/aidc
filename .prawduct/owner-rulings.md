@@ -196,3 +196,10 @@ A repo's Claude history folder is synced under its Linux name (`-home-<name>-…
 WSL and the cluster already use. On each Mac a small script creates an alias (symlink) with the
 Mac name (`-Users-<name>-…`) pointing at it inside `~/.claude/projects/`; aliases are not synced.
 Measured: Claude follows such an alias, appends to the same conversation and finds its memory.
+
+## 2026-11-24: aidc sessions come with testament installed
+
+aidc installs testament (Brooks's distributed test runner; coordinator deployed in the.ranch
+`apps/testament`, image `ghcr.io/brookstalley/testament`) in its sessions, so work in a session
+can run tests through it. How it is installed (release binary, pinned version, cooldown) is a
+technical decision for the build.

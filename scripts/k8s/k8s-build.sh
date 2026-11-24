@@ -48,8 +48,12 @@ BUILDER="builder-$(date +%s)-$$"
 cleanup() { k8s_kubectl -n "$ns" delete pod "$BUILDER" --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
-# bexec <args...>: run in the builder's docker container.
-bexec() { k8s_kubectl -n "$ns" exec -i "$BUILDER" -c docker -- "$@"; }
+# bexec <args...>: run in the builder's docker container, with no stdin. `kubectl exec -i`
+# reads all of its stdin whatever the command does with it, so inside the loop over images
+# below it would swallow the remaining rows (it did: one image built, the rest silently
+# skipped). bexec_in feeds stdin on purpose, for the build context.
+bexec()    { k8s_kubectl -n "$ns" exec "$BUILDER" -c docker -- "$@" </dev/null; }
+bexec_in() { k8s_kubectl -n "$ns" exec -i "$BUILDER" -c docker -- "$@"; }
 
 # Each row is "<registry path>|<context dir>|<dockerfile>" for one role.
 rows=$(aidc_image_inventory)
@@ -87,7 +91,7 @@ while IFS='|' read -r tag context dockerfile; do
     # too); leaving them out of the stream saves sending them.
     tar -C "$context" --exclude=.venv --exclude=__pycache__ --exclude=node_modules \
         --exclude=.pytest_cache --exclude=.mypy_cache --exclude=.ruff_cache -czf - . \
-        | bexec tar -C "$dir" -xzf -
+        | bexec_in tar -C "$dir" -xzf -
     build_args=()
     case "$tag" in
         aidc/dev-base:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
@@ -101,4 +105,8 @@ done <<EOF
 $rows
 EOF
 
+want=$(printf '%s\n' "$rows" | grep -c . || true)
+if [ $((built + skipped)) -ne "$want" ]; then
+    die "accounted for $((built + skipped)) of ${want} images: the build loop ended early"
+fi
 info "built ${built}, already present ${skipped}, in ${AIDC_K8S_REGISTRY_PUSH} at ${AIDC_VERSION_TAG}"

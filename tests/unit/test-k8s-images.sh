@@ -57,6 +57,7 @@ assert_not_has() {
 #   exec ... -- wget ...manifests/<tag>   exit 0 when the image path is in $K_PRESENT
 #   exec ... -- tar ...           drains stdin
 #   exec ... -- <anything else>   succeeds
+#   exec -i ...                   drains stdin, as the real kubectl does
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -72,6 +73,9 @@ case "$*" in
         exit 1 ;;
     *" exec "*"-- tar "*) cat > /dev/null ;;
 esac
+# Like the real kubectl, `exec -i` reads all of stdin, whatever the command does with it: a
+# caller looping over lines on stdin loses the rest of them to the first exec.
+case "$*" in *" exec -i "*) cat > /dev/null ;; esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/kubectl"

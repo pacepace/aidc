@@ -391,21 +391,39 @@ run() {
     [ "$rc" = 0 ]
 }
 
+# The git agent may have a question open about the requests named in work/notified (one id a
+# line): the one last handed over, or the one it last ran `git-requests prompt` for (it also takes
+# requests from `git-requests list` itself), or, after a watcher start, every request then waiting
+# (the watcher cannot know which one, if any, Claude is asking about). Written whole, then renamed
+# into place, so a reader never sees half of it.
+mark_open() {
+    { printf '%s\n' "$@" > work/.notified.tmp && mv -f -- work/.notified.tmp work/notified; } 2>/dev/null \
+        || log "cannot record ${*} as handed to the git agent"
+}
+# open_other ID: prints a request named in work/notified, other than ID, that still waits.
+open_other() {
+    local o
+    [ -f work/notified ] || return 1
+    while IFS= read -r o; do
+        [[ "$o" =~ ^[0-9a-f]{32}$ ]] && [ "$o" != "$1" ] && waiting "$o" && { printf '%s' "$o"; return 0; }
+    done < <(head -c 65536 work/notified)
+    return 1
+}
+
 # notify ID: a request waits for the user. Logged, shown in the git container's terminal, and
 # handed to AIDC_GIT_NOTIFY when the Deployment sets it (git-notify: a line naming the id, typed
-# into the git agent's Claude). Only when the request last handed over (work/notified) no longer
-# waits: the agent is then not in the middle of asking about one, and after each decision it
-# takes the next waiting request from `git-requests list` itself.
+# into the git agent's Claude). Only when no request in work/notified still waits: a line and
+# Enter typed into an open question would answer it. After each decision the agent takes the
+# next waiting request from `git-requests list` itself.
 notify() {
-    local last=""
+    local last
     tmux display-message -t main "git request ${1} (${Q_action} ${Q_slug} ${Q_branch:-#$Q_number}) waits: git-requests list" 2>/dev/null || true
     [ -n "${AIDC_GIT_NOTIFY:-}" ] && [ -x "${AIDC_GIT_NOTIFY}" ] || return 0
-    [ -f work/notified ] && last=$(head -c 32 work/notified)
-    if [ -n "$last" ] && [ "$last" != "$1" ] && waiting "$last"; then
+    if last=$(open_other "$1"); then
         log "${1} waits behind ${last}, which the git agent has not decided yet"; return 0
     fi
     if "$AIDC_GIT_NOTIFY" "$1" </dev/null >/dev/null 2>&1; then
-        printf '%s\n' "$1" > work/notified; log "${1} handed to the git agent"
+        mark_open "$1"; log "${1} handed to the git agent"
     else
         log "${1} not handed to the git agent (its Claude is not running or not set up yet); it waits in git-requests list"
     fi
@@ -473,9 +491,19 @@ once() {
 recover() {
     local f id
     enter
-    # The git agent's Claude restarted with the container: a question it was asking is gone, so
-    # the next waiting request is handed to it afresh.
-    rm -f work/notified
+    # Whether the git agent's Claude restarted too is not known here (the watcher can restart on
+    # its own), nor which waiting request, if any, it is asking about: it may have taken any of
+    # them from `git-requests list`. So every request waiting now counts as possibly open, and
+    # nothing is typed in until each is decided or the agent runs `git-requests prompt` for one
+    # (which then names the only open one). Requests waiting meanwhile are in the list, which the
+    # agent reads when it starts and after each decision.
+    local waits=()
+    for f in work/*.json; do
+        [ -f "$f" ] || continue
+        id="${f#work/}" id="${id%.json}"
+        [[ "$id" =~ ^[0-9a-f]{32}$ ]] && waiting "$id" && waits+=("$id")
+    done
+    if [ "${#waits[@]}" -gt 0 ]; then mark_open "${waits[@]}"; else rm -f work/notified; fi
     for f in results/*.json; do
         [ -f "$f" ] || continue
         id="${f#results/}" id="${id%.json}"
@@ -535,6 +563,9 @@ case "$cmd" in
     prompt)
         id_ok "${1:-}"; enter
         load "$1" || die "no request ${1}"
+        # The agent is about to ask about this one (whether it was handed over or taken from the
+        # list): the watcher types nothing in until it is decided.
+        if waiting "$1"; then mark_open "$1"; fi
         cat <<EOF
 Session ${Q_session} asks you to ${Q_action} on GitHub repo ${Q_slug}${Q_sha:+, commit ${Q_sha}} (git request ${1}).
 Mode: ask, so the user decides. Approving acts on that repo${Q_sha:+ and commit} only: if the

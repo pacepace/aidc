@@ -204,12 +204,40 @@ d=$(newid); put "$d" "$(req "$d" push)"; N_FAIL=1 gr once
 assert_has "Claude not running: logged, the request stays in the list" "$d not handed to the git agent" "$(cat "$REQ/work/requests.log")"
 e=$(newid); put "$e" "$(req "$e" push)"; gr once
 assert_eq "and the next one is handed over (nothing marked as handed)" "$e" "$(tail -n1 "$S/bin/notify.log")"
-gr deny "$d"
-printf '%s\n' "$e" > "$REQ/work/notified"
+gr deny "$d"; gr deny "$e"
+# Requests left waiting by the sections above are decided, so only this section's count.
+gr list; for w in $(printf '%s\n' "$OUT" | awk 'NR > 1 {print $1}'); do gr deny "$w"; done
+# The agent also takes requests from the list (after each decision, and when it starts): the one
+# it runs `prompt` for is the one it is asking about, so nothing is typed in until it is decided.
+: > "$S/bin/notify.log"
+a=$(newid); put "$a" "$(req "$a" push)"; gr once
+b=$(newid); put "$b" "$(req "$b" push)"; gr once
+gr deny "$a"; gr prompt "$b"
+assert_eq "prompt marks the request the agent is asking about" "$b" "$(cat "$REQ/work/notified")"
+c=$(newid); put "$c" "$(req "$c" push)"; gr once
+assert_eq "a request taken from the list and prompted holds the next one back (its Enter would answer the question)" \
+    "$a" "$(paste -sd'|' "$S/bin/notify.log")"
+assert_has "which is logged as waiting behind it" "$c waits behind $b" "$(cat "$REQ/work/requests.log")"
+gr prompt "$(newid)"
+assert_eq "prompt for a request that is not there marks nothing" "$b" "$(cat "$REQ/work/notified")"
+gr deny "$b"
+f=$(newid); put "$f" "$(req "$f" push)"; gr once
+assert_eq "once that one is decided, the next new one is handed over" "$a|$f" "$(paste -sd'|' "$S/bin/notify.log")"
+# A restart cannot know which waiting request, if any, Claude is asking about: all of them count.
+: > "$S/bin/notify.log"; rm -f "$REQ/work/notified"
 ( cd "$REQ" && timeout 3 bash "$GR" watch >/dev/null 2>&1 ) || true
-assert_eq "a restart forgets what was handed over (Claude's question went with it)" "no" \
-    "$([ -e "$REQ/work/notified" ] && echo yes || echo no)"
-gr deny "$e"
+assert_eq "a restart marks every waiting request as possibly asked about" "$(printf '%s\n' "$c" "$f" | sort | paste -sd' ')" \
+    "$(sort "$REQ/work/notified" | paste -sd' ')"
+g=$(newid); put "$g" "$(req "$g" push)"; gr once
+assert_eq "after a restart, a new request is not typed into a question that may be open" "" "$(cat "$S/bin/notify.log")"
+gr deny "$c"; h=$(newid); put "$h" "$(req "$h" push)"; gr once
+assert_eq "nor while any request waiting at the restart still waits" "" "$(cat "$S/bin/notify.log")"
+gr deny "$f"; gr deny "$g"; gr deny "$h"
+i=$(newid); put "$i" "$(req "$i" push)"; gr once
+assert_eq "once those are decided, new requests are handed over again" "$i" "$(cat "$S/bin/notify.log")"
+gr deny "$i"
+( cd "$REQ" && timeout 3 bash "$GR" watch >/dev/null 2>&1 ) || true
+assert_eq "a restart with nothing waiting clears the marker" no "$([ -e "$REQ/work/notified" ] && echo yes || echo no)"
 unset AIDC_GIT_NOTIFY
 
 echo ""
@@ -457,6 +485,29 @@ bash "$S/mut.sh" approve "$id" >/dev/null 2>&1
 git -C "$P" remote set-url origin https://github.com/o/r
 assert_has "with the watcher's run-time binding check removed, the approval reaches gitctl (so the binding test would fail without gitctl's own check)" \
     "push $P feat" "$(calls)"
+
+cp "$GR" "$S/mut.sh"
+sed -i 's/if waiting "\$1"; then mark_open "\$1"; fi/:/' "$S/mut.sh"
+grep -q 'if waiting "$1"; then mark_open "$1"; fi' "$S/mut.sh" && fail "mutation did not apply (prompt's marker)"
+export AIDC_GIT_NOTIFY="$S/bin/notify"; : > "$S/bin/notify.log"; rm -f "$REQ/work/notified"
+a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+b=$(newid); put "$b" "$(req "$b" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+bash "$S/mut.sh" deny "$a" >/dev/null 2>&1; bash "$S/mut.sh" prompt "$b" >/dev/null 2>&1
+c=$(newid); put "$c" "$(req "$c" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+assert_eq "with prompt's marker removed, a request is typed into the open question (so the prompt test would fail)" \
+    "$a|$c" "$(paste -sd'|' "$S/bin/notify.log")"
+bash "$GR" deny "$b" >/dev/null 2>&1; bash "$GR" deny "$c" >/dev/null 2>&1
+cp "$GR" "$S/mut.sh"
+sed -i 's/if \[ "\${#waits\[@\]}" -gt 0 \]; then mark_open "\${waits\[@\]}"; else rm -f work\/notified; fi/rm -f work\/notified/' "$S/mut.sh"
+grep -q 'mark_open "${waits' "$S/mut.sh" && fail "mutation did not apply (restart's marker)"
+: > "$S/bin/notify.log"
+a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+( cd "$REQ" && timeout 3 bash "$S/mut.sh" watch >/dev/null 2>&1 ) || true
+b=$(newid); put "$b" "$(req "$b" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+assert_eq "with the restart's marker removed, a new request is typed in after a restart (so the restart test would fail)" \
+    "$a|$b" "$(paste -sd'|' "$S/bin/notify.log")"
+bash "$GR" deny "$a" >/dev/null 2>&1; bash "$GR" deny "$b" >/dev/null 2>&1
+unset AIDC_GIT_NOTIFY
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -222,9 +222,25 @@ one line naming only the id is pasted into window `claude` when Claude runs ther
 (never into a shell or Claude's first-run screens), and the agent runs `git-requests prompt <id>` (the session's text below a line, marked
 as data) and asks the user with AskUserQuestion, Deny first; aidc delivers that question to an
 orchestrator as any session's, and the user can answer in the terminal too; only then does it
-approve or deny. One request is handed over at a time: while the last one handed over still
-waits, new ones are only logged, and the agent takes them from `git-requests list` after each
-decision, so no line lands in an open question. `aidc git approve|deny` still work.
+approve or deny. One request is handed over at a time: while the request the agent may be asking
+about still waits, new ones are only logged, and the agent takes them from `git-requests list`
+after each decision, so no line lands in an open question. That request is the one last handed
+over or the one the agent last ran `git-requests prompt` for (it also takes requests from the
+list itself); after a watcher start, when which one is open is not known, it is every request
+then waiting, until each is decided or the agent runs `prompt` for one. `aidc git approve|deny`
+still work.
+
+Residuals of the git agent, recorded rather than closed:
+
+- Its allow list is a courtesy, not a boundary. `Bash(git *)` lets it run any command as the git
+  user (uid 2000), for example through a git alias; what stops it reaching GitHub other than
+  through gitctl is that its own git has no credential and gitctl and the watcher check every
+  action, not the list.
+- Only its instructions stop it approving a request without asking the user: `git-requests
+  approve` is in its allow list, and nothing in code tells an approval the user gave from one the
+  agent made up.
+- prawduct's skills, if ever installed in the git home, would be kept out only by its CLAUDE.md
+  ("You do no prawduct work"); nothing in its settings blocks them.
 
 Per-session git mode: each session gets a random token at `aidc create` (`AIDC_GIT_TOKEN` in its
 dev pod; sessions reach no API server and no other pod, so only it can read it), which its gh

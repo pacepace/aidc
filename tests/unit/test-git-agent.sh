@@ -113,9 +113,20 @@ chmod +x "$S/bin/tmux"
 export T_LOG="$S/tmux.log" T_BUF="$S/tmux.buf"
 id=0123456789abcdef0123456789abcdef
 NH="$S/nhome"; mkdir -p "$NH/.claude"
-notify() { : > "$T_LOG"; : > "$T_BUF"; HOME="$NH" PATH="$S/bin:$PATH" bash "$G/git-notify.sh" "$@" >/dev/null 2>&1; echo $?; }
+notify() { : > "$T_LOG"; : > "$T_BUF"; env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY HOME="$NH" PATH="$S/bin:$PATH" \
+    ${N_ENV:+"$N_ENV"} bash "$G/git-notify.sh" "$@" >/dev/null 2>&1; echo $?; }
 assert_eq "Claude not logged in yet: nothing typed (its first screens would take the line)" "1 no" \
     "$(notify "$id") $(grep -q paste-buffer "$T_LOG" && echo yes || echo no)"
+printf '{"hasCompletedOnboarding":true}' > "$NH/.claude.json"
+assert_eq "first-run screens done but no key of any kind: nothing typed" "1 no" \
+    "$(notify "$id") $(grep -q paste-buffer "$T_LOG" && echo yes || echo no)"
+assert_eq "an OAuth token in the environment is a key" 0 "$(N_ENV=CLAUDE_CODE_OAUTH_TOKEN=t notify "$id")"
+assert_eq "an API key in the environment is a key" 0 "$(N_ENV=ANTHROPIC_API_KEY=k notify "$id")"
+printf '{"apiKeyHelper":""}' > "$NH/.claude/settings.json"
+assert_eq "an empty apiKeyHelper is not" 1 "$(notify "$id")"
+printf '{"apiKeyHelper":"/usr/local/bin/key"}' > "$NH/.claude/settings.json"
+assert_eq "an apiKeyHelper in the git home's Claude settings is a key" 0 "$(notify "$id")"
+rm -f "$NH/.claude/settings.json"
 printf '{"x":1}' > "$NH/.claude/.credentials.json"; printf '{"hasCompletedOnboarding":false}' > "$NH/.claude.json"
 assert_eq "logged in, first-run screens not done: nothing typed" "1 no" \
     "$(notify "$id") $(grep -q paste-buffer "$T_LOG" && echo yes || echo no)"

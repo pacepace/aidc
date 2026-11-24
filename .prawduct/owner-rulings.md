@@ -422,3 +422,7 @@ testament is released on GitHub and moves fast. Sessions get its latest release,
 ## 2026-11-24 — testament is fetched with the user's SSH key, not gh
 
 The owner does not use gh for regular git work. aidc fetches testament on the laptop with the user's own SSH key (newest release tag, built into a wheel locally) and hands the wheel to image builds and running sessions; no key or token enters a session or an image.
+
+## 2026-11-24 — testament is optional until it is public
+
+aidc users without access to testament's private repo must not be blocked. Installing it is optional: it happens only when the user's config names the repo, and a missing config or a failed fetch leaves the build or upgrade going without it, with a one-line note. Amend K8S-25 from MUST to "when configured" until testament is public. The owner and Brooks both have SSH keys that can fetch it.

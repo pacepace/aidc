@@ -764,7 +764,7 @@ attaching (`aidc attach git`) or with `aidc git approve|deny`.
 | `aidc list` | All sessions; status + taint flag. |
 | `aidc status <name>` | Component health, taint, the malware feeds (a feed lost at 0 entries, a failed refresh, a list older than twice the refresh interval), declared + adhoc ports, TCP egress relays, attached networks, audit dir path. |
 | `aidc attach <name>` | `docker exec -it -u vscode` into tmux. |
-| `aidc proxy <name> {add\|rm\|ls\|clear}` | Manage adhoc host->container port forwards (not persisted across restart/kill). |
+| `aidc proxy <name> {add\|rm\|ls\|clear}` | Manage adhoc host->container port forwards (not persisted across restart/kill). On Kubernetes: tunnels to this machine, which come back after a restart; `up` starts the declared ones here. |
 | `aidc network <name> {add\|rm\|ls}` | Attach a running session's dev container to another docker bridge so it can reach that stack's services by name. Survives `restart`, not `upgrade`/`kill` — use `create --network` for permanent. Widens the sandbox: see "Reaching another stack's services". |
 | `aidc egress <name> {add\|rm\|ls\|clear}` | Let a running session reach a TCP `host:port` the host can reach (a database over ZeroTier). Survives `restart` and `upgrade`, not `kill`; use `create --egress-tcp` or `egress_tcp:` for permanent. |
 | `aidc logs <name> [--component dev\|squid\|refresher\|policy\|audit]` | Tail logs. |
@@ -775,7 +775,7 @@ attaching (`aidc attach git`) or with `aidc git approve|deny`.
 | `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Recreates from the compose file rendered at create time, kept in `~/.local/state/aidc/sessions/<name>.yaml`. A session made before v1.9.9 kept it in `/tmp`: if that copy is still there it is moved into place and the upgrade goes ahead; if a reboot or a cleanup took it, the session can only be recreated. Does **not** replace the session's Claude Code: it lives in the dev-home volume and auto-updates in-session. Prompts before interrupting an in-flight claude conversation. |
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
 | `aidc audit list` / `aidc audit trim [--older-than <age>] [<name>...] [--yes] [--dry-run]` | List kept audit trails (both backends), or remove old or named ones; never a running session's (see "Kept audit trails"). |
-| `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. |
+| `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. On Kubernetes (`--backend kubernetes`, or `backend: kubernetes`): what a session that is no longer running left in the cluster, except its audit claim. |
 | `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
@@ -841,14 +841,48 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   one on this aidc version's image (after `aidc k8s build`), and `aidc refresh <name>` re-pulls
   its malware feeds. The proxy pod, the session home and your disk are kept, so Claude resumes
   its conversation (`--continue`).
-- Not yet on this backend: `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`, and
-  `proxy`, `network`, `egress` (each says so). A tainted session is recorded and reported, not
-  frozen.
+- **Ports on your machine:** `aidc create ... --port H:C` (repeatable; also the `ports:` config)
+  tunnels the session's port C to `localhost:H` here: a local process runs `kubectl
+  port-forward` with your own cluster credentials, on 127.0.0.1, and starts it again when it
+  drops or the dev pod is replaced (restart, upgrade, a node reboot). `aidc proxy <name>
+  add|rm|ls|clear` manages tunnels on this machine; `aidc proxy <name> up` starts the session's
+  declared ports on another machine. Logs: `~/.local/state/aidc/tunnels/`. `aidc kill` stops
+  them, and `aidc status` lists them.
+- **A page on your network:** `--expose <port>` serves the port through the cluster's ingress at
+  `<name>-<user>.<domain>` (a further port: `<name>-<port>-<user>.<domain>`), only the ingress
+  controller's pods being let in to it. No login unless you add `--login`, which prints a
+  generated username and password once (kept in the cluster only as an htpasswd hash) and puts
+  it in front of every exposed page: with Traefik (a basicAuth Middleware) or ingress-nginx (its
+  auth annotations). With another controller `--login` is refused rather than dropped: add your
+  controller's own basic-auth to the session's Ingress (`<name>-expose-<port>`) by hand. The
+  domain, the ingress class and the certificate come from `kubernetes.ingress` in your config
+  (below), never from aidc; the domain's names must point at the ingress (a wildcard DNS
+  record). `aidc kill` removes the pages.
+- **TCP egress:** `--egress-tcp HOST:PORT` (and `egress_tcp:`) and `aidc egress <name>
+  add|rm|ls|clear` work as on Docker (see "Reaching a database on another network"): one relay
+  per host in your namespace, reached by the host's own name, allowed to open only that address
+  and those ports, logging every connection to the audit trail. Changes are live: the session
+  keeps running.
+- **`--gpu`** gives the session one GPU (`nvidia.com/gpu: 1`); without it, none.
+- **`--dns IP`** (at most three; IPv4) makes the session's Squid resolve through your servers
+  instead of Quad9. Squid still refuses private addresses, so a resolver's internal names are
+  refused, not reached: reach an internal service with `--egress-tcp`, whose names this machine
+  resolves.
+- **`--network <namespace>`** (and `networks:`) and `aidc network <name> add|rm|ls`: the session
+  may reach every pod of that namespace on any port, and its Services by name
+  (`<svc>.<namespace>`). Like Docker's `--network` this widens the sandbox: that traffic does
+  not pass Squid. aidc's own namespaces and the cluster's system ones are refused, and that
+  namespace's own NetworkPolicies may still refuse.
+- `aidc clean-env <name> --backend kubernetes` removes what a session that is no longer running
+  left behind (a create or kill that stopped half way), keeping its audit claim.
+- A tainted session is recorded and reported, not frozen yet.
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
-the pod: the dev pod reaches only its own Squid and has no DNS at all (Squid resolves names), so
-tools must use the proxy settings in the environment; Docker runs inside without privileged mode
-(Sysbox), and an inner container reaches the internet only when handed `$HTTPS_PROXY`.
+the pod: the dev pod reaches only its own Squid (plus the relays and namespaces you gave it) and
+has no cluster DNS: its one nameserver, in its proxy pod, answers only the names of its relays
+and `--network` Services and forwards nothing (Squid resolves everything else), so tools must use
+the proxy settings in the environment; Docker runs inside without privileged mode (Sysbox), and
+an inner container reaches the internet only when handed `$HTTPS_PROXY`.
 
 The cluster needs a runtime that runs Docker inside a pod without privileged mode (Sysbox,
 measured with Sysbox 0.7.2 on k3s 1.35) and a storage class whose volumes several pods on one
@@ -877,6 +911,17 @@ kubernetes:
   cpu: 2                         # guaranteed per session; cpu_limit / memory_limit: the ceiling
   memory: 8Gi                    #   (default 16 and 32Gi)
   user_disk_size: 100Gi          # each user's disk
+  ingress:                       # pages on your network (aidc create --expose); all yours, none aidc's
+    domain: pages.example.org    # the wildcard domain pages live under (<name>-<user>.<domain>)
+    class: traefik               # the IngressClass that serves it
+    tls_secret: ""               # a TLS Secret in your namespace, or
+    cluster_issuer: ""           # a cert-manager ClusterIssuer; neither: the controller's default
+                                 # certificate (a wildcard one serves every page)
+    controller: ""               # traefik | nginx | other (default from the class name): how a
+                                 # --login is put in front
+    controller_namespace: ""     # the controller's pods, the only ones let in to a page (default
+    controller_labels: {}        # kube-system + app.kubernetes.io/name=traefik for Traefik, as
+                                 # k3s installs it; ingress-nginx + app.kubernetes.io/name=ingress-nginx)
   registry:                      # where aidc keeps the images it builds in the cluster
     port: 5000                   # push: registry.<prefix>-system.svc.cluster.local:<port>
                                  # pull: localhost:<port> (the node, through a loopback-only host port)

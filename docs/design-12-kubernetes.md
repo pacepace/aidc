@@ -17,10 +17,10 @@ NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 backend seam, the in-cluster images, users' disks, and sessions (create with a size, attach,
 list, status, logs, restart, upgrade, refresh, kill) with the lockdown (NetworkPolicy and a
 public-only squid), Docker inside, the blocklist and its feeds in `aidc status`, taint and
-audit (with `aidc audit list|trim`), testament when configured, and the git container ("Git",
-on this backend and on Docker). Not built yet: the in-cluster MCP server, account switching,
-Syncthing, ports and LAN pages, `--egress-tcp`, `--gpu`, the taint freeze; all of it ships in
-aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
+audit (with `aidc audit list|trim`), testament when configured, the git container ("Git",
+on this backend and on Docker), tunnels and LAN pages ("Ports"), TCP egress relays, `--dns` and
+`--network` ("Egress"), and the GPU on request. Not built yet: the in-cluster MCP server, account
+switching, Syncthing, the taint freeze; all of it ships in aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
 in `.prawduct/owner-rulings.md`; each open item says what will settle it, and items marked
 **proposal** await the owner.
 
@@ -36,7 +36,9 @@ cluster (the session node)
 └─ namespace <prefix>-u-<user>              one per user; default-deny NetworkPolicy
     ├─ PVC disk                             all the user's repos + worktrees (K8S-02)
     ├─ <session>-dev  (StatefulSet)         Claude, Docker, optional GPU; sysbox-runc
-    ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit: the only way out
+    ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit, names: the only way out
+    ├─ <session>-egress-<host> (Deployment) a TCP relay per --egress-tcp host (NET-15)
+    ├─ <session>-dev (Service) + Ingress    a page on the network (--expose, K8S-15)
     ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (not built yet: aidc 2.0)   the user's MCP server (K8S-07)
@@ -484,9 +486,11 @@ documents it but does not change nodes):
 3. AppArmor local rule letting `fusermount3` mount under `/var/lib/sysboxfs`.
 4. A RuntimeClass `sysbox-runc` pinned to the session node(s).
 
-The GPU is given only when asked for at create (`--gpu`, K8S-11). The cluster's NVIDIA device
-plugin hands GPUs to pods through CDI, so it works under any runtime,
-Sysbox included.
+The GPU is given only when asked for at create (`--gpu`, K8S-11): one `nvidia.com/gpu` in the dev
+container's limits, the node selector unchanged. The cluster's NVIDIA device plugin hands GPUs to
+pods through CDI, so it works under any runtime, Sysbox included. Measured 2026-11-24 on the
+reference cluster: `nvidia-smi -L` lists the GPU in a `--gpu` session; without `--gpu` there is
+no `nvidia-smi` and no `/dev/nvidia*`.
 
 Rootless Docker and Podman were tried and dropped: they needed the AppArmor user-namespace
 restriction lifted, a smaller ID range and a tun device plugin, and still did not run.
@@ -518,8 +522,10 @@ Same model as Docker (NET-01/02/03/14), rebuilt with NetworkPolicy (K8S-12, K8S-
   server, the git container, other namespaces, the API server, nodes, the LAN or a VPN;
   squid also denies those destinations itself;
 - the policy sidecar's taint webhook is the one allowed path to the user's MCP server;
-- `--egress-tcp HOST:PORT` (NET-15) becomes a socat relay pod per host with a ClusterIP Service,
-  a `hostAliases` entry in the dev pod, and an egress rule for exactly that `/32:port`.
+- `--egress-tcp HOST:PORT` (NET-15) becomes a socat relay pod per host with a ClusterIP Service
+  and an egress rule for exactly that `/32:port` (below: "TCP egress relays"); its name resolves
+  through the session's names responder, not `hostAliases`, so `aidc egress add` never restarts
+  the dev pod.
 
 As built, the lockdown carries three details the measurements above did not need:
 - the proxy pod resolves through Quad9 only (`dnsPolicy: None`): the refresher's feed downloads
@@ -560,10 +566,69 @@ the tunnel needs no ingress rule.
 Squid denies private destinations itself as well (defence in depth): every session's squid runs
 public-only (`AIDC_PUBLIC_ONLY=1`, the same rule as the git container's proxy on Docker), so a
 request for a private, loopback, link-local or shared address, or for a public name that resolves
-to one, gets squid's 403 before the NetworkPolicy would refuse the connection. Planned, not
-built yet (W-K2-03): an `--egress-tcp` relay (NET-15) is to be reached by the dev pod directly,
-by its own egress rule, not through squid, so public-only would refuse nothing a session is meant
-to reach; W-K2-03 checks this when it builds the relays. Today a Kubernetes session has no relay.
+to one, gets squid's 403 before the NetworkPolicy would refuse the connection. An `--egress-tcp`
+relay (NET-15) is reached by the dev pod directly, by its own egress rule, not through squid, so
+public-only refuses nothing a session is meant to reach (checked live 2026-11-24: a relay to a
+LAN address answered while squid stayed public-only).
+
+### Names: the session's own responder
+
+The dev pod still has no cluster DNS. Its one nameserver is the `names` container of its own
+proxy pod (reached through the proxy's Service, port 53): dnsmasq with no upstream
+(`--no-resolv`, no server, not the pod's hosts file), answering only the names aidc writes into
+its hosts folder and refusing every other name, so a lookup still cannot leave around squid (the
+smoke's "a DNS lookup is blocked" holds). The folder is on the session's state claim, so a new
+proxy pod keeps it; dnsmasq watches it (`--hostsdir`, inotify), so a name added or removed is
+served at once and nothing restarts. aidc writes there (`scripts/k8s/net.sh`, from the cluster's
+objects each time): each relay's name and each `--network` namespace's Services. Inner Docker
+containers resolve through it too (the inner daemon takes the pod's resolver). This is the main
+agent's Q-K9 call (plan-aidc-2.0 §5): `aidc egress add` stays live, which `hostAliases` (part of
+the pod template) could not.
+
+### TCP egress relays (NET-15)
+
+As on Docker, one relay per destination host, resolved on the user's machine when it is made
+(the machine whose resolver knows the LAN and split-horizon names), reached by the host's own
+name (an IPv4 destination by `aidc-<session>-egress-<slug>`, as on Docker) so TLS hostname checks
+pass. In the cluster a relay is a Deployment `<session>-egress-<slug>` (the forwarder image: one
+socat per port, every connection logged to `egress-<slug>-<port>.log` on the session's audit
+claim), a ClusterIP Service, and two NetworkPolicies: the dev pod may open the relay on those
+ports; the relay takes connections only from the dev pod and may open only `<ip>/32` on those
+ports. `aidc egress add|rm|clear` changes those objects and the names file; the dev pod keeps
+running (a host's other ports drop their open connections when its relay is re-made, as on
+Docker). Unlike Docker, a relay declared at create can be changed live too. Relays are their own
+objects, so restart and upgrade leave them; `aidc kill` removes them with the session's label.
+Loopback destinations are refused; the aidc-mcp address of MCP-12 has no cluster form yet (the
+per-user MCP server, W-M*, decides its address).
+
+Measured 2026-11-24 on the reference cluster: a relay to a LAN host's ssh port gave the session
+the server's banner by the relay's name; the same address directly, another LAN host, the relay's
+other ports, cluster DNS and the Kubernetes API were refused; `aidc egress add` and `rm` of a
+second host took effect in seconds with the dev pod's uid unchanged; the relays and names
+survived `aidc restart`; `getent hosts github.com` still failed.
+
+### `--dns` and `--network` (K8S-01's cluster forms)
+
+- `--dns <ip>` (and `dns_servers:`; at most three, IPv4: a pod takes three nameservers and each
+  gets a `/32` rule): the proxy pod resolves through them, so squid does (its entrypoint drops
+  Quad9 for resolv.conf when `AIDC_DNS_SERVERS` is set), and the proxy's policy lets it reach
+  each on port 53, a private one included. The public-only squid normally refuses a DNS override;
+  a session's proxy says the user chose it (`AIDC_DNS_USER_CHOSEN=1`), and squid's address check
+  still refuses every private answer. So on this backend `--dns` changes which resolver answers
+  public names; an internal name is reached with `--egress-tcp`, resolved on the user's machine.
+- `--network <namespace>` (and `networks:`; live: `aidc network <s> add|rm|ls`): Docker attaches
+  the dev container to another stack's bridge; here a NetworkPolicy lets the dev pod open every
+  pod of that namespace on any port, and the names responder serves its Services as
+  `<svc>.<ns>[.svc[.cluster.local]]`. It widens the sandbox the same way (not through squid,
+  invisible to taint). The user's own namespace (the git login, other sessions), aidc's other
+  namespaces and the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`,
+  `default`) are refused. Measured: a session given a scratch namespace fetched its web Service by
+  name; cluster DNS stayed refused.
+- `clean-env` keeps its purpose (remove what a session left behind) and gets a cluster form: the
+  objects of a session that is no longer running (a create or kill that stopped half way), except
+  its kept audit claim, and this machine's tunnels to it. Docker's container-only-path volumes have
+  no cluster counterpart (a session's worktree is its own on the user's disk), so `--project` is
+  Docker's only. No K8S-01 amendment is needed for any of the three.
 
 Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeats both):
 - through the session's squid, `http://192.168.1.1/`, `http://10.0.0.1/` and
@@ -576,14 +641,35 @@ Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeat
 
 ## Ports: tunnel by default, home network on request
 
-- **Tunnel** (K8S-14): `aidc` runs `kubectl port-forward` to the session with the user's own
-  cluster credentials and reconnects it if it drops. Works from anywhere the user reaches the
-  cluster.
-- **Home network** (K8S-15, optional at create): an Ingress with a stable name such as
-  `<session>-<user>.<configured domain>`, removed at kill. No login by default; the user can add
-  one at create when a page needs protecting (ruled 2026-11-24). Needs a wildcard certificate
-  for the domain and DNS that points its names at the ingress; a phone reaches it over whatever
-  network or VPN already reaches the cluster.
+- **Tunnel** (K8S-14): `aidc create --port H:C` and `aidc proxy <s> add` start a local
+  supervisor per port (`scripts/k8s/tunnel-supervisor.sh`, a process the user sees in `aidc proxy
+  <s> ls` and `ps`, logging to `~/.local/state/aidc/tunnels/<namespace>/`): it runs `kubectl
+  port-forward` to the dev pod with the user's own cluster credentials on 127.0.0.1, starts it
+  again when it exits, and restarts it when the dev pod's uid changes (a port-forward to a pod
+  that is gone does not always exit by itself). Works from anywhere the user reaches the cluster.
+  The declared ports are recorded on the dev StatefulSet's metadata (`aidc/ports`), so `aidc
+  proxy <s> up` starts them on another machine (K8S-21) and `aidc status` lists them with this
+  machine's tunnels; `aidc kill` stops this machine's. Measured 2026-11-24: the port answered on
+  localhost, and again by itself after `aidc restart` replaced the dev pod.
+- **Home network** (K8S-15, optional at create): `--expose <port>` makes a ClusterIP Service for
+  the dev pod, an Ingress per port at `<session>-<user>.<domain>` (further ports
+  `<session>-<port>-<user>.<domain>`), and a NetworkPolicy letting only the ingress controller's
+  pods open those ports. The domain, the class, the certificate (a TLS Secret, a cert-manager
+  ClusterIssuer, or the controller's default certificate) and the controller's namespace and pod
+  labels come from the user's config (`kubernetes.ingress`), never the repo. No login by default;
+  `--login` (ruled 2026-11-24: the developer's choice per session) generates a username and a
+  password, prints them once, keeps only an htpasswd (apr1) hash in a Secret, and puts it in
+  front of every page by the controller's own mechanism: a Traefik basicAuth Middleware, or
+  ingress-nginx's auth annotations. Another controller refuses `--login` rather than serve the
+  page without the login asked for. A page name another Ingress already serves is refused. Needs
+  DNS that points the domain's names at the ingress (a wildcard record); a phone reaches it over
+  whatever network or VPN already reaches the cluster. `aidc kill` removes the Ingresses,
+  Service, policy, login (and a cert-manager certificate made for them). Measured 2026-11-24 on
+  the reference cluster (Traefik, its default TLS store holding the domain's wildcard
+  certificate): from this machine on the LAN, a page with no login answered 200 by its name; one
+  with `--login` answered 401 without or with a wrong password and 200 with the printed one; a pod
+  in another namespace could not open the exposed port directly; after kill the name answered
+  404.
 
 ## Claude: logins, account switching, history
 

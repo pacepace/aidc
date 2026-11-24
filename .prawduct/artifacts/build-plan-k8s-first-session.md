@@ -120,6 +120,7 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   DNS), so the proxy env carries its address; a forced rebuild under the same tag left the node
   on its cached image, so aidc images are pulled Always; under Sysbox /sys/class/net shows the
   node's interfaces, not the pod's, so the inner dockerd reads its MTU by ioctl.
+  Confirmed on the rebuilt image: the session's inner dockerd runs with `--mtu=1450`.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

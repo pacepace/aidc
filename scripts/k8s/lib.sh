@@ -188,14 +188,19 @@ k8s_require_session() {
 # "unknown <why>" and returns 2 when the cluster cannot be asked. Never "absent" for a cluster
 # that did not answer.
 k8s_git_pod() {
-    local ns="$1" out
+    local ns="$1" out errf
+    # stderr apart from the JSON: a kubectl warning on stdout's way would make it unreadable.
+    errf=$(mktemp)
     if ! out=$(k8s_kubectl -n "$ns" get pod -l app=git --field-selector=status.phase=Running \
-            -o jsonpath='{range .items[?(!@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' \
-            --request-timeout=10s 2>&1); then
-        printf 'unknown (%s)\n' "$(printf '%s' "$out" | tail -n1)"
+            -o json --request-timeout=10s 2>"$errf"); then
+        printf 'unknown (%s)\n' "$(tail -n1 "$errf")"
+        rm -f "$errf"
         return 2
     fi
-    out=$(printf '%s\n' "$out" | grep -m1 . || true)
+    rm -f "$errf"
+    # A pod being replaced (Recreate) is still Running until it is gone: skip it.
+    out=$(printf '%s' "$out" | yq -p=json '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' \
+        2>/dev/null | grep -m1 . || true)
     if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
     printf 'absent\n'
     return 1

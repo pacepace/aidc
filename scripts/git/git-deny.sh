@@ -3,11 +3,11 @@
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
-# shellcheck source=lib.sh
-. "$AIDC_SCRIPTS/k8s/lib.sh"
-case "${1:-}" in -h|--help) exec bash "$AIDC_SCRIPTS/cmd-git.sh" --help ;; esac
+# shellcheck source=backend.sh
+. "$AIDC_SCRIPTS/git/backend.sh"
 { [ $# -ge 1 ] && [ $# -le 2 ]; } || die "usage: aidc git deny <id> [reason]"
 printf '%s' "$1" | grep -Eq '^[0-9a-f]{32}$' || die "${1}: not a request id"
-k8s_require || exit 1
-k8s_git_target
-k8s_git_exec git-requests deny "$1" "${2:-}" 2>&1 | k8s_printable
+gb_require
+gb_target
+gb_exec git-requests deny "$1" "${2:-}" 2>&1 | aidc_printable
+exit "${PIPESTATUS[0]}"

@@ -36,9 +36,36 @@ gitctl_check_text() { # TEXT WHAT
     gitctl_refuse "$2 carries AI attribution (${GITCTL_HIT:0:120}); no attribution in commits, PRs or comments"
 }
 
-# An author or committer that is an AI tool or a bot.
+# Names that mark an author or committer as an AI tool, matched as whole words (case-insensitive)
+# in the name and in the email's local part and domain. Narrower than GITCTL_AI: words that are
+# also people's names (cody, aider, ...) are left out here, where a person's own name is checked.
+GITCTL_AI_ID='claude|anthropic|openai|chatgpt|gpt[0-9]*|copilot|gemini|codex|cursor|devin|codeium|windsurf|tabnine|codewhisperer|deepseek|bot'
+# The user's own identity (gitctl sets them from the GitHub login's identity file): a field equal
+# to the user's own is never refused, so a user whose name is one of the words above (Devin) can
+# still push their own commits.
+GITCTL_OWN_NAME="" GITCTL_OWN_EMAIL=""
+
+# gitctl_ai_identity LINES: 0 when any author or committer in LINES is an AI tool or a bot. Each
+# line is "author|committer <name> <<email>> ..." (a commit's header) or "<name> <<email>>".
 gitctl_ai_identity() {
-    printf '%s\n' "$1" | LC_ALL=C grep -qiE '@anthropic\.com|@openai\.com|copilot|\[bot\]'
+    local line name email words
+    while IFS= read -r line; do
+        line="${line#author }"; line="${line#committer }"
+        case "$line" in *"<"*">"*) ;; *) [ -n "$line" ] || continue; name="$line" email="" ;; esac
+        if [[ "$line" == *"<"*">"* ]]; then
+            name="${line%%<*}"; email="${line#*<}"; email="${email%%>*}"
+        fi
+        name="${name%"${name##*[![:space:]]}"}"
+        words=""
+        if [ -z "$GITCTL_OWN_NAME" ] || [ "${name,,}" != "${GITCTL_OWN_NAME,,}" ]; then words+=" ${name}"; fi
+        if [ -z "$GITCTL_OWN_EMAIL" ] || [ "${email,,}" != "${GITCTL_OWN_EMAIL,,}" ]; then words+=" ${email}"; fi
+        # Words: runs of letters and digits (claude-bot is claude and bot; '[bot]' is bot).
+        if printf '%s\n' "$words" | LC_ALL=C tr -c 'A-Za-z0-9\n' ' ' \
+                | LC_ALL=C grep -qiE "(^|[^a-z0-9])(${GITCTL_AI_ID})([^a-z0-9]|$)"; then
+            return 0
+        fi
+    done <<<"$1"
+    return 1
 }
 
 # gitctl_slug_from_url URL: owner/name (in GITCTL_SLUG) of https://github.com/<owner>/<name>[.git].

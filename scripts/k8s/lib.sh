@@ -17,12 +17,6 @@
 # shellcheck source=../lib/git-common.sh
 . "$AIDC_SCRIPTS/lib/git-common.sh"
 
-# The git container's output helpers, shared with the Docker backend (lib/git-common.sh).
-k8s_printable() { aidc_printable; }
-k8s_bytes() { aidc_bytes "$@"; }
-k8s_git_print_protection() { aidc_git_print_protection; }
-k8s_git_print_tidy() { aidc_git_print_tidy; }
-
 # _k8s_cfg <yq-path>: a scalar from the global config's kubernetes block, "" when unset.
 _k8s_cfg() {
     local cfg v
@@ -260,8 +254,9 @@ K8S_GIT_AGENT_UID=2000
 # aidc/session label, so `aidc list|attach|logs|status` find it like any session. No session may
 # take it (its objects would also collide with the git container's: git-home is the git
 # container's home claim), and `aidc kill` refuses it: `aidc git setup` manages it.
-K8S_GIT_SESSION=git
-k8s_is_git_session() { [ "${1:-}" = "$K8S_GIT_SESSION" ]; }
+# shellcheck disable=SC2034  # read by manifests.sh and session-list.sh
+K8S_GIT_SESSION="$AIDC_GIT_SESSION"
+k8s_is_git_session() { aidc_is_git_session "$@"; }
 
 # k8s_git_attach: the git agent's tmux (its Claude in window "claude", a shell beside it), as
 # the git user: the container runs as that user, so `kubectl exec` reaches its tmux socket.
@@ -351,4 +346,81 @@ k8s_git_repo_arg() {
 # k8s_git_exec <args...>: run in the git container (after k8s_git_target), with no stdin.
 k8s_git_exec() { k8s_kubectl -n "$GIT_NS" exec "$GIT_POD" -c git -- "$@" </dev/null; }
 
+# --- the backend interface of `aidc git` (scripts/git/git-*.sh) -----------------------------
+# The same gb_* functions as scripts/docker/lib.sh's: each scripts/git/git-<verb>.sh is one
+# script for both backends.
 
+gb_require() { k8s_require || exit 1; }
+gb_target() { k8s_git_target; }
+gb_exec() { k8s_git_exec "$@"; }
+gb_exec_in() { k8s_kubectl -n "$GIT_NS" exec -i "$GIT_POD" -c git -- "$@"; }
+gb_exec_tty() { k8s_kubectl -n "$GIT_NS" exec -it "$GIT_POD" -c git -- env TERM="${TERM:-xterm-256color}" "$@"; }
+gb_repo_arg() { k8s_git_repo_arg "$1"; }
+# The GitHub working copies on the user's disk (aidc repo list's first column).
+gb_repos() { bash "$AIDC_SCRIPTS/k8s/repo-list.sh" | tail -n +2 | awk '{ print $1 }'; }
+gb_repo_ok() { k8s_repo_path_ok "$1"; }
+# shellcheck disable=SC2034  # GB_* are read by scripts/git/git-*.sh
+gb_settings() {
+    GB_MODE="$AIDC_K8S_GIT_MODE" GB_MODE_KEY=kubernetes.git_mode
+    # shellcheck disable=SC2034  # read by scripts/git/git-status.sh
+    GB_STORAGE_WARN="$AIDC_K8S_GIT_STORAGE_WARN" GB_STORAGE_KEY=kubernetes.git_storage_warn
+}
+# gb_session_token NAME (after gb_target): the session's own git token, from its StatefulSet, or
+# dies saying why.
+gb_session_token() {
+    local token
+    k8s_require_session "$GIT_NS" "$1"
+    token=$(k8s_kubectl -n "$GIT_NS" get statefulset "${1}-dev" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="dev")].env[?(@.name=="AIDC_GIT_TOKEN")].value}') \
+        || die "cannot read session '${1}': the cluster did not answer"
+    printf '%s' "$token" | grep -Eq '^[0-9a-f]{64}$' \
+        || die "session '${1}' was created before sessions had their own git mode: create it again (aidc kill ${1}; aidc create ${1})"
+    printf '%s' "$token"
+}
+# gb_sessions (after gb_target): "<session> <token>" for every session in the user's namespace;
+# returns 1 when the cluster did not answer (then nothing may be pruned).
+gb_sessions() {
+    local out
+    out=$(k8s_kubectl -n "$GIT_NS" get statefulset -l aidc/session -o json --request-timeout=10s 2>/dev/null) || return 1
+    printf '%s' "$out" | yq -p=json '.items[] | (.metadata.labels["aidc/session"] // "") + " " +
+        ((.spec.template.spec.containers[] | select(.name == "dev") | .env[]? | select(.name == "AIDC_GIT_TOKEN") | .value) // "")' \
+        2>/dev/null | grep -E '^[a-z0-9-]+ [0-9a-f]{64}$' || true
+}
+# shellcheck disable=SC2034  # read by scripts/git/git-status.sh
+GB_STATUS_W=10
+# shellcheck disable=SC2034  # GB_UP is read by scripts/git/git-status.sh
+gb_status_head() {
+    local ns pod rc=0 dep
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    GIT_NS="$ns" GB_UP=0
+    printf 'git container: %s (namespace %s)\n' "$AIDC_K8S_USER" "$ns"
+    pod=$(k8s_git_pod "$ns") || rc=$?
+    case "$rc" in
+        0) printf 'pod:      %s, running\n' "$pod"; GIT_POD="$pod" GB_UP=1 ;;
+        1)
+            # No running pod: say whether there is a git container at all.
+            if dep=$(k8s_kubectl -n "$ns" get deployment git --ignore-not-found -o name --request-timeout=10s 2>/dev/null); then
+                if [ -n "$dep" ]; then printf 'pod:      not running (see: kubectl -n %s describe pod -l app=git)\n' "$ns"
+                else printf 'pod:      not set up (run: aidc git setup)\n'; fi
+            else
+                printf 'pod:      unknown (the cluster did not answer)\n'
+            fi ;;
+        *) printf 'pod:      %s\n' "$pod" ;;
+    esac
+}
+gb_status_tail() {
+    local have missing p
+    if have=$(k8s_kubectl -n "$GIT_NS" get networkpolicy -o name --request-timeout=10s 2>/dev/null); then
+        missing=""
+        for p in default-deny git-egress; do
+            printf '%s\n' "$have" | grep -qx "networkpolicy.networking.k8s.io/${p}" || missing="${missing} ${p}"
+        done
+        if [ -z "$missing" ]; then
+            printf 'egress:   enforced: NetworkPolicy, public addresses and Quad9 DNS only; no connections in\n'
+        else
+            printf 'egress:   NOT ENFORCED: NetworkPolicy missing:%s\n' "$missing"
+        fi
+    else
+        printf 'egress:   unknown (the cluster did not answer)\n'
+    fi
+}

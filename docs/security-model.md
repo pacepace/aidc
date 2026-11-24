@@ -195,13 +195,19 @@ copies. Its network reaches public addresses only. What remains, by design or no
   scans commit messages and authors for attribution, not diffs. Review the PR before merging; in
   `rules` mode nothing waits for you.
 - **The git agent is not a boundary.** Its allow list and instructions are courtesies; it can run
-  gitctl itself, so a session that talks it into acting gets what gitctl's rules allow, no more.
-  Only its instructions stop it approving a request without asking you.
+  gitctl itself (and reach gitcred through sudo directly), so a session that talks it into acting
+  gets what gitctl's rules allow, no more: only repos you added (gitcred asks gitrun itself), and
+  on Docker the user's uid (`gitwc`) only for fetch, tidy and unpushed on a mounted working copy.
+  Only its instructions stop it approving a request without asking you. What it changed on
+  GitHub is recorded where it cannot change it (`aidc git log`: each push, PR, merge, comment,
+  branch delete and protection, with the request that asked or "direct"), so an action you never
+  asked for shows there.
 - **Session-written config in a working copy** can still steer the agent's own git (code as the
   agent's uid, or on Docker as the user's uid through `gitwc`), with the container's public-only
   egress and no login. Filters, hooks and fsmonitor are pinned off where gitctl runs git there.
-- **A session's name in a request is self-reported;** per-session modes are keyed by a token only
-  that session holds, and can only loosen your mode, never tighten it.
+- **A session's name in a request is self-reported;** every mode decision is keyed by a token only
+  that session holds: a request without its session's registered token always waits for you, so a
+  session can be held to `ask` under your `rules` and gains nothing by leaving its token out.
 - **Branch protection is GitHub's backstop.** `aidc git protect` offers a ruleset; a fine-grained
   token without admin scope limits what a mistake can reach.
 

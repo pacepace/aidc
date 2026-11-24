@@ -4,7 +4,7 @@ A disposable, isolated dev container for running Claude Code in `--dangerously-s
 
 ## What's enforced
 
-- **Git is local-only.** No SSH keys. No GitHub tokens. No `gh` CLI. Pre-push hook hard-fails any push attempt. The container has full local git — branches, commits, rebases, stashes — but nothing leaves.
+- **Sessions hold no way to GitHub.** No SSH keys. No GitHub tokens. No GitHub CLI (a session's `gh` is aidc's stand-in). Pre-push hook hard-fails any push attempt. The container has full local git — branches, commits, rebases, stashes. With no git container nothing leaves; with one set up, a session's commits reach GitHub only as requests it pushes by fixed rules (in `ask` mode only after you approve; in `rules` mode at once): see [The git container](#the-git-container-pushes-and-prs-for-your-sessions).
 - **Network egress is enforced.** The session bridge is a Docker `internal` network — no NAT, so there is no route out except through the Squid sidecar. Blocklist (URLhaus + HaGeZi-TIF, refreshed every 6h), state-actor TLD policy, Quad9 upstream. Not just `HTTP_PROXY`: a privileged process that strips the proxy vars and adds its own route still gets `Network is unreachable`.
 - **Docker is isolated.** DinD inside the sandbox. The host Docker daemon is unreachable. Claude can build and run images; they live and die with the session.
 - **The MCP control plane is off limits.** A session's Squid denies the `aidc mcp` server's bind address and port (from `mcp.bind_address` / `mcp.port` when the session is created), so a sandboxed agent cannot reach the server that drives every session, even with a stolen token. Sessions created before this change get the rule on `aidc kill` + `aidc create`. That rule is the whole enforcement, so it holds for a session whose traffic goes through its Squid: one created with `--egress direct`, or attached to another network with `--network`, can route around it — as those options already warn at create time.
@@ -631,8 +631,13 @@ Design: [docs/design-12-kubernetes.md](docs/design-12-kubernetes.md), "Git".
 your sessions, behind its own proxy that reaches public addresses only (DNS through Quad9); in a
 cluster a `git` Deployment in your namespace (after `aidc user add`). Safe to run again: it
 restarts the container on the current image, and keeps its volumes (your login, its home, its
-private copies of your repos). `aidc git status` says whether it runs and is logged in, the git
-mode, how many requests wait, and how much its copies take ("unknown" when it cannot be asked).
+private copies of your repos), and registers your sessions with it (below, **Modes**). `aidc git
+status` says whether it runs and is logged in, the git mode, how many requests wait (or why its
+request watcher cannot take any), and how much its copies take ("unknown" when it cannot be
+asked). `aidc git log` shows what it changed on GitHub (pushes, pull requests opened, merged and
+commented on, branches deleted, protections added: when, which repo, branch or PR and commit,
+and which session request asked, or "direct"), from a log kept where its agent cannot change it,
+capped so it never piles up.
 
 **Log it in.** `aidc git login` logs it in to GitHub as you: a one-time code you approve in your
 browser. Commits it makes show as you (your GitHub name; your public email, else GitHub's
@@ -666,11 +671,13 @@ or created again, to get the request folder). Its `gh` is aidc's stand-in, not G
 `gh pr view`, `gh pr list` and `gh pr status` become requests the git container answers, so
 `/prawduct:pr` and plain `gh pr create` work unchanged. `git push` in a session fails and says to
 use `gh pr create`. The stand-in waits up to a minute for the answer, then prints
-"requested; waiting for approval" with the request's id (`gh aidc request <id>` reads it later).
+"requested; waiting for approval" with the request's id (`gh aidc request <id>` reads it later);
+when the git container has not taken the request at all it says so instead, and fails.
 
 **Approve or deny.** In the git mode `ask` (the default) each push, PR and merge waits for you:
 `aidc git requests` lists them, `aidc git requests <id>` shows one (session, repo, branch and
-the commit you approve: a branch that moves after the request is refused), `aidc git approve
+the commit you approve, or for a merge the pull request's head commit: a branch or pull request
+that moves after the request is refused), `aidc git approve
 <id>` runs it, `aidc git deny <id> [why]` refuses it and the session reads why. Your git agent
 also asks you about each waiting request with its question tool: answer in its terminal
 (`aidc attach git`). Reads (`gh pr view`, `gh pr list`) run at once. Requests and results are
@@ -678,10 +685,16 @@ deleted after 30 days.
 
 **Modes.** `rules` lets gitctl's rules decide at once. Your mode is `git.mode` in the global
 config on Docker and `kubernetes.git_mode` in a cluster (applied by `aidc git setup`).
-`aidc git mode` lists it and the sessions given their own; `aidc git mode <session> rules` lets
-one session's requests run at once (each session sends a random token only it has, so another
-session cannot claim its mode), and `aidc git mode <session> default` takes it back. A session
-cannot be made stricter than your mode (`ask` under your `rules` is refused); one created
+`aidc git mode` lists it and the sessions given their own. Per session, both ways: `aidc git mode
+<session> rules` lets one session's requests run at once while your mode is `ask`; `aidc git mode
+<session> ask` holds one session's requests for your approval while your mode is `rules`; `aidc
+git mode <session> default` gives it your mode again. Each session sends a random token only it
+has, and every mode is keyed on it: a request without its session's token (or naming a session
+the git container does not know) always waits for you, so another session cannot claim a mode
+and a held session gains nothing by leaving its token out. `aidc create` registers a session's
+token with a running git container (`aidc git setup` registers every session, for ones made while
+it was not running, and drops the modes of sessions that are gone); `aidc kill` drops the
+session's mode, and a session made again under the same name starts at yours. One created
 before per-session modes existed must be created again.
 
 **From the terminal.** `aidc git push <repo> <branch>`, `aidc git pr <repo> <branch> [--base B]
@@ -705,9 +718,10 @@ any session's, so an orchestrator that watches the session `git` (`session_watch
 agent's question about a request as that session's reply. Answering it with `session_send` is
 not yet checked live (the question tool may not take a pasted answer); answer in its terminal
 or with `aidc git approve|deny` meanwhile. **On Kubernetes the question does not reach an
-orchestrator yet:** the MCP server's session tools reach cluster sessions only with aidc 2.0's
-per-user MCP server. Until then answer by attaching (`aidc attach git`) or with `aidc git
-approve|deny`. This is the current behaviour, pending an owner ruling.
+orchestrator yet:** the MCP server's session tools reach cluster sessions only through the
+per-user MCP server. The Kubernetes backend ships in aidc 2.0 together with that server, and 2.0
+routes Kubernetes git approvals through the orchestrator before it ships. Until then answer by
+attaching (`aidc attach git`) or with `aidc git approve|deny`.
 
 ## Reference
 
@@ -778,8 +792,11 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   under your home directory is the same path under `/home/<user>` on the disk, so a repo's
   Claude history has the same name everywhere. There is no `--repo` here: a session that works
   on an added repo makes its own worktree and branch in it
-  (`git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD`). A top-level
-  `backend: kubernetes` in the config makes the cluster the default for `create`.
+  (`git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD`). Its commits carry your
+  git identity (this machine's `git config user.name` and `user.email`), as on Docker. A top-level
+  `backend: kubernetes` in the config makes the cluster the default for `create`, and for `aidc
+  git` and `aidc repo` alike (one rule: `--backend`, else that line, else Docker; a
+  `kubernetes:` block alone changes nothing).
 - `aidc attach | status | logs | kill <name>` find the session where it lives (the cluster is
   asked first when one is configured); `aidc list` shows both backends. `kill` keeps the
   session's audit volume (`<name>-audit-<UTC time>`, named for when it was made, so a later

@@ -1,19 +1,27 @@
 # shellcheck shell=bash
 # The git container's shared pieces on the CLI side, for both backends (docs/design-12-kubernetes.md,
-# "Git"): which backend `aidc git` and `aidc repo` talk to, and the helpers that print what the
-# git container says. No docker or kubectl here: each backend's scripts call their own.
+# "Git"): the reserved session name, which backend a command talks to, and the helpers that print
+# what the git container says. No docker or kubectl here: each backend's scripts call their own.
 #
 # Defines no die/err: a sourced library reports its own failures (test-lib-self-contained.sh).
 
-# aidc_git_backend: where the user's git container is, "docker" or "kubernetes": the --backend
-# flag (the dispatcher passes it as AIDC_BACKEND_FLAG), else the global config's top-level
-# `backend:` (as `aidc create` reads it), else kubernetes when the config has a `kubernetes:`
-# block, else docker. Returns 1, saying why on stderr, for any other name.
-aidc_git_backend() {
+# The git agent's session name, reserved on both backends: the git container is the session
+# named git (aidc list|attach|logs|status find it), no session may take the name, and aidc kill
+# refuses it. The one definition; the MCP server's GIT_SESSION is held to it by its tests.
+# shellcheck disable=SC2034  # read by the scripts that source this
+AIDC_GIT_SESSION=git
+aidc_is_git_session() { [ "${1:-}" = "$AIDC_GIT_SESSION" ]; }
+
+# aidc_default_backend: the backend a command uses when no --backend flag says, "docker" or
+# "kubernetes". The one rule, for `aidc create`, `aidc git` and `aidc repo` alike (and the MCP
+# server's create_backend, held to it by its tests): the --backend flag (the dispatcher passes it
+# as AIDC_BACKEND_FLAG), else the first top-level `backend:` line of the global config, else
+# docker. A `kubernetes:` block alone changes nothing: a Docker user who ran `aidc k8s check`
+# keeps Docker. Returns 1, saying why on stderr, for any other name.
+aidc_default_backend() {
     local b="${AIDC_BACKEND_FLAG:-}" cfg="${HOME}/.config/aidc/config.yaml"
     if [ -z "$b" ] && [ -f "$cfg" ]; then
         b=$(sed -n 's/^backend:[[:space:]]*["'"'"']\{0,1\}\([a-z0-9]*\).*/\1/p' "$cfg" 2>/dev/null | head -n1)
-        if [ -z "$b" ] && grep -q '^kubernetes:' "$cfg" 2>/dev/null; then b=kubernetes; fi
     fi
     case "${b:-docker}" in
         docker) printf 'docker' ;;

@@ -5,11 +5,10 @@
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
-# shellcheck source=lib.sh
-. "$AIDC_SCRIPTS/k8s/lib.sh"
-case "${1:-}" in -h|--help) exec bash "$AIDC_SCRIPTS/cmd-git.sh" --help ;; esac
+# shellcheck source=backend.sh
+. "$AIDC_SCRIPTS/git/backend.sh"
 [ $# -eq 0 ] || die "aidc git login takes no arguments (got: $*)"
-k8s_require || exit 1
-k8s_git_target
+gb_require
+gb_target
 info "logging the git container in to GitHub: copy the one-time code, open the address and approve it"
-k8s_kubectl -n "$GIT_NS" exec -it "$GIT_POD" -c git -- env TERM="${TERM:-xterm-256color}" gitctl login
+gb_exec_tty gitctl login

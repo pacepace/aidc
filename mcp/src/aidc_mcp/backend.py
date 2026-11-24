@@ -158,9 +158,10 @@ _BACKEND_LINE = re.compile(r"""backend:\s*["']?([a-z0-9]*)""")
 
 
 def create_backend() -> str:
-    """The backend `aidc create` would choose with no --backend flag, read as the CLI
-    dispatcher (scripts/aidc) reads it: the first top-level `backend:` line of
-    $HOME/.config/aidc/config.yaml, docker when there is none. The file is the one the CLI
+    """The backend `aidc create` would choose with no --backend flag: a copy of the CLI's one
+    rule (scripts/lib/git-common.sh, aidc_default_backend, which `aidc git` and `aidc repo`
+    use too; tests/test_backend.py holds this copy to it): the first top-level `backend:` line
+    of $HOME/.config/aidc/config.yaml, docker when there is none. The file is the one the CLI
     this server runs would read (same HOME), not the /aidc-config mount: inside the aidc-mcp
     container the dispatcher does not see that mount and creates on Docker, and session_create
     must agree with it, because the two backends take different create arguments (the

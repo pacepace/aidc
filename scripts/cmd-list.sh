@@ -15,6 +15,8 @@ trap '' PIPE
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"
+# shellcheck source=lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
 
 require_docker
 
@@ -65,7 +67,7 @@ while IFS="$(printf '\t')" read -r ct_name status; do
     # state volume. Probe via the policy container.
     policy_ct="aidc-${session}-policy"
     tainted="no"
-    if [ "$session" = git ]; then
+    if aidc_is_git_session "$session"; then
         # The git agent (aidc git setup): trusted, no sandbox proxy and no policy sidecar.
         tainted="-"
     elif docker exec "$policy_ct" test -f /var/state/tainted >/dev/null 2>&1; then

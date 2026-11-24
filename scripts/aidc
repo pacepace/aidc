@@ -24,6 +24,8 @@ export AIDC_SCRIPTS
 # Source common library (provides err/die/info, validation, etc.).
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"
+# shellcheck source=lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
 
 # ---- VERSION read + validation ----------------------------------------------
 #
@@ -87,14 +89,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
-# No flag: `create` takes the config's top-level `backend:` (default docker); a verb that names
+# No flag: `create` takes the default backend (aidc_default_backend: the config's top-level
+# `backend:`, else docker; `aidc git` and `aidc repo` use the same rule); a verb that names
 # a session goes where that session lives, asking the configured cluster first (a quiet no
 # when there is none) and Docker otherwise. `list` shows both.
 if [ -z "$BACKEND" ]; then
     case "$SUBCOMMAND" in
         create)
-            BACKEND=$(sed -n 's/^backend:[[:space:]]*["'"'"']\{0,1\}\([a-z0-9]*\).*/\1/p' \
-                "${HOME}/.config/aidc/config.yaml" 2>/dev/null | head -n1)
+            BACKEND=$(AIDC_BACKEND_FLAG="" aidc_default_backend) || exit 2
             ;;
         attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
             if [ $# -gt 0 ]; then
@@ -116,7 +118,7 @@ if [ -z "$BACKEND" ]; then
     esac
 fi
 # `aidc git` and `aidc repo` serve both backends themselves (lib/git-common.sh,
-# aidc_git_backend): the flag, if any, goes with them.
+# aidc_default_backend): the flag, if any, goes with them.
 case "$SUBCOMMAND" in
     git|repo)
         AIDC_BACKEND_FLAG="$BACKEND"; export AIDC_BACKEND_FLAG
@@ -127,10 +129,10 @@ case "${BACKEND:-docker}" in
         # The git agent is a session named git on Docker too, managed by `aidc git setup`:
         # attach and status go to its own scripts, and nothing may stop or rebuild it as a
         # session (logs work as for any session).
-        if [ "${1:-}" = git ]; then
+        if aidc_is_git_session "${1:-}"; then
             case "$SUBCOMMAND" in
-                attach) shift; exec bash "$AIDC_SCRIPTS/docker/git-attach.sh" "$@" ;;
-                status) shift; exec bash "$AIDC_SCRIPTS/docker/git-status.sh" "$@" ;;
+                attach) shift; AIDC_GIT_BACKEND=docker exec bash "$AIDC_SCRIPTS/git/git-attach.sh" "$@" ;;
+                status) shift; AIDC_GIT_BACKEND=docker exec bash "$AIDC_SCRIPTS/git/git-status.sh" "$@" ;;
                 kill|restart|upgrade|proxy|network|egress|refresh)
                     err "git is your git agent (the git container), not a session aidc ${SUBCOMMAND} manages: aidc git setup starts or updates it"
                     exit 2 ;;

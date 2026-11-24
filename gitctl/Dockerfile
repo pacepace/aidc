@@ -12,13 +12,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-# git and ssh for the pushes, tmux for the user's terminal, tini to reap what tmux leaves.
+# git for the pushes (HTTPS only: gitctl pins core.sshCommand off, so no ssh client is installed),
+# tmux for the user's terminal, tini to reap what tmux leaves.
 # curl only for the downloads below and Claude Code's own updates. sudo is how gitctl switches
 # to the users that hold the login; jq reads Claude Code's hook input and gh's JSON.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
-        openssh-client \
         tmux \
         tini \
         curl \
@@ -90,7 +90,7 @@ RUN useradd -M -u 1000 -g 1000 -d /home/gitwc -s /usr/sbin/nologin gitwc \
     && install -d -o gitwc -g session -m 0700 /home/gitwc \
     && install -d -o root -g root -m 0755 /var/aidc \
     && install -d -o git -g session -m 2755 /var/aidc/git-requests
-COPY gitctl-rules.sh gitctl.sh git-requests.sh gh-shim.sh cred-helper.sh claude-hook.sh \
+COPY gitctl-rules.sh gitctl.sh gitctl-run.sh gitctl-cred.sh gitctl-agent.sh git-requests.sh gh-shim.sh cred-helper.sh claude-hook.sh \
      git-claude.sh git-notify.sh transcript-mirror.sh claude-refresh.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
@@ -107,6 +107,7 @@ RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/
                   /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \
                   /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/lib/gitctl/git-notify.sh \
                   /opt/aidc/lib/gitctl/claude-refresh.sh \
+    && chmod 0644 /opt/aidc/lib/gitctl/gitctl-run.sh /opt/aidc/lib/gitctl/gitctl-cred.sh /opt/aidc/lib/gitctl/gitctl-agent.sh \
     && chmod 0440 /etc/sudoers.d/aidc-gitctl \
     && visudo -c -f /etc/sudoers.d/aidc-gitctl \
     && install -d -m 0755 /opt/aidc/bin \

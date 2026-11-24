@@ -3,10 +3,9 @@
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
-# shellcheck source=lib.sh
-. "$AIDC_SCRIPTS/k8s/lib.sh"
-case "${1:-}" in -h|--help) exec bash "$AIDC_SCRIPTS/cmd-git.sh" --help ;; esac
+# shellcheck source=backend.sh
+. "$AIDC_SCRIPTS/git/backend.sh"
 [ $# -eq 0 ] || die "aidc git logout takes no arguments (got: $*)"
-k8s_require || exit 1
-k8s_git_target
-k8s_git_exec gitctl logout
+gb_require
+gb_target
+gb_exec gitctl logout

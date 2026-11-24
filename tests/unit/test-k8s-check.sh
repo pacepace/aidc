@@ -120,9 +120,9 @@ assert_eq "explicit registry addresses win over the defaults" \
     "reg.example:443|reg.example:443" "$(settings | cut -d'|' -f10,11)"
 
 echo "=== names ==="
-names=$( . "$AIDC_ROOT/scripts/k8s/lib.sh"; k8s_load_settings; AIDC_K8S_USER=pace
+names=$( . "$AIDC_ROOT/scripts/k8s/lib.sh"; k8s_load_settings; AIDC_K8S_USER=alice
          printf '%s %s' "$(k8s_system_ns)" "$(k8s_user_ns "$AIDC_K8S_USER")")
-assert_eq "namespaces: system, and the user's (sessions live in it)" "aidc-system aidc-u-pace" "$names"
+assert_eq "namespaces: system, and the user's (sessions live in it)" "aidc-system aidc-u-alice" "$names"
 
 echo "=== aidc k8s check ==="
 run_check() { "$AIDC_ROOT/scripts/aidc" k8s check 2>&1; echo "exit=$?"; }

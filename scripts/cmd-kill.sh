@@ -22,6 +22,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/egress.sh
 . "$AIDC_SCRIPTS/lib/egress.sh"
+# shellcheck source=docker/lib.sh
+. "$AIDC_SCRIPTS/docker/lib.sh"
 
 case "${1:-}" in
     -h|--help)
@@ -112,6 +114,14 @@ fi
 
 # Drop the rendered compose file (it carries the session's secrets), wherever it is.
 aidc_remove_session_compose "$NAME" >/dev/null
+
+# The git container forgets the session (its token and any git mode of its own), so a mode never
+# outlives the session it was given to. Best effort: a git container that is not running prunes
+# it at the next aidc git setup.
+if [ "$(docker inspect -f '{{.State.Running}}' "$DK_GIT_CT" 2>/dev/null)" = true ]; then
+    docker exec -u git "$DK_GIT_CT" git-requests forget "$NAME" >/dev/null 2>&1 \
+        || info "the git container did not forget ${NAME}'s git mode; aidc git setup prunes it"
+fi
 
 # Anything else still attached (another session joined with `aidc network`) keeps a
 # network alive past the down; detach it and remove the network, or say so loudly.

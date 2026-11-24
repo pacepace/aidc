@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the git container (k8s_render_git, `aidc git setup|attach|status`).
 #
-# The git container holds the user's SSH key and GitHub login, so its manifest is a security
+# The git container holds the user's GitHub login, so its manifest is a security
 # boundary: a privileged pod, an API token, cluster DNS or a route to private addresses would
 # let a key be walked to the cluster; a recreated home claim would lose the user's login.
 # Status must never say "no" when the cluster or the container could not be asked. kubectl is
@@ -110,7 +110,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
     K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
+# backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
+# aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
+backend: kubernetes
 kubernetes:
   context: lab
   user: alice
@@ -286,8 +289,14 @@ assert_has "a session made before tokens: says to create it again" "create it ag
 assert_has "and exits 1" "exit=1" "$out"
 out=$(K_NO_SESSION=1 run git mode demo rules)
 assert_has "no such session is refused" "no session 'demo'" "$out"
+: > "$K_STDIN"
 out=$(run git mode demo default)
-assert_has "default goes straight to the git container" "exec git-7d9f-abc -c git -- git-requests mode demo default" "$(cat "$K_LOG")"
+assert_has "default, too, is keyed on the session's token, handed over on stdin" "exec -i git-7d9f-abc -c git -- git-requests mode demo default" "$(cat "$K_LOG")"
+assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
+: > "$K_STDIN"
+out=$(run git mode demo ask)
+assert_has "ask holds one session to approval, keyed on its token the same way" "exec -i git-7d9f-abc -c git -- git-requests mode demo ask" "$(cat "$K_LOG")"
+assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
 out=$(run git mode demo yolo)
 assert_has "an unknown mode is refused" "not rules, ask or default" "$out"
 out=$(run git mode git rules)
@@ -310,6 +319,13 @@ out=$(K_STATUS_REAL="$SCRATCH/fake" FAKE_ROWS='a x\nb y' run git status)
 assert_has "and two are two" "requests: 2 waiting" "$out"
 out=$(K_WAITING=3 run git status)
 assert_has "waiting requests are counted, with where to see them" "requests: 3 waiting for your approval (aidc git requests)" "$out"
+mkdir -p "$SCRATCH/fake2"; cp "$SCRATCH/fake/gitctl" "$SCRATCH/fake2/"
+printf '#!/bin/sh\necho "git-requests: /home/alice/.aidc/git-requests is writable by others" >&2\nexit 1\n' > "$SCRATCH/fake2/git-requests"
+chmod +x "$SCRATCH/fake2/git-requests"
+out=$(K_STATUS_REAL="$SCRATCH/fake2" run git status)
+assert_has "a request folder the watcher refuses: status gives its reason, not 'cannot be asked'" \
+    "requests: NOT TAKEN: the request watcher cannot use its request folder: /home/alice/.aidc/git-requests is writable by others" "$out"
+assert_has "while the login, asked in the same exec, is still answered" "github:   not logged in" "$out"
 assert_has "the egress policy is reported enforced" "egress:   enforced" "$out"
 out=$(run git status)
 assert_has "no login is no, with what to do" "github:   not logged in (aidc git login)" "$out"
@@ -401,6 +417,7 @@ out=$(run git approve "../x"); assert_has "an id that is not one is refused" "no
 out=$(run git login)
 assert_has "login runs gitctl login interactively in the git container" "exec -it git-7d9f-abc -c git -- env TERM=xterm-test gitctl login" "$(xl)"
 out=$(run git logout); assert_has "logout" "gitctl logout" "$(xl)"
+out=$(run git log 5); assert_has "log reads gitctl's action log" "exec git-7d9f-abc -c git -- gitctl log 5" "$(xl)"
 out=$(K_NO_POD=1 run git push "$HOME/r" feat)
 assert_has "with no git container: says to set it up" "run \`aidc git setup\`" "$out"
 

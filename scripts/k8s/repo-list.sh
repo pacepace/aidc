@@ -40,7 +40,7 @@ out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- bash -c '
 if ! printf '%s\n' "$out" | grep -qx end; then
     die "unknown: the git container did not answer"
 fi
-rows=$(printf '%s\n' "$out" | sed -n 's/^repo=//p' | k8s_printable)
+rows=$(printf '%s\n' "$out" | sed -n 's/^repo=//p' | aidc_printable)
 if [ -z "$rows" ]; then
     info "no repos yet (aidc repo add <owner/name>)"
     exit 0

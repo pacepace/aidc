@@ -63,7 +63,7 @@ fi
 # from a disk sessions write, so control characters are stripped before they reach the terminal.
 if [ -n "$path" ] && [ "$DELETE_WC" = 1 ]; then
     report=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- gitctl unpushed "$path" </dev/null 2>&1) || true
-    report=$(printf '%s\n' "$report" | k8s_printable)
+    report=$(printf '%s\n' "$report" | aidc_printable)
     if [ "$(printf '%s\n' "$report" | tail -n1)" != end ]; then
         why=$(printf '%s\n' "$report" | tail -n1)
         [ "$EVEN_UNPUSHED" = 1 ] \

@@ -15,8 +15,9 @@ NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** being built. Built and checked on the reference cluster (`tests/smoke/k8s.sh`): the
 backend seam, the in-cluster images, users' disks, and sessions (create, attach, list, status,
-logs, kill) with the lockdown, Docker inside, the blocklist, taint and audit. Not built yet: the
-git container, the in-cluster MCP server, account switching, Syncthing, ports. Owner rulings are
+logs, kill) with the lockdown, Docker inside, the blocklist, taint and audit, and the git
+container ("Git", on this backend and on Docker). Not built yet: the in-cluster MCP server,
+account switching, Syncthing, ports; all of it ships in aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
 in `.prawduct/owner-rulings.md`; each open item says what will settle it, and items marked
 **proposal** await the owner.
 
@@ -34,7 +35,7 @@ cluster (the session node)
     ├─ <session>-dev  (StatefulSet)         Claude, Docker, optional GPU; sysbox-runc
     ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit: the only way out
     ├─ <session>-audit (PVC)                kept by `aidc kill`
-    ├─ git container (later)                Claude Code + SSH key + gh (K8S-04..06)
+    ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (later)                     the user's MCP server (K8S-07)
     └─ syncthing (later)                    Claude state <-> user's machines (K8S-18)
 ```
@@ -50,8 +51,9 @@ against either (K8S-01).
 ## Code: one disk per user, one worktree per session
 
 Each user has one persistent volume holding every repo they work on, because projects need each
-other (K8S-02). Users never share a volume. Each session works in its own git worktree of the
-repo it was created for (K8S-03), so two sessions on one repo never share a working folder.
+other (K8S-02). Users never share a volume. A session that works on a repo makes its own git
+worktree and branch in it (K8S-03 as amended; "Sessions make their own worktrees" under "Git"),
+so two sessions on one repo never share a working folder.
 
 The user views and edits the same files with VS Code attached to a pod that mounts the volume,
 the way aidc dev containers are used today (K8S-09).
@@ -63,8 +65,8 @@ only thing that pushes, pulls or opens PRs (K8S-04). It runs Claude Code with th
 
 - merge commits only; never force-push; no AI attribution in commits, PRs, code or docs;
 - git mode, from **ask** (default: each session request waits for the user) to **rules**
-  (gitctl's rules decide at once); each user sets their own, and may give one session `rules`
-  (K8S-05; "Per-session git mode" below);
+  (gitctl's rules decide at once); each user sets their own, and may give one session its own,
+  either way (K8S-05; "Per-session git mode" below);
 - an orchestrator the user drives may approve through the user's MCP server; sandboxed sessions
   never reach that server (K8S-06; "Ask mode and orchestrators" below for where this stands);
 - the first time it meets a repo it checks the GitHub protections (no force push, merge commits
@@ -80,9 +82,9 @@ was built first and dropped: they accept too many spellings of too many options 
 
 As built so far: `aidc git setup` runs it as a one-replica Deployment `git` in the user's
 namespace, from the `aidc/gitctl` image (git, a pinned and checksum-checked `gh`, Claude Code,
-openssh, tmux), built in the cluster with the others. It runs as uid 2000 (its own group 2000,
-so the files that lock a repo are not group-writable by sessions; supplementary group 1000, the
-sessions'), unprivileged (only SETUID, SETGID and AUDIT_WRITE, for sudo to gitctl's users), no
+tmux; no ssh client: pushes are HTTPS only), built in the cluster with the others. It runs as
+uid 2000 (its own group 2000; supplementary group 1000, the sessions', so it can work in their
+group-shared working copies), unprivileged (only SETUID, SETGID and AUDIT_WRITE, for sudo to gitctl's users), no
 service-account token, no service links. It
 mounts the user's disk at `/home/<user>` and its own home claim `git-home` (on the retained
 `storage_class`: it holds the user's secrets) at `/home/git`, seeded once from the image as a
@@ -97,9 +99,8 @@ no policies all refused; the user's disk visible.
 The hard rules as built: the agent and the user's terminal run as `git` (uid 2000) and run
 ordinary git as themselves, with no credential, so nothing they run reaches GitHub (their git
 still runs no repo hooks or fsmonitor and no `ext::` transport, from `/etc/gitconfig`). What
-needs the login is `gitctl`, a set of fixed verbs and the only thing in the sudo rules:
-`fetch`, `push <repo> <branch>`, `pr-create`, `pr-comment`, `pr-merge`, `pr-view`, `pr-list`,
-`status`, `login`, `logout`. Each builds its own git or gh command line from arguments it
+needs the login is `gitctl`, a set of fixed verbs (`gitctl --help` lists them) and the only
+thing in the sudo rules. Each builds its own git or gh command line from arguments it
 validates and passes no option the caller writes, so there is no flag spelling to get past.
 git runs as `gitrun` (no secret; the token comes from the credential helper, for
 `https://github.com` only) and gh as `gitcred`, the only user that can read the login, kept on
@@ -125,9 +126,20 @@ killed verb's) is swept at the start of the next verb.
 `main`, `master`, `develop` or origin's default branch under any name, as GitHub reports it
 (they change by PR merges); it asks origin what it has
 (`ls-remote`) rather than trusting `refs/remotes/*`, reads each commit it would send whole, and
-refuses one that carries AI attribution anywhere or whose author is an AI tool. `pr-create` and `pr-comment` refuse
+refuses one that carries AI attribution anywhere or whose author or committer is an AI tool (a
+name or email naming one, as a whole word: `Claude <x@example.invalid>` is refused; the user's
+own identity, from the login's identity file, never is). `pr-create` and `pr-comment` refuse
 attribution in their text; `pr-merge` always merges with a merge commit, after checking the
-PR's title, body and commits. Claude Code's PreToolUse hook
+PR's title, body and commits, and bound to the head commit it checked (`--match-head-commit`; a
+request's merge also to the head the user was shown when it was taken, `--expect-head`).
+gitcred checks for itself that a repo is one the user added before any gh call that names one:
+it asks gitrun (`has-copy`, read only, through the one sudo rule gitcred has, to that verb of
+gitctl only), so a caller who reaches gitcred through sudo directly cannot act on another repo
+either. gitrun and gitcred each append a line for every action that changes GitHub (push,
+delete-branch; pr-create, pr-comment, pr-merge, protect) to an action log in their own storage,
+which the agent cannot write: time, verb, repo, branch or PR, commit, who asked (a request's id
+or `direct`) and the calling user; each is capped at 1 MiB, then kept as one older file.
+`aidc git log` shows both, merged in time order. Claude Code's PreToolUse hook
 (`/etc/claude-code/managed-settings.json`, root's, with `allowManagedHooksOnly`) is a courtesy
 on top: it refuses switching user, reading the login's home, edits to the guard files, a gh
 login in the agent's home, and attributed git commands. Measured 2026-11-24 in the git pod as
@@ -189,20 +201,25 @@ Session requests (owner rulings 2026-11-24): a session's `gh` is a stand-in
 `pr list` and `aidc push` as request files into `/home/<user>/.aidc/git-requests/requests/`
 (the git container's folder, made by `aidc git setup`; sessions may add files there but not
 list it, and read results by id from `results/`), waits up to a minute and prints the result as
-gh would, or "requested; waiting for approval" with the id. The watcher (`git-requests watch`,
+gh would, "requested; waiting for approval" with the id when the request waits for the user,
+or that the git container has not taken it (exit 1) when it still sits in `requests/`. The watcher (`git-requests watch`,
 as the agent, kept running by the container's main process) moves each request out by rename,
 refuses anything but a plain file, checks every field (known fields only, a working copy on the
 disk with a GitHub origin, branch names, no protected branch, title and body without
 attribution or control characters), and then, by `kubernetes.git_mode`: rules runs it through
 gitctl at once; ask holds it as pending for `aidc git approve|deny` (reads run at once in both). A request
-records the GitHub repo its working copy named when taken and, for a push, the branch's commit;
-the user is shown both, and the run refuses (nothing done) if the working copy has since
-changed either: gitctl is given them (`--expect-repo`, `--expect-commit`) and checks them
-against what it acts on.
+records the GitHub repo its working copy named when taken and, for a push, the branch's commit,
+for a merge the pull request's head commit as GitHub had it then; the user is shown them, and the
+run refuses (nothing done) if any has since changed: gitctl is given them (`--expect-repo`,
+`--expect-commit`, `--expect-head`) and checks them against what it acts on. An approval and a
+denial of one request take its lock and read its state again under it, so when they race exactly
+one happens and the other says it did not. A watcher that cannot use its request folder logs why
+(once per reason), and `aidc git status` shows that reason.
 A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
 nothing and says to use `gh pr create`. Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
 restart is reported as interrupted, never retried. Requests and results are deleted after 30
-days.
+days (a request still waiting then is logged as expired), and what a killed take or save leaves
+in `work/` after an hour.
 
 The git agent (owner rulings 2026-11-24: it is an aidc session; it does no prawduct work; its
 instructions are one managed CLAUDE.md, no skills; it tidies after every merge; ask-mode
@@ -247,23 +264,33 @@ Residuals of the git agent, recorded rather than closed:
 - prawduct's skills, if ever installed in the git home, would be kept out only by its CLAUDE.md
   ("You do no prawduct work"); nothing in its settings blocks them.
 
-Per-session git mode: each session gets a random token at `aidc create` (`AIDC_GIT_TOKEN` in its
-dev pod; sessions reach no API server and no other pod, so only it can read it), which its gh
-stand-in sends with each request. `aidc git mode <session> rules` (from the user's machine,
-which reads the token from the StatefulSet) records the session's name and the token's SHA-256
-in the agent's home; with the user's mode ask, a request carrying that token runs at once, and
-one naming the session with another token or none waits. The reverse (one session held to ask
-while the user's mode is rules) is refused: a session can always send a request without its
-token.
+Per-session git mode (owner ruling 2026-11-23: each user changes their mode per session, both
+ways): each session gets a random token at `aidc create` (`AIDC_GIT_TOKEN` in its dev pod or
+container; sessions reach no API server, no other pod and no other container, so only it can
+read it), which its gh stand-in sends with each request. Every mode decision is keyed on that
+token. The git container keeps, per session, the token's SHA-256 and the session's own mode
+(`default`, `rules` or `ask`): `aidc create` registers a new session (`git-requests register`,
+the token on stdin), `aidc git setup` registers every session there is and prunes the records of
+sessions that are gone (`sync`), `aidc kill` forgets the session (`forget`), and `aidc git mode
+<session> <rules|ask|default>` (from the user's machine, which reads the token from the
+StatefulSet or the container) sets its own. A request carrying its session's recorded token runs
+by that session's own mode, or the user's when it has none; any other request (no token,
+another token, a session with no record) waits for the user. So one session can be given rules
+while the user's mode is ask, and held to ask while it is rules: leaving its token out gains a
+held session nothing. A session made again under an old name has a new token and starts at the
+user's mode.
 
 ### The git container on Docker
 
 The same image, gitctl, request watcher, managed CLAUDE.md, modes and tokens on the Docker
 backend (owner rulings 2026-11-24, "The git container works on Docker too" and "On Docker the
 git container works on the user's own working copies"). `aidc git` and `aidc repo` pick the
-backend themselves: `--backend`, else the config's `backend:`, else Kubernetes when a
-`kubernetes:` block exists, else Docker (`scripts/lib/git-common.sh`; the Docker side is
-`scripts/docker/`). What differs is only what Docker is:
+backend by the one rule every command uses (`scripts/lib/git-common.sh`,
+`aidc_default_backend`): `--backend`, else the config's top-level `backend:`, else Docker; a
+`kubernetes:` block alone changes nothing. Each `aidc git` verb is one script for both backends
+(`scripts/git/`), reaching the git container through a small interface each backend's library
+defines (the `gb_*` functions of `scripts/docker/lib.sh` and `scripts/k8s/lib.sh`); only `aidc
+git setup` and `aidc repo` are per backend. What differs is only what Docker is:
 
 - The container is `aidc-git-dev`, labelled as the dev container of the session named `git`, so
   `aidc list|attach|logs|status` and the MCP server find it like any session (the MCP runs a
@@ -284,7 +311,9 @@ backend themselves: `--backend`, else the config's `backend:`, else Kubernetes w
 - The agent (uid 2000) cannot write the user's files, which are not group-writable, so the verbs
   that write a working copy (`fetch`'s import, `tidy`, `unpushed`) run as `gitwc`, uid 1000 (the
   sessions' and the user's uid), through one more sudo rule; gitctl refuses `gitwc` unless Docker
-  made the container (`/.dockerenv`, root's). `tidy` removes a worktree only inside its working
+  made the container (`/.dockerenv`, root's), and as `gitwc` runs those three verbs only, each on
+  a mounted working copy: every other verb (push, adopt, the pull request verbs, which read their
+  text files) refuses it, so no file only the user's uid can read reaches GitHub through it. `tidy` removes a worktree only inside its working
   copy, and one recorded outside it (unseen in the container, so it looks gone) keeps its record
   and branch: nothing is pruned while one exists. `clone` is refused.
 - Egress: the container is on an internal network (`aidc-git-net`, no route out) whose only
@@ -312,10 +341,12 @@ come back by `session_send` or from the user in the terminal. Where that stands 
   the session `git` gets the question as that session's reply. Whether `session_send` can answer
   it is not yet checked: the MCP server's own notes say the question widget may not take a
   pasted answer and Enter. Checked by hand with a logged-in git agent (tests/smoke/README.md).
-- Kubernetes: the question does not reach an orchestrator. The MCP server's session tools reach
-  cluster sessions only with aidc 2.0's per-user MCP server (K8S-07); until then the user
-  answers by attaching (`aidc attach git`) or with `aidc git approve|deny`. This is the current
-  behaviour, pending an owner ruling.
+- Kubernetes: the question does not reach an orchestrator yet. The MCP server's session tools
+  reach cluster sessions only through the per-user MCP server (K8S-07). Owner ruling 2026-11-24
+  ("aidc 2.0 is the Kubernetes work and the 3tears adoption, released together"): the Kubernetes
+  backend ships only in 2.0, with that server, and 2.0 must route Kubernetes git approvals
+  through the orchestrator before it ships. Until then the user answers by attaching (`aidc
+  attach git`) or with `aidc git approve|deny`.
 - Both: `aidc git requests|approve|deny` always work, and answer the request whatever the agent
   is asking.
 
@@ -515,7 +546,7 @@ node's network namespace, which the pod does not share).
 
 Each user's Claude logins are set up once in their area; every session uses them (K8S-16).
 Fallback if sharing breaks: each session logs in on its own. Users bring their own secrets
-(SSH key, GitHub login, Claude accounts); the admin who runs `aidc user add <name>` never handles
+(their GitHub login, `aidc git login`, and Claude accounts); the admin who runs `aidc user add <name>` never handles
 them (K8S-20).
 
 ### Switching accounts mid-work

@@ -80,6 +80,20 @@ sel=$(k8s_node_selector) || exit 1
 # here: the session is rendered twice below and both must carry the same one.
 AIDC_K8S_GIT_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 [[ "$AIDC_K8S_GIT_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "cannot make the session's token"
+# The session's git identity, as on Docker (cmd-create.sh): the user's own name and email from
+# this machine's git config, so the commits the git container pushes for it show as the user.
+# A value with a control character is not taken (it would end up in the session's .gitconfig).
+AIDC_K8S_GIT_USER_NAME=$(git config --get user.name 2>/dev/null || true)
+AIDC_K8S_GIT_USER_EMAIL=$(git config --get user.email 2>/dev/null || true)
+if [ "$(printf '%s%s' "$AIDC_K8S_GIT_USER_NAME" "$AIDC_K8S_GIT_USER_EMAIL" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then
+    AIDC_K8S_GIT_USER_NAME="" AIDC_K8S_GIT_USER_EMAIL=""
+fi
+if [ -n "$AIDC_K8S_GIT_USER_NAME" ] && [ -n "$AIDC_K8S_GIT_USER_EMAIL" ]; then
+    info "git identity: ${AIDC_K8S_GIT_USER_NAME} <${AIDC_K8S_GIT_USER_EMAIL}>"
+else
+    AIDC_K8S_GIT_USER_NAME="" AIDC_K8S_GIT_USER_EMAIL=""
+    info "git identity: NOT bridged (set this machine's git config --global user.name and user.email)"
+fi
 AUDIT_CLAIM="${NAME}-audit-$(date -u +%Y%m%d%H%M%S)"
 info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, audit ${AUDIT_CLAIM})"
 info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
@@ -116,6 +130,14 @@ pod="${NAME}-dev-0"
 for _ in $(seq 150); do
     if k8s_kubectl -n "$ns" logs "$pod" -c dev 2>/dev/null | grep -q '\[aidc-user-main\] ready'; then
         info "session ${NAME} is ready"
+        # The git container keys this session's git mode on its token (the user's mode until
+        # aidc git mode gives it its own; a session made again under an old name starts afresh).
+        if gpod=$(k8s_git_pod "$ns" 2>/dev/null) \
+                && printf '%s\n' "$AIDC_K8S_GIT_TOKEN" | k8s_kubectl -n "$ns" exec -i "$gpod" -c git -- git-requests register "$NAME" >/dev/null 2>&1; then
+            info "git container: session ${NAME} registered (your git mode applies to it)"
+        else
+            info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"
+        fi
         info "attach: aidc attach ${NAME} --backend kubernetes (or: kubectl -n ${ns} exec -it ${pod} -c dev -- sudo -u vscode tmux attach -t main)"
         exit 0
     fi

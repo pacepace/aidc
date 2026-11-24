@@ -37,6 +37,6 @@ else
 fi
 phase=$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/null || true)
 [ "$phase" = "Bound" ] || die "${USER_NAME}'s disk is ${phase:-missing}, not Bound"
-info "${USER_NAME} is set up in ${ns}. They add their own SSH key, GitHub login and Claude accounts."
+info "${USER_NAME} is set up in ${ns}. They add their own GitHub login (aidc git login) and Claude accounts."
 # Optional: a user who never pushes from the cluster needs no git container.
 info "next, for pushes and PRs: ${USER_NAME} runs \`aidc git setup\` (with kubernetes.user: ${USER_NAME}), then \`aidc git attach\` to log in"

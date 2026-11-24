@@ -160,3 +160,61 @@ def test_the_git_agents_session_user_is_its_git_user():
     assert backend.exec_argv("aidc-proj-dev", ["id"], user="vscode") == [
         "docker", "exec", "-u", "vscode", "aidc-proj-dev", "id"]
     assert backend.is_git_session("git") and not backend.is_git_session("gitx")
+
+
+# --- the default backend: one rule, the shell's ------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GIT_COMMON = REPO_ROOT / "scripts" / "lib" / "git-common.sh"
+
+# Configs the rule must read the same way on both sides: no file, no backend line, a
+# kubernetes: block alone (Docker: the block does not change the default), quoted values, an
+# indented key of another section, two lines (the first counts), an empty value, a CRLF file.
+DEFAULT_BACKEND_CONFIGS = [
+    None,
+    "",
+    "profile: multi\n",
+    "kubernetes:\n  user: alice\n  storage_class: x\n",
+    "backend: kubernetes\n",
+    "backend: k8s\n",
+    'backend: "kubernetes"\n',
+    "backend: 'docker'\n",
+    "kubernetes:\n  backend: kubernetes\nbackend: docker\nbackend: kubernetes\n",
+    "backend:\n",
+    "backend: kubernetes  # the cluster\n",
+    "backend: kubernetes\r\n",
+]
+
+
+def _shell_default_backend(home: Path) -> str:
+    """aidc_default_backend, the shell rule `aidc create`, `aidc git` and `aidc repo` share."""
+    import subprocess
+
+    out = subprocess.run(
+        ["bash", "-c", '. "$1"; AIDC_BACKEND_FLAG="" aidc_default_backend', "bash", str(GIT_COMMON)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+        check=False)
+    return out.stdout.strip() if out.returncode == 0 else f"error: {out.stderr.strip()}"
+
+
+@pytest.mark.parametrize("config", DEFAULT_BACKEND_CONFIGS)
+def test_create_backend_is_the_shell_rule(config, tmp_path, monkeypatch):
+    """The MCP server's create_backend is a Python copy of the shell's aidc_default_backend:
+    session_create must pick the backend `aidc create` will, or the arguments it passes (the
+    Kubernetes create refuses --repo) are the other backend's. Held to the shell itself."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    if config is not None:
+        cfg = tmp_path / ".config" / "aidc" / "config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(config, encoding="utf-8")
+    shell = _shell_default_backend(tmp_path)
+    py = backend.create_backend()
+    # The shell says "kubernetes" for both spellings; Python keeps the CLI's spelling.
+    assert ("kubernetes" if backend.is_kubernetes(py) else py) == shell, config
+
+
+def test_git_session_name_is_the_shells():
+    """The reserved session name of the git agent is defined once in the shell; the server's
+    GIT_SESSION must be it."""
+    text = GIT_COMMON.read_text(encoding="utf-8")
+    assert f"\nAIDC_GIT_SESSION={backend.GIT_SESSION}\n" in text

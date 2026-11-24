@@ -6,7 +6,9 @@
 # On the Kubernetes backend, sessions make their own worktrees in repos the git container cloned
 # onto the user's disk; on Docker, the git container works on the user's own working copies
 # (docs/design-12-kubernetes.md, "Git"). Each subcommand is scripts/k8s/repo-<name>.sh or
-# scripts/docker/repo-<name>.sh.
+# scripts/docker/repo-<name>.sh: the two add a repo differently (a clone onto the cluster disk; the
+# user's own working copy mounted on Docker). The backend is the one every command defaults to
+# (lib/git-common.sh, aidc_default_backend).
 
 set -euo pipefail
 
@@ -52,11 +54,12 @@ shift
 # shellcheck source=lib/git-common.sh
 . "$AIDC_SCRIPTS/lib/git-common.sh"
 BACKEND_DIR=k8s
-case "$(aidc_git_backend)" in
+AIDC_GIT_BACKEND=$(aidc_default_backend) || exit 2
+case "$AIDC_GIT_BACKEND" in
     kubernetes) ;;
     docker) BACKEND_DIR=docker ;;
-    *) exit 2 ;;
 esac
+export AIDC_GIT_BACKEND
 SCRIPT="$AIDC_SCRIPTS/${BACKEND_DIR}/repo-${SUB}.sh"
 if [ ! -f "$SCRIPT" ]; then
     printf '[aidc] error: unknown repo subcommand: %s\n' "$SUB" >&2

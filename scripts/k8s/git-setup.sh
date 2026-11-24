@@ -51,4 +51,13 @@ fi
 req=$(k8s_git_requests_path)
 k8s_repo_dir_step "$ns" "$req" requests "$sel" >/dev/null \
     || die "the git container runs, but its request folder ${req} could not be made; run aidc git setup again"
+# Every session's token, so the git container keys their git modes on them, and the records of
+# sessions that are gone are pruned. Only from a list the cluster gave.
+k8s_git_target
+if sessions=$(gb_sessions); then
+    printf '%s\n' "$sessions" | gb_exec_in git-requests sync 2>&1 | aidc_printable >&2 \
+        || info "warning: the git container did not take the sessions' tokens; their requests wait for your approval"
+else
+    info "warning: the cluster did not list the sessions; their git modes are left as they were"
+fi
 info "the git container is ready (git mode: ${AIDC_K8S_GIT_MODE}). Next: \`aidc git login\` (a device code you approve in your browser)."

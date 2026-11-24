@@ -129,8 +129,8 @@ Wave codes are defined in §3.
 | P11 | (04) Filters: a driver added between the read and the call | R-G6, accept (W-K0) |
 | P12 | (04) `cannot-delete` for files made with another umask (kubectl exec shells, Docker-in-session builds) | W-K1: decide whether the git agent may fix group-write through a gitwc-like path on k8s. Otherwise accept |
 | P13 | (04, Critic) tidy: a path component swapped between the check and `worktree remove` | R-G7, accept |
-| P14 | (04, Critic) Residual: the agent can sudo to gitcred's PR verbs on any repo | R-G8, accept (or restrict `pr-*` to `has-copy` repos at gitcred level too: recommend fixing in W-K1) |
-| P15 | (05) Per-session mode can only loosen; `mode <s> ask` under rules is refused (the plan says "owner may want it otherwise") | W-K0: owner confirms |
+| P14 | (04, Critic) Residual: the agent can sudo to gitcred's PR verbs on any repo | Closed (06, cumulative Critic): gitcred asks gitrun `has-copy` itself before any gh call that names a repo |
+| P15 | (05) Per-session mode can only loosen; `mode <s> ask` under rules is refused (the plan says "owner may want it otherwise") | Closed (06, cumulative Critic): per the 2026-11-23 ruling both ways; every mode decision is keyed on the session's registered token |
 | P16 | (05) Residuals: a line pasted while the user types joins their text; a request answered outside the question waits for the next look | R-G9, accept, or W-M3 if the orchestrator answer path changes |
 | P17 | (05, Critic) `Bash(git *)` allow list is a courtesy; only the instructions stop self-approval; prawduct skills kept out only by CLAUDE.md | R-G10/11/12. Owner accepts, or 2.0 adds an approval binding (e.g. `git-requests approve` requires a nonce shown only in the user's terminal or MCP answer). Recommend asking (Q-K8) |
 | P18 | (07, Critic) Off-Docker gitwc refusal and the sudo switch reached only in the installed image (no unit test) | Live-checked in chunk 06. W-K1 adds an image-level test in the smoke |
@@ -156,7 +156,7 @@ Wave codes are defined in §3.
 | D7 | Docker git container on macOS | W-K0 |
 | D8 | Squid's own deny of private destinations on k8s sessions (defence in depth) | W-K1: set `AIDC_PUBLIC_ONLY=1` on the k8s session proxy, check that `--egress-tcp` relays still work (they go to a ClusterIP, which public-only refuses: needs an allow for the relay Services. Design point, see W-K2) |
 | D9 | A root process in a Sysbox session cannot change node-side NetworkPolicy rules | W-K1 (live probe: iptables/nft from session root) |
-| D10 | Design-12 header "Status" is stale (says the git container is not built) | W-K1 docs |
+| D10 | Design-12 header "Status" is stale (says the git container is not built) | Closed (06, cumulative Critic) |
 | D11 | Design-12 "Shape" tree still marks git container/aidc-mcp/syncthing "(later)" | W-K1 docs (and finished as each is built) |
 
 ### Open GitHub issues

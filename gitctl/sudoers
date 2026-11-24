@@ -7,9 +7,14 @@
 # here) drops everything the caller exported.
 # On Docker, the agent's verbs that write a working copy run as gitwc (the user's uid there), only on
 # a working copy Docker mounted (gitctl checks the mount list as gitwc), and
-# from it reach gitrun and gitcred as the agent does; gitctl refuses gitwc anywhere else.
+# from it reach gitrun and gitcred as the agent does; gitctl refuses gitwc anywhere else, and
+# every verb but fetch, tidy and unpushed.
+# gitcred asks gitrun one thing: whether the user added a repo (has-copy, read only). It checks
+# that itself before any gh call that names a repo, so a caller who reaches gitcred directly
+# cannot act on a repo the user did not add.
 Defaults:git,gitrun,gitcred,gitwc env_reset, !lecture, !use_pty
 Defaults:git,gitrun,gitcred,gitwc secure_path="/usr/bin:/bin"
 git     ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitwc   ALL=(gitrun,gitcred)       NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitrun  ALL=(gitcred)              NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
+gitcred ALL=(gitrun)               NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh has-copy *

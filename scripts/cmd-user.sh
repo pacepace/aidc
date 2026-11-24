@@ -16,9 +16,9 @@ aidc user add <name>
 
   add      Create <name>'s area in the cluster of the `kubernetes:` config: a namespace
            and a disk (on kubernetes.storage_class) that all of <name>'s sessions share.
-           The new user then adds their own SSH key, GitHub login and Claude accounts;
-           the admin never handles them (they run `aidc git setup` and log in
-           through `aidc git attach`). Safe to run again.
+           The new user then adds their own GitHub login and Claude accounts; the
+           admin never handles them (they run `aidc git setup`, log in to GitHub with
+           `aidc git login` and to Claude through `aidc git attach`). Safe to run again.
 USAGE
 }
 

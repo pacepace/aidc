@@ -68,6 +68,8 @@ AIDC_GITCTL_REAL_GIT=$(command -v git)
 export AIDC_GITCTL_REAL_GH="$S/bin/gh" AIDC_GITCTL_REAL_GIT
 unset AIDC_GITCTL_ROLE AIDC_GITCTL_TEST_FORGE
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+# gitcred's home (its login, identity and action log): a folder of the test's, never the tester's.
+CRED="$S/cred"; mkdir -p "$CRED"; export AIDC_GITCTL_CRED_HOME="$CRED"
 G() { git -c user.name=Someone -c user.email=someone@example.com -c init.defaultBranch=main "$@"; }
 
 ctl() { : > "$S/bin/calls.log"; OUT=$(bash "$GITCTL/gitctl.sh" "$@" 2>&1); RC=$?; CALLS=$(cat "$S/bin/calls.log"); }
@@ -340,21 +342,32 @@ refused "as gitcred it opens no file the caller names"
 AIDC_GITCTL_ROLE=cred ctl push "$W" feature; refused "gitcred runs no git verb"
 AIDC_GITCTL_ROLE=run ctl pr-merge o/r 5; refused "gitrun runs no gh verb"
 
-printf '{"title":"Add it","body":"Clean.","commits":[{"messageHeadline":"Add it","messageBody":"","authors":[{"name":"Someone","email":"someone@example.com"}]}]}' > "$S/bin/prview.json"
+printf '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Add it","body":"Clean.","commits":[{"messageHeadline":"Add it","messageBody":"","authors":[{"name":"Someone","email":"someone@example.com"}]}]}' > "$S/bin/prview.json"
 ctl pr-merge "$H" 5
-assert_eq "pr-merge reads the PR, then merges with a merge commit, nothing else" \
-    "pr view 5 --repo o/r --json title\\,body\\,commits 
-pr merge 5 --repo o/r --merge " "$CALLS"
+assert_eq "pr-merge reads the PR, then merges with a merge commit bound to the head it checked, nothing else" \
+    "pr view 5 --repo o/r --json title\\,body\\,commits\\,headRefOid 
+pr merge 5 --repo o/r --merge --match-head-commit $(printf 'a%.0s' $(seq 40)) " "$CALLS"
 for extra in --squash "--squash=t" "--merge=0" --rebase -s; do
     ctl pr-merge "$H" 5 "$extra"; refused "pr-merge takes no '$extra'"
 done
 ctl pr-merge "$H" "5;x"; refused "a PR number must be a number"
-printf '{"title":"Add it","body":"","commits":[{"messageHeadline":"Fix","messageBody":"Co-Authored-By: Claude <noreply@anthropic.com>","authors":[]}]}' > "$S/bin/prview.json"
+printf '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Add it","body":"","commits":[{"messageHeadline":"Fix","messageBody":"Co-Authored-By: Claude <noreply@anthropic.com>","authors":[]}]}' > "$S/bin/prview.json"
 ctl pr-merge "$H" 5
-assert_eq "a PR carrying an attributed commit is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits " "$CALLS"
-printf '{"title":"Add it","body":"","commits":[{"messageHeadline":"Fix","messageBody":"","authors":[{"name":"Copilot","email":"copilot@users.noreply.github.com"}]}]}' > "$S/bin/prview.json"
+assert_eq "a PR carrying an attributed commit is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits\\,headRefOid " "$CALLS"
+printf '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Add it","body":"","commits":[{"messageHeadline":"Fix","messageBody":"","authors":[{"name":"Copilot","email":"copilot@users.noreply.github.com"}]}]}' > "$S/bin/prview.json"
 ctl pr-merge "$H" 5
-assert_eq "a PR with a commit authored as an AI tool is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits " "$CALLS"
+assert_eq "a PR with a commit authored as an AI tool is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits\\,headRefOid " "$CALLS"
+printf '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Add it","body":"","commits":[{"messageHeadline":"Fix","messageBody":"","authors":[{"name":"Claude","email":"claude@example.invalid"}]}]}' > "$S/bin/prview.json"
+ctl pr-merge "$H" 5
+assert_eq "a PR with a commit authored as Claude at any email is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits\\,headRefOid " "$CALLS"
+printf '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Add it","body":"Clean.","commits":[{"messageHeadline":"Add it","messageBody":"","authors":[{"name":"Someone","email":"someone@example.com"}]}]}' > "$S/bin/prview.json"
+ctl pr-merge "$H" 5 --expect-head "$(printf 'b%.0s' $(seq 40))"
+assert_eq "a PR whose head moved since it was approved (--expect-head) is not merged" "pr view 5 --repo o/r --json title\\,body\\,commits\\,headRefOid " "$CALLS"
+assert_has "saying so" "moved since it was approved" "$OUT"
+ctl pr-merge "$H" 5 --expect-head "$(printf 'a%.0s' $(seq 40))"
+assert_has "the approved head, unchanged, is merged, bound to it" "--match-head-commit $(printf 'a%.0s' $(seq 40))" "$CALLS"
+ctl pr-view "$H" 5 --expect-head "$(printf 'a%.0s' $(seq 40))"; refused "only pr-merge takes --expect-head"
+AIDC_GITCTL_ROLE=cred ctl pr-merge o/r 5 "abc"; refused "as gitcred, the head is a full commit id"
 
 printf 'Looks good.\n' > "$S/comment"
 ctl pr-comment "$H" 5 --body-file "$S/comment"
@@ -404,16 +417,22 @@ assert_eq "input it cannot read is blocked (the hook fails closed)" 2 "$HRC"
 echo ""
 echo "=== the image: one sudo rule for the agent, root's files ==="
 df=$(cat "$GITCTL/Dockerfile")
+case "$df" in *openssh*) fail "no ssh client in the image (pushes are HTTPS only)" ;; *) pass "no ssh client in the image (pushes are HTTPS only)" ;; esac
 assert_has "/opt/aidc/bin (gitctl, and a gh that points to it) comes first on PATH" 'ENV PATH="/opt/aidc/bin:' "$df"
 assert_has "gitctl is installed" "ln -s /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/bin/gitctl" "$df"
+for f in gitctl-run.sh gitctl-cred.sh gitctl-agent.sh; do
+    assert_has "the side it sources, ${f}, is installed beside it (root's, not executable)" "/opt/aidc/lib/gitctl/${f}" "$df"
+    assert_has "..." "${f}" "$(grep '^COPY gitctl-rules.sh' "$GITCTL/Dockerfile")"
+done
 assert_has "plain gh points to gitctl (a gh login as the agent would be readable by it)" "ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh" "$df"
 assert_has "the sudo rules are root's, 0440" "chmod 0440 /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "and checked at build" "visudo -c -f /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "the managed settings are installed" "COPY managed-settings.json /etc/claude-code/managed-settings.json" "$df"
-assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker), gitrun to the credential helper" \
+assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker), gitrun to the credential helper, gitcred to gitrun's has-copy only" \
 "git ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitwc ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
-gitrun ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh" \
+gitrun ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
+gitcred ALL=(gitrun) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh has-copy *" \
     "$(grep -vE '^(#|Defaults|$)' "$GITCTL/sudoers" | tr -s ' ')"
 assert_has "sudo resets the environment" "env_reset" "$(cat "$GITCTL/sudoers")"
 ms="$GITCTL/managed-settings.json"
@@ -728,6 +747,20 @@ AIDC_GITCTL_DOCKER=1 ctl fetch "$S/disk/linked"; refused "Docker: a mount whose 
 SP="$S/disk/with space"; G clone -q "$A" "$SP" 2>/dev/null; mount_line "$(printf '%s' "$SP" | sed 's/ /\\040/g')" >> "$MI"
 AIDC_GITCTL_DOCKER=1 ctl fetch "$SP"; assert_eq "Docker: a mount point with a space (escaped in the mount list) is found" 0 "$RC"
 AIDC_GITCTL_DOCKER=1 AIDC_GITCTL_MOUNTINFO="$S/no-such-file" ctl fetch "$AW"; refused "Docker: no mount list, no gitwc verb"
+# gitwc (AIDC_GITCTL_AS_WC stands for running as it) can read and write the user's own files: it
+# runs fetch, tidy and unpushed on a mounted working copy only, and nothing else, so no file of
+# the user's reaches a pull request through it.
+printf 'SECRET=1\n' > "$AW/.env"; chmod 0600 "$AW/.env"
+for v in "pr-create $AW main main --title-file $AW/.env --body-file $AW/.env" "pr-comment $AW 5 --body-file $AW/.env" \
+         "push $AW main" "adopt $AW" "pr-merge $AW 5" "pr-view $AW 5" "pr-list $AW" "protect $AW" "has-copy o/adopted" \
+         "clone o/r $S/disk/wcclone" "log"; do
+    # shellcheck disable=SC2086  # the verb and its words, split on purpose
+    AIDC_GITCTL_DOCKER=1 AIDC_GITCTL_AS_WC=1 ctl $v; refused "as gitwc, '${v%% *}' is refused"
+    assert_has "saying only fetch, tidy and unpushed run as gitwc" "does not run as gitwc" "$OUT"
+done
+AIDC_GITCTL_AS_WC=1 ctl fetch "$AR"; refused "as gitwc, a fetch of a repo that is not a mounted working copy is refused"
+AIDC_GITCTL_AS_WC=1 ctl fetch "$AW"; assert_eq "as gitwc, a fetch of a mounted working copy works" 0 "$RC"
+rm -f "$AW/.env"
 # On Docker gitrun's git and gitcred's gh go through the git container's proxy, a fixed value.
 cat > "$S/bin/git-logged" <<STUB
 #!/bin/sh
@@ -851,6 +884,18 @@ ctl has-copy o/r; assert_eq "has-copy: yes for an added repo" "0 yes" "$RC $OUT"
 ctl has-copy o/other; refused "has-copy: refused for one not added"
 AIDC_GITCTL_ROLE=run ctl fetch o/other; refused "called as gitrun directly, fetch makes no copy of a repo not added"
 assert_eq "none made" no "$([ -e "$STORE/o/other.git" ] && echo yes || echo no)"
+# The same holds when gitcred is reached through sudo directly (the agent can run that): gitcred
+# asks gitrun itself, every verb that names a repo, before gh runs.
+for v in "pr-merge o/other 7" "pr-merge o/other 7 $(printf 'a%.0s' $(seq 40))" "pr-view o/other 7" "pr-list o/other" \
+         "pr-view-json o/other 7" "pr-list-json o/other open" "protection o/other" "protect o/other"; do
+    # shellcheck disable=SC2086  # the verb and its words, split on purpose
+    AIDC_GITCTL_ROLE=cred ctl $v; refused "called as gitcred directly, '${v%% *}' on a repo the user did not add is refused"
+    assert_has "with the reason" "not one of the user's repos" "$OUT"
+done
+AIDC_GITCTL_ROLE=cred ctl_in $'Title\nBody.' pr-create o/other feature main; refused "called as gitcred directly, 'pr-create' on a repo the user did not add is refused"
+AIDC_GITCTL_ROLE=cred ctl_in "Body." pr-comment o/other 7; refused "called as gitcred directly, 'pr-comment' on a repo the user did not add is refused"
+AIDC_GITCTL_ROLE=cred ctl pr-view o/r 7
+assert_eq "an added repo still works as gitcred" "pr view 7 --repo o/r " "$CALLS"
 
 echo ""
 echo "=== an approved request acts on the repo and commit it was approved for ==="
@@ -890,8 +935,73 @@ G -C "$TC" switch -q -c topic; ctl push "$TC" topic
 assert_eq "another branch of that repo still pushes" 0 "$RC"
 
 echo ""
+echo "=== an author or committer that is an AI tool, at any email ==="
+for id in "Claude <x@example.invalid>" "author Claude <claude@example.invalid> 1700000000 +0000" "Gemini <x@y>" \
+          "Someone <someone@anthropic.com>" "committer A <copilot@users.noreply.github.com> 1 +0000" "GPT-4 <a@example.com>" \
+          "dependabot[bot] <1+dependabot[bot]@users.noreply.github.com>" "Dev <devin@cognition.ai>" "x <claude-code@example.com>" \
+          "ChatGPT <a@example.com>" "Cursor Agent <cursoragent@cursor.com>" "Codeium <a@codeium.com>"; do
+    if gitctl_ai_identity "$id"; then pass "AI identity: $id"; else fail "AI identity missed: $id"; fi
+done
+for id in "Someone <someone@example.com>" "Mark Claudel <m@example.com>" "Aiden Smith <aiden@example.com>" \
+          "author Octo Cat <42+octo@users.noreply.github.com> 1 +0000"; do
+    if gitctl_ai_identity "$id"; then fail "a false hit: $id"; else pass "a person: $id"; fi
+done
+GITCTL_OWN_NAME="Devin Jones" GITCTL_OWN_EMAIL="devin@example.com"
+if gitctl_ai_identity "author Devin Jones <devin@example.com> 1 +0000"; then fail "the user's own identity is refused"
+else pass "the user's own identity (a name on the list) is never refused"; fi
+if gitctl_ai_identity "author Devin Jones <claude@example.invalid> 1 +0000"; then pass "but an AI email beside the user's name is"
+else fail "an AI email beside the user's name passed"; fi
+GITCTL_OWN_NAME="" GITCTL_OWN_EMAIL=""
+G -C "$W" switch -q feature
+git -C "$W" -c user.name=Claude -c user.email=claude@example.invalid commit -q --allow-empty -m "Plain message"
+before=$(remote_sha feature)
+ctl push "$W" feature; refused "a commit authored as Claude <claude@example.invalid> is not pushed"
+assert_eq "and nothing reached the remote" "$before" "$(remote_sha feature)"
+G -C "$W" reset -q --hard HEAD~1
+# The user's own identity comes from the login's identity file (gitctl login writes it).
+printf '[user]\n\tname = Devin Jones\n\temail = devin@example.com\n' > "$CRED/git-identity"
+git -C "$W" -c user.name="Devin Jones" -c user.email=devin@example.com commit -q --allow-empty -m "The user's own"
+ctl push "$W" feature
+assert_eq "a commit with the user's own identity is pushed, whatever the name" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+rm -f "$CRED/git-identity"
+G -C "$W" switch -q main
+
+echo ""
+echo "=== the action log: what changed GitHub, kept where the agent cannot write ==="
+ctl log
+assert_has "a push is recorded by gitrun: verb, repo, branch, commit, who asked, result" \
+    "push o/r feature $(git -C "$W" rev-parse feature) asked-by=direct" "$OUT"
+assert_has "pull request merges are recorded by gitcred" "pr-merge o/r #5 $(printf 'a%.0s' $(seq 40)) asked-by=direct" "$OUT"
+assert_has "and pull requests opened" "pr-create o/r feature->main - asked-by=direct" "$OUT"
+assert_has "and comments" "pr-comment o/r #5" "$OUT"
+case "$OUT" in *" fetch "*|*" pr-view "*|*" has-copy "*) fail "reads are not recorded" ;; *) pass "reads are not recorded" ;; esac
+assert_eq "in time order" "$(printf '%s\n' "$OUT" | LC_ALL=C sort -s -k1,1)" "$OUT"
+assert_eq "gitrun's log is in its private store, gitcred's in its home" "yes yes" \
+    "$([ -f "$STORE/.actions.log" ] && echo yes || echo no) $([ -f "$CRED/actions.log" ] && echo yes || echo no)"
+id=0123456789abcdef0123456789abcdef
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "Asked for"
+ctl push "$W" feature --asked-by "$id"
+ctl log 1
+assert_has "a request's id goes with the action (--asked-by)" "push o/r feature $(git -C "$W" rev-parse feature) asked-by=${id}" "$OUT"
+ctl push "$W" feature --asked-by "not-an-id"; refused "--asked-by takes a request id or direct"
+ctl log 3x; refused "log takes a number of lines"
+: > "$STORE/.actions.log"; rm -f "$STORE/.actions.log.1"
+for i in 1 2 3 4 5 6; do
+    G -C "$W" commit -q --allow-empty -m "Capped $i"
+    AIDC_GITCTL_ACTION_LOG_BYTES=300 ctl push "$W" feature
+done
+assert_eq "the log is capped: past the cap it moves to one older file, and no more are kept" "yes no" \
+    "$([ -f "$STORE/.actions.log.1" ] && echo yes || echo no) $([ -e "$STORE/.actions.log.2" ] && echo yes || echo no)"
+assert_eq "so neither file grows past the cap plus a line" yes \
+    "$([ "$(stat -c %s "$STORE/.actions.log")" -lt 600 ] && [ "$(stat -c %s "$STORE/.actions.log.1")" -lt 600 ] && echo yes || echo no)"
+ctl log 100
+assert_has "and the log still shows the last push" "push o/r feature $(git -C "$W" rev-parse feature)" "$OUT"
+G -C "$W" switch -q main
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
-mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh" "$S/mut/gitctl-rules.sh"; }
+# gitctl.sh and the files it sources (each trust side's, and the shared rules).
+mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut"/gitctl*.sh; }
 mut 's/gitctl_check_text "$raw" "commit ${sha:0:12}" || die/: || die/'
 G -C "$W" switch -q feature
 G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
@@ -950,6 +1060,30 @@ mut 's/if ! removable "$wt"; then/if false; then/'
 bash "$S/mut/gitctl.sh" tidy "$T" >/dev/null 2>&1
 assert_eq "with tidy's folder check removed, the planted request folder is deleted (so the tidy test would fail)" no \
     "$([ -d "$REQS" ] && echo yes || echo no)"
+
+mut 's/           cred_added "$1" ;;/           : ;;/'
+: > "$S/bin/calls.log"
+AIDC_GITCTL_ROLE=cred bash "$S/mut/gitctl.sh" pr-merge o/other 7 >/dev/null 2>&1
+assert_has "with gitcred's own added-repos check removed, a direct merge of a repo not added reaches gh (so the gitcred tests would fail)" \
+    "pr merge 7 --repo o/other" "$(cat "$S/bin/calls.log")"
+mut 's/case "$verb" in fetch|tidy|unpushed) ;; \*) die "${verb} does not run as gitwc/case "$verb" in *) ;; esac; case "" in x) die "${verb} does not run as gitwc/; s/\[ "$AS_WC" = 0 \] || die "gitwc reads no file"/:/'
+printf 'SECRET=1\n' > "$AW/.env"
+: > "$S/bin/calls.log"
+AIDC_GITCTL_DOCKER=1 AIDC_GITCTL_AS_WC=1 bash "$S/mut/gitctl.sh" pr-create "$AW" main main --title-file "$AW/.env" --body-file "$AW/.env" >/dev/null 2>&1
+assert_has "with the gitwc guards removed, gitwc reads the user's file into a pull request (so the gitwc tests would fail)" \
+    "SECRET=1" "$(cat "$S/bin/calls.log")"
+rm -f "$AW/.env"
+mut 's/        if printf .%s.n. "$words" | LC_ALL=C tr/        if false \&\& printf "%s" "$words" | LC_ALL=C tr/'
+G -C "$W" switch -q feature
+git -C "$W" -c user.name=Claude -c user.email=claude@example.invalid commit -q --allow-empty -m "Plain message"
+bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
+assert_eq "with the AI-identity match removed, a commit by Claude <claude@example.invalid> is pushed (so the identity test would fail)" \
+    "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+G -C "$W" switch -q main
+mut 's/            \[ $# = 2 \] || \[ "$head" = "$3" \] \\/            true \\/'
+: > "$S/bin/calls.log"
+bash "$S/mut/gitctl.sh" pr-merge "$H" 5 --expect-head "$(printf 'b%.0s' $(seq 40))" >/dev/null 2>&1
+assert_has "with the approved-head check removed, a moved PR is merged (so the head test would fail)" "pr merge 5" "$(cat "$S/bin/calls.log")"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

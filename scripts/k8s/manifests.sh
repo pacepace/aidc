@@ -500,6 +500,11 @@ spec:
             # session (aidc git mode) applies to requests carrying it, and no other session can
             # read it (sessions reach no API server and no other pod).
             - {name: AIDC_GIT_TOKEN, value: "${AIDC_K8S_GIT_TOKEN:-}"}
+            # The user's git identity (session-create.sh, from this machine's git config, as
+            # Docker's aidc create bridges it): the entrypoint writes it to the session's
+            # .gitconfig, so its commits show as the user. Quoted as JSON strings.
+            - {name: AIDC_GIT_USER_NAME, value: $(jq -n --arg v "${AIDC_K8S_GIT_USER_NAME:-}" '$v')}
+            - {name: AIDC_GIT_USER_EMAIL, value: $(jq -n --arg v "${AIDC_K8S_GIT_USER_EMAIL:-}" '$v')}
           volumeMounts:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/vscode}
@@ -512,13 +517,13 @@ EOF
 # k8s_render_git <node-selector-json>: the user's git container (docs/design-12-kubernetes.md,
 # "Git"): its home claim, its egress policy and its Deployment, in the user's namespace.
 #
-# It is the only thing that pushes, so it holds the user's SSH key and GitHub login, in its own
-# home claim on the user's retained class: a lost claim is a lost login, and the user, not the
-# admin, adds them again. It mounts the user's disk at the same path sessions do, so a repo has
+# It is the only thing that pushes, so it holds the user's GitHub login (on its own claim,
+# git-cred) and its home claim, both on the user's retained class: a lost claim is a lost login,
+# and the user, not the admin, adds it again. It mounts the user's disk at the same path sessions do, so a repo has
 # one path everywhere.
 #
-# It runs as the git user (uid 2000; its own group 2000, plus the session group 1000 that the
-# shared parts of a repo belong to), unprivileged, with no API token and no service links.
+# It runs as the git user (uid 2000; its own group 2000, plus the session group 1000 the
+# group-shared working copies belong to), unprivileged, with no API token and no service links.
 # The agent and the user's terminal run as that user, which holds no credential: what needs
 # the GitHub login goes through gitctl's fixed verbs, which run git as gitrun and gh as gitcred
 # through the one sudo rule that names gitctl (gitctl/sudoers). sudo is a setuid program, so
@@ -526,13 +531,13 @@ EOF
 # (SETUID, SETGID, and AUDIT_WRITE for sudo's audit record); it can become those two users,
 # for gitctl only. The
 # GitHub login lives on its own claim, git-cred, readable by gitcred only.
-# Egress is Quad9 and public addresses only, as the session proxy's, so a key held here cannot
+# Egress is Quad9 and public addresses only, as the session proxy's, so a login held here cannot
 # be walked to the API server, a node, a session or the LAN; nothing may connect to it (the
 # namespace's default-deny covers ingress, and the policy names it again for this pod). Like
 # the proxy, it resolves through Quad9 only, the one DNS its policy allows.
 #
 # Not under the sessions' runtime class: it runs no Docker, and its uid 2000 must be the same
-# number on the shared disk as in the repo lock design-12 measured.
+# number on the shared disk as the one that owns what it writes there.
 k8s_render_git() {
     local sel="$1" ns img
     ns=$(k8s_user_ns "$AIDC_K8S_USER")
@@ -588,8 +593,8 @@ kind: Deployment
 metadata: {name: git, namespace: ${ns}, labels: {${labels}, ${session}, app: git}}
 spec:
   replicas: 1
-  # Recreate: two git containers at once would share one home (one SSH key, one gh config) and
-  # race on the same repos.
+  # Recreate: two git containers at once would share one home and one GitHub login and race on
+  # the same repos.
   strategy: {type: Recreate}
   selector: {matchLabels: {app: git}}
   template:

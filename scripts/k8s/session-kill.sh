@@ -39,4 +39,10 @@ fi
 info "removing session ${NAME} from ${ns}"
 k8s_kubectl -n "$ns" delete statefulset,deployment,service,networkpolicy,configmap -l "$sel" --wait=true >&2
 k8s_kubectl -n "$ns" delete pvc -l "${sel},aidc/kept!=audit" --wait=false >&2
+# The git container forgets the session (its token and any git mode of its own), so a mode never
+# outlives the session it was given to. Best effort: aidc git setup prunes what is left.
+if gpod=$(k8s_git_pod "$ns" 2>/dev/null); then
+    k8s_kubectl -n "$ns" exec "$gpod" -c git -- git-requests forget "$NAME" </dev/null >/dev/null 2>&1 \
+        || info "the git container did not forget ${NAME}'s git mode; aidc git setup prunes it"
+fi
 info "session ${NAME} removed; its audit trail is kept in ${audit#persistentvolumeclaim/} (namespace ${ns})"

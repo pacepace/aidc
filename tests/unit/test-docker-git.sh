@@ -44,6 +44,8 @@ assert_not_has() {
 #   D_TOKEN           AIDC_GIT_TOKEN in session s1's dev container
 #   D_SESSIONS="s1"   sessions that exist (by label)
 #   D_SEEN=dev:ino    the device and inode the git container sees at a mounted path (default: the host's)
+#   D_REQERR=text     git-requests list fails in the status probe, with this reason
+#   D_GITCT=false     the git container is not running (docker inspect of aidc-git-dev for kill/create)
 cat > "$SCRATCH/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$D_LOG"
@@ -72,6 +74,7 @@ case "$a" in
         esac; exit 0 ;;
     "ps -a --filter label=aidc.session="*) n="${a#*label=aidc.session=}"; n="${n%% *}"
         case " ${D_SESSIONS:-} git " in *" $n "*) echo abc123 ;; esac; exit 0 ;;
+    'ps -a --filter label=aidc.role=dev --format {{.Label "aidc.session"}}') printf 'git\ns1\n'; exit 0 ;;
     "ps -a --filter label=aidc.role=dev --format "*) printf 'aidc-git-dev\tUp 2 minutes\naidc-s1-dev\tUp 1 hour\n'; exit 0 ;;
     "inspect aidc-"*"-dev --format"*"aidc.profile"*) case "$a" in *aidc-git-dev*) echo git-agent ;; *) echo multi ;; esac; exit 0 ;;
     "inspect aidc-"*"-dev --format"*) echo "2026-11-24T00:00:00Z"; exit 0 ;;
@@ -81,7 +84,8 @@ case "$a" in
         [ -n "${D_SEEN:-}" ] && { echo "$D_SEEN"; exit 0; }
         stat -c %d:%i -- "${a##* }"; exit 0 ;;
     "exec -u git aidc-git-dev sh -c "*)
-        echo "github=${D_GH:-no}"; echo "waiting=${D_WAITING:-0}"
+        echo "github=${D_GH:-no}"
+        if [ -n "${D_REQERR:-}" ]; then echo "requests-error=${D_REQERR}"; else echo "waiting=${D_WAITING:-0}"; fi
         echo "storage-copies ${D_COPIES:-1048576}"; echo "storage-bundles ${D_BUNDLES:-0}"; exit 0 ;;
     "exec -u git aidc-git-dev gitctl adopt "*) [ "${D_ADOPT_RC:-0}" = 0 ] && { echo "added o/r (${a##* })"; exit 0; }
         echo "gitctl: refused: cannot fetch https://github.com/o/r" >&2; exit 1 ;;
@@ -94,9 +98,12 @@ case "$a" in
     "exec -u git aidc-git-dev git-requests first-use "*) exit 0 ;;
     "exec -u git aidc-git-dev git-requests "*) echo "ok"; exit 0 ;;
     "exec -i -u git aidc-git-dev git-requests mode "*) cat > "$D_STDIN"; echo "mode set"; exit 0 ;;
+    "exec -i -u git aidc-git-dev git-requests sync") cat > "$D_STDIN"; echo "sessions: 1 registered, 0 gone pruned"; exit 0 ;;
     "exec -i -u git aidc-git-dev bash -c "*) cat > "$D_STDIN"; echo "https://github.com/o/r/pull/7"; exit 0 ;;
     "exec -it "*) exit 0 ;;
 esac
+# D_LENIENT=1: any other call succeeds silently (aidc kill's many teardown steps).
+[ "${D_LENIENT:-}" = 1 ] && exit 0
 echo "docker stub: unexpected: $a" >&2
 exit 1
 STUB
@@ -126,6 +133,15 @@ assert_has "--backend docker wins over the config" "git container: aidc-git-dev 
 out=$(run git status --backend mars)
 assert_has "an unknown backend is refused" "unknown backend: mars" "$out"
 assert_eq "with an error" 2 "$(run git status --backend mars >/dev/null; echo $?)"
+: > "$HOME/.config/aidc/config.yaml"
+
+printf 'kubernetes:\n  user: alice\n  storage_class: x\n' > "$HOME/.config/aidc/config.yaml"
+out=$(run git status)
+assert_has "a kubernetes block alone (no backend: line) stays on Docker, as aidc create does" "git container: aidc-git-dev (Docker" "$out"
+out=$(run repo list)
+assert_not_has "aidc repo too" "kubectl" "$out"
+cr=$(cat "$AIDC_ROOT/scripts/aidc")
+assert_has "aidc create takes the same rule (one place: aidc_default_backend)" 'BACKEND=$(AIDC_BACKEND_FLAG="" aidc_default_backend)' "$cr"
 : > "$HOME/.config/aidc/config.yaml"
 
 echo "=== aidc git setup ==="
@@ -299,6 +315,35 @@ out=$(D_SESSIONS=s1 D_TOKEN="" run git mode s1 rules)
 assert_has "a session made before sessions had tokens is told to be made again" "create it again" "$out"
 out=$(run git mode git rules)
 assert_has "the git agent has no mode of its own" "the git agent sends no requests" "$out"
+for m in ask default; do
+    : > "$D_STDIN"
+    out=$(D_SESSIONS=s1 D_TOKEN="$(printf 'a%.0s' $(seq 64))" run git mode s1 "$m")
+    assert_has "${m}, too, is keyed on the session's token, on stdin" "exec -i -u git aidc-git-dev git-requests mode s1 ${m}" "$(calls)"
+    assert_eq "..." "$(printf 'a%.0s' $(seq 64))" "$(cat "$D_STDIN")"
+done
+out=$(D_SESSIONS="" run git mode s9 ask)
+assert_has "a session that does not exist is refused" "no session 's9'" "$out"
+
+echo "=== setup registers every session's token; kill forgets the session ==="
+: > "$D_STDIN"
+out=$(D_TOKEN="$(printf 'c%.0s' $(seq 64))" run git setup)
+assert_has "setup hands the git container every session's token (sync), on stdin" "exec -i -u git aidc-git-dev git-requests sync" "$(calls)"
+assert_eq "the git agent's own container is not a session there" "s1 $(printf 'c%.0s' $(seq 64))" "$(cat "$D_STDIN")"
+assert_not_has "no token on a command line" "$(printf 'c%.0s' $(seq 64))" "$(calls)"
+out=$(D_LENIENT=1 D_SESSIONS=s1 run kill s1)
+assert_has "aidc kill has the git container forget the session (its token and mode)" "exec -u git aidc-git-dev git-requests forget s1" "$(calls)"
+out=$(D_LENIENT=1 D_SESSIONS=s1 D_STATE=absent run kill s1)
+assert_not_has "with no git container running, kill asks nothing of it" "git-requests forget" "$(calls)"
+cc=$(cat "$AIDC_ROOT/scripts/cmd-create.sh")
+assert_has "aidc create registers the new session's token, on stdin" '| docker exec -i -u git "$DK_GIT_CT" git-requests register "$NAME"' "$cc"
+
+echo "=== aidc git log ==="
+out=$(run git log)
+assert_has "log reads the git container's action log (gitctl log)" "exec -u git aidc-git-dev gitctl log 100" "$(calls)"
+out=$(run git log 20)
+assert_has "the last N lines" "gitctl log 20" "$(calls)"
+out=$(run git log x)
+assert_has "a count that is not one is refused" "not a number of lines" "$out"
 
 echo "=== aidc git status ==="
 out=$(D_GH=yes D_WAITING=3 run git status)
@@ -316,6 +361,9 @@ printf 'git:\n  storage_warn: 1Mi\n' > "$HOME/.config/aidc/config.yaml"
 out=$(D_COPIES=2097152 run git status)
 assert_has "storage above git.storage_warn is warned about" "WARNING: over git.storage_warn (1Mi)" "$out"
 : > "$HOME/.config/aidc/config.yaml"
+out=$(D_REQERR="git-requests: /var/aidc/git-requests is writable by others" run git status)
+assert_has "a request folder the watcher refuses: status gives the watcher's own reason, not 'cannot be asked'" \
+    "requests:  NOT TAKEN: the request watcher cannot use its request folder: /var/aidc/git-requests is writable by others" "$out"
 out=$(D_STATE=absent run git status)
 assert_has "no container: not set up, with the command" "container: not set up (run: aidc git setup)" "$out"
 assert_has "and the login is unknown, never no" "github:    unknown" "$out"

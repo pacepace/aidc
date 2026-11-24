@@ -5,7 +5,8 @@
 # the pull request reads into requests, small JSON files in the request folder on the user's
 # disk ($AIDC_GIT_REQUESTS), waits up to about a minute for the git container's result, and
 # prints it the way gh would. In "ask" mode the user approves first; then this says the request
-# is waiting, with its id, and exits 0.
+# is waiting, with its id, and exits 0. A request the git container has not taken at all (it is
+# not running, or refuses its request folder) is said so, never as waiting for approval.
 #
 #   gh pr create [-t T] [-b B | -F FILE] [-B BASE] [-H BRANCH] [-f]   push the branch, open the PR
 #   gh pr merge [<number>|<branch>] [--merge]                         merge commit only
@@ -100,16 +101,29 @@ await() {
 
 field() { printf '%s' "$RESULT" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null | printable; }
 
-# finish ID: print a request's result as gh would, or say it waits. Mutating requests that wait
-# exit 0 (the request stands); a read that got no answer exits 1 (the caller has no data).
+# untaken ID: 0 when the request still sits in requests/ with no result: the git container has
+# not taken it (a session can test its own request by name, not list the folder).
+untaken() { [ ! -e "$REQ/results/${1}.json" ] && [ -e "$REQ/requests/${1}.json" ]; }
+not_taken_msg() {
+    printf 'the git container has not taken request %s: it is not running, or it cannot use its request folder (the user sees why with: aidc git status). The request stays and is taken once it can be; check it with: gh aidc request %s' "$1" "$1"
+}
+
+# finish ID: print a request's result as gh would, or say where it stands. A change waiting for
+# the user's approval, or being run, exits 0 (the request stands); one the git container has not
+# taken exits 1, saying so; a read that got no answer exits 1 (the caller has no data).
 finish() {
     local id="$1" kind="$2" state
     if ! await "$id" "$WAIT"; then
         state=$(field state)
+        untaken "$id" && die "$(not_taken_msg "$id")"
         if [ "$kind" = read ]; then
             die "no answer from the git container yet (request ${id}${state:+, $state}); try again, or: gh aidc request ${id}"
         fi
-        echo "requested; waiting for approval (request ${id}). Check it with: gh aidc request ${id}  (or gh pr status)"
+        case "$state" in
+            pending) echo "requested; waiting for approval (request ${id}). Check it with: gh aidc request ${id}  (or gh pr status)" ;;
+            running) echo "requested; the git container is running it (request ${id}). Check it with: gh aidc request ${id}" ;;
+            *) echo "requested; the git container took it and has not answered yet (request ${id}). Check it with: gh aidc request ${id}" ;;
+        esac
         return 0
     fi
     state=$(field state)
@@ -317,7 +331,11 @@ pr_status() {
 aidc_request() {
     { [ $# = 1 ] && [[ "$1" =~ ^[0-9a-f]{32}$ ]]; } || die "usage: gh aidc request <id>"
     need_folder
-    [ -r "$REQ/results/${1}.json" ] || { echo "request ${1}: sent, not taken yet"; return 0; }
+    if [ ! -r "$REQ/results/${1}.json" ]; then
+        if untaken "$1"; then echo "request ${1}: sent, not taken yet: $(not_taken_msg "$1")"
+        else echo "request ${1}: no result (taken, or expired)"; fi
+        return 0
+    fi
     RESULT=$(cat -- "$REQ/results/${1}.json")
     printf 'request %s: %s: %s\n' "$1" "$(field state)" "$(field message)"
     [ -z "$(field url)" ] || field url

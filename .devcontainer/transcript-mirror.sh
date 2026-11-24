@@ -26,7 +26,7 @@
 aidc_mirror_copy_forward_pass() {
     local _src="$1" _dest_dir="$2" f _base _dest _tmp
     for f in "${_src}"/*.jsonl; do
-        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
         _base=$(basename "$f")
         _dest="${_dest_dir}/${_base}"
         # cp -u equivalent: skip the copy (and the mtime churn a reader could

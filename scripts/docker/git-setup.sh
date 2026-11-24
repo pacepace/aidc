@@ -70,6 +70,15 @@ done
 
 info "starting the git container (${DK_GIT_CT}; git mode ${AIDC_DK_GIT_MODE})"
 dk_git_start
+# Every session's token, so the git container keys their git modes on them (sessions made while
+# it was not running included), and the records of sessions that are gone are pruned. Only from
+# a list docker gave: a list it could not give prunes nothing.
+if sessions=$(gb_sessions); then
+    printf '%s\n' "$sessions" | dk_git_exec_in git-requests sync 2>&1 | aidc_printable >&2 \
+        || info "warning: the git container did not take the sessions' tokens; their requests wait for your approval"
+else
+    info "warning: docker did not list the sessions; their git modes are left as they were"
+fi
 n=$(dk_git_repos | grep -c . || true)
 info "the git container is ready, with ${n} working cop$([ "$n" = 1 ] && echo y || echo ies) added (aidc repo list)."
 info "Next: \`aidc git login\` (a device code you approve in your browser); add the working copies"

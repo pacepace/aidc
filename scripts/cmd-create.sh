@@ -25,6 +25,10 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/config.sh"
 # shellcheck source=lib/claude-state.sh
 . "$AIDC_SCRIPTS/lib/claude-state.sh"
+# shellcheck source=lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
+# shellcheck source=docker/lib.sh
+. "$AIDC_SCRIPTS/docker/lib.sh"
 # The container's Claude-state helpers, for the one rule both sides must agree on:
 # the project-dir name (aidc_claude_project_name).
 # shellcheck source=../.devcontainer/claude-state-install.sh
@@ -159,7 +163,7 @@ done
 
 validate_session_name "$NAME"
 # The git agent's name, on both backends (aidc git setup makes it; its container would collide).
-[ "$NAME" != git ] || die "'git' is the name of your git agent (aidc git setup); choose another session name"
+! aidc_is_git_session "$NAME" || die "'${AIDC_GIT_SESSION}' is the name of your git agent (aidc git setup); choose another session name"
 require_docker
 aidc_retire_auth_bridge
 require_cmd jq envsubst
@@ -1104,6 +1108,19 @@ fi
 # the Claude state seed) belong to whoever owns the tree, not to whatever user this
 # process happens to be: see aidc_mkdir_host.
 aidc_fix_host_owner "$AUDIT_DIR"
+
+# The git container keys this session's git mode on its token (git-requests register: the
+# user's mode until `aidc git mode` gives it its own; a session made again under an old name
+# starts afresh). Without it, the session's requests wait for the user's approval in every mode,
+# until aidc git setup registers it.
+if [ -n "$GIT_REQUESTS_PATH" ]; then
+    if [ "$(docker inspect -f '{{.State.Running}}' "$DK_GIT_CT" 2>/dev/null)" = true ] \
+            && printf '%s\n' "$GIT_TOKEN" | docker exec -i -u git "$DK_GIT_CT" git-requests register "$NAME" >/dev/null 2>&1; then
+        info "git container: session ${NAME} registered (your git mode applies to it)"
+    else
+        info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"
+    fi
+fi
 
 # ---- summary -----------------------------------------------------------------
 

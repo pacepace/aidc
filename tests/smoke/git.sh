@@ -39,6 +39,7 @@ SG_LOGGED_IN=""    # yes / no / unknown, from aidc git status
 SG_REQUEST=""      # the last request id gh pr create printed
 SG_PR=""           # the scratch repo's PR the GitHub part opened (for cleanup)
 SG_GH_WC=""        # the scratch repo's working copy (for cleanup)
+SG_IDENT=""        # this machine's git identity, "<name> <<email>>", which sessions commit as
 
 sg_aidc() { "$AIDC" "$@" --backend "$SG_BACKEND" </dev/null 2>&1; }
 # sg_has <text> <aidc args...>: the command's output contains <text> (captured first, so the
@@ -88,8 +89,13 @@ sg_part_requests() {
     assert "and its own 64-hex git token" "sg_in '[[ \"\$AIDC_GIT_TOKEN\" =~ ^[0-9a-f]{64}\$ ]]'"
     assert "its gh is aidc's stand-in, not GitHub's CLI" "sg_in 'grep -q AIDC_GIT_REQUESTS \"\$(command -v gh)\"'"
     assert "it cannot list other sessions' requests" "! sg_in 'ls \"\$AIDC_GIT_REQUESTS/requests\"'"
+    # Commits show as the user: aidc create gives the session this machine's git identity
+    # (Docker and Kubernetes alike), so no identity is set here.
+    SG_IDENT="$(git config --get user.name 2>/dev/null || true) <$(git config --get user.email 2>/dev/null || true)>"
+    assert "the session's git identity is the user's own (${SG_IDENT})" \
+        "[ \"\$SG_IDENT\" != ' <>' ] && [ \"\$(sg_in 'printf \"%s <%s>\" \"\$(git config --get user.name)\" \"\$(git config --get user.email)\"' | tail -n1)\" = \"\$SG_IDENT\" ]"
     assert "it makes its own worktree and branch in the working copy, and commits" \
-        "sg_in \"cd '${SG_WC}' && git worktree add -q -b '${SG_BRANCH}' '${SG_WT}' HEAD && cd '${SG_WT}' && echo smoke > aidc-smoke.txt && git add aidc-smoke.txt && git -c user.name=aidc-smoke -c user.email=smoke@example.com commit -q -m 'aidc smoke'\""
+        "sg_in \"cd '${SG_WC}' && git worktree add -q -b '${SG_BRANCH}' '${SG_WT}' HEAD && cd '${SG_WT}' && echo smoke > aidc-smoke.txt && git add aidc-smoke.txt && git commit -q -m 'aidc smoke'\""
     assert "git push explains: ask the git container with gh pr create" \
         "sg_in_has 'gh pr create' \"cd '${SG_WT}' && git push origin '${SG_BRANCH}'\""
 
@@ -154,7 +160,7 @@ sg_part_github() {
     # The working copy has origin's default branch checked out (each make_wc leaves it so).
     def=$(sg_in "git -C '${wc}' symbolic-ref -q --short HEAD" 2>/dev/null | tail -n1)
     assert "the session makes a worktree on a new branch from origin's ${def:-?}, and commits a file" \
-        "sg_in \"cd '${wc}' && git worktree add -q -b '${br}' '${wt}' 'origin/${def}' && cd '${wt}' && mkdir -p aidc-smoke && date -u > 'aidc-smoke/${SG_SESSION}.txt' && git add aidc-smoke && git -c user.name=aidc-smoke -c user.email=smoke@example.com commit -q -m 'aidc smoke: ${SG_SESSION}'\""
+        "sg_in \"cd '${wc}' && git worktree add -q -b '${br}' '${wt}' 'origin/${def}' && cd '${wt}' && mkdir -p aidc-smoke && date -u > 'aidc-smoke/${SG_SESSION}.txt' && git add aidc-smoke && git commit -q -m 'aidc smoke: ${SG_SESSION}'\""
     sg_aidc git mode "$SG_SESSION" rules >/dev/null || true
     SG_WT="$wt"
     sg_request "AIDC_GH_WAIT=${SG_WAIT_DONE}" pr create --title "aidc smoke ${SG_SESSION}" --body "aidc smoke test; merged and deleted by the smoke"
@@ -174,6 +180,8 @@ sg_part_github() {
     parents=$(sg_in "cd '${wc}' && git rev-list --parents -n1 'origin/${def}'" 2>/dev/null | tail -n1 | wc -w)
     assert "origin's ${def} is a merge commit (${sha:0:12}, $((parents - 1)) parents)" "[ '${parents}' = 3 ]"
     assert "the branch is gone from origin after a fetch" "! sg_in \"cd '${wc}' && git rev-parse -q --verify 'refs/remotes/origin/${br}'\""
+    assert "the commit the session made, now on origin's ${def}, carries the user's identity (${SG_IDENT:-?})" \
+        "[ \"\$(sg_in \"cd '${wc}' && git log -1 --format='%an <%ae>' 'origin/${def}^2'\" | tail -n1)\" = \"\$SG_IDENT\" ]"
     SG_PR=""
     assert "the merge commit is the user's (the git container's identity: their GitHub name)" \
         "[ -n \"\$(sg_git git config --get user.name)\" ] && [ -n \"\$(sg_git git config --get user.email)\" ]"
@@ -197,7 +205,7 @@ sg_part_claude() {
     fi
     echo "[git] the git agent's Claude asks"
     local wt="${SG_WC}/.aidc-smoke-claude" br="aidc-smoke-${SG_SESSION}-claude" i found=""
-    sg_in "cd '${SG_WC}' && git worktree add -q -b '${br}' '${wt}' HEAD && cd '${wt}' && echo q > aidc-q.txt && git add aidc-q.txt && git -c user.name=aidc-smoke -c user.email=smoke@example.com commit -q -m 'aidc smoke question'" >/dev/null 2>&1 || true
+    sg_in "cd '${SG_WC}' && git worktree add -q -b '${br}' '${wt}' HEAD && cd '${wt}' && echo q > aidc-q.txt && git add aidc-q.txt && git commit -q -m 'aidc smoke question'" >/dev/null 2>&1 || true
     SG_WT="$wt"
     sg_request "AIDC_GH_WAIT=3" pr create --title "aidc smoke question" --body "aidc smoke test: deny this"
     assert "the request waits (${SG_REQUEST:-none})" "[ -n '${SG_REQUEST}' ]"

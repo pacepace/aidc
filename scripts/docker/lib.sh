@@ -31,7 +31,7 @@
 
 # The git agent's session name, reserved on both backends, and the names of what setup makes.
 # shellcheck disable=SC2034  # read by the scripts that source this
-DK_GIT_SESSION=git
+DK_GIT_SESSION="$AIDC_GIT_SESSION"
 DK_GIT_CT=aidc-git-dev
 # shellcheck disable=SC2034  # read by the scripts that source this
 DK_GIT_PROXY=aidc-git-squid
@@ -286,4 +286,90 @@ dk_git_start() {
         die "${bad} changed while the git container started (the folder it mounted is not the one there now): the git container is removed; check ${bad}, then aidc git setup"
     fi
     dk_git_wait_ready || die "the git container did not become ready; see: docker logs ${DK_GIT_CT}"
+}
+
+# --- the backend interface of `aidc git` (scripts/git/git-*.sh) -----------------------------
+# Each scripts/git/git-<verb>.sh is one script for both backends; what differs is only how the
+# git container is reached, so each backend's lib defines the same gb_* functions.
+
+# gb_require: what every verb needs here before anything is asked.
+gb_require() { require_docker; }
+# gb_target: dies unless the git container runs.
+gb_target() { dk_git_target; }
+# gb_exec ARGS / gb_exec_in ARGS / gb_exec_tty ARGS: run in the git container as the agent:
+# no stdin; stdin passed in; interactive, on the user's terminal.
+gb_exec() { dk_git_exec "$@"; }
+gb_exec_in() { dk_git_exec_in "$@"; }
+gb_exec_tty() { docker exec -it -u git -e "TERM=${TERM:-xterm-256color}" "$DK_GIT_CT" "$@"; }
+# gb_repo_arg PATH: the working copy the git container sees for PATH, or dies.
+gb_repo_arg() { dk_git_repo_arg "$1"; }
+# gb_repos: every working copy the git container works on, one a line; gb_repo_ok PATH: a path
+# of that list fit to hand over.
+gb_repos() { dk_git_repos; }
+gb_repo_ok() { dk_git_path_ok "$1"; }
+# shellcheck disable=SC2034  # GB_* are read by scripts/git/git-*.sh
+# gb_settings: GB_MODE / GB_MODE_KEY, GB_STORAGE_WARN / GB_STORAGE_KEY (dies on a bad mode).
+gb_settings() {
+    dk_git_settings
+    GB_MODE="$AIDC_DK_GIT_MODE" GB_MODE_KEY=git.mode
+    # shellcheck disable=SC2034  # read by scripts/git/git-status.sh
+    GB_STORAGE_WARN="$AIDC_DK_GIT_STORAGE_WARN" GB_STORAGE_KEY=git.storage_warn
+}
+# gb_session_token NAME: the session's own git token (AIDC_GIT_TOKEN in its dev container,
+# read from docker), or dies saying why.
+gb_session_token() {
+    local token
+    session_exists "$1" || die "no session '${1}'"
+    token=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_name "$1" dev)" 2>/dev/null \
+        | sed -n 's/^AIDC_GIT_TOKEN=//p' | head -n1) || true
+    printf '%s' "$token" | grep -Eq '^[0-9a-f]{64}$' \
+        || die "session '${1}' was created before sessions had their own git mode: create it again (aidc kill ${1}; aidc create ${1})"
+    printf '%s' "$token"
+}
+# gb_sessions: "<session> <token>" for every session on this machine that has a token; returns
+# 1 when docker did not answer (then nothing may be pruned).
+gb_sessions() {
+    local names n tok
+    names=$(docker ps -a --filter label=aidc.role=dev --format '{{.Label "aidc.session"}}' 2>/dev/null) || return 1
+    while IFS= read -r n; do
+        { [ -n "$n" ] && ! aidc_is_git_session "$n"; } || continue
+        tok=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_name "$n" dev)" 2>/dev/null \
+            | sed -n 's/^AIDC_GIT_TOKEN=//p' | head -n1) || continue
+        printf '%s' "$tok" | grep -Eq '^[0-9a-f]{64}$' && printf '%s %s\n' "$n" "$tok"
+    done <<<"$names"
+    return 0
+}
+# The status lines' label width, and the lines only this backend has.
+# shellcheck disable=SC2034  # read by scripts/git/git-status.sh
+GB_STATUS_W=11
+# shellcheck disable=SC2034  # GB_UP is read by scripts/git/git-status.sh
+# gb_status_head: the container's own lines; GB_UP=1 when it runs (it can be asked).
+gb_status_head() {
+    local state
+    printf 'git container: %s (Docker; the git agent, session %s)\n' "$DK_GIT_CT" "$DK_GIT_SESSION"
+    state=$(dk_git_state); GB_UP=0; GB_STATE="$state"
+    case "$state" in
+        running) printf 'container: running\n'; GB_UP=1 ;;
+        stopped) printf 'container: not running (aidc git setup; docker logs %s)\n' "$DK_GIT_CT" ;;
+        absent) printf 'container: not set up (run: aidc git setup)\n' ;;
+        *) printf 'container: unknown (docker did not answer)\n' ;;
+    esac
+}
+# gb_status_tail: egress (an internal network, out only through the public-only proxy; anything
+# else is reported, never assumed) and the working copies added.
+gb_status_tail() {
+    local internal proxy_env proxy_up n
+    internal=$(docker network inspect -f '{{.Internal}}' "$DK_GIT_NET" 2>/dev/null || true)
+    proxy_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$DK_GIT_PROXY" 2>/dev/null || true)
+    proxy_up=$(docker inspect -f '{{.State.Running}}' "$DK_GIT_PROXY" 2>/dev/null || true)
+    if [ "$internal" = true ] && printf '%s\n' "$proxy_env" | grep -qx 'AIDC_PUBLIC_ONLY=1' && [ "$proxy_up" = true ]; then
+        printf 'egress:    enforced: internal network, out only through its proxy to public addresses (Quad9 DNS); no connections in\n'
+    elif [ -z "$internal" ] && [ "${GB_STATE:-}" = absent ]; then
+        printf 'egress:    not set up\n'
+    else
+        printf 'egress:    NOT ENFORCED: network internal=%s, proxy running=%s, public-only=%s\n' "${internal:-?}" "${proxy_up:-?}" \
+            "$(printf '%s\n' "$proxy_env" | grep -qx 'AIDC_PUBLIC_ONLY=1' && echo yes || echo no)"
+    fi
+    n=$(dk_git_repos | grep -c . || true)
+    printf 'repos:     %s working cop%s added (aidc repo list)\n' "$n" "$([ "$n" = 1 ] && echo y || echo ies)"
 }

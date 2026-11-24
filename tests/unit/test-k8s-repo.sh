@@ -97,7 +97,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
     K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH"
+# backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
+# aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
+backend: kubernetes
 kubernetes:
   context: lab
   user: alice

@@ -29,7 +29,8 @@ lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck not installed"; exit 1; }
 	shellcheck --severity=warning \
 	    install.sh \
-	    scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh scripts/k8s/*.sh \
+	    scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh scripts/k8s/*.sh scripts/docker/*.sh scripts/git/*.sh \
+	    gitctl/*.sh .devcontainer/*.sh \
 	    proxy/refresher/*.sh proxy/policy/*.sh proxy/audit/*.sh
 	bash release/lint-formula-template.sh
 

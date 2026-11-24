@@ -275,6 +275,33 @@ assert_eq "each session gets one token of its own (64 hex), the same in both ren
 out=$(run create demo --backend kubernetes)
 tok2=$(yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "AIDC_GIT_TOKEN") | .value' "$K_APPLIED" | sort -u)
 assert_eq "and a new session a new one" yes "$([ -n "$tok2" ] && [ "$tok" != "$tok2" ] && echo yes || echo no)"
+assert_has "create registers the session's token with the git container, on stdin" \
+    "exec -i git-7d9f-abc -c git -- git-requests register demo" "$(cat "$K_LOG")"
+assert_not_has "never on a command line" "$tok2" "$(cat "$K_LOG")"
+assert_has "and says so" "session demo registered" "$out"
+out=$(K_EXISTS=1 run kill demo --backend kubernetes)
+assert_has "kill has the git container forget the session (its token and mode)" \
+    "exec git-7d9f-abc -c git -- git-requests forget demo" "$(cat "$K_LOG")"
+
+echo "=== the session's git identity: the user's, as on Docker ==="
+# The commits the git container pushes for a session show as the user: create bridges this
+# machine's git identity (git config user.name and user.email), as Docker's aidc create does.
+idenv() { yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "'"$1"'") | .value' "$K_APPLIED" | sort -u; }
+git config --global user.name "Alice \"Al\" O'Neil \\ Example"
+git config --global user.email alice@example.com
+out=$(run create demo --backend kubernetes)
+assert_eq "the session pod gets the user's name, quoting and all" "Alice \"Al\" O'Neil \\ Example" "$(idenv AIDC_GIT_USER_NAME)"
+assert_eq "and email" "alice@example.com" "$(idenv AIDC_GIT_USER_EMAIL)"
+assert_has "and create says which identity" "git identity: Alice" "$out"
+ep=$(cat "$AIDC_ROOT/.devcontainer/entrypoint.sh")
+assert_has "the session's entrypoint writes them to its .gitconfig (the same image on both backends)" 'name = ${AIDC_GIT_USER_NAME}' "$ep"
+git config --global user.name $'Two\nlines'
+out=$(run create demo --backend kubernetes)
+assert_eq "an identity with a control character is not bridged (it would reach the .gitconfig)" "|" "$(idenv AIDC_GIT_USER_NAME)|$(idenv AIDC_GIT_USER_EMAIL)"
+assert_has "and create says so" "git identity: NOT bridged" "$out"
+git config --global --unset user.name; git config --global --unset user.email
+out=$(run create demo --backend kubernetes)
+assert_has "no identity on this machine: create says it is not bridged" "git identity: NOT bridged" "$out"
 out=$(K_GIT=1 run kill git)
 assert_has "aidc kill git (found in the cluster) refuses the git agent" "aidc kill does not remove it" "$out"
 assert_has "and exits 1" "exit=1" "$out"

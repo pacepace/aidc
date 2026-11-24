@@ -92,7 +92,7 @@ _set_delete() {
         || { err "cannot read volume ${pv}"; return 1; }
     [ "$policy" = Delete ] && return 0
     k8s_kubectl patch pv "$pv" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}' >/dev/null \
-        || { err "cannot set volume ${pv} to Delete (it is ${policy}); nothing removed"; return 1; }
+        || { err "cannot set volume ${pv} to Delete (it is ${policy}); nothing removed (credentials that may not change volumes: an admin trims it)"; return 1; }
 }
 
 # _wait_gone <pv> <what>: wait for the provisioner to delete the volume, and say what happened.

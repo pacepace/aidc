@@ -46,7 +46,10 @@ assert_has() {
 #   get runtimeclass X        handler sysbox-runc (or JSON with a node selector) unless K_NO_RC=1
 #   get storageclass X        provisioner zfs.csi.openebs.io unless K_NO_SC=1
 #   get nodes                 "$K_NODES" (name<space>Ready-status lines)
-#   auth can-i ...            ${K_CANI:-yes}
+#   create -f - -o json       a SelfSubjectRulesReview: "$K_RULES" when set, else every right
+#                             (or every right but creating pods when K_CANI=no)
+#   auth can-i ...            namespaces ${K_CANI_NS:-yes}, nodes ${K_CANI_NODES:-yes},
+#                             deployments (the registry's) ${K_CANI_REG:-yes}
 #   get deployment registry   ${K_REGISTRY_READY} or fails when unset
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
@@ -64,9 +67,20 @@ case "$*" in
     *"get storageclass"*)
         [ "${K_NO_SC:-}" = 1 ] && { echo 'not found' >&2; exit 1; }
         printf 'zfs.csi.openebs.io' ;;
-    *"get nodes"*) printf '%b' "${K_NODES:-}" ;;
+    *"get nodes"*)
+        [ "${K_CANI_NODES:-yes}" = no ] && { echo 'nodes is forbidden' >&2; exit 1; }
+        printf '%b' "${K_NODES:-}" ;;
     *"auth can-i create namespaces"*) echo "${K_CANI_NS:-yes}" ;;
-    *"auth can-i create pods"*) echo "${K_CANI:-yes}" ;;
+    *"create -f - -o json"*)
+        cat >/dev/null
+        if [ -n "${K_RULES:-}" ]; then printf '%s' "$K_RULES"
+        elif [ "${K_CANI:-yes}" = no ]; then
+            # Every right but creating pods (and a create named for one pod only, which is not it).
+            echo '{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["get","list","watch","patch","update","delete"]},{"apiGroups":["*"],"resources":["pods"],"verbs":["create"],"resourceNames":["only-this"]},{"apiGroups":["*"],"resources":["services","configmaps","persistentvolumeclaims","events","serviceaccounts/token","pods/exec","deployments","statefulsets","networkpolicies"],"verbs":["create"]}]}}'
+        else echo '{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["*"]}]}}'; fi ;;
+    *"auth whoami"*) printf 'system:admin' ;;
+    *"auth can-i list nodes"*) echo "${K_CANI_NODES:-yes}" ;;
+    *"auth can-i get deployments"*) echo "${K_CANI_REG:-yes}" ;;
     *"get deployment registry"*)
         [ -n "${K_REGISTRY_READY:-}" ] || { echo 'not found' >&2; exit 1; }
         printf '%s' "$K_REGISTRY_READY" ;;
@@ -171,6 +185,34 @@ out=$(K_NODES='n1 True\n' K_CANI_NS=no run_check)
 assert_has "no permission for namespaces is only a note (an admin can run setup and user add)" \
     "note:    you may not create namespaces" "$out"
 assert_has "and the cluster can still run sessions" "This cluster can run aidc sessions." "$out"
+
+echo "=== aidc k8s check with a user's own credentials (aidc user add's Role and ClusterRole) ==="
+# The rules review a user's ServiceAccount gets: its Role in its namespace plus the shared
+# ClusterRole, as rendered by aidc user add (and the review a cluster always allows).
+granted() {
+    # shellcheck disable=SC1091
+    ( . "$AIDC_ROOT/scripts/k8s/lib.sh"; . "$AIDC_ROOT/scripts/k8s/manifests.sh"; k8s_load_settings
+      { k8s_render_user_access alice; printf '%s\n' '---'; k8s_render_user_shared; } \
+        | yq ea -o=json -I=0 "[select(.kind == \"Role\" and .metadata.name == \"aidc-user\") , select(.kind == \"ClusterRole\" and .metadata.name == \"aidc-user\") ${1:+| select(.kind == \"Role\")}] | {\"status\": {\"resourceRules\": ([.[].rules[]] + [{\"apiGroups\": [\"authorization.k8s.io\"], \"resources\": [\"selfsubjectrulesreviews\"], \"verbs\": [\"create\"]}])}}" - )
+}
+out=$(K_NODES='n1 True\n' K_RULES="$(granted)" K_CANI_NS=no K_CANI_REG=no run_check)
+assert_has "the user's Role covers everything aidc does in their namespace" "ok:      your credentials (system:admin) may do everything aidc does in aidc-u-" "$out"
+assert_has "and the shared ClusterRole its cluster-wide reads and the volume patch" "ok:      cluster-wide you may read runtime classes" "$out"
+assert_has "the registry they cannot see is a note, not missing" "note:    the registry in aidc-system is an admin's" "$out"
+assert_has "a user's credentials can run sessions" "This cluster can run aidc sessions." "$out"
+
+out=$(K_NODES='n1 True\n' K_RULES="$(granted ns-only)" K_CANI_NS=no K_CANI_NODES=no run_check)
+assert_has "without the ClusterRole: what is missing cluster-wide, as a note" \
+    "note:    cluster-wide you may not: get runtimeclasses, get storageclasses, list nodes, get persistentvolumes, list persistentvolumes, watch persistentvolumes, patch persistentvolumes" "$out"
+out=$(K_NODES='' K_RULES="$(granted ns-only)" K_CANI_NS=no K_CANI_NODES=no run_check)
+assert_has "nodes they may not list: the ready-node check is skipped, said as a note" \
+    "note:    your credentials may not list nodes" "$out"
+
+out=$(K_NODES='n1 True\n' K_RULES='{"status":{"resourceRules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get","list"]}]}}' run_check)
+assert_has "credentials short of the Role: each missing verb named" "missing: permission to watch pods, create pods, patch pods, delete pods, create pods/exec" "$out"
+assert_has "and the check fails" "exit=1" "$out"
+out=$(K_NODES='n1 True\n' K_RULES='{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["get","list","watch","create","patch","update","delete"],"resourceNames":["someone-else"]}]}}' run_check)
+assert_has "a rule limited to other names grants nothing" "missing: permission to get pods" "$out"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

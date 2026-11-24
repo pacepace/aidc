@@ -332,3 +332,11 @@ read the token. Commits, pushes and PRs show as the user ("commits have to show 
 author name and email come from the user's GitHub account; no signing. Rejected: per-repo
 manual tokens or keys (too much ceremony), a GitHub App (acts as a bot), SSH agent forwarding
 (only works while connected).
+
+## 2026-11-24: The git container does not do prawduct's work
+
+"I don't want it doing double duty." Sessions run prawduct's whole cycle, `/prawduct:pr`
+included (gate, hygiene, template, body); the git container knows nothing of prawduct and runs
+no prawduct check. Since sessions cannot reach GitHub, a session's `gh` (PR create, and the push
+before it) becomes a request handed to the git container, which applies only its own rules
+(gitctl's hard rules; ask or rules mode) and then pushes and opens the PR.

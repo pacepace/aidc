@@ -121,7 +121,11 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   the PR merge-commit-only and attribution-free); `aidc git tidy` deletes merged branches and
   their worktrees and lists every leftover (unmerged, unpushed, orphaned) for the user; GitHub
   protections checked on first use of a repo and offered (`aidc git protect <repo>`, applied only
-  with the user's yes). Live: push a session's branch, open a PR, tidy after a merge.
+  with the user's yes). Sessions ask for pushes and PRs through a `gh` stand-in in the session
+  image that writes a request (branch, title, body) to a request folder on the user's disk, so
+  `/prawduct:pr` and plain `gh pr create` work unchanged in sessions; the git container acts on
+  requests by its rules (ask mode: shows the user first) and knows nothing of prawduct (owner
+  ruling 2026-11-24). Live: push a session's branch, open a PR, tidy after a merge.
 
 ### Chunk 05: The git container's Claude, git modes and approval
 

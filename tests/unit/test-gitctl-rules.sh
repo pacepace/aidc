@@ -49,7 +49,17 @@ d=$(dirname "$0")
 case "$1 $2" in
     "pr view") case " $* " in *" --json "*) cat "$d/prview.json"; exit 0 ;; esac ;;
     "auth status") cat "$d/authstatus.out" 2>/dev/null; exit "$(cat "$d/authstatus.rc" 2>/dev/null || echo 0)" ;;
+    "auth login") exit "$(cat "$d/login.rc" 2>/dev/null || echo 0)" ;;
 esac
+# gh api <path>: the answer in api/<path, / as _>, or its .err text and a failure.
+if [ "$1" = api ]; then
+    shift
+    while [ $# -gt 0 ]; do case "$1" in --method|-F|--input) shift 2 ;; -*) shift ;; *) break ;; esac; done
+    f="$d/api/$(printf '%s' "$1" | tr / _)"
+    [ -e "$f" ] && { cat "$f"; exit 0; }
+    cat "$f.err" 2>/dev/null || echo "gh: Not Found (HTTP 404)"
+    exit 1
+fi
 exit 0
 STUB
 chmod +x "$S/bin/gh"
@@ -483,6 +493,188 @@ AIDC_GITCTL_ROLE=run ctl unpushed "$C"; refused "gitrun has no unpushed: it neve
 ctl unpushed "$C" extra; refused "unpushed takes one argument"
 
 echo ""
+echo "=== a filter driver planted in a working copy never runs as the agent ==="
+# The agent's git reads the working copy's config, which sessions write. A clean filter runs on
+# any file git re-reads (status, worktree remove); every driver named there is overridden.
+FC="$S/disk/filtered"; mkdir -p "$FC"
+ctl clone o/r "$FC"
+mkdir -p "$FC/.git/info"; printf '* filter=Ev.il\n' > "$FC/.git/info/attributes"
+git -C "$FC" config filter.Ev.il.clean "sh -c 'touch $S/PWNED-clean; cat'"
+git -C "$FC" config filter.Ev.il.smudge "sh -c 'touch $S/PWNED-smudge; cat'"
+git -C "$FC" config filter.Ev.il.process "sh -c 'touch $S/PWNED-process'"
+git -C "$FC" config filter.plain.clean "touch $S/PWNED-plain"
+printf '* filter=plain\n' >> "$FC/.git/info/attributes"
+touch -d '1 hour ago' "$FC/README"
+ctl unpushed "$FC"
+assert_eq "unpushed (git status in the copy) runs no planted clean, smudge or process filter" "0 none" \
+    "$RC $(find "$S" -maxdepth 1 -name 'PWNED-*' | wc -l | sed 's/^0$/none/')"
+G -C "$FC" switch -q -c filtered-b
+G -C "$FC" commit -q --allow-empty -m "Filtered"
+rm -f "$S"/PWNED-*   # the test's own git above ran them; gitctl's must not
+touch -d '2 hours ago' "$FC/README"
+ctl push "$FC" filtered-b
+ctl tidy "$FC"
+assert_eq "nor do push (bundle create) and tidy (status, worktree remove)" none \
+    "$(find "$S" -maxdepth 1 -name 'PWNED-*' | wc -l | sed 's/^0$/none/')"
+assert_has "push names the branch and the commit it pushed (a session's request result reads it)" \
+    "pushed filtered-b $(git -C "$FC" rev-parse filtered-b)" "$(ctl push "$FC" filtered-b; printf '%s' "$OUT")"
+
+echo ""
+echo "=== delete-branch: only a branch merged on GitHub, never a base ==="
+D="$S/del"; G clone -q "$R" "$D" 2>/dev/null
+G -C "$D" switch -q -c merged-b origin/main; G -C "$D" commit -q --allow-empty -m "Merged work"
+G -C "$D" push -q origin merged-b 2>/dev/null
+G -C "$D" switch -q main; G -C "$D" pull -q origin main 2>/dev/null
+G -C "$D" merge -q --no-ff -m "Merge merged-b" merged-b; G -C "$D" push -q origin main 2>/dev/null
+G -C "$D" switch -q -c open-b origin/main; G -C "$D" commit -q --allow-empty -m "Open work"
+G -C "$D" push -q origin open-b 2>/dev/null
+ctl delete-branch "$D" merged-b
+assert_eq "a branch merged into main on GitHub is deleted there" "0 none" "$RC $(remote_sha merged-b)"
+ctl delete-branch "$D" merged-b
+assert_eq "a branch already gone is not an error" 0 "$RC"
+ctl delete-branch "$D" open-b
+assert_eq "a branch not merged on GitHub is kept" "1 $(git -C "$D" rev-parse open-b)" "$RC $(remote_sha open-b)"
+assert_has "with the reason" "not merged on GitHub" "$OUT"
+for b in main master develop -f "a:b"; do
+    ctl delete-branch "$D" "$b"
+    if [ "$RC" != 0 ]; then pass "delete-branch '$b' is refused"; else fail "delete-branch '$b' went through"; fi
+done
+assert_eq "and main is still there" yes "$([ "$(remote_sha main)" != none ] && echo yes || echo no)"
+ctl delete-branch "$D" open-b --force; refused "delete-branch takes no options"
+AIDC_GITCTL_ROLE=cred ctl delete-branch o/r open-b; refused "gitcred has no delete-branch"
+
+echo ""
+echo "=== tidy: merged work goes, every leftover is named ==="
+T="$S/disk/tidy"; mkdir -p "$T"
+ctl clone o/r "$T"
+umask 002
+G -C "$T" worktree add -q -b t-merged "$T/wt-merged" origin/main 2>/dev/null
+G -C "$T/wt-merged" commit -q --allow-empty -m "Will merge"
+mkdir -p "$T/wt-merged/sub/dir"; printf 'x\n' > "$T/wt-merged/sub/dir/f"; G -C "$T/wt-merged" add sub; G -C "$T/wt-merged" commit -q -m "A file"
+G -C "$T" worktree add -q -b t-dirty "$T/wt-dirty" origin/main 2>/dev/null
+G -C "$T/wt-dirty" commit -q --allow-empty -m "Will merge too"
+G -C "$T" worktree add -q -b t-locked-dir "$T/wt-ro" origin/main 2>/dev/null
+G -C "$T/wt-ro" commit -q --allow-empty -m "Merged, folder not writable"
+mkdir -p "$T/wt-ro/ro"; printf 'x\n' > "$T/wt-ro/ro/f"; G -C "$T/wt-ro" add ro; G -C "$T/wt-ro" commit -q -m "ro"
+G -C "$T" worktree add -q -b t-unpushed "$T/wt-unpushed" origin/main 2>/dev/null
+G -C "$T/wt-unpushed" commit -q --allow-empty -m "Never pushed"
+G -C "$T" worktree add -q -b t-open "$T/wt-open" origin/main 2>/dev/null
+G -C "$T/wt-open" commit -q --allow-empty -m "Pushed, PR open"
+umask 022
+for b in t-merged t-dirty t-locked-dir t-open; do ctl push "$T" "$b"; done
+# GitHub merges three of them (merge commits on main), elsewhere.
+G -C "$D" fetch -q origin 2>/dev/null; G -C "$D" switch -q main; G -C "$D" reset -q --hard origin/main
+for b in t-merged t-dirty t-locked-dir; do G -C "$D" merge -q --no-ff -m "Merge $b" "origin/$b"; done
+G -C "$D" push -q origin main 2>/dev/null
+printf 'draft\n' > "$T/wt-dirty/draft.txt"
+chmod 0555 "$T/wt-ro/ro"
+# A folder that was a worktree, whose admin folder someone removed.
+mkdir -p "$T/wt-orphan"; printf 'gitdir: %s/.git/worktrees/wt-orphan\n' "$T" > "$T/wt-orphan/.git"
+ctl tidy "$T"
+chmod 0755 "$T/wt-ro/ro"
+row() { printf '%s\n' "$OUT" | grep -qxF "$1" && echo yes || echo "no"; }
+assert_eq "the report ends with end" end "$(printf '%s\n' "$OUT" | tail -n1)"
+assert_eq "a merged branch is deleted on GitHub" "yes none" "$(row 'deleted-remote t-merged') $(remote_sha t-merged)"
+assert_eq "its clean worktree is removed, admin folder and all" "yes no no" \
+    "$(row "removed-worktree $T/wt-merged") $([ -e "$T/wt-merged" ] && echo yes || echo no) $([ -e "$T/.git/worktrees/wt-merged" ] && echo yes || echo no)"
+assert_eq "and the local branch goes" "yes none" "$(row 'deleted-branch t-merged') $(git -C "$T" rev-parse -q --verify t-merged || echo none)"
+assert_eq "a merged branch whose worktree has uncommitted changes: deleted on GitHub, worktree and branch kept, reported" \
+    "yes yes yes" "$(row "uncommitted $T/wt-dirty") $([ -f "$T/wt-dirty/draft.txt" ] && echo yes || echo no) $(git -C "$T" rev-parse -q --verify t-dirty >/dev/null && echo yes || echo no)"
+assert_has "a worktree with a folder the agent cannot write is not touched, and named" "cannot-delete $T/wt-ro not writable" "$OUT"
+assert_eq "and nothing of it was deleted" yes "$([ -f "$T/wt-ro/ro/f" ] && echo yes || echo no)"
+assert_eq "an unpushed branch is reported with its count, and kept" "yes yes" \
+    "$(row 'unpushed 1 t-unpushed') $(git -C "$T" rev-parse -q --verify t-unpushed >/dev/null && echo yes || echo no)"
+assert_eq "a pushed, unmerged branch is reported and kept, here and on GitHub" "yes yes" \
+    "$(row 'unmerged t-open') $([ "$(remote_sha t-open)" != none ] && echo yes || echo no)"
+assert_eq "an orphaned worktree folder is reported, not deleted" "yes yes" "$(row "orphaned $T/wt-orphan") $([ -d "$T/wt-orphan" ] && echo yes || echo no)"
+assert_eq "main is never touched" yes "$(git -C "$T" rev-parse -q --verify main >/dev/null && [ "$(remote_sha main)" != none ] && echo yes || echo no)"
+rm -rf "$T/wt-merged-gone"; G -C "$T" worktree add -q -b t-gone "$T/wt-gone" origin/main 2>/dev/null; rm -rf "$T/wt-gone"
+ctl tidy "$T"
+assert_eq "a worktree whose folder is gone has its record pruned" yes "$(row 'pruned wt-gone')"
+AIDC_GITCTL_ROLE=run ctl tidy "$T"; refused "gitrun has no tidy: it never works in a working copy"
+ctl tidy "$T" extra; refused "tidy takes one argument"
+
+echo ""
+echo "=== login: the identity commits carry is the user's GitHub account ==="
+CRED="$S/cred"; mkdir -p "$CRED"; export AIDC_GITCTL_CRED_HOME="$CRED"
+mkdir -p "$S/bin/api"
+printf '{"login":"octo","id":42,"name":"Octo Cat","email":null}' > "$S/bin/api/user"
+ctl login
+assert_eq "login runs gh's device-code login (https, no SSH key), then reads the account" \
+    "auth login --hostname github.com --git-protocol https --web --skip-ssh-key 
+api user " "$CALLS"
+ident() { git config --file "$CRED/git-identity" "$1" 2>/dev/null; }
+assert_eq "no public email: GitHub's noreply address for the account" "Octo Cat|42+octo@users.noreply.github.com" "$(ident user.name)|$(ident user.email)"
+assert_eq "the identity file is readable by the agent's git (0644), written whole" 644 "$(stat -c %a "$CRED/git-identity")"
+printf '{"login":"octo","id":42,"name":"Octo\\nCat\\u001b[31m","email":"octo@example.com"}' > "$S/bin/api/user"
+ctl login
+assert_eq "a public email is used; control characters in the name are dropped" "OctoCat[31m|octo@example.com" "$(ident user.name)|$(ident user.email)"
+printf '{"login":"octo","id":42,"name":"","email":"x\\n[core]\\n\\tpager = sh"}' > "$S/bin/api/user"
+ctl login
+assert_eq "an email that is not one falls back to noreply; an empty name is the login" "octo|42+octo@users.noreply.github.com" "$(ident user.name)|$(ident user.email)"
+assert_eq "and the file holds only the user section" "user.name user.email" "$(git config --file "$CRED/git-identity" --name-only --list | paste -sd' ' -)"
+echo 1 > "$S/bin/login.rc"
+rm -f "$CRED/git-identity"; ctl login
+assert_eq "a login that did not complete writes no identity" "1 no" "$RC $([ -e "$CRED/git-identity" ] && echo yes || echo no)"
+rm -f "$S/bin/login.rc"
+ctl login; ctl logout
+assert_eq "logout removes the identity with the login" "0 no" "$RC $([ -e "$CRED/git-identity" ] && echo yes || echo no)"
+ctl login extra; refused "login takes no arguments"
+
+echo ""
+echo "=== protections: read, and only ever turned on ==="
+printf '{"default_branch":"main","allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":false}' > "$S/bin/api/repos_o_r"
+printf '[]' > "$S/bin/api/repos_o_r_rules_branches_main"
+printf 'gh: Branch not protected (HTTP 404)\n' > "$S/bin/api/repos_o_r_branches_main_protection.err"
+ctl protection "$H"
+assert_eq "an unprotected default branch: force pushes and deletion allowed" \
+    "repo o/r|default main|force-push allowed|deletion allowed|merge-commit allowed|squash allowed|rebase disallowed|end" \
+    "$(printf '%s' "$OUT" | paste -sd'|' -)"
+case "$CALLS" in *"--method"*) fail "protection only reads ($CALLS)" ;; *) pass "protection only reads" ;; esac
+printf '[{"type":"non_fast_forward"},{"type":"deletion"}]' > "$S/bin/api/repos_o_r_rules_branches_main"
+ctl protection "$H"
+assert_eq "a ruleset blocking both counts as blocked" "force-push blocked deletion blocked" \
+    "$(printf '%s\n' "$OUT" | grep -E '^(force-push|deletion) ' | paste -sd' ' -)"
+printf '[]' > "$S/bin/api/repos_o_r_rules_branches_main"
+printf '{"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":true}}' > "$S/bin/api/repos_o_r_branches_main_protection"
+ctl protection "$H"
+assert_eq "classic protection counts too (force pushes blocked unless allowed)" "force-push blocked deletion allowed" \
+    "$(printf '%s\n' "$OUT" | grep -E '^(force-push|deletion) ' | paste -sd' ' -)"
+rm -f "$S/bin/api/repos_o_r_branches_main_protection" "$S/bin/api/repos_o_r_rules_branches_main"
+printf 'gh: Resource not accessible (HTTP 403)\n' > "$S/bin/api/repos_o_r_branches_main_protection.err"
+ctl protection "$H"
+assert_eq "what cannot be read is unknown, never allowed" "force-push unknown deletion unknown" \
+    "$(printf '%s\n' "$OUT" | grep -E '^(force-push|deletion) ' | paste -sd' ' -)"
+printf '[]' > "$S/bin/api/repos_o_r_rules_branches_main"
+printf 'gh: Branch not protected (HTTP 404)\n' > "$S/bin/api/repos_o_r_branches_main_protection.err"
+printf '{"default_branch":"main","allow_merge_commit":false,"allow_squash_merge":true,"allow_rebase_merge":true}' > "$S/bin/api/repos_o_r"
+printf '{"id":1}' > "$S/bin/api/repos_o_r_rulesets"
+ctl protect "$H"
+assert_has "protect adds the fixed ruleset (force pushes and deletion of the default, main, master, develop)" \
+    "api --method POST repos/o/r/rulesets --input -" "$CALLS"
+assert_has "and allows merge commits where they were off" "api --method PATCH repos/o/r -F allow_merge_commit=true" "$CALLS"
+case "$CALLS" in *squash*|*rebase*|*DELETE*|*PUT*|*"=false"*) fail "protect never turns anything off ($CALLS)" ;; *) pass "protect never turns anything off" ;; esac
+printf '[{"type":"non_fast_forward"},{"type":"deletion"}]' > "$S/bin/api/repos_o_r_rules_branches_main"
+printf '{"default_branch":"main","allow_merge_commit":true}' > "$S/bin/api/repos_o_r"
+ctl protect "$H"
+case "$CALLS" in *"--method"*) fail "protect changes nothing that is already on ($CALLS)" ;; *) pass "protect changes nothing that is already on" ;; esac
+ctl protect "$H" --off; refused "protect takes no options"
+AIDC_GITCTL_ROLE=cred ctl protect "o/r;x"; refused "as gitcred, protect checks owner/name again"
+
+echo ""
+echo "=== pull requests as JSON (a session's gh stand-in answers from these) ==="
+ctl pr-view-json "$H" 7
+assert_eq "pr-view-json by number: fixed fields" \
+    "pr view 7 --repo o/r --json number\\,title\\,body\\,state\\,url\\,headRefName\\,headRefOid\\,baseRefName\\,isDraft\\,mergedAt\\,reviewDecision\\,statusCheckRollup " "$CALLS"
+ctl pr-view-json "$H" feature
+assert_has "or by its head branch" "pr view feature --repo o/r --json" "$CALLS"
+ctl pr-list-json "$H" open feature
+assert_has "pr-list-json with a state and a head" "pr list --repo o/r --state open --head feature --limit 100 --json" "$CALLS"
+ctl pr-list-json "$H" sideways; refused "an unknown state is refused"
+ctl pr-view-json "$H" "--web"; refused "a PR that reads as an option is refused"
+ctl pr-list-json "$H" all "--jq=.x"; refused "a head that reads as an option is refused"
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
 mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh"; }
 mut 's/gitctl_check_text "$raw" "commit ${sha:0:12}" || die/: || die/'
@@ -507,6 +699,12 @@ git -C "$W" config --unset core.hooksPath
 assert_eq "with the agent's hook pin removed, a hook planted in the working copy runs (so the hostile-config test would fail)" yes \
     "$([ -e "$S/PWNED-hook" ] && echo yes || echo no)"
 rm -f "$S/PWNED-hook"
+mut 's/GIT_CONFIG_COUNT="$n" ${envs\[@\]+"${envs\[@\]}"}/GIT_CONFIG_COUNT=0/'
+touch -d '3 hours ago' "$FC/README"
+bash "$S/mut/gitctl.sh" unpushed "$FC" >/dev/null 2>&1
+assert_eq "with the filter override removed, the planted clean filter runs (so the filter test would fail)" yes \
+    "$([ -n "$(find "$S" -maxdepth 1 -name 'PWNED-*')" ] && echo yes || echo no)"
+rm -f "$S"/PWNED-*
 mut "s/trap 'rm -f \"\$RUN_BUNDLE\"; /trap '/"
 G -C "$W" commit -q --allow-empty -m "Left behind?"
 bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1

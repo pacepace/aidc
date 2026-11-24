@@ -56,6 +56,8 @@ _k8s_cfg_json() {
 #                           on the session class; default 10Gi)
 #   AIDC_K8S_GIT_STORAGE_WARN  `aidc git status` warns when those copies and its bundles take
 #                           more (default 1Gi)
+#   AIDC_K8S_GIT_MODE       how the git container treats sessions' push and PR requests: ask
+#                           (default: the user approves each) or rules (gitctl's rules decide)
 #   AIDC_K8S_CPU_REQUEST / _MEMORY_REQUEST / _CPU_LIMIT / _MEMORY_LIMIT  session size (2 / 8Gi
 #                           guaranteed, up to 16 / 32Gi: K8S-19)
 #   AIDC_K8S_REGISTRY_STORAGE_CLASS / _SIZE  the registry's volume (default the user disk's
@@ -98,6 +100,7 @@ k8s_load_settings() {
     AIDC_K8S_HOME_SIZE=$(_k8s_cfg '.kubernetes.home_size'); AIDC_K8S_HOME_SIZE="${AIDC_K8S_HOME_SIZE:-50Gi}"
     AIDC_K8S_GIT_STORE_SIZE=$(_k8s_cfg '.kubernetes.git_store_size'); AIDC_K8S_GIT_STORE_SIZE="${AIDC_K8S_GIT_STORE_SIZE:-10Gi}"
     AIDC_K8S_GIT_STORAGE_WARN=$(_k8s_cfg '.kubernetes.git_storage_warn'); AIDC_K8S_GIT_STORAGE_WARN="${AIDC_K8S_GIT_STORAGE_WARN:-1Gi}"
+    AIDC_K8S_GIT_MODE=$(_k8s_cfg '.kubernetes.git_mode'); AIDC_K8S_GIT_MODE="${AIDC_K8S_GIT_MODE:-ask}"
     AIDC_K8S_CPU_REQUEST=$(_k8s_cfg '.kubernetes.cpu'); AIDC_K8S_CPU_REQUEST="${AIDC_K8S_CPU_REQUEST:-2}"
     AIDC_K8S_MEMORY_REQUEST=$(_k8s_cfg '.kubernetes.memory'); AIDC_K8S_MEMORY_REQUEST="${AIDC_K8S_MEMORY_REQUEST:-8Gi}"
     AIDC_K8S_CPU_LIMIT=$(_k8s_cfg '.kubernetes.cpu_limit'); AIDC_K8S_CPU_LIMIT="${AIDC_K8S_CPU_LIMIT:-16}"
@@ -108,7 +111,7 @@ k8s_load_settings() {
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
         AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE AIDC_K8S_USER_DISK_SIZE \
-        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN \
+        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN AIDC_K8S_GIT_MODE \
         AIDC_K8S_CPU_REQUEST AIDC_K8S_MEMORY_REQUEST \
         AIDC_K8S_CPU_LIMIT AIDC_K8S_MEMORY_LIMIT
 }
@@ -145,6 +148,7 @@ k8s_require() {
     k8s_valid_label "$AIDC_K8S_PREFIX" || { err "kubernetes.namespace_prefix '${AIDC_K8S_PREFIX}' is not a DNS label"; bad=1; }
     k8s_valid_label "$AIDC_K8S_USER" || { err "kubernetes.user '${AIDC_K8S_USER}' is not a DNS label"; bad=1; }
     [ -n "$AIDC_K8S_STORAGE_CLASS" ] || { err "kubernetes.storage_class is not set"; bad=1; }
+    case "$AIDC_K8S_GIT_MODE" in ask|rules) ;; *) err "kubernetes.git_mode '${AIDC_K8S_GIT_MODE}' is not ask or rules"; bad=1 ;; esac
     [ "$bad" = 0 ]
 }
 
@@ -301,4 +305,72 @@ k8s_repo_dir_step() {
         Failed) printf '[aidc] error: %s\n' "$(printf '%s' "$logs" | tail -n1)" >&2; return 1 ;;
         *) printf '[aidc] error: the folder step for %s did not finish (phase: %s)\n' "$path" "${phase:-unknown}" >&2; return 1 ;;
     esac
+}
+
+# The request folder on the user's disk: sessions' gh stand-in drops push and pull request
+# requests in it for the git container (gitctl/git-requests.sh). The git container's own.
+k8s_git_requests_path() { printf '/home/%s/.aidc/git-requests' "$AIDC_K8S_USER"; }
+
+# k8s_git_target: the git container's namespace and running pod, in GIT_NS and GIT_POD; dies
+# saying which of "not set up" and "the cluster did not answer" it was.
+k8s_git_target() {
+    local rc=0
+    GIT_NS=$(k8s_user_ns "$AIDC_K8S_USER")
+    GIT_POD=$(k8s_git_pod "$GIT_NS") || rc=$?
+    case "$rc" in
+        0) ;;
+        1) die "no running git container in ${GIT_NS}: run \`aidc git setup\`" ;;
+        *) die "cannot reach the git container: the cluster did not answer: ${GIT_POD#unknown }" ;;
+    esac
+}
+
+# k8s_git_repo_arg <path>: the working copy's path on the user's disk (a path on this machine
+# under its home maps there, as for aidc repo), or dies.
+k8s_git_repo_arg() {
+    local p
+    p=$(k8s_cluster_repo_path "$1") \
+        || die "the path must be under your home directory (${HOME}) or /home/${AIDC_K8S_USER}: got ${1}"
+    k8s_repo_path_ok "$p" || die "${p}: not a repo folder below /home/${AIDC_K8S_USER}"
+    printf '%s' "$p"
+}
+
+# k8s_git_exec <args...>: run in the git container (after k8s_git_target), with no stdin.
+k8s_git_exec() { k8s_kubectl -n "$GIT_NS" exec "$GIT_POD" -c git -- "$@" </dev/null; }
+
+# k8s_git_print_protection: `gitctl protection` lines on stdin, for the user. Returns 1 when
+# something is missing (force pushes or deletion not blocked, merge commits not allowed).
+k8s_git_print_protection() {
+    local k v repo="" def="" f="" d="" m="" sq="" rb=""
+    while read -r k v; do
+        case "$k" in repo) repo="$v" ;; default) def="$v" ;; force-push) f="$v" ;; deletion) d="$v" ;;
+            merge-commit) m="$v" ;; squash) sq="$v" ;; rebase) rb="$v" ;; esac
+    done
+    printf 'GitHub protections of %s (default branch %s):\n' "${repo:-?}" "${def:-?}"
+    printf '  force pushes:   %s\n  deletion:       %s\n  merge commits:  %s (squash %s, rebase %s)\n' \
+        "${f:-unknown}" "${d:-unknown}" "${m:-unknown}" "${sq:-unknown}" "${rb:-unknown}"
+    [ "$f" = blocked ] && [ "$d" = blocked ] && [ "$m" = allowed ]
+}
+
+# k8s_git_print_tidy: `gitctl tidy` lines on stdin, for the user: what went, then every leftover.
+k8s_git_print_tidy() {
+    local k v done_="" left=""
+    while read -r k v; do
+        case "$k" in
+            deleted-remote) done_+=$'\n'"  deleted on GitHub: ${v}" ;;
+            deleted-branch) done_+=$'\n'"  deleted branch: ${v}" ;;
+            removed-worktree) done_+=$'\n'"  removed worktree: ${v}" ;;
+            pruned) done_+=$'\n'"  pruned the record of a deleted worktree: ${v}" ;;
+            kept-remote) left+=$'\n'"  merged, but GitHub kept it: ${v}" ;;
+            unpushed) left+=$'\n'"  unpushed: ${v#* } (${v%% *} commit(s) on no GitHub branch)" ;;
+            unmerged) left+=$'\n'"  pushed, not merged yet: ${v}" ;;
+            uncommitted) left+=$'\n'"  merged, but its worktree has uncommitted changes: ${v}" ;;
+            checked-out) left+=$'\n'"  merged, but the working copy has it checked out: ${v}" ;;
+            detached) left+=$'\n'"  worktree on a detached HEAD: ${v}" ;;
+            locked) left+=$'\n'"  locked worktree: ${v}" ;;
+            orphaned) left+=$'\n'"  orphaned worktree folder (its record is gone): ${v}" ;;
+            cannot-delete) left+=$'\n'"  the git container cannot delete: ${v}" ;;
+        esac
+    done
+    printf 'tidied:%s\n' "${done_:- nothing to delete}"
+    printf 'left for you:%s\n' "${left:- nothing}"
 }

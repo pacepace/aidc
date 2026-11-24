@@ -182,8 +182,12 @@ echo
 echo "[2/11] isolation assertions"
 assert "no docker.sock from host in dev container" \
     "! dev_exec 'test -S /var/run/docker.sock.host'"
-assert "gh CLI not installed" \
-    "! dev_exec 'command -v gh'"
+# GIT-03: GitHub's own CLI is not installed. The gh on PATH is aidc's stand-in (no login; on
+# Docker it says no git container is set up and does nothing).
+assert "GitHub's gh CLI not installed (only aidc's stand-in)" \
+    "dev_exec 'gh --version | grep -q \"aidc session stand-in\" && [ \"\$(type -ap gh | wc -l)\" = 1 ]'"
+assert "the gh stand-in reaches nothing on Docker" \
+    "! dev_exec 'gh pr create --title x --body y'"
 assert "no SSH agent socket" \
     "dev_exec 'test -z \"\$SSH_AUTH_SOCK\"'"
 assert "no ~/.ssh dir" \

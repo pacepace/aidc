@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: Your git container on the Kubernetes backend (holds your GitHub login).
 #
-# Usage: aidc git <setup|attach|status>
+# Usage: aidc git <setup|login|logout|attach|status|push|pr|merge|tidy|protect|requests|approve|deny>
 #
 # Sessions in the cluster cannot push; one git container per user does (docs/design-12-kubernetes.md,
 # "Git"). Each subcommand is scripts/k8s/git-<name>.sh.
@@ -15,13 +15,37 @@ usage() {
 aidc git <subcommand>
 
   setup    Start your git container in your namespace of the `kubernetes:` config (after
-           `aidc user add`). It is the only thing that pushes, and it keeps your GitHub login
-           on its own volume, where its agent cannot read it. Safe to run again.
-  attach   Open its terminal (tmux). Log in to GitHub there with `gitctl login` (a device
-           code you approve in your browser): you add your own login, the admin never
-           handles it. Detach with Ctrl-b d.
-  status   Whether it is running, logged in to GitHub, and has an SSH key. Says "unknown"
-           when the cluster or the container cannot be asked.
+           `aidc user add`), and its request folder on your disk. It is the only thing that
+           pushes, and it keeps your GitHub login where its agent cannot read it. Safe to run
+           again; it restarts the container so it runs the image now in the registry.
+  login    Log it in to GitHub as you: a one-time code you approve in your browser. Its
+           commits then show as you (your GitHub name; your public email, else GitHub's
+           noreply address for your account). logout removes both.
+  attach   Open its terminal (tmux). Detach with Ctrl-b d.
+  status   Whether it is running and logged in, its git mode, waiting requests, its storage.
+           Says "unknown" when the cluster or the container cannot be asked.
+
+  push <repo> <branch>
+           Push a branch of a working copy on your disk (fast-forward only; never main,
+           master or develop; commits with AI attribution refused).
+  pr <repo> <branch> [--base B] --title T --body-file F
+           Push the branch and open a pull request (base: origin's default branch).
+  merge <repo> <pr-number>
+           Merge a pull request, always with a merge commit, then tidy the repo.
+  tidy [<repo>]
+           Delete merged branches (on GitHub and here) and their clean worktrees; list
+           every leftover (unmerged, unpushed, uncommitted, orphaned folders) for you.
+  protect <repo>
+           Show GitHub's protections of the default branch; with your yes, turn missing
+           ones on (no force pushes, no deletion, merge commits allowed). Never turns any off.
+
+  requests [<id>]   Sessions' requests waiting for your approval (git mode ask), or one of them.
+  approve <id>      Run a waiting request.
+  deny <id> [why]   Refuse it; the session is told why.
+
+<repo> is a working copy's path, on your disk in the cluster or under your home here (as for
+aidc repo). Sessions ask with `gh pr create` and `gh pr merge` (a stand-in that writes a request
+for the git container); kubernetes.git_mode is ask (default: you approve each) or rules.
 USAGE
 }
 

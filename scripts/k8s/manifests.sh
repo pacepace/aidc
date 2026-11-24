@@ -491,6 +491,11 @@ spec:
             - {name: CLAUDE_CONFIG_DIR, value: /home/vscode/.claude}
             # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
             - {name: AIDC_DOCKER_STORAGE_DRIVER, value: overlay2}
+            # The session's gh stand-in hands pull requests to the git container through this
+            # folder; on this backend new files are group-writable (umask 002) so the git
+            # container can tidy merged worktrees.
+            - {name: AIDC_BACKEND, value: kubernetes}
+            - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
           volumeMounts:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/vscode}
@@ -616,6 +621,8 @@ spec:
           env:
             - {name: HOME, value: /home/git}
             - {name: AIDC_USER, value: "${AIDC_K8S_USER}"}
+            - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
+            - {name: AIDC_GIT_MODE, value: "${AIDC_K8S_GIT_MODE:-ask}"}
           securityContext:
             runAsUser: 2000
             runAsGroup: 2000
@@ -650,6 +657,9 @@ EOF2
 #   own     after the clone: the working copy becomes the session user's, like any repo a
 #           session made, group-shared (setgid) so the agent, in the session group, can work
 #           in it too; symlinks in it are not followed;
+#   requests  aidc git setup: the git container's request folder (missing parents as the
+#           session user); made, or taken when empty, for the agent ($4) with the session group,
+#           setgid, 2755. One that holds anything and is not the agent's is refused, not taken.
 #   delete  aidc repo remove --delete-working-copy: the folder goes, if it is a git working copy.
 #           It is emptied from inside, from the folder that was checked (find -delete does not
 #           follow symlinks), and only then removed by name with rmdir, which removes nothing
@@ -667,7 +677,7 @@ while [ -n "$rest" ]; do
     if [ -L "$c" ]; then echo "refused: $here is a symlink" >&2; exit 3; fi
     made=0
     if [ ! -e "$c" ]; then
-        if [ "$mode" != make ]; then echo "refused: $here does not exist" >&2; exit 3; fi
+        if [ "$mode" != make ] && [ "$mode" != requests ]; then echo "refused: $here does not exist" >&2; exit 3; fi
         mkdir "$c"; made=1
     fi
     cd -P "$c"
@@ -678,6 +688,13 @@ case "$mode" in
     make)
         if [ -n "$(ls -A .)" ]; then echo "refused: $p is not empty" >&2; exit 3; fi
         chown "$agent:1000" . && chmod 0755 .
+        echo "ready: $p" ;;
+    requests)
+        if [ "$(stat -c %u .)" != "$agent" ]; then
+            if [ -n "$(ls -A .)" ]; then echo "refused: $p holds files and does not belong to the git container: move it aside" >&2; exit 3; fi
+            chown "$agent:1000" .
+        fi
+        chmod 2755 .
         echo "ready: $p" ;;
     own)
         chown -R -h 1000:1000 . && chmod 2775 .

@@ -58,7 +58,7 @@
 |----|-------------|----------|--------|
 | GIT-01 | Inside the container, `git status`, `diff`, `add`, `commit`, `branch`, `checkout`, `rebase`, `stash`, `log`, `blame`, `show` MUST all work. | P0 | brief §2 |
 | GIT-02 | Inside the container, `git push`, `pull`, `fetch`, and any remote-touching operation MUST fail. | P0 | brief §2 |
-| GIT-03 | The GitHub CLI (`gh`) MUST NOT be installed in the container. | P0 | brief §2 |
+| GIT-03 | The GitHub CLI (`gh`) MUST NOT be installed in the container. Amended 2026-11-24 (owner rulings "The git container does not do prawduct's work", "Sessions make their own worktrees on Kubernetes"): `gh` in the container is aidc's stand-in (`.devcontainer/gh-standin.sh`), holding no login and reaching nothing itself; on Kubernetes it hands pull requests to the user's git container as request files. | P0 | brief §2 |
 | GIT-04 | Push prevention is achieved primarily by mount restrictions (no SSH keys, no credentials); see CTR-07, CTR-08. | P0 | brief §2 |
 | GIT-05 | A system-level pre-push hook (`/etc/git-hooks/pre-push`) installed via `git config --system core.hooksPath` MUST hard-fail any push attempt as a belt-and-suspenders defense. | P1 | brief §2 |
 | GIT-06 | The host machine retains full remote git capability (push/pull/fetch/gh) — the asymmetry is one-directional. | P0 | brief §2 |

@@ -58,7 +58,7 @@ the way aidc dev containers are used today (K8S-09).
 
 ## Git: a trusted git container per user
 
-Sessions cannot push. One trusted git container per user holds the SSH key and `gh`, and is the
+Sessions cannot push. One trusted git container per user holds the GitHub login (`gh`, over https), and is the
 only thing that pushes, pulls or opens PRs (K8S-04). It runs Claude Code with the git rules:
 
 - merge commits only; never force-push; no AI attribution in commits, PRs, code or docs;
@@ -151,6 +151,45 @@ runs `git worktree add -b <branch> <path>` itself in a working copy; `aidc creat
 **Cleanup is the git container's job** (K8S-08). Merged branches and their worktrees are deleted.
 Anything else left behind (unmerged, unpushed, orphaned worktrees) is flagged to the user at
 once, not left to rot.
+
+Push, PR, merge, tidy and protections as built: the user drives them with `aidc git push`,
+`pr`, `merge`, `tidy` and `protect` (kubectl exec to gitctl; running the command is the
+approval), and logs the git container in with `aidc git login` (gh's device code as gitcred,
+then `gh api user` writes the identity file `/etc/gitconfig` includes: the account's name, its
+public email or else `<id>+<login>@users.noreply.github.com`; no signing; `logout` removes
+both). `gitctl tidy <repo>` fetches, then for each local branch already in a base on origin
+(origin's default branch, or main, master or develop): `delete-branch` on GitHub (as gitrun:
+only a branch merged there, never a base, leased on the tip it checked), the clean worktree
+removed with its admin folder (`git worktree remove`, after checking every folder in it is
+writable by the agent, so nothing is half-deleted), the local branch deleted; prune; and every
+leftover reported, never deleted: unpushed and unmerged branches, a merged branch's worktree with
+changes, detached and locked worktrees, folders that were worktrees whose admin folder is gone,
+and what the agent may not delete. Only branches the working copy has are deleted on GitHub.
+Sessions make files group-writable (umask 002 on this backend) so the agent, in their group,
+can delete them. `gitctl protection` reads what guards the default branch (rulesets and classic
+protection: force pushes and deletion blocked, allowed or unknown; the merge methods);
+`gitctl protect` only adds a fixed ruleset (no force pushes or deletion of the default branch,
+main, master, develop) and allows merge commits, never turning anything off; the CLI applies it
+only on the user's yes. Every git the agent runs in a working copy overrides each filter driver
+the copy's config names (clean and smudge `cat`, no process), read just before the call, with
+hooks and fsmonitor off.
+
+Session requests (owner rulings 2026-11-24): a session's `gh` is a stand-in
+(`.devcontainer/gh-standin.sh`) that writes `pr create` (push included), `pr merge`, `pr view`,
+`pr list` and `aidc push` as request files into `/home/<user>/.aidc/git-requests/requests/`
+(the git container's folder, made by `aidc git setup`; sessions may add files there but not
+list it, and read results by id from `results/`), waits up to a minute and prints the result as
+gh would, or "requested; waiting for approval" with the id. The watcher (`git-requests watch`,
+as the agent, kept running by the container's main process) moves each request out by rename,
+refuses anything but a plain file, checks every field (known fields only, a working copy on the
+disk with a GitHub origin, branch names, no protected branch, title and body without
+attribution or control characters), and then, by `kubernetes.git_mode`: rules runs it through
+gitctl at once; ask holds it as pending for `aidc git approve|deny` (reads run at once in both).
+Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
+restart is reported as interrupted, never retried. Requests and results are deleted after 30
+days. In ask mode the request is also handed to `AIDC_GIT_NOTIFY` when set: the git agent's
+Claude takes it from there in a later step (`git-requests prompt <id>` is its text), asking
+with its question tool so approvals reach the orchestrator.
 
 ### Proposal: lock the parts of the repo that can run code
 

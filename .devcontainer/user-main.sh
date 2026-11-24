@@ -5,6 +5,12 @@ set -uo pipefail
 
 log() { printf '[aidc-user-main] %s\n' "$*" >&2; }
 
+# On Kubernetes the user's git container (uid 2000, in this session's group) tidies merged
+# worktrees on the shared disk; it can delete only what the group may write. Every process of
+# the session (tmux, Claude, its shells) inherits this umask, so new files and folders are
+# group-writable there. On Docker the repo is the host's: its umask is left alone.
+[ "${AIDC_BACKEND:-}" = kubernetes ] && umask 002
+
 # The container's own Claude state, installed once before Claude launches: clear
 # empty pre-v1.5.0 mount placeholders, then the onboarding seed on first start.
 # See claude-state-install.sh for the why of each; that file is also what the

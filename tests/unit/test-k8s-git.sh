@@ -54,7 +54,10 @@ assert_not_has() {
 #   K_NO_POD=1       no running git pod (the Deployment exists unless K_NO_DEP=1)
 #   K_EXEC_FAIL=1    exec into the git pod fails (container not ready, exec refused)
 #   K_GH=yes|stored|no   what gh says inside (default no)
-#   K_KEYS="id_ed25519"  the SSH keys in ~/.ssh (default none)
+#   K_WAITING=n      requests waiting for approval (default 0)
+#   K_UNCHANGED=1    apply reports the Deployment unchanged
+#   K_PROT="lines"   what gitctl protection reports before its end line (default: all on)
+#   K_FAIL_STEP=requests  the request folder step's pod fails
 #   K_NO_GIT_POLICY=1    the git-egress policy is missing
 #   K_COPIES / K_BUNDLES bytes in gitrun's private copies / the agent's bundles (1 MiB / 0);
 #   K_NO_STORAGE=1       gitctl storage printed nothing
@@ -64,7 +67,19 @@ printf '%s\n' "$*" >> "$K_LOG"
 [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
-    *"apply -f -"*) cat >> "$K_APPLIED" ;;
+    *"apply -f -"*) { echo ---; cat; } >> "$K_APPLIED"
+        [ "${K_UNCHANGED:-}" = 1 ] && echo "deployment.apps/git unchanged" || echo "deployment.apps/git configured" ;;
+    *"get pod repo-dir-"*"jsonpath"*)
+        case "$*" in *"repo-dir-${K_FAIL_STEP:-none}-"*) printf Failed ;; *) printf Succeeded ;; esac ;;
+    *"logs repo-dir-"*) echo "ready" ;;
+    *"exec git-7d9f-abc -c git -- gitctl protection"*|*"exec git-7d9f-abc -c git -- gitctl protect "*)
+        printf '%b' "${K_PROT:-repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nsquash allowed\nrebase allowed\n}"; echo end ;;
+    *"exec git-7d9f-abc -c git -- gitctl tidy"*) printf 'deleted-remote feat\nremoved-worktree /home/alice/r/wt\nunpushed 2 other\norphaned /home/alice/r/old\nend\n' ;;
+    *"exec git-7d9f-abc -c git -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
+    *"exec git-7d9f-abc -c git -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
+    *"exec git-7d9f-abc -c git -- gitctl"*|*"exec -i git-7d9f-abc -c git -- bash -c"*|*"exec git-7d9f-abc -c git -- git-requests"*)
+        [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }
+        cat >/dev/null 2>&1 || true; echo "ok: $*" | cut -c1-80 ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
     *"get pvc disk"*)
         [ "${K_PVC_WARN:-}" = 1 ] && echo "Warning: client version skew" >&2
@@ -75,7 +90,7 @@ case "$*" in
     *"get deployment git"*) [ "${K_NO_DEP:-}" = 1 ] || echo "deployment.apps/git" ;;
     *"exec git-7d9f-abc -c git -- sh -c"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'error: unable to upgrade connection' >&2; exit 1; }
-        echo "github=${K_GH:-no}"; echo "ssh=${K_KEYS:-none}"
+        echo "github=${K_GH:-no}"; echo "waiting=${K_WAITING:-0}"
         [ "${K_NO_STORAGE:-}" = 1 ] || { echo "storage-copies ${K_COPIES:-1048576}"; echo "storage-bundles ${K_BUNDLES:-0}"; } ;;
     *"get networkpolicy -o name"*)
         echo "networkpolicy.networking.k8s.io/default-deny"
@@ -104,10 +119,10 @@ echo "=== aidc git setup: the manifest ==="
 out=$(run git setup)
 assert_has "setup reports the container ready" "the git container is ready" "$out"
 assert_has "and exits 0" "exit=0" "$out"
-assert_has "and points the user at attach to add their own secrets" "aidc git attach" "$out"
+assert_has "and points the user at adding their own GitHub login" "aidc git login" "$out"
 assert_eq "it applies the egress policy, the home, login and private-copy claims and the Deployment, nothing else" \
     "NetworkPolicy/git-egress PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred PersistentVolumeClaim/git-run Deployment/git" \
-    "$(yq -N e '[.kind, .metadata.name] | join("/")' "$K_APPLIED" | paste -sd' ' -)"
+    "$(yq -N e 'select(.kind != "Pod" and .kind != null) | [.kind, .metadata.name] | join("/")' "$K_APPLIED" | grep . | paste -sd' ' -)"
 assert_eq "everything goes in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_has "it waits for the Deployment to be ready" "rollout status deployment/git" "$(cat "$K_LOG")"
 assert_eq "every volume mount in the git pod names a volume the pod declares" "" \
@@ -166,12 +181,39 @@ assert_eq "the policy selects exactly the pods the Deployment makes" '"git"' \
     "$(dep '.spec.template.metadata.labels.app')"
 assert_has "every kubectl call uses the configured context" "--context lab apply" "$(cat "$K_LOG")"
 
+assert_eq "the git container is told its request folder and git mode" \
+    '[{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"},{"name":"AIDC_GIT_MODE","value":"ask"}]' \
+    "$(pod '[.containers[] | select(.name == "git") | .env[] | select(.name == "AIDC_GIT_REQUESTS" or .name == "AIDC_GIT_MODE")]')"
+assert_eq "setup makes the request folder on the disk, by the root folder step, for the agent" \
+    '["/home/alice/.aidc/git-requests","/home/alice","requests","2000"]' \
+    "$(q 'select(.kind == "Pod") | .spec.containers[0].command[4:8]')"
+assert_eq "a Deployment that applied changed rolls by itself: no restart" "" "$(grep 'rollout restart' "$K_LOG")"
+out=$(K_UNCHANGED=1 run git setup)
+assert_has "an unchanged Deployment (same tag, maybe a rebuilt image) is restarted, so the pod pulls the image again" \
+    "rollout restart deployment/git" "$(cat "$K_LOG")"
+assert_eq "restarted before setup waits for it" yes \
+    "$([ "$(grep -n 'rollout restart' "$K_LOG" | cut -d: -f1)" -lt "$(grep -n 'rollout status' "$K_LOG" | cut -d: -f1)" ] && echo yes || echo no)"
+out=$(K_FAIL_STEP=requests run git setup)
+assert_has "a request folder that cannot be made fails setup, saying so" "its request folder /home/alice/.aidc/git-requests could not be made" "$out"
+cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/config.bak"
+printf '  git_mode: rules\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(run git setup)
+assert_has "kubernetes.git_mode reaches the git container" '{"name":"AIDC_GIT_MODE","value":"rules"}' "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[]')"
+cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
+printf '  git_mode: yolo\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(run git setup)
+assert_has "a git_mode that is not ask or rules is refused" "is not ask or rules" "$out"
+cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
+out=$(run git setup)
+
 echo "=== aidc git setup: run again ==="
-first=$(cat "$K_APPLIED")
+nopod() { yq -N e 'select(.kind != "Pod")' "$K_APPLIED"; }
+first=$(nopod)
 out=$(run git setup)
 assert_has "a second setup succeeds" "exit=0" "$out"
-assert_eq "it applies the same manifests (apply leaves what is right alone)" "$first" "$(cat "$K_APPLIED")"
-assert_not_has "and deletes nothing (the home claim holds the user's secrets)" " delete " "$(cat "$K_LOG")"
+assert_eq "it applies the same manifests (apply leaves what is right alone)" "$first" "$(nopod)"
+assert_not_has "and deletes nothing but its own one-shot folder pod (the home claim holds the user's secrets)" " delete " \
+    "$(grep -v ' delete pod repo-dir-requests-' "$K_LOG")"
 
 echo "=== aidc git setup: failures ==="
 out=$(K_NO_DISK=1 run git setup)
@@ -204,26 +246,27 @@ out=$(K_DOWN=1 run git attach)
 assert_has "a cluster that does not answer is said so" "the cluster did not answer" "$out"
 
 echo "=== aidc git status ==="
-out=$(K_GH=yes K_KEYS="id_ed25519" run git status)
+out=$(K_GH=yes run git status)
 assert_has "the running pod is named" "pod:      git-7d9f-abc, running" "$out"
 assert_has "a confirmed GitHub login is yes" "github:   logged in" "$out"
-assert_has "an SSH key is named" "ssh key:  yes (id_ed25519)" "$out"
+assert_not_has "no SSH key row (the login is gh over https)" "ssh key" "$out"
+assert_has "the git mode is shown (ask by default)" "mode:     ask" "$out"
+assert_has "no waiting requests is none" "requests: none" "$out"
+out=$(K_WAITING=3 run git status)
+assert_has "waiting requests are counted, with where to see them" "requests: 3 waiting for your approval (aidc git requests)" "$out"
 assert_has "the egress policy is reported enforced" "egress:   enforced" "$out"
 out=$(run git status)
 assert_has "no login is no, with what to do" "github:   not logged in (aidc git attach" "$out"
-assert_has "no key is none, with what to do" "ssh key:  none (aidc git attach" "$out"
 out=$(K_GH=stored run git status)
 assert_has "a stored login GitHub did not confirm is unknown, not no" \
     "github:   unknown (GitHub did not confirm the login)" "$out"
 out=$(K_EXEC_FAIL=1 run git status)
 assert_has "a container that cannot be asked: login unknown" "github:   unknown" "$out"
-assert_has "a container that cannot be asked: key unknown" "ssh key:  unknown" "$out"
+assert_has "a container that cannot be asked: requests unknown" "requests: unknown" "$out"
 assert_not_has "and never 'not logged in'" "not logged in" "$out"
-assert_not_has "and never 'none'" "ssh key:  none" "$out"
 out=$(K_DOWN=1 run git status)
 assert_has "a cluster that does not answer: pod unknown" "pod:      unknown" "$out"
 assert_has "login unknown" "github:   unknown" "$out"
-assert_has "key unknown" "ssh key:  unknown" "$out"
 assert_has "egress unknown, not 'not enforced'" "egress:   unknown" "$out"
 assert_not_has "never 'not set up'" "not set up" "$out"
 out=$(K_NO_POD=1 run git status)
@@ -247,6 +290,63 @@ out=$(K_EXEC_FAIL=1 run git status)
 assert_has "a container that cannot be asked: storage unknown" "storage:  unknown" "$out"
 out=$(K_NO_GIT_POLICY=1 run git status)
 assert_has "a missing egress policy is reported loudly" "NOT ENFORCED: NetworkPolicy missing: git-egress" "$out"
+
+echo "=== push, pr, merge, tidy, protect, requests, login ==="
+mkdir -p "$HOME/r"
+xl() { grep ' exec ' "$K_LOG" | sed 's/^--context lab -n aidc-u-alice //'; }
+out=$(run git push "$HOME/r" feat)
+assert_has "push: gitctl push in the git container, the path mapped onto the disk" "exec git-7d9f-abc -c git -- gitctl push /home/alice/r feat" "$(xl)"
+assert_has "then the first-use protection check" "git-requests first-use /home/alice/r" "$(xl)"
+assert_has "exit 0" "exit=0" "$out"
+out=$(K_FIRST='repo o/r\ndefault main\nforce-push allowed\ndeletion allowed\nmerge-commit allowed' run git push "$HOME/r" feat)
+assert_has "a first push to an unprotected repo shows the protections" "force pushes:   allowed" "$out"
+assert_has "and offers aidc git protect" "aidc git protect" "$out"
+out=$(K_EXEC_FAIL=1 run git push "$HOME/r" feat)
+assert_has "a push the git container refused fails" "exit=1" "$out"
+out=$(run git push /etc feat)
+assert_has "a path off the disk is refused before anything runs" "must be under your home directory" "$out"
+assert_eq "..." "" "$(xl)"
+printf 'The body.\n' > "$SCRATCH/body.md"
+out=$(run git pr "$HOME/r" feat --title "Add it" --body-file "$SCRATCH/body.md")
+assert_has "pr: pushes first" "gitctl push /home/alice/r feat" "$(xl)"
+assert_has "then opens the PR with the body on stdin and the title as an argument" "exec -i git-7d9f-abc -c git -- bash -c" "$(xl)"
+assert_has "..." "gitctl pr-create" "$(cat "$K_LOG")"
+assert_has "exit 0" "exit=0" "$out"
+out=$(run git pr "$HOME/r" feat --title "Add it")
+assert_has "pr needs a body file" "usage: aidc git pr" "$out"
+out=$(run git merge "$HOME/r" 12)
+assert_has "merge: gitctl pr-merge, then tidy" "gitctl pr-merge /home/alice/r 12" "$(xl)"
+assert_has "..." "gitctl tidy /home/alice/r" "$(xl)"
+assert_has "and the tidy report names what went and what is left" "deleted on GitHub: feat" "$out"
+assert_has "..." "unpushed: other (2 commit(s) on no GitHub branch)" "$out"
+assert_has "..." "orphaned worktree folder (its record is gone): /home/alice/r/old" "$out"
+out=$(run git merge "$HOME/r" "12;x")
+assert_has "a PR number that is not one is refused" "not a pull request number" "$out"
+out=$(run git tidy "$HOME/r")
+assert_has "tidy one repo" "== /home/alice/r" "$out"
+assert_has "..." "left for you:" "$out"
+out=$(run git protect "$HOME/r")
+assert_has "protect: nothing missing, nothing asked, nothing changed" "nothing to turn on" "$out"
+assert_not_has "..." "gitctl protect " "$(xl)"
+: > "$K_LOG"
+out=$(K_PROT='repo o/r\ndefault main\nforce-push allowed\ndeletion allowed\nmerge-commit allowed\n' bash -c '"$0/scripts/aidc" git protect "$1" 2>&1 <<<"no"; echo "exit=$?"' "$AIDC_ROOT" "$HOME/r")
+assert_has "missing protections are offered; anything but yes leaves them" "left as it is" "$out"
+assert_not_has "..." "gitctl protect " "$(xl)"
+: > "$K_LOG"
+out=$(K_PROT='repo o/r\ndefault main\nforce-push allowed\ndeletion allowed\nmerge-commit allowed\n' bash -c '"$0/scripts/aidc" git protect "$1" 2>&1 <<<"yes"; echo "exit=$?"' "$AIDC_ROOT" "$HOME/r")
+assert_has "the user's yes applies them, through gitctl protect" "gitctl protect /home/alice/r" "$(xl)"
+out=$(run git requests)
+assert_has "requests lists the waiting ones from the git container" "git-requests list" "$(xl)"
+assert_not_has "with control characters a session wrote stripped" $'\033' "$out"
+id=0123456789abcdef0123456789abcdef
+out=$(run git approve "$id"); assert_has "approve <id>" "git-requests approve $id" "$(xl)"
+out=$(run git deny "$id" "not now"); assert_has "deny <id> <why>" "git-requests deny $id not now" "$(xl)"
+out=$(run git approve "../x"); assert_has "an id that is not one is refused" "not a request id" "$out"
+out=$(run git login)
+assert_has "login runs gitctl login interactively in the git container" "exec -it git-7d9f-abc -c git -- env TERM=xterm-test gitctl login" "$(xl)"
+out=$(run git logout); assert_has "logout" "gitctl logout" "$(xl)"
+out=$(K_NO_POD=1 run git push "$HOME/r" feat)
+assert_has "with no git container: says to set it up" "run \`aidc git setup\`" "$out"
 
 echo "=== aidc user add offers it ==="
 out=$(run user add bob)

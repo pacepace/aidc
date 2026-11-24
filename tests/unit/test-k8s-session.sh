@@ -148,6 +148,10 @@ assert_eq "the proxy pod has resource requests (not first in line for eviction)"
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .resources.requests' | tail -1)"
 assert_has "the inner Docker uses overlay2 (Sysbox gives it a real /var/lib/docker)" \
     '{"name":"AIDC_DOCKER_STORAGE_DRIVER","value":"overlay2"}' "$(dev '.spec.template.spec.containers[0].env')"
+assert_has "the session's gh stand-in is told the git container's request folder" \
+    '{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"}' "$(dev '.spec.template.spec.containers[0].env')"
+assert_has "and the session knows it is on Kubernetes (group-writable files, for the git container's tidy)" \
+    '{"name":"AIDC_BACKEND","value":"kubernetes"}' "$(dev '.spec.template.spec.containers[0].env')"
 assert_has "a new session home starts as a copy of the image's (Claude Code lives there), owned by the session user" \
     "cp -a /home/vscode/. /seed/; chown 1000:1000 /seed" "$(dev '[.spec.template.spec.initContainers[] | select(.name == "seed-home") | .command]')"
 assert_eq "the repo folder is made as the session user" '[{"runAsUser":1000,"runAsGroup":1000},["mkdir","-p","/home/alice/code/proj"]]' \

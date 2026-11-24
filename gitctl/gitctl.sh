@@ -21,10 +21,17 @@
 #   gitctl fetch <repo>                                  origin's branches into refs/remotes/origin/*
 #   gitctl push <repo> <branch>                          push that branch, fast-forward only
 #   gitctl unpushed <repo>                               after a fetch, the work on no origin branch
+#   gitctl tidy <repo>                                   after merges: delete merged branches and
+#                                                        their worktrees, report every leftover
+#   gitctl delete-branch <repo> <branch>                 delete a branch on GitHub, if merged there
 #   gitctl pr-create <repo> <head> <base> --title-file F --body-file F   (F may be -: stdin)
 #   gitctl pr-comment <repo> <number> --body-file F
 #   gitctl pr-merge <repo> <number>                      always a merge commit
 #   gitctl pr-view <repo> <number> | pr-list <repo>
+#   gitctl pr-view-json <repo> <number|branch>           one PR as JSON (fixed fields)
+#   gitctl pr-list-json <repo> <open|closed|merged|all> [<head>]
+#   gitctl protection <repo>                             what protects origin's default branch
+#   gitctl protect <repo>                                turn missing protections on (never off)
 #   gitctl status | login | logout                       the GitHub login (gitcred's)
 #   gitctl storage                                       bytes in gitrun's copies and the bundles
 #   gitctl remove-copy <owner/name>                      delete gitrun's private copy of a repo
@@ -66,8 +73,8 @@ ulimit -c 0 2>/dev/null || true
 verb="${1:-}"
 [ $# -gt 0 ] && shift
 case "$verb" in
-    clone|fetch|push|unpushed|storage|remove-copy) VERB_ROLE=run ;;
-    pr-create|pr-comment|pr-merge|pr-view|pr-list|status|login|logout) VERB_ROLE=cred ;;
+    clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy) VERB_ROLE=run ;;
+    pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
 esac
@@ -212,7 +219,37 @@ run_push() {
         ids=$(printf '%s\n' "$raw" | sed -n '/^$/q; /^\(author\|committer\) /p')
         gitctl_ai_identity "$ids" && die "commit ${sha:0:12} is authored or committed as an AI tool or bot"
     done < <(g rev-list "$local_sha" "${nots[@]}" --)
-    g push --no-recurse-submodules --no-follow-tags "$ORIGIN_URL" "${local_sha}:refs/heads/${branch}"
+    g push --no-recurse-submodules --no-follow-tags "$ORIGIN_URL" "${local_sha}:refs/heads/${branch}" \
+        || die "the push of ${branch} failed"
+    # The one line a caller reads back (a session's request result, which sets its upstream).
+    echo "pushed ${branch} ${local_sha}"
+}
+
+# delete-branch: delete a branch on GitHub after its pull request merged (gitctl tidy). Only a
+# branch whose tip, as origin has it now, is already in origin's default branch or in main,
+# master or develop: nothing is lost. Never those branches themselves. The delete is leased on
+# the tip that was checked, so a branch someone moved since is left alone.
+run_delete_branch() {
+    nargs $# 2; no_options "$@"
+    local slug="$1" branch="$2" sha def b into=""
+    gitctl_slug_ok "$slug" || die "$GITCTL_REASON"
+    gitctl_branch_ok "$REAL_GIT" "$branch" || die "$GITCTL_REASON"
+    for b in $PROTECTED_BRANCHES; do
+        [ "$branch" = "$b" ] && die "${branch} is never deleted"
+    done
+    enter_copy "$slug"
+    sha=$(g rev-parse -q --verify "refs/heads/${branch}^{commit}") || { echo "gone ${branch}"; return 0; }
+    def=$(g symbolic-ref -q --short HEAD 2>/dev/null || true)
+    [ "$branch" != "$def" ] || die "${branch} is origin's default branch: never deleted"
+    for b in $def $PROTECTED_BRANCHES; do
+        [ "$b" != "$branch" ] || continue
+        g rev-parse -q --verify "refs/heads/${b}^{commit}" >/dev/null || continue
+        if g merge-base --is-ancestor "$sha" "refs/heads/${b}"; then into="$b"; break; fi
+    done
+    [ -n "$into" ] || die "${branch} is not merged on GitHub (into ${def:-the default branch}, main, master or develop): not deleted"
+    g push --no-recurse-submodules --no-follow-tags "--force-with-lease=refs/heads/${branch}:${sha}" \
+        "$ORIGIN_URL" ":refs/heads/${branch}" || die "the delete of ${branch} failed (moved on GitHub since?)"
+    echo "deleted ${branch} ${into}"
 }
 
 # storage: the bytes gitrun's store holds (its private copies, and any bundle being imported).
@@ -267,6 +304,95 @@ read_texts() {
     BODY=$(cat)
 }
 
+# The fields gitctl reads a pull request with: what a session's gh stand-in answers from.
+PR_FIELDS=number,title,body,state,url,headRefName,headRefOid,baseRefName,isDraft,mergedAt,reviewDecision,statusCheckRollup
+
+# write_identity: after a login, the author and committer every commit in the git container
+# carries (/etc/gitconfig includes the file): the user's GitHub name and an email GitHub ties to
+# their account. The public email when the account shows one (it is already public); otherwise
+# GitHub's noreply address for the account (<id>+<login>@users.noreply.github.com), which
+# GitHub attributes to the user and never exposes a private one. No signing.
+write_identity() {
+    local user login id name pub email tmp
+    user=$(gh_ api user) || die "logged in, but GitHub did not say who you are (gh api user); run gitctl login again"
+    login=$(printf '%s' "$user" | jq -r '.login // ""') || die "cannot read your GitHub account"
+    id=$(printf '%s' "$user" | jq -r '.id // ""')
+    name=$(printf '%s' "$user" | jq -r '.name // ""' | LC_ALL=C tr -d '\000-\037\177')
+    pub=$(printf '%s' "$user" | jq -r '.email // ""')
+    [[ "$login" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || die "GitHub gave an account name that is not one (${login:0:40})"
+    [[ "$id" =~ ^[0-9]{1,15}$ ]] || die "GitHub gave an account id that is not one"
+    [ -n "$name" ] || name="$login"
+    local email_re='^[^[:space:][:cntrl:]<>@"]+@[^[:space:][:cntrl:]<>@"]+$'
+    if [[ "$pub" =~ $email_re ]]; then email="$pub"
+    else email="${id}+${login}@users.noreply.github.com"; fi
+    tmp=$(mktemp "$CRED_HOME/.git-identity.XXXXXX") || die "cannot write the identity"
+    if ! { env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME="$CRED_HOME" \
+            "$REAL_GIT" config --file "$tmp" user.name "$name" \
+        && env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME="$CRED_HOME" \
+            "$REAL_GIT" config --file "$tmp" user.email "$email" \
+        && chmod 0644 -- "$tmp" && mv -f -- "$tmp" "$CRED_HOME/git-identity"; }; then
+        rm -f -- "$tmp"; die "cannot write the identity"
+    fi
+    echo "commits made here show as: ${name} <${email}>"
+}
+
+# read_protection OWNER/NAME: what GitHub enforces on the repo's default branch, in P_* (each
+# blocked, allowed or unknown; merge methods allowed, disallowed or unknown). Rulesets and
+# classic branch protection both count. Read-only.
+read_protection() {
+    local repo rules out
+    P_DEFAULT="" P_FORCE=unknown P_DELETE=unknown P_MERGE=unknown P_SQUASH=unknown P_REBASE=unknown
+    repo=$(gh_ api "repos/${1}" 2>/dev/null) || die "cannot read ${1} on GitHub (is gitctl logged in? gitctl status)"
+    P_DEFAULT=$(printf '%s' "$repo" | jq -r '.default_branch // ""')
+    gitctl_branch_ok "$REAL_GIT" "$P_DEFAULT" || die "GitHub gave a default branch that is not one"
+    tri() { case "$1" in true) echo allowed ;; false) echo disallowed ;; *) echo unknown ;; esac; }
+    P_MERGE=$(tri "$(printf '%s' "$repo" | jq -r '.allow_merge_commit')")
+    P_SQUASH=$(tri "$(printf '%s' "$repo" | jq -r '.allow_squash_merge')")
+    P_REBASE=$(tri "$(printf '%s' "$repo" | jq -r '.allow_rebase_merge')")
+    local f_rule=unknown d_rule=unknown f_classic=unknown d_classic=unknown
+    if rules=$(gh_ api "repos/${1}/rules/branches/${P_DEFAULT}" 2>/dev/null); then
+        f_rule=no d_rule=no
+        printf '%s' "$rules" | jq -e 'any(.[]?; .type == "non_fast_forward")' >/dev/null && f_rule=yes
+        printf '%s' "$rules" | jq -e 'any(.[]?; .type == "deletion")' >/dev/null && d_rule=yes
+    fi
+    if out=$(gh_ api "repos/${1}/branches/${P_DEFAULT}/protection" 2>&1); then
+        # Classic protection blocks force pushes and deletion unless it allows them.
+        f_classic=yes d_classic=yes
+        [ "$(printf '%s' "$out" | jq -r '.allow_force_pushes.enabled // false')" = true ] && f_classic=no
+        [ "$(printf '%s' "$out" | jq -r '.allow_deletions.enabled // false')" = true ] && d_classic=no
+    else
+        case "$out" in *"Branch not protected"*) f_classic=no d_classic=no ;; esac
+    fi
+    both() { if [ "$1" = yes ] || [ "$2" = yes ]; then echo blocked; elif [ "$1" = no ] && [ "$2" = no ]; then echo allowed; else echo unknown; fi; }
+    P_FORCE=$(both "$f_rule" "$f_classic")
+    P_DELETE=$(both "$d_rule" "$d_classic")
+}
+
+print_protection() {
+    printf 'repo %s\ndefault %s\nforce-push %s\ndeletion %s\nmerge-commit %s\nsquash %s\nrebase %s\nend\n' \
+        "$1" "$P_DEFAULT" "$P_FORCE" "$P_DELETE" "$P_MERGE" "$P_SQUASH" "$P_REBASE"
+}
+
+# apply_protection OWNER/NAME: turn protections on, never off. A new ruleset that blocks force
+# pushes and deletion of the default branch and of main, master and develop (a ruleset adds to
+# whatever else protects the branch; changing classic protection would mean rewriting all of
+# it), and merge commits allowed when they are not (gitctl merges only that way). Nothing
+# here can turn any setting off: the body is fixed, and squash and rebase merges are left as
+# they are.
+apply_protection() {
+    if [ "$P_FORCE" != blocked ] || [ "$P_DELETE" != blocked ]; then
+        printf '%s' '{"name":"aidc: no force pushes or deletion","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH","refs/heads/main","refs/heads/master","refs/heads/develop"],"exclude":[]}},"rules":[{"type":"non_fast_forward"},{"type":"deletion"}]}' \
+            | gh_ api --method POST "repos/${1}/rulesets" --input - >/dev/null \
+            || die "GitHub refused the ruleset (it needs admin rights on ${1}; private repos need a paid plan for rulesets)"
+        echo "added a ruleset: no force pushes or deletion of ${P_DEFAULT}, main, master, develop" >&2
+    fi
+    if [ "$P_MERGE" = disallowed ]; then
+        gh_ api --method PATCH "repos/${1}" -F allow_merge_commit=true >/dev/null \
+            || die "GitHub refused to allow merge commits on ${1}"
+        echo "allowed merge commits" >&2
+    fi
+}
+
 run_cred() {
     case "$verb" in
         status)
@@ -276,11 +402,17 @@ run_cred() {
             else case "$out" in *"not logged in"*) echo no ;; *) echo unknown ;; esac; fi ;;
         login)
             nargs $# 0
+            # Device code: gh prints a one-time code and the address to enter it at; the user
+            # approves in their own browser. git gets the token from gh (https), never a key.
             (cd / && env -i HOME="$CRED_HOME" GH_CONFIG_DIR="$CRED_HOME/gh" PATH=/usr/bin:/bin LANG=C.UTF-8 \
                 TERM="${TERM:-dumb}" GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 GH_BROWSER=echo BROWSER=echo \
-                "$REAL_GH" auth login --hostname github.com --git-protocol https --web --skip-ssh-key) ;;
+                "$REAL_GH" auth login --hostname github.com --git-protocol https --web --skip-ssh-key) \
+                || die "the GitHub login did not complete"
+            write_identity ;;
         logout)
             nargs $# 0
+            # The identity goes with the login: commits made after a logout are not the user's.
+            rm -f -- "$CRED_HOME/git-identity"
             gh_ auth logout --hostname github.com ;;
         pr-list)
             nargs $# 1; gitctl_slug_ok "$1" || die "$GITCTL_REASON"
@@ -288,6 +420,33 @@ run_cred() {
         pr-view)
             nargs $# 2; gitctl_slug_ok "$1" || die "$GITCTL_REASON"; gitctl_number_ok "$2" || die "$GITCTL_REASON"
             gh_ pr view "$2" --repo "$1" ;;
+        pr-view-json)
+            # One PR, by number or by its head branch, as JSON with a fixed set of fields.
+            nargs $# 2; gitctl_slug_ok "$1" || die "$GITCTL_REASON"
+            gitctl_number_ok "$2" || gitctl_branch_ok "$REAL_GIT" "$2" || die "${2}: not a pull request number or branch"
+            gh_ pr view "$2" --repo "$1" --json "$PR_FIELDS" ;;
+        pr-list-json)
+            # pr-list-json <repo> <state> [<head branch>]: up to 100 PRs, as JSON.
+            [ $# = 2 ] || [ $# = 3 ] || die "pr-list-json takes 2 or 3 arguments"
+            no_options "$@"
+            gitctl_slug_ok "$1" || die "$GITCTL_REASON"
+            case "$2" in open|closed|merged|all) ;; *) die "${2}: not a pull request state (open, closed, merged, all)" ;; esac
+            if [ $# = 3 ]; then
+                gitctl_branch_ok "$REAL_GIT" "$3" || die "$GITCTL_REASON"
+                gh_ pr list --repo "$1" --state "$2" --head "$3" --limit 100 --json "$PR_FIELDS"
+            else
+                gh_ pr list --repo "$1" --state "$2" --limit 100 --json "$PR_FIELDS"
+            fi ;;
+        protection)
+            nargs $# 1; gitctl_slug_ok "$1" || die "$GITCTL_REASON"
+            read_protection "$1"
+            print_protection "$1" ;;
+        protect)
+            nargs $# 1; gitctl_slug_ok "$1" || die "$GITCTL_REASON"
+            read_protection "$1"
+            apply_protection "$1"
+            read_protection "$1"
+            print_protection "$1" ;;
         pr-create)
             nargs $# 3; no_options "$@"
             gitctl_slug_ok "$1" || die "$GITCTL_REASON"
@@ -340,9 +499,26 @@ as_run() {
 # as the agent, never as gitrun, so the copy's config cannot reach the login; still, the
 # settings that run a program on the steps gitctl takes (hooks, fsmonitor, auto gc) are pinned
 # off, and no transport is allowed: bundles are imported with `bundle unbundle`, never fetched.
+# A filter driver the copy's config names runs its clean or smudge command on files git reads
+# or writes (status, worktree remove, reset), so every driver named there is overridden for the
+# call (clean and smudge `cat`, no process). The names are read from the config just before the
+# call, through GIT_CONFIG_COUNT, which takes a driver name of any spelling where `-c` would
+# split it at an `=`. Residual: a driver a session adds between that read and the call.
 ag() {
+    local dir=. key d n=0 envs=()
+    local -A seen=()
+    [ "${1:-}" = -C ] && dir="$2"
+    while IFS= read -r key; do
+        d="${key#filter.}"; d="${d%.*}"
+        { [ -n "$d" ] && [ -z "${seen[$d]:-}" ]; } || continue
+        seen[$d]=1
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.clean" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.smudge" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.process" "GIT_CONFIG_VALUE_${n}="); n=$((n + 1))
+    done < <(env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null \
+        "$REAL_GIT" -C "$dir" config --name-only --get-regexp '^filter\..*\.(clean|smudge|process)$' 2>/dev/null)
     env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_CONFIG_GLOBAL=/dev/null \
-        GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
+        GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_COUNT="$n" ${envs[@]+"${envs[@]}"} \
         "$REAL_GIT" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c gc.auto=0 \
         -c maintenance.auto=false -c protocol.allow=never -c credential.helper= "$@"
 }
@@ -516,6 +692,125 @@ agent_unpushed() {
     echo end
 }
 
+# tidy: after merges, the working copy's merged work goes and everything else is reported. One
+# line each, then "end" (a report without it is no report):
+#   deleted-remote <branch>            deleted on GitHub (delete-branch: merged there)
+#   deleted-branch <branch>            the local branch, merged into a base on origin
+#   removed-worktree <path>            a clean worktree of a merged branch, with its admin folder
+#   pruned <name>                      a worktree admin folder whose worktree is gone
+#   kept-remote <branch> <why>         a merged branch GitHub would not delete
+#   unpushed <n> <branch>              a local branch with n commits on no origin branch
+#   unmerged <branch>                  pushed, not merged yet
+#   uncommitted <path>                 a merged branch's worktree with changes (kept)
+#   checked-out <branch> <path>        a merged branch the working copy itself has checked out
+#   detached <path>                    a worktree on a detached HEAD (kept)
+#   locked <path>                      a locked worktree (kept)
+#   orphaned <path>                    a folder that was a worktree, whose admin folder is gone
+#   cannot-delete <path> <why>         what the agent may not delete (a folder only a session
+#                                      can write: its umask was not 002)
+# Bases are origin's default branch and main, master and develop where origin has them. Only
+# branches that exist in this working copy are deleted on GitHub: a colleague's branch is not
+# this working copy's to tidy. Runs as the agent (in the session group); gitrun only deletes on
+# GitHub.
+agent_tidy() {
+    nargs $# 1; no_options "$@"
+    local line b tip n i wt base bases=() rows=() into rel j ex dirty why
+    working_copy "$1"; agent_slug "$WC"
+    new_bundle
+    as_run fetch "$SLUG" > "$BUNDLE" || exit 1
+    import_bundle "$WC"
+    base=$(ag -C "$WC" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    for b in "${base#origin/}" $PROTECTED_BRANCHES; do
+        [ -n "$b" ] || continue
+        ag -C "$WC" rev-parse -q --verify "refs/remotes/origin/${b}^{commit}" >/dev/null || continue
+        case " ${bases[*]} " in *" $b "*) ;; *) bases+=("$b") ;; esac
+    done
+    [ ${#bases[@]} -gt 0 ] || die "origin has no default branch, main, master or develop to tidy against"
+    merged_into() { # SHA: the first base that holds it, in INTO
+        local x
+        INTO=""
+        for x in "${bases[@]}"; do
+            if ag -C "$WC" merge-base --is-ancestor "$1" "refs/remotes/origin/${x}" 2>/dev/null; then INTO="$x"; return 0; fi
+        done
+        return 1
+    }
+    # The worktrees, the working copy first.
+    local wts=() wbr=() wdet=() wgone=() wlock=()
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) wts+=("${line#worktree }"); wbr+=(""); wdet+=(0); wgone+=(0); wlock+=(0) ;;
+            "branch refs/heads/"*) wbr[-1]="${line#branch refs/heads/}" ;;
+            detached) wdet[-1]=1 ;;
+            prunable*) wgone[-1]=1 ;;
+            locked*) wlock[-1]=1 ;;
+        esac
+    done < <(ag -C "$WC" worktree list --porcelain) || die "cannot list ${WC}'s worktrees"
+    [ ${#wts[@]} -gt 0 ] || die "cannot list ${WC}'s worktrees"
+    while IFS= read -r -u 3 b; do
+        [ -n "$b" ] || continue
+        b="${b#refs/heads/}"
+        case " ${bases[*]} $PROTECTED_BRANCHES " in *" $b "*) continue ;; esac
+        tip=$(ag -C "$WC" rev-parse -q --verify "refs/heads/${b}^{commit}") || continue
+        if ! merged_into "$tip"; then
+            n=$(ag -C "$WC" rev-list --count "$tip" --not --remotes=origin --) || die "cannot read ${b}"
+            if [ "$n" != 0 ]; then rows+=("unpushed ${n} ${b}"); else rows+=("unmerged ${b}"); fi
+            continue
+        fi
+        into="$INTO"
+        if ag -C "$WC" rev-parse -q --verify "refs/remotes/origin/${b}" >/dev/null; then
+            if line=$(as_run delete-branch "$SLUG" "$b" 2>&1 </dev/null); then
+                case "$line" in *"deleted ${b} "*|*"gone ${b}"*) rows+=("deleted-remote ${b}") ;; esac
+            else
+                rows+=("kept-remote ${b} $(printf '%s' "$line" | tail -n1 | sed 's/^gitctl: refused: //')")
+            fi
+        fi
+        # The worktree that has it checked out, if any.
+        wt="" i=""
+        for j in "${!wts[@]}"; do
+            [ "${wbr[$j]}" = "$b" ] && { wt="${wts[$j]}"; i="$j"; break; }
+        done
+        if [ -n "$wt" ]; then
+            if [ "$i" = 0 ]; then rows+=("checked-out ${b} ${wt}"); continue; fi
+            if [ "${wlock[$i]}" = 1 ]; then rows+=("locked ${wt}"); continue; fi
+            if [ "${wgone[$i]}" = 0 ]; then
+                ex=()
+                for j in "${!wts[@]}"; do
+                    rel="${wts[$j]#"$wt"/}"
+                    [ "$j" != "$i" ] && [ "$rel" != "${wts[$j]}" ] && ex+=(":(exclude,literal)${rel}")
+                done
+                dirty=$(ag -C "$wt" --no-optional-locks status --porcelain --ignore-submodules=all -- . ${ex[@]+"${ex[@]}"}) \
+                    || { rows+=("cannot-delete ${wt} its changes cannot be read"); continue; }
+                if [ -n "$dirty" ]; then rows+=("uncommitted ${wt}"); continue; fi
+                # Every folder in it must be one the agent may empty, or the remove would stop
+                # half way: check first, delete nothing when one is not.
+                why=$(find "$wt" -xdev -type d ! -writable -print -quit 2>/dev/null)
+                if [ -n "$why" ]; then rows+=("cannot-delete ${wt} not writable by the git container: ${why}"); continue; fi
+                if line=$(ag -C "$WC" worktree remove "$wt" 2>&1 </dev/null); then rows+=("removed-worktree ${wt}")
+                else rows+=("cannot-delete ${wt} $(printf '%s' "$line" | tail -n1)"); continue; fi
+            fi
+        fi
+        if ag -C "$WC" update-ref -d "refs/heads/${b}" "$tip" 2>/dev/null; then rows+=("deleted-branch ${b}")
+        else rows+=("cannot-delete ${b} the branch moved or its ref cannot be written"); fi
+    done 3< <(ag -C "$WC" for-each-ref --format='%(refname)' refs/heads/)
+    for i in "${!wts[@]}"; do
+        [ "$i" != 0 ] || continue
+        [ "${wdet[$i]}" = 1 ] && [ "${wgone[$i]}" = 0 ] && rows+=("detached ${wts[$i]}")
+    done
+    while IFS= read -r line; do
+        case "$line" in "Removing worktrees/"*) line="${line#Removing worktrees/}"; rows+=("pruned ${line%%:*}") ;; esac
+    done < <(ag -C "$WC" worktree prune -v 2>&1)
+    # Folders inside the working copy that were worktrees: a .git file whose admin folder is gone.
+    local gd main_git
+    main_git=$(ag -C "$WC" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || main_git=""
+    while IFS= read -r -d '' line; do
+        { [ -f "$line" ] && [ ! -L "$line" ]; } || continue
+        gd=$(timeout 5 head -c 4096 -- "$line" 2>/dev/null | sed -n '1s/^gitdir: //p')
+        case "$gd" in "${main_git}/worktrees/"*) [ -d "$gd" ] || rows+=("orphaned ${line%/.git}") ;; esac
+    done < <(find "$WC" -mindepth 2 -maxdepth 4 -name .git -type f -print0 2>/dev/null)
+    [ ${#rows[@]} -eq 0 ] || printf '%s\n' "${rows[@]}"
+    echo end
+}
+
 # push: the branch, bundled from the working copy (only what origin lacks, as far as the copy
 # knows: the bundle's base must be in gitrun's copy or gitrun refuses it), handed to gitrun on
 # stdin. gitrun decides; nothing here is trusted by it.
@@ -561,8 +856,16 @@ agent_side() {
         storage) agent_storage "$@" ;;
         remove-copy) nargs $# 1; no_options "$@"; switch_to run remove-copy "$1" ;;
         status|login|logout) switch_to cred "$verb" "$@" ;;
-        pr-list) nargs $# 1; agent_slug "$1"; switch_to cred "$verb" "$SLUG" ;;
-        pr-view|pr-merge) nargs $# 2; agent_slug "$1"; switch_to cred "$verb" "$SLUG" "$2" ;;
+        pr-list|protection|protect) nargs $# 1; agent_slug "$1"; switch_to cred "$verb" "$SLUG" ;;
+        pr-view|pr-merge|pr-view-json) nargs $# 2; agent_slug "$1"; switch_to cred "$verb" "$SLUG" "$2" ;;
+        pr-list-json)
+            [ $# = 2 ] || [ $# = 3 ] || die "usage: gitctl pr-list-json <repo> <open|closed|merged|all> [<head>]"
+            agent_slug "$1"; shift; switch_to cred "$verb" "$SLUG" "$@" ;;
+        delete-branch)
+            nargs $# 2; no_options "$@"
+            gitctl_branch_ok "$REAL_GIT" "$2" || die "$GITCTL_REASON"
+            agent_slug "$1"; switch_to run delete-branch "$SLUG" "$2" ;;
+        tidy) agent_tidy "$@" ;;
         pr-create)
             if [ $# -ne 7 ] || [ "$4" != --title-file ] || [ "$6" != --body-file ]; then
                 die "usage: gitctl pr-create <repo> <head> <base> --title-file F --body-file F"
@@ -594,7 +897,7 @@ case "$ROLE" in
     run)
         sweep_store
         case "$verb" in
-            fetch) run_fetch "$@" ;; push) run_push "$@" ;;
+            fetch) run_fetch "$@" ;; push) run_push "$@" ;; delete-branch) run_delete_branch "$@" ;;
             storage) run_storage "$@" ;; remove-copy) run_remove_copy "$@" ;;
             *) die "${verb} does not run as gitrun" ;;
         esac ;;

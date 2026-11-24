@@ -31,9 +31,24 @@ fi
 
 sel=$(k8s_node_selector) || exit 1
 info "applying ${AIDC_K8S_USER}'s git container in ${ns}"
-k8s_render_git "$sel" | k8s_kubectl apply -f - >&2
+applied=$(k8s_render_git "$sel" | k8s_kubectl apply -f -) || die "could not apply the git container"
+printf '%s\n' "$applied" >&2
+# The image tag is aidc's version, so `aidc k8s build --force` replaces the image under the same
+# tag and an unchanged Deployment would keep running the old one. Setup restarts it then: the
+# pod pulls the image again (imagePullPolicy Always). Always, not only when the registry's
+# digest differs: the registry is reachable from the cluster, not from here, and setup is run
+# rarely and on purpose. A request running then is reported to its session as interrupted.
+if printf '%s\n' "$applied" | grep -q '^deployment.apps/git unchanged'; then
+    info "restarting it, so it runs the image now in the registry"
+    k8s_kubectl -n "$ns" rollout restart deployment/git >&2 || die "could not restart the git container"
+fi
 info "waiting for it to be ready"
 if ! k8s_kubectl -n "$ns" rollout status deployment/git --timeout=300s >&2; then
     die "the git container did not become ready; see: kubectl -n ${ns} describe pod -l app=git (is aidc/gitctl built? aidc k8s build --only gitctl)"
 fi
-info "the git container is ready. Next: \`aidc git attach\`, then \`gitctl login\` there."
+# The request folder sessions hand pull requests to, made (or checked) on the user's disk by a
+# one-shot root pod, as the repo folders are, and given to the git container.
+req=$(k8s_git_requests_path)
+k8s_repo_dir_step "$ns" "$req" requests "$sel" >/dev/null \
+    || die "the git container runs, but its request folder ${req} could not be made; run aidc git setup again"
+info "the git container is ready (git mode: ${AIDC_K8S_GIT_MODE}). Next: \`aidc git login\` (a device code you approve in your browser)."

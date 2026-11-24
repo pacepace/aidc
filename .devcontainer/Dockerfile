@@ -24,7 +24,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # is required by dockerd for its NAT/bridge rules.
 #
 # Explicitly NOT installed (anti-patterns):
-#   - gh (GitHub CLI) -- GIT-03 forbids it
+#   - gh (GitHub CLI) -- GIT-03 forbids it. /usr/local/bin/gh is aidc's stand-in
+#     (gh-standin.sh, below): no login, no network of its own; on the Kubernetes backend it
+#     hands pull requests to the user's git container as request files.
 #   - openssh-client / sshpass -- no SSH outbound from container
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -461,7 +463,8 @@ COPY user-main.sh          /usr/local/bin/aidc-user-main.sh
 COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
 COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
-RUN chmod 0755 /usr/local/bin/aidc-post-create.sh \
+COPY gh-standin.sh         /usr/local/bin/gh
+RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/aidc-post-create.sh \
                 /usr/local/bin/aidc-tmux-start.sh \
                 /usr/local/bin/aidc-entrypoint.sh \
                 /usr/local/bin/aidc-user-main.sh \

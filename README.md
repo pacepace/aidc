@@ -645,7 +645,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 | `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
 | `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
-| `aidc git {setup\|attach\|status}` | Kubernetes backend: your git container, which holds your GitHub login (see "Kubernetes backend"). |
+| `aidc git {setup\|login\|logout\|attach\|status\|push\|pr\|merge\|tidy\|protect\|requests\|approve\|deny}` | Kubernetes backend: your git container, which holds your GitHub login and pushes, opens and merges PRs for you and your sessions (see "Kubernetes backend"). |
 
 ### Profiles
 
@@ -674,16 +674,40 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
   privileged pods.
 - `aidc user add <name>`: the user's namespace and disk.
-- `aidc git setup | attach | status`: the user's git container, the one thing in the cluster
-  that will push and open PRs (sessions cannot). `setup` starts it in your namespace (safe to
-  run again); `attach` opens its terminal, where you log in to GitHub yourself with
-  `gitctl login` (a device code you approve in your browser), so the admin never handles it;
-  `status` says whether it runs and is logged in to GitHub, and how much its private copies
-  take ("unknown" when the cluster or the container does not answer). Its agent runs as its own
+- `aidc git setup | login | logout | attach | status`: the user's git container, the one thing
+  in the cluster that will push and open PRs (sessions cannot). `setup` starts it in your
+  namespace with its request folder on your disk (safe to run again; it restarts the container
+  so a rebuilt image is picked up); `login` logs it in to GitHub as you (a device code you
+  approve in your browser, so the admin never handles it), and its commits then show as you:
+  your GitHub name, and your public email or else GitHub's noreply address for your account,
+  unsigned; `attach` opens its terminal; `status` says whether it runs and is logged in, its
+  git mode, how many session requests wait for you, and how much its private copies take
+  ("unknown" when the cluster or the container does not answer). Its agent runs as its own
   user (uid 2000, in the sessions' group), unprivileged, with no API token, and cannot read the
   login: only gitctl's fixed verbs reach it. The container reaches public addresses and Quad9
   DNS only, and nothing may connect to it. The login, its home and its private copies are
-  volumes, kept when the container is replaced. Pushing through it comes next.
+  volumes, kept when the container is replaced.
+- `aidc git push <repo> <branch>`, `aidc git pr <repo> <branch> [--base B] --title T --body-file F`
+  and `aidc git merge <repo> <number>`: the git container pushes (fast-forward only, never
+  `main`, `master` or `develop`, no commit with AI attribution), pushes and opens a PR, or
+  merges one (always a merge commit), for a working copy on your disk; running the command is
+  your approval. After a merge it tidies. The first push to a repo shows GitHub's protections
+  of its default branch; `aidc git protect <repo>` turns missing ones on (a ruleset against
+  force pushes and deletion, merge commits allowed) only when you answer yes, and never turns
+  any off. `aidc git tidy [<repo>]` deletes merged branches (on GitHub and locally) and their
+  clean worktrees, and lists every leftover (unpushed, unmerged, uncommitted, orphaned worktree
+  folders) without deleting it.
+- Sessions ask through `gh`: a stand-in in the session image (not GitHub's CLI; it holds no
+  login) that turns `gh pr create` (with the push before it; `gh aidc push` pushes only),
+  `gh pr merge`, `gh pr view` and `gh pr list` into request files in
+  `/home/<user>/.aidc/git-requests`, waits up to a minute for the git container's answer and
+  prints it as gh would. `kubernetes.git_mode: ask` (the default) holds each push, PR and merge
+  until you approve it (`aidc git requests`, `aidc git approve <id>`, `aidc git deny <id>`); the
+  session hears "requested; waiting for approval" with the id (`gh aidc request <id>`, `gh pr
+  status`). `rules` lets gitctl's rules decide at once. Reads run at once in both. Requests and
+  results are deleted after 30 days. `git push` in a session still fails, and says to use
+  `gh pr create`. Sessions here make group-writable files (umask 002), so the git container
+  can tidy their worktrees. On Docker the stand-in says no git container is set up.
 - `aidc repo add <github-url|owner/name> [--path P]`: your git container clones the repo onto
   your disk (default `/home/<user>/<name>`) as an ordinary working copy, yours and your
   sessions', shared with the git container. It gets there through the git container's own
@@ -740,6 +764,8 @@ kubernetes:
   git_store_size: 10Gi           # the git container's private copies of GitHub repos (on the
                                  # session class: a cache of GitHub)
   git_storage_warn: 1Gi          # `aidc git status` warns when those copies take more
+  git_mode: ask                  # sessions' push/PR/merge requests: ask (you approve each) or
+                                 # rules (gitctl's rules decide); applied by `aidc git setup`
   cpu: 2                         # guaranteed per session; cpu_limit / memory_limit: the ceiling
   memory: 8Gi                    #   (default 16 and 32Gi)
   user_disk_size: 100Gi          # each user's disk

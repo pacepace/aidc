@@ -80,20 +80,21 @@ RUN groupadd -g 2001 gitcred \
     && install -d -o root -g root -m 0755 /home/gitrun /var/lib/gitctl \
     && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred \
     && install -d -o gitrun -g gitrun -m 0700 /var/lib/gitctl/gitrun
-COPY gitctl-rules.sh gitctl.sh gh-shim.sh cred-helper.sh claude-hook.sh /opt/aidc/lib/gitctl/
+COPY gitctl-rules.sh gitctl.sh git-requests.sh gh-shim.sh cred-helper.sh claude-hook.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
 COPY managed-settings.json /etc/claude-code/managed-settings.json
 RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/aidc-gitctl \
     && chmod 0755 /opt/aidc /opt/aidc/lib /opt/aidc/lib/gitctl /etc/claude-code \
     && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
-    && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/gh-shim.sh \
+    && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/lib/gitctl/gh-shim.sh \
                   /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \
     && chmod 0440 /etc/sudoers.d/aidc-gitctl \
     && visudo -c -f /etc/sudoers.d/aidc-gitctl \
     && install -d -m 0755 /opt/aidc/bin \
     && ln -s /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/bin/gitctl \
     && ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh \
+    && ln -s /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/bin/git-requests \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/aidc/bin:*) ;; *) PATH="/opt/aidc/bin:$PATH" ;; esac' \
         > /etc/profile.d/aidc-gitctl.sh \
     # ~/.profile puts ~/.local/bin first; /opt/aidc/bin goes before it.

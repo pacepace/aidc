@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# aidc git status: the git container's pod, GitHub login and SSH key, its storage (gitrun's
+# aidc git status: the git container's pod, GitHub login, git mode, waiting requests, its storage (gitrun's
 # private copies and the agent's bundles, with a warning above kubernetes.git_storage_warn, so
 # nothing fills its disk unnoticed) and its egress policy.
 #
 # Every answer is one of yes, no or unknown: a cluster or container that cannot be asked is
-# "unknown", never "no", because a user told "not logged in" logs in again, and one told
-# "no key" makes a second key, when the truth was only that nothing answered.
+# "unknown", never "no", because a user told "not logged in" logs in again when the truth was
+# only that nothing answered.
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
@@ -33,7 +33,7 @@ case "$rc" in
 esac
 
 github="unknown (the container cannot be asked)"
-ssh="unknown (the container cannot be asked)"
+waiting="unknown (the container cannot be asked)"
 storage="unknown (the container cannot be asked)"
 if [ "$rc" = 0 ]; then
     # One exec for both answers. Only a line the script printed counts: an exec that fails
@@ -45,19 +45,17 @@ if [ "$rc" = 0 ]; then
         case "$(gitctl status 2>/dev/null)" in
             yes) echo "github=yes" ;; no) echo "github=no" ;; unknown) echo "github=stored" ;;
         esac
-        keys=$(ls "$HOME"/.ssh/id_* 2>/dev/null | grep -v "\.pub$" | xargs -r -n1 basename | paste -sd" " -)
-        echo "ssh=${keys:-none}"
+        n=$(git-requests list 2>/dev/null | tail -n +2 | grep -c .) && echo "waiting=${n}"
         gitctl storage 2>/dev/null | sed "s/^/storage-/"' </dev/null 2>/dev/null || true)
     case "$(printf '%s\n' "$out" | sed -n 's/^github=//p')" in
         yes) github="logged in" ;;
         no) github="not logged in (aidc git attach, then: gitctl login)" ;;
         stored) github="unknown (GitHub did not confirm the login)" ;;
     esac
-    keys=$(printf '%s\n' "$out" | sed -n 's/^ssh=//p')
-    case "$keys" in
-        "") ;;
-        none) ssh="none (aidc git attach, then add one to ~/.ssh)" ;;
-        *) ssh="yes (${keys})" ;;
+    n=$(printf '%s\n' "$out" | sed -n 's/^waiting=//p')
+    case "$n" in
+        0) waiting="none" ;;
+        [1-9]*) waiting="${n} waiting for your approval (aidc git requests)" ;;
     esac
 fi
 copies=$(printf '%s\n' "${out:-}" | sed -n 's/^storage-copies //p')
@@ -71,7 +69,8 @@ if [ "$rc" = 0 ] && printf '%s' "$copies" | grep -Eq '^[0-9]+$'; then
     fi
 fi
 printf 'github:   %s\n' "$github"
-printf 'ssh key:  %s\n' "$ssh"
+printf 'mode:     %s (kubernetes.git_mode: ask approves each session request, rules lets gitctl decide)\n' "$AIDC_K8S_GIT_MODE"
+printf 'requests: %s\n' "$waiting"
 printf 'storage:  %s\n' "$storage"
 
 if have=$(k8s_kubectl -n "$ns" get networkpolicy -o name --request-timeout=10s 2>/dev/null); then

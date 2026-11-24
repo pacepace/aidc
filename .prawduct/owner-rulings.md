@@ -287,3 +287,5 @@ Kept audit trails accumulate (one per session on both backends: folders under th
 Docker, kept claims on Kubernetes), so aidc needs a command that lists them and removes old ones
 ("we need an audit trim command if they grow to GB that rapidly"). Audit is evidence, so trimming
 is explicit and never touches a running session's trail.
+Refined (2026-11-24): any aidc command warns when the kept audit trails are larger than 100 MB
+("something should warn you when you run any aidc command if it is larger than 100MB").

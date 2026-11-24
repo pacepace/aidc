@@ -402,3 +402,7 @@ The owner approved one cumulative Critic round beyond the branch's review round 
 ## 2026-11-24 — aidc 2.0 is the Kubernetes work and the 3tears adoption, released together
 
 On Kubernetes the git agent's ask-mode question reaches no orchestrator until the per-user MCP server, which is part of the 3tears adoption. So the owner ruled that the Kubernetes backend and the 3tears adoption ship as one release, 2.0: the Kubernetes work rolls straight into the 3tears work rather than releasing on its own. Until then, Kubernetes approvals are answered with `aidc attach git` or `aidc git approve|deny`; 2.0 must route them through the orchestrator before it ships.
+
+## 2026-11-24 — Everything ships in 2.0; nothing is left behind
+
+Every piece of the Kubernetes program goes into 2.0 with the 3tears adoption: the per-user MCP server, account switching, Syncthing, ports/tunnel/LAN Ingress, GPU, `--egress-tcp`, the taint freeze, restart/upgrade, the audit trim (#77) and the git container's live GitHub test. None of it is deferred to a backlog item or a later release. Work is done all the way, not filed.

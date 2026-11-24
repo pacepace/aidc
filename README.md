@@ -891,8 +891,11 @@ selector and the runtime class's own scheduling do).
 testament (a distributed test runner) at its newest release. The repo is private for now, so this is opt-in and uses
 your own SSH key: aidc reads the newest `vX.Y.Z` tag with `git ls-remote`, clones that tag
 shallowly, builds a wheel with `uv build` (cached in `~/.cache/aidc/testament/<tag>`), and puts
-only the wheel into the dev image (`aidc rebuild`, `aidc k8s build --force`) and into a running
-session (`aidc upgrade`). Without the setting, without access or without `uv`, it says so in one
+only the wheel into the dev image (whenever it is built: `aidc rebuild`, the first `aidc create`
+that has no image yet, `aidc k8s build`, and `--force` there for a new release under the same
+version) and into a running session (`aidc upgrade`). The build resolves its build backend under
+the same 14-day cooldown as every other dependency, and the cache keeps the newest three
+releases. Without the setting, without access or without `uv`, it says so in one
 line and the build or upgrade goes on.
 
 ```yaml

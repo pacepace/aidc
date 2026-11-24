@@ -160,7 +160,7 @@ on top: it refuses switching user, reading the login's home, edits to the guard 
 login in the agent's home, and attributed git commands. Measured 2026-11-24 in the git pod as
 uid 2000, with a dummy token: `sudo -l` lists only gitctl; the token is unreadable by every route
 tried; every verb refuses options and malformed arguments. The bypasses that remain are listed
-in the build plan (`build-plan-k8s-git-container.md`, Chunk 02 decisions).
+in the build plan (`.prawduct/artifacts/archive/build-plan-k8s-git-container.md`, Chunk 02 decisions).
 
 Repos as built: `aidc repo add <owner/name>` first puts the repo on the `git-repos` ConfigMap and
 waits (up to `AIDC_K8S_GIT_REPOS_WAIT`, 180 s) until the git pod's mounted copy has it (the
@@ -560,9 +560,10 @@ the tunnel needs no ingress rule.
 Squid denies private destinations itself as well (defence in depth): every session's squid runs
 public-only (`AIDC_PUBLIC_ONLY=1`, the same rule as the git container's proxy on Docker), so a
 request for a private, loopback, link-local or shared address, or for a public name that resolves
-to one, gets squid's 403 before the NetworkPolicy would refuse the connection. An `--egress-tcp`
-relay (NET-15) is reached by the dev pod directly, by its own egress rule, not through squid, so
-public-only refuses nothing a session is meant to reach.
+to one, gets squid's 403 before the NetworkPolicy would refuse the connection. Planned, not
+built yet (W-K2-03): an `--egress-tcp` relay (NET-15) is to be reached by the dev pod directly,
+by its own egress rule, not through squid, so public-only would refuse nothing a session is meant
+to reach; W-K2-03 checks this when it builds the relays. Today a Kubernetes session has no relay.
 
 Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeats both):
 - through the session's squid, `http://192.168.1.1/`, `http://10.0.0.1/` and

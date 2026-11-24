@@ -36,8 +36,9 @@ case "$taint" in
 esac
 # The malware feeds behind the blocklist (#60), from the refresher's state file; a refresher that
 # cannot be asked is unknown, never fine.
-proxy=$(k8s_kubectl -n "$ns" get pod -l "aidc/session=${NAME},app=proxy" -o name --request-timeout=10s 2>/dev/null | head -n1 || true)
-if [ -n "$proxy" ] && fstate=$(k8s_kubectl -n "$ns" exec "$proxy" -c refresher --request-timeout=10s -- \
+if ! proxy=$(k8s_get "$ns" pod -l "aidc/session=${NAME},app=proxy" -o name); then
+    printf 'feeds:    unknown: the cluster did not answer (%s)\n' "$proxy"
+elif proxy=$(printf '%s\n' "$proxy" | head -n1) && [ -n "$proxy" ] && fstate=$(k8s_kubectl -n "$ns" exec "$proxy" -c refresher --request-timeout=10s -- \
         sh -c 'cat /etc/squid/aidc-feeds.state 2>/dev/null; true' </dev/null 2>/dev/null); then
     aidc_feeds_describe "$fstate" "$(date +%s)" | sed '1s/^/feeds:    /; 2,$s/^/          /' || true
 else

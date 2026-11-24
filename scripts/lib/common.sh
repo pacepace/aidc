@@ -21,6 +21,13 @@ err()  { printf '[aidc] error: %s\n' "$*" >&2; }
 info() { printf '[aidc] %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# The line a dev container's (or dev pod's) user-main logs once tmux and Claude are up
+# (.devcontainer/user-main.sh: its log prefix plus "ready"). Every wait for a ready session
+# (Docker's wait_for_dev_ready; Kubernetes' create, restart and upgrade) looks for this, so a
+# reworded log line fails in one place (tests/unit/test-dev-ready.sh checks the producer).
+# shellcheck disable=SC2034  # read by scripts/k8s/lib.sh
+AIDC_DEV_READY_MARKER='[aidc-user-main] ready'
+
 # ---- session name validation -------------------------------------------------
 #
 # Session names are interpolated into Docker container names, volume names,
@@ -519,7 +526,7 @@ wait_for_dev_ready() {
     local i=0 last_msg="" logs msg
     while [ "$i" -lt "$max_seconds" ]; do
         logs=$(docker logs "$dev_ct" 2>&1 || true)
-        if printf '%s' "$logs" | grep -q '\[aidc-user-main\] ready'; then
+        if printf '%s' "$logs" | grep -qF "$AIDC_DEV_READY_MARKER"; then
             info "$dev_ct ready (user-main reported ready)"
             relay_transcript_warnings "$logs"
             return 0

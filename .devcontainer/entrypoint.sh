@@ -59,7 +59,9 @@ fi
 # exec, aidc attach's shell windows, sudo) get the same here: login and interactive bash read
 # the two files, and sudo would otherwise add its own 022 to whatever umask its caller had.
 # Files written as root (a Docker build bind-mounting the disk) are still the session's to
-# remove; gitctl tidy names them.
+# remove; gitctl tidy names them. umask_override also loosens a stricter umask a caller set
+# (`umask 077; sudo ...` writes 002 files): accepted, in a single-user pod whose disk only the
+# git container shares.
 # group_write_shells <root>: writes them under <root> (/ in the container).
 group_write_shells() {
     local r="${1%/}" tmp

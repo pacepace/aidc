@@ -108,6 +108,24 @@ not_taken_msg() {
     printf 'the git container has not taken request %s: it is not running, or it cannot use its request folder (the user sees why with: aidc git status). The request stays and is taken once it can be; check it with: gh aidc request %s' "$1" "$1"
 }
 
+# gone_state ID: where a request stands when neither its request file nor its result is there.
+# The git container takes a request by moving it out of requests/ before it writes any result,
+# so a request just taken looks like this too; only the 30-day sweep (git-requests' expire)
+# removes both for good. So it is "expired" only when this session's own record says it was
+# sent more than 30 days ago; within that it is taken and not answered yet. With no record (not
+# sent from this session, or its record already swept) neither can be told.
+gone_state() {
+    local sent t
+    sent=$(cut -d' ' -f2 "$STATE/$1" 2>/dev/null) || sent=""
+    if [ -z "$sent" ] || ! t=$(date -u -d "$sent" +%s 2>/dev/null); then
+        printf 'unknown: no request or result is there, and this session has no record of sending it (another session'"'"'s, or expired: the git container keeps them 30 days)'
+    elif [ $(( $(date -u +%s) - t )) -gt $(( 30 * 86400 )) ]; then
+        printf 'expired: no request or result is kept for it any more (the git container keeps them 30 days)'
+    else
+        printf 'taken, not answered yet: the git container took it and has not written a result; check again shortly'
+    fi
+}
+
 # finish ID: print a request's result as gh would, or say where it stands. A change waiting for
 # the user's approval, or being run, exits 0 (the request stands); one the git container has not
 # taken exits 1, saying so; a read that got no answer exits 1 (the caller has no data).
@@ -316,9 +334,10 @@ pr_list() {
 }
 
 # This session's requests, newest first, with their state: the result when there is one; "sent,
-# not taken yet" while the request itself still waits in the folder; and "expired" when neither
-# is there any more (the git container deletes requests and results after 30 days), never
-# "not taken" for a request that is simply gone.
+# not taken yet" while the request itself still waits in the folder; and when neither is there,
+# gone_state's answer: "taken, not answered yet" within 30 days of sending, "expired" after
+# (the git container deletes requests and results after 30 days). Never "not taken" for a
+# request that has left the folder.
 pr_status() {
     local f id s
     need_folder
@@ -329,7 +348,7 @@ pr_status() {
         s=$(jq -r '"\(.state): \(.message)"' "$REQ/results/${id}.json" 2>/dev/null | printable) || s=""
         if [ -z "$s" ]; then
             if untaken "$id"; then s="sent, not taken yet"
-            else s="expired: no request or result is kept for it any more (the git container keeps them 30 days)"; fi
+            else s=$(gone_state "$id"); fi
         fi
         printf '%s  %s  %s\n' "$id" "$(cut -d' ' -f1,3 "$STATE/$f" | printable)" "$s"
     done < <(find "$STATE" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2)
@@ -340,7 +359,7 @@ aidc_request() {
     need_folder
     if [ ! -r "$REQ/results/${1}.json" ]; then
         if untaken "$1"; then echo "request ${1}: sent, not taken yet: $(not_taken_msg "$1")"
-        else echo "request ${1}: expired: no request or result is kept for it any more (the git container keeps them 30 days)"; fi
+        else echo "request ${1}: $(gone_state "$1")"; fi
         return 0
     fi
     RESULT=$(cat -- "$REQ/results/${1}.json")

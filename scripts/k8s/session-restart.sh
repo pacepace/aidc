@@ -32,7 +32,10 @@ k8s_is_git_session "$NAME" \
     && die "git is your git agent (the git container), not a session aidc restart manages: aidc git setup starts or updates it"
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 k8s_require_session "$ns" "$NAME"
-old=$(k8s_dev_pod_uid "$ns" "$NAME")
+# The old pod's uid tells the new pod from it (the old one keeps its name and its ready line
+# while it terminates): a read that fails stops here, before anything changes.
+old=$(k8s_dev_pod_uid "$ns" "$NAME") \
+    || die "cannot read ${NAME}'s dev pod in ${ns}: the cluster did not answer (${old}); nothing changed"
 info "restarting ${NAME}'s dev pod (the proxy keeps running)"
 k8s_kubectl -n "$ns" delete pod "${NAME}-dev-0" --ignore-not-found --wait=false >/dev/null \
     || die "the cluster did not take the restart; nothing changed"

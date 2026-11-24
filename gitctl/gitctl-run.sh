@@ -120,7 +120,7 @@ run_push() {
     # The bundle's branch is held under a ref of this push's own (its bundle's unique name), so
     # two pushes of one repo never set or delete each other's.
     RUN_REF="refs/incoming/${RUN_BUNDLE##*/}"
-    trap 'rm -f "$RUN_BUNDLE"; g update-ref -d "$RUN_REF" >/dev/null 2>&1' EXIT
+    trap 'rm -f "$RUN_BUNDLE" "${RUN_BUNDLE}.added" "${RUN_BUNDLE}.err"; g update-ref -d "$RUN_REF" >/dev/null 2>&1' EXIT
     # A push that was killed leaves its ref; its bundle is gone (or swept), so drop it. A push
     # still running has its bundle file, made before its ref.
     while IFS= read -r ref; do
@@ -158,9 +158,13 @@ run_push() {
         gitctl_check_text "$raw" "commit ${sha:0:12}" || die "$GITCTL_REASON; reword it before pushing"
         ids=$(printf '%s\n' "$raw" | sed -n '/^$/q; /^\(author\|committer\) /p')
         gitctl_ai_identity "$ids" && die "commit ${sha:0:12} is authored or committed as an AI tool or bot"
-        # No attribution in code or docs either: the lines this commit adds, read as a stream.
-        if gitctl_attribution_stream < <(added_lines "$sha"); then
-            die "commit ${sha:0:12} adds AI attribution to a file (${GITCTL_HIT:0:120}); no attribution in code or docs. Take it out, or build such text from parts where it is test data"
+        # No attribution in code or docs either: the lines this commit adds, checked by shape (a
+        # trailer, a "Generated with" footer), so a file may state the policy. They go to a file
+        # first: a diff that cannot be read refuses the push (fail closed), never "adds nothing".
+        added_lines "$sha" "${RUN_BUNDLE}.err" > "${RUN_BUNDLE}.added" \
+            || die "cannot read the lines commit ${sha:0:12} adds, so it cannot be checked for attribution (git diff-tree: $(tail -n1 "${RUN_BUNDLE}.err" 2>/dev/null)); nothing was pushed"
+        if gitctl_file_attribution_stream < "${RUN_BUNDLE}.added"; then
+            die "commit ${sha:0:12} adds AI attribution to a file (${GITCTL_HIT:0:120}); no attribution trailers or \"Generated with\" footers in code or docs. Take it out, or build such text from parts where it is test data"
         fi
     done < <(g rev-list "$local_sha" "${nots[@]}" --)
     if ! g push --no-recurse-submodules --no-follow-tags "$ORIGIN_URL" "${local_sha}:refs/heads/${branch}"; then
@@ -172,21 +176,24 @@ run_push() {
     echo "pushed ${branch} ${local_sha}"
 }
 
-# added_lines SHA: the lines commit SHA adds, without their diff prefix. A plain commit against
+# added_lines SHA ERRFILE: the lines commit SHA adds, without their diff prefix; returns 1 (git's
+# messages in ERRFILE) when git cannot produce the diff. A plain commit against
 # its parent (or the empty tree); a merge as a combined diff, where only a line new against every
 # parent counts (what the merge itself wrote; a line from a merged branch was that branch's,
 # scanned when it was pushed, or origin's). Renames are followed, so a moved file adds nothing.
 # No diff driver, text conversion or colour: what is compared is the bytes the push sends.
 added_lines() {
-    local n
-    n=$(g rev-list --no-walk --parents "$1" | awk '{ print NF - 1 }')
-    [ "${n:-0}" -ge 1 ] || n=1
-    g diff-tree -p --cc -M --root --no-commit-id --no-color --no-ext-diff --no-textconv "$1" 2>/dev/null \
+    local n st
+    n=$(g rev-list --no-walk --parents "$1" 2>"$2" | awk '{ print NF - 1 }') && [ -n "$n" ] || return 1
+    [ "$n" -ge 1 ] || n=1
+    g diff-tree -p --cc -M --root --no-commit-id --no-color --no-ext-diff --no-textconv "$1" 2>"$2" \
         | awk -v n="$n" 'BEGIN { p = ""; for (i = 0; i < n; i++) p = p "+" }
             /^diff --(git|cc|combined) / { h = 1; next }
             /^@@/ { h = 0; next }
             h { next }
             substr($0, 1, n) == p { print substr($0, n + 1) }'
+    st=("${PIPESTATUS[@]}")
+    [ "${st[0]}" = 0 ] && [ "${st[1]}" = 0 ]
 }
 
 # delete-branch: delete a branch on GitHub after its pull request merged (gitctl tidy). Only a

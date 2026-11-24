@@ -105,6 +105,7 @@ case "$*" in
     *"get networkpolicy default-deny"*) echo "networkpolicy.networking.k8s.io/default-deny" ;;
     *"get deployment "*"-proxy"*) case "$*" in *--ignore-not-found*) : ;; *) exit 1 ;; esac ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
+    *"get pod "*"-dev-0 -o jsonpath={.metadata.uid}"*) printf 'u1|' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
 esac

@@ -78,19 +78,30 @@ case "$*" in
         if [ "${K_SIZED:-}" = 1 ]; then
             echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj"}},"spec":{"template":{"spec":{"containers":[{"name":"dev","resources":{"requests":{"cpu":"4","memory":"12Gi"},"limits":{"cpu":"16","memory":"32Gi"}}}]}}}}'
         else
-            echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi","aidc/audit":"demo-audit-20261124050000"}}}'
+            echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi","aidc/audit":"demo-audit-20261124050000"}},"spec":{"template":{"spec":{"initContainers":[{"name":"seed-home","image":"localhost:5000/aidc/dev-base:v0.0.1"},{"name":"repo-dir","image":"localhost:5000/aidc/dev-base:v0.0.1"},{"name":"wait-proxy","image":"localhost:5000/aidc/squid:v0.0.1"}],"containers":[{"name":"dev","image":"localhost:5000/aidc/dev-base:v0.0.1"},{"name":"mirror","image":"localhost:5000/aidc/mirror:v0.0.1"}]}}}}'
         fi ;;
     *"get statefulset -l app=dev"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
-    *"get pod demo-dev-0 --ignore-not-found -o jsonpath={.metadata.uid}"*)
-        # The dev pod's uid: "old" until the pod is deleted or rolled, then "new" (K_UID_FILE).
-        cat "$K_UID_FILE" 2>/dev/null || printf 'old' ;;
-    *"delete pod demo-dev-0"*|*"rollout restart statefulset/demo-dev"*) [ "${K_NEVER_BACK:-}" = 1 ] || printf 'new' > "$K_UID_FILE" ;;
-    *"get pod demo-dev-0 -o jsonpath={.spec.containers"*) printf '%s' "${K_POD_IMAGE:-localhost:5000/aidc/dev-base:$(head -n1 "$AIDC_ROOT_FOR_STUB/VERSION")}" ;;
-    *"get statefulset demo-dev"*"jsonpath"*) printf 'localhost:5000/aidc/dev-base:v0.0.1' ;;
+    *"get pod demo-dev-0 -o jsonpath={.metadata.uid}"*)
+        # The dev pod: uid "old" until the pod is deleted or rolled, then "new" (K_UID_FILE).
+        # K_UID_FAIL=1: the cluster does not answer the first (old uid) read. K_NEW_DELETING=1:
+        # the new pod is being deleted. K_IMAGE_READ_FAIL=1: the read of the new pod's image fails;
+        # K_IMAGE_READ_DELETING=1: by then the pod is being deleted.
+        case "$*" in *"{.metadata.uid}|{.metadata.deletionTimestamp}|{.spec.containers"*)
+            [ "${K_IMAGE_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+            del=""; [ "${K_IMAGE_READ_DELETING:-}" = 1 ] && del=2026-11-24T10:00:00Z
+            printf '%s|%s|%s' "$(cat "$K_UID_FILE" 2>/dev/null || printf old)" "$del" \
+                "${K_POD_IMAGE:-localhost:5000/aidc/dev-base:$(head -n1 "$AIDC_ROOT_FOR_STUB/VERSION")}"; exit 0 ;; esac
+        uid=$(cat "$K_UID_FILE" 2>/dev/null || printf 'old')
+        [ "${K_UID_FAIL:-}" = 1 ] && [ "$uid" = old ] && { echo 'Unable to connect to the server: i/o timeout' >&2; exit 1; }
+        case "$*" in *deletionTimestamp*)
+            del=""; [ "${K_NEW_DELETING:-}" = 1 ] && del=2026-11-24T10:00:00Z
+            printf '%s|%s' "$uid" "$del" ;;
+        *) printf '%s' "$uid" ;; esac ;;
+    *"delete pod demo-dev-0"*|*"patch statefulset demo-dev"*) [ "${K_NEVER_BACK:-}" = 1 ] || printf 'new' > "$K_UID_FILE" ;;
     *"exec pod/demo-proxy-abc -c refresher -- /usr/local/bin/refresh.sh"*) echo "refreshed: 9 entries from urlhaus=4 hagezi=5 additions=0 (took 1s)" ;;
     *"exec -i demo-dev-0 -c dev -- sudo -u vscode -H env HOME=/home/vscode sh -c"*) : ;;
-    *"get pod demo-dev-0 -o jsonpath"*) printf 'Running' ;;
+    *"get pod demo-dev-0 -o jsonpath={.status.phase}"*) printf 'Running' ;;
     *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
@@ -239,6 +250,17 @@ for bad in "--cpu two" "--cpu 0" "--memory 8gb" "--memory -1" "--cpu-limit 1.234
     assert_has "'$bad' is refused before anything is made" "exit=1" "$out"
     assert_eq "  (nothing applied for '$bad')" "" "$(cat "$K_APPLIED")"
 done
+# Kubernetes' quantity grammar: decimal kilo is a lower-case k; K is not a quantity at all.
+# shellcheck disable=SC2016  # expanded by the inner shell
+mem() { AIDC_SCRIPTS="$AIDC_ROOT/scripts" bash -c '. "$AIDC_SCRIPTS/k8s/lib.sh"; k8s_memory_bytes "$1"' _ "$1" 2>/dev/null || echo refused; }
+assert_eq "512k is 512000 bytes, as Kubernetes reads it" 512000 "$(mem 512k)"
+assert_eq "512K is refused (the API server would refuse it partway through a create)" refused "$(mem 512K)"
+assert_eq "binary and decimal suffixes up to E and Ei" "1073741824 8000000000 1125899906842624 1000000000000000000" \
+    "$(mem 1Gi) $(mem 8G) $(mem 1Pi) $(mem 1E)"
+assert_eq "the milli suffix is refused for memory (512m is half a byte, a typo for 512Mi)" refused "$(mem 512m)"
+out=$(run create demo --backend kubernetes --memory 512K)
+assert_has "--memory 512K is refused before anything is made" "exit=1" "$out"
+assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
 out=$(run create demo --backend kubernetes --cpu 2.5)
 assert_eq "a fractional CPU count is taken as Kubernetes writes it" '"2.5"' "$(dev '.spec.template.spec.containers[] | select(.name == "dev") | .resources.requests.cpu')"
 printf '  cpu: lots\n' >> "$HOME/.config/aidc/config.yaml"
@@ -282,6 +304,10 @@ mv "$SCRATCH/bin/kubectl" "$SCRATCH/bin/kubectl.real"; mv "$SCRATCH/bin/kubectl-
 out=$(K_FAIL_WHAT="networkpolicy default-deny" run create demo --backend kubernetes)
 assert_has "a failed default-deny read is 'did not answer', never 'has no default-deny'" "cannot read the default-deny NetworkPolicy in aidc-u-alice: the cluster did not answer" "$out"
 assert_not_has "(not the missing-policy advice)" "has no default-deny" "$out"
+out=$(K_FAIL_WHAT="service demo-proxy" run create demo --backend kubernetes)
+assert_has "a failed read of the proxy's address is 'did not answer', never 'has no address'" \
+    "cannot read the proxy Service's address in aidc-u-alice: the cluster did not answer (Unable to connect to the server)" "$out"
+assert_not_has "(not the no-address message)" "has no address" "$out"
 out=$(K_FAIL_WHAT="deployment demo-proxy" run create demo --backend kubernetes)
 assert_has "a failed read of the session is 'did not answer', and creates nothing" "cannot read session 'demo' in aidc-u-alice: the cluster did not answer" "$out"
 assert_eq "nothing applied" "" "$(cat "$K_APPLIED")"
@@ -326,6 +352,17 @@ rm -f "$K_UID_FILE"
 out=$(K_EXISTS=1 K_NEVER_BACK=1 run restart demo)
 assert_has "a pod that never comes back is an error, with where to look" "did not come back ready in 4s; see: kubectl -n aidc-u-alice describe pod demo-dev-0" "$out"
 assert_has "exit 1" "exit=1" "$out"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_UID_FAIL=1 run restart demo)
+assert_has "a failed read of the old pod's uid stops restart: the cluster did not answer" \
+    "cannot read demo's dev pod in aidc-u-alice: the cluster did not answer (Unable to connect to the server: i/o timeout); nothing changed" "$out"
+assert_has "exit 1" "exit=1" "$out"
+assert_not_has "before anything is deleted (the old pod could otherwise pass for the new one)" "delete pod" "$(cat "$K_LOG")"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_NEW_DELETING=1 run restart demo)
+assert_has "a pod that is being deleted is never taken as back, even with a new uid and the ready line" \
+    "did not come back ready in 4s" "$out"
+assert_not_has "so restart does not say it is back" "session demo is back" "$out"
 out=$(run restart demo --backend kubernetes)
 assert_has "restart of a session that is not there says so" "no session 'demo'" "$out"
 out=$(K_GIT=1 run restart git --backend kubernetes)
@@ -335,9 +372,16 @@ rm -f "$K_UID_FILE"
 ver=$(head -n1 "$AIDC_ROOT/VERSION")
 out=$(K_EXISTS=1 run upgrade demo --yes)
 log=$(cat "$K_LOG")
-assert_has "upgrade points the dev pod and its init containers at this version's image" \
-    "set image statefulset/demo-dev dev=localhost:5000/aidc/dev-base:${ver} seed-home=localhost:5000/aidc/dev-base:${ver} repo-dir=localhost:5000/aidc/dev-base:${ver}" "$log"
-assert_has "and rolls it, so the pod is new even under the same tag" "rollout restart statefulset/demo-dev" "$log"
+patch=$(grep "patch statefulset demo-dev --type=strategic -p " "$K_LOG" | sed "s/^.* -p //")
+assert_eq "upgrade changes the StatefulSet in one patch (one revision, one new pod)" 1 "$(grep -c 'patch statefulset demo-dev' "$K_LOG")"
+assert_not_has "not set image and then a rollout restart (two revisions)" "rollout restart" "$log"
+assert_eq "the patch moves every container on dev-base, found in the session's own StatefulSet" \
+    "dev=localhost:5000/aidc/dev-base:${ver} seed-home=localhost:5000/aidc/dev-base:${ver} repo-dir=localhost:5000/aidc/dev-base:${ver}" \
+    "$(printf '%s' "$patch" | jq -r '[.spec.template.spec.containers[], .spec.template.spec.initContainers[]] | map(.name + "=" + .image) | join(" ")')"
+assert_eq "and nothing on another image (mirror, wait-proxy)" "" \
+    "$(printf '%s' "$patch" | jq -r '[.spec.template.spec.containers[], .spec.template.spec.initContainers[]] | map(select(.name == "mirror" or .name == "wait-proxy")) | .[].name')"
+assert_eq "with a restartedAt stamp, so the pod is new even under the same tag" yes \
+    "$(printf '%s' "$patch" | jq -r '.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] | test("^20[0-9-]+T") | if . then "yes" else "no" end')"
 assert_has "it shows the image it replaces" "current image: localhost:5000/aidc/dev-base:v0.0.1" "$out"
 assert_has "and says it is done once the new pod is ready on that image" "upgraded demo to localhost:5000/aidc/dev-base:${ver}" "$out"
 assert_has "testament: not configured is one line, and the upgrade goes on" "testament: not configured" "$out"
@@ -346,9 +390,30 @@ rm -f "$K_UID_FILE"
 out=$(K_EXISTS=1 K_POD_IMAGE=localhost:5000/aidc/dev-base:v0.0.1 run upgrade demo --yes)
 assert_has "a pod that came back on another image is an error" "came back on localhost:5000/aidc/dev-base:v0.0.1" "$out"
 rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_UID_FAIL=1 run upgrade demo --yes)
+assert_has "a failed read of the old pod's uid stops upgrade before anything changes" \
+    "cannot read demo's dev pod in aidc-u-alice: the cluster did not answer (Unable to connect to the server: i/o timeout); nothing changed" "$out"
+assert_not_has "no patch is sent" "patch statefulset" "$(cat "$K_LOG")"
+assert_not_has "and it never says the session came back on its old image" "came back on" "$out"
+assert_not_has "nor installs testament anywhere" "exec -i demo-dev-0" "$(cat "$K_LOG")"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_NEW_DELETING=1 run upgrade demo --yes)
+assert_has "a new pod that is being deleted is not taken as upgraded" "did not come back ready in 4s" "$out"
+assert_not_has "so nothing is installed into a terminating pod" "exec -i demo-dev-0" "$(cat "$K_LOG")"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_IMAGE_READ_FAIL=1 run upgrade demo --yes)
+assert_has "a failed read of the new pod's image is not 'came back on an unknown image'" \
+    "demo came back, but its image cannot be read: the cluster did not answer (Unable to connect to the server)" "$out"
+assert_not_has "and nothing is installed" "exec -i demo-dev-0" "$(cat "$K_LOG")"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_IMAGE_READ_DELETING=1 run upgrade demo --yes)
+assert_has "a pod that is being deleted by the time its image is read is not reported on" "was replaced again before its image could be read" "$out"
+assert_not_has "not as upgraded" "upgraded demo" "$out"
+assert_not_has "and testament is not installed into it" "exec -i demo-dev-0" "$(cat "$K_LOG")"
+rm -f "$K_UID_FILE"
 out=$(: > "$K_APPLIED"; : > "$K_LOG"; cd "$HOME/code/proj" && printf 'n\n' | K_EXISTS=1 "$AIDC_ROOT/scripts/aidc" upgrade demo 2>&1; echo "exit=$?")
 assert_has "without --yes it asks, and n aborts" "aborted" "$out"
-assert_not_has "changing nothing" "set image" "$(cat "$K_LOG")"
+assert_not_has "changing nothing" "patch statefulset" "$(cat "$K_LOG")"
 out=$(K_GIT=1 run upgrade git --yes --backend kubernetes)
 assert_has "the git agent is not upgraded as a session" "not a session aidc upgrade manages" "$out"
 

@@ -101,18 +101,12 @@ case "$REPO_PATH" in *[\"\\]*|*$'\n'*) die "the repo path may not contain quotes
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 # Each read below tells "not there" (an empty answer) from "the cluster did not answer" (kubectl
 # failed): only the first is a fact about the user's namespace.
-# k8s_read <what> <kubectl get args...>: the answer, or dies saying the cluster did not answer.
-# stderr apart from the answer: a kubectl warning must not read as a value.
+# k8s_read <what> <kubectl get args...>: the answer (lib.sh's k8s_get), or dies saying the
+# cluster did not answer.
 k8s_read() {
-    local what="$1" out errf rc=0
+    local what="$1" out
     shift
-    errf=$(mktemp)
-    out=$(k8s_kubectl -n "$ns" get "$@" --ignore-not-found --request-timeout=10s 2>"$errf" </dev/null) || rc=$?
-    if [ "$rc" != 0 ]; then
-        out=$(tail -n1 "$errf"); rm -f "$errf"
-        die "cannot read ${what} in ${ns}: the cluster did not answer (${out})"
-    fi
-    rm -f "$errf"
+    out=$(k8s_get "$ns" "$@") || die "cannot read ${what} in ${ns}: the cluster did not answer (${out})"
     printf '%s' "$out"
 }
 phase=$(k8s_read "your disk" pvc disk -o jsonpath='{.status.phase}')
@@ -173,9 +167,10 @@ k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/
     | yq '.metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/session": "'"${NAME}"'"}' \
     | k8s_kubectl apply -f - >&2
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" | k8s_kubectl apply -f - >&2
+# Not there yet is asked again; a read that fails is "the cluster did not answer" (k8s_read).
 proxy_ip=""
 for _ in $(seq 30); do
-    proxy_ip=$(k8s_kubectl -n "$ns" get service "${NAME}-proxy" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+    proxy_ip=$(k8s_read "the proxy Service's address" service "${NAME}-proxy" -o jsonpath='{.spec.clusterIP}')
     [ -n "$proxy_ip" ] && break
     sleep 1
 done
@@ -186,20 +181,17 @@ k8s_kubectl -n "$ns" rollout status "deployment/${NAME}-proxy" --timeout=300s >&
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" "$proxy_ip" | k8s_kubectl apply -f - >&2
 info "waiting for the dev pod to be ready"
 pod="${NAME}-dev-0"
-for _ in $(seq 150); do
-    if k8s_kubectl -n "$ns" logs "$pod" -c dev 2>/dev/null | grep -q '\[aidc-user-main\] ready'; then
-        info "session ${NAME} is ready"
-        # The git container keys this session's git mode on its token (the user's mode until
-        # aidc git mode gives it its own; a session made again under an old name starts afresh).
-        if gpod=$(k8s_git_pod "$ns" 2>/dev/null) \
-                && printf '%s\n' "$AIDC_K8S_GIT_TOKEN" | k8s_kubectl -n "$ns" exec -i "$gpod" -c git -- git-requests register "$NAME" >/dev/null 2>&1; then
-            info "git container: session ${NAME} registered (your git mode applies to it)"
-        else
-            info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"
-        fi
-        info "attach: aidc attach ${NAME} --backend kubernetes (or: kubectl -n ${ns} exec -it ${pod} -c dev -- sudo -u vscode tmux attach -t main)"
-        exit 0
-    fi
-    sleep 4
-done
-die "the dev pod did not report ready in 10 minutes; see: kubectl -n ${ns} logs ${pod} -c dev"
+# A new session has no old pod: any dev pod that is not being deleted and says it is ready
+# (k8s_wait_dev_ready says where to look when it does not).
+k8s_wait_dev_ready "$ns" "$NAME" "" "${AIDC_K8S_READY_WAIT:-600}" \
+    || die "the dev pod did not report ready; its log: kubectl -n ${ns} logs ${pod} -c dev"
+info "session ${NAME} is ready"
+# The git container keys this session's git mode on its token (the user's mode until
+# aidc git mode gives it its own; a session made again under an old name starts afresh).
+if gpod=$(k8s_git_pod "$ns" 2>/dev/null) \
+        && printf '%s\n' "$AIDC_K8S_GIT_TOKEN" | k8s_kubectl -n "$ns" exec -i "$gpod" -c git -- git-requests register "$NAME" >/dev/null 2>&1; then
+    info "git container: session ${NAME} registered (your git mode applies to it)"
+else
+    info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"
+fi
+info "attach: aidc attach ${NAME} --backend kubernetes (or: kubectl -n ${ns} exec -it ${pod} -c dev -- sudo -u vscode tmux attach -t main)"

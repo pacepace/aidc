@@ -49,19 +49,23 @@ STUB
 chmod +x "$S/bin/fake-ssh"
 export FORGE="$S/forge" GIT_SSH_COMMAND="$S/bin/fake-ssh"
 
-# uv stub: `uv build ... --out-dir D SRC` writes the wheel of SRC's version; logs each build.
+# uv stub: `uv build ... --exclude-newer T --out-dir D SRC` writes the wheel of SRC's version;
+# logs each build's version and its cooldown (the --exclude-newer value and UV_EXCLUDE_NEWER) to
+# UV_ARGS. UV_FAIL=<text> fails the build with that as its last stderr line.
 cat > "$S/bin/uv" <<'STUB'
 #!/bin/sh
 [ "$1" = build ] || exit 1
-out="" src=""
-while [ $# -gt 0 ]; do case "$1" in --out-dir) out="$2"; shift 2 ;; -*|build) shift ;; *) src="$1"; shift ;; esac; done
+out="" src="" excl=""
+while [ $# -gt 0 ]; do case "$1" in --out-dir) out="$2"; shift 2 ;; --exclude-newer) excl="$2"; shift 2 ;; -*|build) shift ;; *) src="$1"; shift ;; esac; done
+printf '%s %s\n' "$excl" "${UV_EXCLUDE_NEWER:-}" >> "$UV_ARGS"
+if [ -n "${UV_FAIL:-}" ]; then printf 'Building wheel...\n%s\n\n' "$UV_FAIL" >&2; exit 2; fi
 v=$(sed -n 's/^version = "\(.*\)"/\1/p' "$src/pyproject.toml")
 mkdir -p "$out" && echo wheel > "$out/testament-${v}-py3-none-any.whl"
 echo "$v" >> "$UV_LOG"
 STUB
 chmod +x "$S/bin/uv"
-export UV_LOG="$S/uv.log" PATH="$S/bin:$PATH"
-: > "$UV_LOG"
+export UV_LOG="$S/uv.log" UV_ARGS="$S/uv-args.log" PATH="$S/bin:$PATH"
+: > "$UV_LOG"; : > "$UV_ARGS"
 
 # shellcheck source=../../scripts/lib/config.sh
 . "$AIDC_SCRIPTS/lib/config.sh"
@@ -90,6 +94,12 @@ assert_eq "the newest vX.Y.Z tag, in number order (v0.10.0 over v0.9.0; no pre-r
 wheel
 assert_eq "the wheel of that release, cached per tag" "0 $HOME/.cache/aidc/testament/v0.10.0/testament-0.10.0-py3-none-any.whl" "$RC $OUT"
 assert_eq "built once" "0.10.0" "$(cat "$UV_LOG")"
+# REL-09: the build backend resolves under the 14-day cooldown, as a flag and in the environment.
+read -r EXCL EXCL_ENV < "$UV_ARGS"
+assert_eq "uv build is given --exclude-newer, and UV_EXCLUDE_NEWER the same" "$EXCL" "$EXCL_ENV"
+assert_eq "an RFC 3339 UTC time" yes "$(printf '%s' "$EXCL" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' && echo yes)"
+AGE=$(( ($(date -u +%s) - $(date -u -d "$EXCL" +%s)) / 3600 ))
+assert_eq "14 days back (336 hours, give or take one)" yes "$([ "$AGE" -ge 335 ] && [ "$AGE" -le 337 ] && echo yes)"
 wheel
 assert_eq "a second call takes the cached wheel" "0 $HOME/.cache/aidc/testament/v0.10.0/testament-0.10.0-py3-none-any.whl" "$RC $OUT"
 assert_eq "without building again" 1 "$(grep -c . "$UV_LOG")"
@@ -104,7 +114,8 @@ echo "=== no access, or not something to fetch with an SSH key ==="
 rm -rf "$HOME/.cache/aidc/testament"
 OUT=$(SSH_DENY=1 aidc_testament_wheel 2>"$S/err"); RC=$?; ERR=$(cat "$S/err")
 assert_eq "no access: no wheel" "1 " "$RC $OUT"
-assert_has "and one line says so and that it goes on" "cannot read its release tags with your SSH key (no access?); going on without it" "$ERR"
+assert_has "and one line says so, with ssh's own reason, and that it goes on" "cannot read its release tags with your SSH key (no access?) (git@example.invalid: Permission denied (publickey).); going on without it" "$ERR"
+assert_eq "one line" 1 "$(printf '%s\n' "$ERR" | grep -c .)"
 for url in https://github.com/team/testament.git "-oProxyCommand=x:y" "/srv/testament.git"; do
     printf 'testament:\n  repo: "%s"\n' "$url" > "$CFG"
     wheel
@@ -204,6 +215,39 @@ out=$(SSH_DENY=1 AIDC_ROOT="$AIDC_ROOT" AIDC_VERSION_TAG=vtest bash "$AIDC_SCRIP
 assert_eq "no access: the upgrade still succeeds" 0 "$rc"
 assert_has "with the one line" "testament: cannot read its release tags with your SSH key" "$out"
 assert_eq "and nothing is copied in" "" "$(grep '^cp ' "$D_LOG")"
+
+echo "=== the cache keeps the newest releases only ==="
+C="$HOME/.cache/aidc/testament"
+for v in 0.1.0 0.2.0 0.9.0 0.10.0; do mkdir -p "$C/v$v"; : > "$C/v$v/testament-$v-py3-none-any.whl"; done
+mkdir -p "$C/.build.old1" "$C/.build.new1"; touch -d '2 hours ago' "$C/.build.old1"
+printf '[project]\nname = "testament"\nversion = "0.13.0"\n' > "$SRC/pyproject.toml"
+G -C "$SRC" commit -q -am "v0.13.0"; G -C "$SRC" tag v0.13.0; G -C "$SRC" push -q "$S/forge/team/testament.git" v0.13.0 2>/dev/null
+wheel
+assert_eq "a new release is cached" "0 testament-0.13.0-py3-none-any.whl" "$RC ${OUT##*/}"
+assert_eq "and only the newest three releases stay (number order)" "v0.9.0 v0.10.0 v0.13.0" \
+    "$(find "$C" -mindepth 1 -maxdepth 1 -type d -name 'v*' -printf '%f\n' | sort -V | paste -sd' ' -)"
+assert_eq "an interrupted build's folder goes" "" "$(find "$C" -maxdepth 1 -name '.build.old1')"
+assert_eq "one that may be a build running beside it stays" ".build.new1" "$(find "$C" -maxdepth 1 -name '.build.new1' -printf '%f')"
+rm -rf "$C/.build.new1"
+
+echo "=== a failure keeps its cause, on the same one line ==="
+rm -rf "$C"
+OUT=$(UV_FAIL='error: Failed to resolve requirements from build-system.requires' aidc_testament_wheel 2>"$S/err"); RC=$?; ERR=$(cat "$S/err")
+assert_eq "the build fails: no wheel" "1 " "$RC $OUT"
+assert_has "the note gives uv's last stderr line" "v0.13.0 did not build into a wheel (error: Failed to resolve requirements from build-system.requires); going on without it" "$ERR"
+assert_eq "still one line" 1 "$(printf '%s\n' "$ERR" | grep -c .)"
+assert_eq "its build folder goes" "" "$(find "$C" -maxdepth 1 -name '.build.*')"
+cat > "$S/bin/git" <<'STUB'
+#!/bin/sh
+case "$*" in *" clone "*) echo 'Cloning into x...' >&2; echo 'fatal: Remote branch v0.13.0 not found in upstream origin' >&2; exit 128 ;; esac
+exec "$REAL_GIT" "$@"
+STUB
+chmod +x "$S/bin/git"
+OUT=$(REAL_GIT=$(PATH="${PATH#"$S/bin:"}" command -v git) aidc_testament_wheel 2>"$S/err"); RC=$?; ERR=$(cat "$S/err")
+rm -f "$S/bin/git"
+assert_eq "the clone fails: no wheel" "1 " "$RC $OUT"
+assert_has "the note gives git's last stderr line" "cannot fetch v0.13.0 (fatal: Remote branch v0.13.0 not found in upstream origin); going on without it" "$ERR"
+assert_eq "one line" 1 "$(printf '%s\n' "$ERR" | grep -c .)"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

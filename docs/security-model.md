@@ -192,8 +192,9 @@ runs with the login in a repo anyone else can write: commits cross as bundles in
 copies. Its network reaches public addresses only. What remains, by design or not yet closed:
 
 - **What a session asks for is code it wrote.** A pushed branch is the session's work; gitctl
-  scans commit messages, authors and the lines each commit adds for attribution, nothing else
-  about the code. Review the PR before merging; in `rules` mode nothing waits for you.
+  scans commit messages, authors and the lines each commit adds for attribution (in files, by
+  shape: an attribution trailer or a "Generated with" footer line, so a file may state the
+  no-attribution policy), nothing else about the code. Review the PR before merging; in `rules` mode nothing waits for you.
 - **The git agent is not a boundary.** Its allow list and instructions are courtesies; it can run
   gitctl itself (and reach gitcred through sudo directly), so a session that talks it into acting
   gets what gitctl's rules allow, no more: only repos you added, and "added" is a list written

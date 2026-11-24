@@ -45,9 +45,24 @@ ns=$(k8s_user_ns "$AIDC_K8S_USER")
 k8s_require_session "$ns" "$NAME"
 pod="${NAME}-dev-0"
 img="${AIDC_K8S_REGISTRY_PULL}/aidc/dev-base:${AIDC_VERSION_TAG}"
-cur=$(k8s_kubectl -n "$ns" get statefulset "${NAME}-dev" --request-timeout=10s \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="dev")].image}' </dev/null) \
-    || die "cannot read session '${NAME}': the cluster did not answer"
+# The session's StatefulSet as manifests.sh rendered it: its dev container's image now, and
+# every container and init container that runs dev-base (the dev container and those that copy
+# from it), so all of them move together, whatever the manifest names them.
+sts=$(k8s_get "$ns" statefulset "${NAME}-dev" -o json) \
+    || die "cannot read session '${NAME}': the cluster did not answer (${sts})"
+[ -n "$sts" ] || die "session '${NAME}' has no dev StatefulSet in ${ns}"
+cur=$(printf '%s' "$sts" | jq -r '.spec.template.spec.containers[]? | select(.name == "dev") | .image' 2>/dev/null || true)
+# The patch: those containers on the new image and a restartedAt stamp, in one change of the pod
+# template (one revision, one new pod; the stamp makes it new under an unchanged tag).
+patch=$(printf '%s' "$sts" | jq -c --arg img "$img" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    def devbase: [.[]? | select((.image // "") | test("/aidc/dev-base:")) | {name: .name, image: $img}];
+    {spec: {template: {metadata: {annotations: {"kubectl.kubernetes.io/restartedAt": $at}},
+        spec: {containers: (.spec.template.spec.containers | devbase),
+               initContainers: (.spec.template.spec.initContainers | devbase)}}}}
+    | if (.spec.template.spec.initContainers | length) == 0 then del(.spec.template.spec.initContainers) else . end') \
+    || die "cannot read session '${NAME}': its StatefulSet is not what aidc renders"
+printf '%s' "$patch" | jq -e '[.spec.template.spec.containers[].name] | index("dev")' >/dev/null 2>&1 \
+    || die "session '${NAME}' has no dev container on aidc's dev-base image: create it again (aidc kill ${NAME}; aidc create ${NAME})"
 
 printf '\nThis replaces the dev pod of %s:\n' "$NAME" >&2
 printf '  - an in-flight Claude turn is interrupted; Claude resumes the conversation (--continue)\n' >&2
@@ -61,16 +76,20 @@ if [ "$YES" != 1 ]; then
     case "$REPLY" in y|Y) ;; *) info "aborted"; exit 0 ;; esac
 fi
 
-old=$(k8s_dev_pod_uid "$ns" "$NAME")
-# The image of the dev container and of the init containers that copy from it (the home's first
-# seed, the repo folder), then a rollout restart: a new pod even when the tag is unchanged.
-k8s_kubectl -n "$ns" set image "statefulset/${NAME}-dev" "dev=${img}" "seed-home=${img}" "repo-dir=${img}" \
-    </dev/null >/dev/null || die "the cluster did not take the new image; nothing changed"
-k8s_kubectl -n "$ns" rollout restart "statefulset/${NAME}-dev" </dev/null >/dev/null \
-    || die "the cluster did not roll the session; see: kubectl -n ${ns} describe statefulset ${NAME}-dev"
+# The old pod's uid tells the new pod from it (the old one keeps its name and its ready line
+# while it terminates): a read that fails stops here, before anything changes.
+old=$(k8s_dev_pod_uid "$ns" "$NAME") \
+    || die "cannot read ${NAME}'s dev pod in ${ns}: the cluster did not answer (${old}); nothing changed"
+k8s_kubectl -n "$ns" patch statefulset "${NAME}-dev" --type=strategic -p "$patch" </dev/null >/dev/null \
+    || die "the cluster did not take the new image; nothing changed"
 info "rolling ${NAME}'s dev pod onto ${img}"
 k8s_wait_dev_ready "$ns" "$NAME" "$old" "${AIDC_K8S_READY_WAIT:-600}" || exit 1
-got=$(k8s_kubectl -n "$ns" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="dev")].image}' </dev/null 2>/dev/null || true)
+# The pod that said it was ready, read again with its uid: only a new pod's image is an answer.
+now=$(k8s_get "$ns" pod "$pod" -o jsonpath='{.metadata.uid}|{.metadata.deletionTimestamp}|{.spec.containers[?(@.name=="dev")].image}') \
+    || die "${NAME} came back, but its image cannot be read: the cluster did not answer (${now}); run aidc upgrade ${NAME} again"
+IFS='|' read -r uid gone got <<<"$now" || true
+{ [ -n "$uid" ] && [ "$uid" != "$old" ] && [ -z "$gone" ]; } \
+    || die "${pod} was replaced again before its image could be read; run aidc upgrade ${NAME} again"
 [ "$got" = "$img" ] || die "${pod} came back on ${got:-an unknown image}, not ${img}"
 info "upgraded ${NAME} to ${img}"
 

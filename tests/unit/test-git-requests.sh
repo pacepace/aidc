@@ -517,7 +517,24 @@ assert_has "pr status: one whose request and result are both gone is expired, ho
 assert_not_has "  (never 'not taken' for it)" "$uid  push feat  sent, not taken yet" "$OUT"
 ghs aidc request "$uid"
 assert_has "gh aidc request says the same" "request $uid: expired" "$OUT"
+# Sent moments ago, and taken: take() moves the request out of requests/ before it writes any
+# result, so both are absent for a while. That is not expired: the session's own record says
+# it was sent within the 30 days.
+printf 'push %s feat\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$gst/$uid"
+ghs pr status
+assert_has "pr status: a request just taken, with no result yet, is taken and not answered" "$uid  push feat  taken, not answered yet" "$OUT"
+assert_not_has "  (never 'expired' for it)" "$uid  push feat  expired" "$OUT"
+ghs aidc request "$uid"
+assert_has "gh aidc request says the same" "request $uid: taken, not answered yet" "$OUT"
+printf 'push %s feat\n' "$(date -u -d '29 days ago' +%Y-%m-%dT%H:%M:%SZ)" > "$gst/$uid"
+ghs aidc request "$uid"
+assert_has "29 days after sending it is still not called expired" "request $uid: taken, not answered yet" "$OUT"
+printf 'push %s feat\n' "$(date -u -d '31 days ago' +%Y-%m-%dT%H:%M:%SZ)" > "$gst/$uid"
+ghs aidc request "$uid"
+assert_has "31 days after, it is" "request $uid: expired" "$OUT"
 rm -f "$gst/$uid"
+ghs aidc request "$uid"
+assert_has "with no record of sending it, neither is claimed" "request $uid: unknown: no request or result is there, and this session has no record of sending it" "$OUT"
 mkdir -p "$S/elsewhere"; git init -q "$S/elsewhere"; git -C "$S/elsewhere" remote add origin https://gitlab.com/o/r
 OUT=$(cd "$S/elsewhere" && bash "$GH" pr create --title T --body B 2>&1); RC=$?
 assert_eq "a working copy whose origin is not GitHub is refused here" 1 "$RC"

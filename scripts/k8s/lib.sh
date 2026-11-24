@@ -164,15 +164,18 @@ k8s_cpu_milli() {
            awk -v q="$1" 'BEGIN { m = int(q * 1000 + 0.5); if (m < 1) exit 1; print m }' ;;
     esac
 }
-# k8s_memory_bytes <quantity>: the memory quantity in bytes ("8Gi", "512Mi", "8G", "1073741824"),
-# or returns 1.
+# k8s_memory_bytes <quantity>: the memory quantity in bytes ("8Gi", "512Mi", "8G", "512k",
+# "1073741824"), or returns 1. Kubernetes' quantity grammar: binary suffixes Ki Mi Gi Ti Pi Ei,
+# decimal k M G T P E (lower-case k: "512K" is not a quantity, and the API server would refuse it
+# partway through a create). Left out on purpose: the milli suffix m (0.5 bytes, always a typo
+# for Mi in a memory size) and exponents (8e9).
 k8s_memory_bytes() {
     local n u
-    printf '%s' "$1" | grep -Eqx '[0-9]{1,13}(\.[0-9]{1,3})?(Ki|Mi|Gi|Ti|K|M|G|T)?' || return 1
-    n=$(printf '%s' "$1" | sed -E 's/[KMGT]i?$//') u="${1#"$n"}"
+    printf '%s' "$1" | grep -Eqx '[0-9]{1,13}(\.[0-9]{1,3})?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?' || return 1
+    n=$(printf '%s' "$1" | sed -E 's/([KMGTPE]i|[kMGTPE])$//') u="${1#"$n"}"
     awk -v n="$n" -v u="$u" 'BEGIN {
-        f["Ki"] = 1024; f["Mi"] = 1024^2; f["Gi"] = 1024^3; f["Ti"] = 1024^4
-        f["K"] = 1e3; f["M"] = 1e6; f["G"] = 1e9; f["T"] = 1e12; f[""] = 1
+        f["Ki"] = 1024; f["Mi"] = 1024^2; f["Gi"] = 1024^3; f["Ti"] = 1024^4; f["Pi"] = 1024^5; f["Ei"] = 1024^6
+        f["k"] = 1e3; f["M"] = 1e6; f["G"] = 1e9; f["T"] = 1e12; f["P"] = 1e15; f["E"] = 1e18; f[""] = 1
         b = n * f[u]; if (b < 1) exit 1; printf "%.0f\n", b }'
 }
 # k8s_check_size: AIDC_K8S_CPU_REQUEST / _MEMORY_REQUEST / _CPU_LIMIT / _MEMORY_LIMIT are
@@ -196,12 +199,36 @@ k8s_check_size() {
     [ "$bad" = 0 ]
 }
 
+# k8s_get <namespace> <kubectl get args...>: the backend's one reader for a cluster object whose
+# absence is an answer. Prints the answer and returns 0, with "" for an object that is not there
+# (--ignore-not-found); when kubectl fails (the cluster did not answer, no rights, a timeout),
+# prints kubectl's last stderr line instead and returns 2, so a failed read is never "not
+# there". kubectl's stderr is kept apart from the answer: a warning on a read that worked must
+# not read as a value. Use it as an assignment, so a caller's set -e or || sees the failure:
+#   v=$(k8s_get "$ns" pvc disk -o jsonpath='{.status.phase}') || die "...: the cluster did not answer (${v})"
+k8s_get() {
+    local ns="$1" out errf rc=0
+    shift
+    errf=$(mktemp) || { printf 'cannot make a temporary file'; return 2; }
+    out=$(k8s_kubectl -n "$ns" get "$@" --ignore-not-found --request-timeout=10s 2>"$errf" </dev/null) || rc=$?
+    if [ "$rc" != 0 ]; then
+        out=$(grep -v '^[[:space:]]*$' "$errf" | tail -n1)
+        rm -f "$errf"
+        printf '%s' "${out:-kubectl exited ${rc}}"
+        return 2
+    fi
+    rm -f "$errf"
+    printf '%s' "$out"
+}
+
 # k8s_session_taint <namespace> <session>: "yes <flag json>", "no", or "unknown <why>", read
 # from the session's policy sidecar. Only the flag file being absent is "no": a sidecar that
 # cannot be asked is unknown, never clean.
 k8s_session_taint() {
     local ns="$1" s="$2" proxy out
-    proxy=$(k8s_kubectl -n "$ns" get pod -l "aidc/session=${s},app=proxy" -o name 2>/dev/null | head -n1)
+    proxy=$(k8s_get "$ns" pod -l "aidc/session=${s},app=proxy" -o name) \
+        || { printf 'unknown (the cluster did not answer: %s)\n' "$proxy"; return 0; }
+    proxy=$(printf '%s\n' "$proxy" | head -n1)
     [ -n "$proxy" ] || { printf 'unknown (no proxy pod)\n'; return 0; }
     if out=$(k8s_kubectl -n "$ns" exec "$proxy" -c policy -- \
             sh -c 'if [ -e /var/state/tainted ]; then printf "yes "; cat /var/state/tainted; else echo no; fi' \
@@ -238,25 +265,31 @@ k8s_require_session() {
     esac
 }
 
-# k8s_dev_pod_uid <namespace> <session>: the dev pod's uid now, "" when there is none.
+# k8s_dev_pod_uid <namespace> <session>: the dev pod's uid now, "" when there is none; returns 2
+# (kubectl's last line on stdout, as k8s_get) when the cluster did not answer. restart and
+# upgrade stop then: an unknown old uid would let the old pod, still terminating with the ready
+# marker in its log, pass for the new one.
 k8s_dev_pod_uid() {
-    k8s_kubectl -n "$1" get pod "${2}-dev-0" --ignore-not-found -o jsonpath='{.metadata.uid}' \
-        --request-timeout=10s </dev/null 2>/dev/null || true
+    k8s_get "$1" pod "${2}-dev-0" -o jsonpath='{.metadata.uid}'
 }
 
 # k8s_wait_dev_ready <namespace> <session> <old-uid> <seconds>: wait until the session's dev pod
-# is a new one (its uid is not <old-uid>) and has said it is ready (user-main's marker in its
-# log: tmux and Claude are up). Returns 1 when it did not within <seconds>, saying where to
-# look on stderr.
+# is a new one (its uid is not <old-uid>, and it is not being deleted) and has said it is ready
+# (user-main's marker, AIDC_DEV_READY_MARKER, in its log: tmux and Claude are up). <old-uid> ""
+# is a first start (create). A read that fails is "not yet". Returns 1 when it did not within
+# <seconds>, saying where to look on stderr.
 k8s_wait_dev_ready() {
-    local ns="$1" s="$2" old="$3" end uid
+    local ns="$1" s="$2" old="$3" end now uid gone
     end=$(( $(date +%s) + $4 ))
     while [ "$(date +%s)" -lt "$end" ]; do
-        uid=$(k8s_dev_pod_uid "$ns" "$s")
-        if [ -n "$uid" ] && [ "$uid" != "$old" ] \
-                && k8s_kubectl -n "$ns" logs "${s}-dev-0" -c dev --request-timeout=10s </dev/null 2>/dev/null \
-                    | grep -q '\[aidc-user-main\] ready'; then
-            return 0
+        if now=$(k8s_get "$ns" pod "${s}-dev-0" -o jsonpath='{.metadata.uid}|{.metadata.deletionTimestamp}'); then
+            uid="${now%%|*}" gone="${now#*|}"
+            [ "$gone" != "$now" ] || gone=""
+            if [ -n "$uid" ] && [ "$uid" != "$old" ] && [ -z "$gone" ] \
+                    && k8s_kubectl -n "$ns" logs "${s}-dev-0" -c dev --request-timeout=10s </dev/null 2>/dev/null \
+                        | grep -qF "$AIDC_DEV_READY_MARKER"; then
+                return 0
+            fi
         fi
         sleep 3
     done
@@ -372,8 +405,12 @@ k8s_repo_dir_step() {
         return 1
     fi
     for _ in $(seq 90); do
-        phase=$(k8s_kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-        case "$phase" in Succeeded|Failed) break ;; esac
+        # A read that fails is "not finished yet" (the loop asks again); its last answer is kept.
+        if phase=$(k8s_get "$ns" pod "$name" -o jsonpath='{.status.phase}'); then
+            case "$phase" in Succeeded|Failed) break ;; esac
+        else
+            phase="unknown: the cluster did not answer (${phase})"
+        fi
         sleep 2
     done
     logs=$(k8s_kubectl -n "$ns" logs "$name" 2>&1 || true)
@@ -400,9 +437,8 @@ K8S_GIT_REPOS_FILE=/etc/aidc/git-repos/repos
 k8s_git_repos_read() {
     local out
     K8S_GIT_REPOS="" K8S_GIT_REPOS_RV=""
-    if ! out=$(k8s_kubectl -n "$1" get configmap "$K8S_GIT_REPOS_CM" --ignore-not-found -o json \
-            --request-timeout=10s </dev/null); then
-        printf '[aidc] error: cannot read the list of added repos in %s: the cluster did not answer\n' "$1" >&2
+    if ! out=$(k8s_get "$1" configmap "$K8S_GIT_REPOS_CM" -o json); then
+        printf '[aidc] error: cannot read the list of added repos in %s: the cluster did not answer (%s)\n' "$1" "$out" >&2
         return 1
     fi
     [ -n "$out" ] || return 0
@@ -540,7 +576,7 @@ gb_status_head() {
         0) printf 'pod:      %s, running\n' "$pod"; GIT_POD="$pod" GB_UP=1 ;;
         1)
             # No running pod: say whether there is a git container at all.
-            if dep=$(k8s_kubectl -n "$ns" get deployment git --ignore-not-found -o name --request-timeout=10s 2>/dev/null); then
+            if dep=$(k8s_get "$ns" deployment git -o name); then
                 if [ -n "$dep" ]; then printf 'pod:      not running (see: kubectl -n %s describe pod -l app=git)\n' "$ns"
                 else printf 'pod:      not set up (run: aidc git setup)\n'; fi
             else

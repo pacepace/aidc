@@ -7,7 +7,10 @@
 # wheel here (uv build) and cached per tag. The wheel goes into the dev image's build context
 # (aidc rebuild, a first create, aidc k8s build) and, on `aidc upgrade`, into the running
 # session. No key or token enters an image or a session: only the wheel does. Integrity rests on
-# the SSH-authenticated fetch of the tag's commit.
+# the SSH-authenticated fetch of the tag's commit (there is no checksum asset to check: ruling
+# Q-K7's checksum clause has nothing to apply to a source build). The build itself resolves its
+# build backend under the same 14-day supply-chain cooldown as everything else (REL-09):
+# `uv build --exclude-newer`, which governs the isolated build environment.
 #
 # Missing config, no access, no uv: one line on stderr, and the build or upgrade goes on
 # without testament. Nothing here fails a caller.
@@ -17,6 +20,40 @@
 # and no kubectl: the backends hand aidc_testament_install their own copy and exec.
 
 _aidc_testament_note() { printf '[aidc] testament: %s\n' "$*" >&2; }
+
+# Wheels of this many releases stay in the cache; older ones are removed after a new one is cached.
+AIDC_TESTAMENT_KEEP=3
+
+# _aidc_testament_why <stderr-file>: " (<its last line>)", or "" when it has none. A failure note
+# stays one line but keeps its cause. Blank lines and git's generic remote-failure advice (which
+# follows the real reason, e.g. ssh's "Permission denied (publickey).") are skipped.
+_aidc_testament_why() {
+    local l
+    l=$(grep -v -e '^[[:space:]]*$' -e '^fatal: Could not read from remote repository\.$' \
+            -e '^Please make sure you have the correct access rights$' -e '^and the repository exists\.$' \
+            "$1" 2>/dev/null | tail -n1 | tr -d '\r' | cut -c1-200)
+    [ -n "$l" ] && printf ' (%s)' "$l"
+    return 0
+}
+
+# _aidc_testament_cutoff: the UTC time 14 days ago, RFC 3339 (GNU date, then BSD date).
+_aidc_testament_cutoff() {
+    date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v-14d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+# _aidc_testament_prune <cache>: build folders an interrupted build left (over an hour old, so a
+# build running beside this one keeps its own) go, and of the per-tag folders only the newest
+# AIDC_TESTAMENT_KEEP (numeric order) stay.
+_aidc_testament_prune() {
+    local cache="$1" t
+    find "$cache" -mindepth 1 -maxdepth 1 -type d -name '.build.*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+    for t in "$cache"/v*; do [ -d "$t" ] && printf '%s\n' "${t##*/}"; done \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+        | sort -t. -k1,1nr -k2,2nr -k3,3nr | tail -n +$((AIDC_TESTAMENT_KEEP + 1)) \
+        | while IFS= read -r t; do rm -rf "${cache}/v${t}"; done
+    return 0
+}
 
 # aidc_testament_repo: the configured repo, "" when none.
 aidc_testament_repo() {
@@ -37,11 +74,12 @@ _aidc_testament_run() {
     if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; else "$@"; fi
 }
 
-# aidc_testament_newest_tag <repo>: the newest vX.Y.Z tag (numeric order), or returns 1.
+# aidc_testament_newest_tag <repo> [stderr-file]: the newest vX.Y.Z tag (numeric order), or
+# returns 1. git's stderr goes to <stderr-file> (default: discarded).
 aidc_testament_newest_tag() {
     local refs
     refs=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}" \
-        _aidc_testament_run 60 git ls-remote --tags --refs -- "$1" 2>/dev/null) || return 1
+        _aidc_testament_run 60 git ls-remote --tags --refs -- "$1" 2>"${2:-/dev/null}") || return 1
     printf '%s\n' "$refs" | awk '{ sub("^refs/tags/", "", $2); print $2 }' \
         | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
         | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 | sed 's/^/v/' | grep .
@@ -50,7 +88,7 @@ aidc_testament_newest_tag() {
 # aidc_testament_wheel: the newest release's wheel, its path on stdout; returns 1 (with one line
 # on stderr saying why) when there is none to install.
 aidc_testament_wheel() {
-    local repo tag cache dir work w
+    local repo tag cache dir work w errf cutoff
     repo=$(aidc_testament_repo)
     if [ -z "$repo" ]; then
         _aidc_testament_note "not configured (testament.repo in your aidc config); going on without it"
@@ -62,10 +100,13 @@ aidc_testament_wheel() {
         ssh://?*|[A-Za-z0-9._-]*@?*:?*) ;;
         *) _aidc_testament_note "testament.repo must be an ssh URL (git@host:owner/name.git or ssh://...); going on without it"; return 1 ;;
     esac
-    if ! tag=$(aidc_testament_newest_tag "$repo"); then
-        _aidc_testament_note "cannot read its release tags with your SSH key (no access?); going on without it"
+    errf=$(mktemp 2>/dev/null) || errf=/dev/null
+    if ! tag=$(aidc_testament_newest_tag "$repo" "$errf"); then
+        _aidc_testament_note "cannot read its release tags with your SSH key (no access?)$(_aidc_testament_why "$errf"); going on without it"
+        [ "$errf" = /dev/null ] || rm -f "$errf"
         return 1
     fi
+    [ "$errf" = /dev/null ] || rm -f "$errf"
     cache="${XDG_CACHE_HOME:-${HOME}/.cache}/aidc/testament"
     dir="${cache}/${tag}"
     w=$(find "$dir" -maxdepth 1 -type f -name 'testament-*.whl' 2>/dev/null | head -n1)
@@ -78,13 +119,21 @@ aidc_testament_wheel() {
         return 1
     fi
     mkdir -p "$cache" || { _aidc_testament_note "cannot make ${cache}; going on without it"; return 1; }
-    work=$(mktemp -d "${cache}/.build.XXXXXX") || { _aidc_testament_note "cannot make a build folder; going on without it"; return 1; }
-    if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}" \
-            _aidc_testament_run 300 git -c advice.detachedHead=false clone -q --depth 1 --branch "$tag" -- "$repo" "${work}/src" >/dev/null 2>&1; then
-        rm -rf "$work"; _aidc_testament_note "cannot fetch ${tag}; going on without it"; return 1
+    if ! cutoff=$(_aidc_testament_cutoff) || [ -z "$cutoff" ]; then
+        _aidc_testament_note "${tag}: cannot work out the date 14 days ago for the build's cooldown; going on without it"
+        return 1
     fi
-    if ! _aidc_testament_run 600 uv build -q --wheel --out-dir "${work}/dist" "${work}/src" >/dev/null 2>&1; then
-        rm -rf "$work"; _aidc_testament_note "${tag} did not build into a wheel; going on without it"; return 1
+    work=$(mktemp -d "${cache}/.build.XXXXXX") || { _aidc_testament_note "cannot make a build folder; going on without it"; return 1; }
+    errf="${work}/err"
+    if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}" \
+            _aidc_testament_run 300 git -c advice.detachedHead=false clone -q --depth 1 --branch "$tag" -- "$repo" "${work}/src" >/dev/null 2>"$errf"; then
+        _aidc_testament_note "cannot fetch ${tag}$(_aidc_testament_why "$errf"); going on without it"; rm -rf "$work"; return 1
+    fi
+    # The build backend is resolved in an isolated environment, which the image's uv.toml does not
+    # reach: --exclude-newer (and UV_EXCLUDE_NEWER, for anything uv spawns) gives it the cooldown.
+    if ! UV_EXCLUDE_NEWER="$cutoff" _aidc_testament_run 600 uv build -q --wheel --exclude-newer "$cutoff" \
+            --out-dir "${work}/dist" "${work}/src" >/dev/null 2>"$errf"; then
+        _aidc_testament_note "${tag} did not build into a wheel$(_aidc_testament_why "$errf"); going on without it"; rm -rf "$work"; return 1
     fi
     w=$(find "${work}/dist" -maxdepth 1 -type f -name 'testament-*.whl' | head -n1)
     if [ -z "$w" ]; then
@@ -92,6 +141,7 @@ aidc_testament_wheel() {
     fi
     rm -rf "$dir"; mkdir -p "$dir" && mv -f "$w" "$dir/" || { rm -rf "$work"; _aidc_testament_note "cannot cache the wheel; going on without it"; return 1; }
     rm -rf "$work"
+    _aidc_testament_prune "$cache"
     printf '%s/%s\n' "$dir" "${w##*/}"
 }
 

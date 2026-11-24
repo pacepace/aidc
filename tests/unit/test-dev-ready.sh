@@ -116,6 +116,17 @@ eq "restart: an empty log relays nothing and returns 0" "rc=0" "$out"
 grep -q 'relay_transcript_warnings' "$AIDC_ROOT/scripts/cmd-restart.sh"
 eq "restart relays the warnings too" "0" "$?"
 
+# The ready marker every wait looks for (AIDC_DEV_READY_MARKER) is what user-main logs: its
+# log() run with the word it logs when ready, taken from user-main.sh itself.
+UM="$AIDC_ROOT/.devcontainer/user-main.sh"
+produced=$(bash -c "$(grep -m1 '^log()' "$UM"); $(grep -m1 '^log \"ready' "$UM")" 2>&1)
+# shellcheck disable=SC2016  # expansions are for the inner shell, on purpose
+marker=$(AIDC_ROOT="$AIDC_ROOT" bash -c '. "$AIDC_ROOT/scripts/lib/common.sh"; printf "%s" "$AIDC_DEV_READY_MARKER"')
+eq "user-main's ready line starts with the marker every wait looks for" "yes" \
+    "$(case "$produced" in "$marker"*) [ -n "$marker" ] && echo yes ;; esac)"
+eq "the marker is defined once (no copy of it in the CLI's scripts)" "" \
+    "$(grep -rnF 'aidc-user-main\] ready' "$AIDC_ROOT/scripts" | grep -v '^[^:]*:[0-9]*:#' || true)"
+
 echo
 echo "dev ready: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

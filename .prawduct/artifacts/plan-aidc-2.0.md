@@ -154,7 +154,7 @@ Wave codes are defined in §3.
 | D5 | Git agent's question reaching an orchestrator on k8s ("owner ruling; 2.0's per-user MCP"): settled by the 2026-11-24 ruling (must route before 2.0 ships) | W-M3 |
 | D6 | Real push/PR/merge/tidy/protect | W-K0 |
 | D7 | Docker git container on macOS | W-K0 |
-| D8 | Squid's own deny of private destinations on k8s sessions (defence in depth) | W-K1: set `AIDC_PUBLIC_ONLY=1` on the k8s session proxy, check that `--egress-tcp` relays still work (they go to a ClusterIP, which public-only refuses: needs an allow for the relay Services. Design point, see W-K2) |
+| D8 | Squid's own deny of private destinations on k8s sessions (defence in depth) | W-K1: set `AIDC_PUBLIC_ONLY=1` on the k8s session proxy (done). `--egress-tcp` relays (W-K2-03) are planned to be reached by the dev pod directly, by their own egress rule, not through squid, so they need no squid allow; W-K2-03 checks it |
 | D9 | A root process in a Sysbox session cannot change node-side NetworkPolicy rules | W-K1 (live probe: iptables/nft from session root) |
 | D10 | Design-12 header "Status" is stale (says the git container is not built) | Closed (06, cumulative Critic) |
 | D11 | Design-12 "Shape" tree still marks git container/aidc-mcp/syncthing "(later)" | W-K1 docs (and finished as each is built) |

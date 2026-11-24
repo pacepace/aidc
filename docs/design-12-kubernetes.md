@@ -180,10 +180,31 @@ Unlike Docker, NetworkPolicy rules live in the node's network namespace, outside
 process inside the pod cannot remove them. That only holds while the pod cannot reach the node,
 which is why sessions run unprivileged under Sysbox.
 
-**Open (measure before building):** k3s's built-in policy controller is on, but no egress policy
-has ever been used on this cluster. A test matrix in a scratch namespace (pod to 1.1.1.1, to the
-API server, to kube-dns, to its own node, to another node, to a pod in another namespace; squid
-3128 must work) settles it.
+Measured 2026-11-24 on ranch-dev01 (k3s 1.35.5, embedded kube-router policy controller): a
+Sysbox session pod (`hostUsers: false`, `dnsPolicy: None`, no service-account token) and a
+stand-in Squid pod, with the three policies above. kube-router rejects a denied TCP connection
+(connection refused) rather than dropping it; a baseline run with the policies removed showed
+every target below open.
+
+| Target | From the session pod | From Squid |
+|---|---|---|
+| its Squid, TCP 3128 | open | — |
+| internet (1.1.1.1:443) | refused | open (also :80; Quad9 :53 open) |
+| Kubernetes API service (10.45.0.1:443) | refused | refused |
+| cluster DNS (10.45.0.10:53) | refused, UDP unanswered | refused |
+| own node: ssh, kubelet (10.42.0.121:22, :10250) | refused | refused |
+| server node: API, Traefik (10.42.0.101:6443, :443) | refused | refused |
+| router (10.42.0.1:53), ZeroTier router (10.23.23.1:53) | refused | refused |
+| pod in another namespace | refused | refused |
+| storage network NFS (10.43.0.121:2049) | timeout (the node's own NFS firewall, with or without policies) | timeout |
+| DNS to Quad9 or the router, UDP | unanswered; name lookups fail | — |
+
+`kubectl port-forward` to the session pod still works under default-deny ingress (HTTP 200), so
+the tunnel needs no ingress rule.
+
+Still to check when built: Squid's own deny of private destinations (defence in depth), and that
+a root process inside a Sysbox session cannot change the node-side rules (the rules live in the
+node's network namespace, which the pod does not share).
 
 ## Ports: tunnel by default, home network on request
 
@@ -300,8 +321,6 @@ Kubernetes code lands.
 
 | Item | Settles it |
 |---|---|
-| Egress policy enforcement on k3s | test matrix in a scratch namespace |
 | Session behaviour at real access-token expiry with no refresh token | live test (hours) |
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
-| `kubectl port-forward` with default-deny ingress | live test |

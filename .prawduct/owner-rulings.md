@@ -203,3 +203,13 @@ aidc installs testament (Brooks's distributed test runner; coordinator deployed 
 `apps/testament`, image `ghcr.io/brookstalley/testament`) in its sessions, so work in a session
 can run tests through it. How it is installed (release binary, pinned version, cooldown) is a
 technical decision for the build.
+
+## 2026-11-24: What Syncthing syncs
+
+Synced: Claude conversations and memory (`projects/`), `CLAUDE.md`, rules, skills, agents,
+commands, keybindings, and the status bar (the `statusLine` setting and its script). Settings and
+the status bar go laptop to cluster only, because they can run code on the machine that receives
+them; on the cluster aidc wraps the status bar script to read usage for account switching, and
+fixes its path. Never synced: logins (`.credentials.json`), `.claude.json`, and the files of
+running Claude processes. One machine at a time continues a given conversation (aidc holds a
+lock). Also: there is no 5-hour usage window any more; only the weekly one counts.

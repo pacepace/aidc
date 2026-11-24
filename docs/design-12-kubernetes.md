@@ -246,8 +246,9 @@ creates an alias symlink `-Users-<name>-…` → `-home-<name>-…` inside `~/.c
 (measured: Claude follows a symlink there, appends to the same transcript and finds memory);
 Windows uses junctions. Aliases are excluded from sync.
 
-What to sync: `projects/` (transcripts, memory), `CLAUDE.md`, `rules/`, `skills/`, `agents/`,
-`commands/`, `keybindings.json`. Never: `.credentials.json`, `.claude.json`, and live-process
+What to sync (ruled 2026-11-24): `projects/` (transcripts, memory), `CLAUDE.md`, `rules/`,
+`skills/`, `agents/`, `commands/`, `keybindings.json`, and the status bar (`statusLine` and its
+script, laptop to cluster only; on the cluster aidc wraps it to read usage, and fixes its path). Never: `.credentials.json`, `.claude.json`, and live-process
 state (`sessions/`, `shell-snapshots/`, caches). `settings.json` only as a template, laptop to
 cluster, because it carries hooks that run code on the receiving machine. One machine at a time
 resumes a given conversation; aidc holds a lease so two machines do not both append.

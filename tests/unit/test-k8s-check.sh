@@ -65,7 +65,8 @@ case "$*" in
         [ "${K_NO_SC:-}" = 1 ] && { echo 'not found' >&2; exit 1; }
         printf 'zfs.csi.openebs.io' ;;
     *"get nodes"*) printf '%b' "${K_NODES:-}" ;;
-    *"auth can-i"*) echo "${K_CANI:-yes}" ;;
+    *"auth can-i create namespaces"*) echo "${K_CANI_NS:-yes}" ;;
+    *"auth can-i create pods"*) echo "${K_CANI:-yes}" ;;
     *"get deployment registry"*)
         [ -n "${K_REGISTRY_READY:-}" ] || { echo 'not found' >&2; exit 1; }
         printf '%s' "$K_REGISTRY_READY" ;;
@@ -120,8 +121,8 @@ assert_eq "explicit registry addresses win over the defaults" \
 
 echo "=== names ==="
 names=$( . "$AIDC_ROOT/scripts/k8s/lib.sh"; k8s_load_settings; AIDC_K8S_USER=pace
-         printf '%s %s %s' "$(k8s_system_ns)" "$(k8s_user_ns "$AIDC_K8S_USER")" "$(k8s_session_ns feat-x)")
-assert_eq "namespaces: system, user, session" "aidc-system aidc-u-pace aidc-pace-feat-x" "$names"
+         printf '%s %s' "$(k8s_system_ns)" "$(k8s_user_ns "$AIDC_K8S_USER")")
+assert_eq "namespaces: system, and the user's (sessions live in it)" "aidc-system aidc-u-pace" "$names"
 
 echo "=== aidc k8s check ==="
 run_check() { "$AIDC_ROOT/scripts/aidc" k8s check 2>&1; echo "exit=$?"; }
@@ -165,7 +166,11 @@ out=$(K_NODES='n1 False\n' run_check)
 assert_has "no ready node: missing" "missing: no ready node matches" "$out"
 
 out=$(K_NODES='n1 True\n' K_CANI=no run_check)
-assert_has "no namespace permission: missing" "missing: permission to create namespaces" "$out"
+assert_has "no permission for pods in your namespace: missing" "missing: permission to create pods in aidc-u-" "$out"
+out=$(K_NODES='n1 True\n' K_CANI_NS=no run_check)
+assert_has "no permission for namespaces is only a note (an admin can run setup and user add)" \
+    "note:    you may not create namespaces" "$out"
+assert_has "and the cluster can still run sessions" "This cluster can run aidc sessions." "$out"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

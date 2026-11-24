@@ -18,13 +18,21 @@ printf 'profile:  %s\n' "$(printf '%s' "$sts" | yq -p=json '.metadata.annotation
 printf 'pods:\n'
 k8s_kubectl -n "$ns" get pods -l "aidc/session=${NAME}" \
     -o custom-columns='  NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,NODE:.spec.nodeName,STARTED:.status.startTime' 2>/dev/null
-proxy=$(k8s_kubectl -n "$ns" get pod -l "aidc/session=${NAME},app=proxy" -o name 2>/dev/null | head -n1)
-if [ -n "$proxy" ] && taint=$(k8s_kubectl -n "$ns" exec "$proxy" -c policy -- cat /var/state/tainted 2>/dev/null </dev/null); then
-    printf 'taint:    TAINTED %s\n' "$taint"
-elif [ -n "$proxy" ]; then
-    printf 'taint:    clean\n'
+taint=$(k8s_session_taint "$ns" "$NAME")
+case "$taint" in
+    yes*) printf 'taint:    TAINTED %s\n' "${taint#yes }" ;;
+    no) printf 'taint:    clean\n' ;;
+    *) printf 'taint:    %s\n' "$taint" ;;
+esac
+# The lockdown is the session's NetworkPolicies: say so only when they are there.
+have=$(k8s_kubectl -n "$ns" get networkpolicy -o name 2>/dev/null | sed 's|.*/||' | sort | paste -sd' ' -)
+want="default-deny ${NAME}-dev-only-to-its-proxy ${NAME}-proxy-public-only"
+missing=""
+for p in $want; do case " $have " in *" $p "*) ;; *) missing="${missing} ${p}" ;; esac; done
+if [ -z "$missing" ]; then
+    printf 'egress:   enforced: NetworkPolicy, dev pod -> its proxy only, proxy -> public addresses only; no DNS in the dev pod\n'
 else
-    printf 'taint:    unknown (no proxy pod)\n'
+    printf 'egress:   NOT ENFORCED: NetworkPolicy missing:%s\n' "$missing"
 fi
-printf 'egress:   enforced: NetworkPolicy, dev pod -> its proxy only, proxy -> public addresses only; no DNS in the dev pod\n'
-printf 'audit:    volume claim %s-audit in %s (kept by aidc kill)\n' "$NAME" "$ns"
+audit=$(printf '%s' "$sts" | yq -p=json '.metadata.annotations["aidc/audit"] // ""')
+printf 'audit:    volume claim %s in %s (kept by aidc kill)\n' "${audit:-?}" "$ns"

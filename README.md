@@ -680,7 +680,11 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   the cluster the default for `create`.
 - `aidc attach | status | logs | kill <name>` find the session where it lives (the cluster is
   asked first when one is configured); `aidc list` shows both backends. `kill` keeps the
-  session's audit volume (`<name>-audit`) and your disk.
+  session's audit volume (`<name>-audit-<UTC time>`, named for when it was made, so a later
+  session of the same name never writes over it) and your disk. Kept audit volumes add up: list
+  them with `kubectl -n <prefix>-u-<you> get pvc -l aidc/kept=audit` and delete one with
+  `kubectl delete pvc` when you no longer need it (on a storage class that retains its volumes,
+  delete the released PV too).
 - Not yet on this backend: `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`, and
   `restart`, `upgrade`, `proxy`, `network`, `egress`, `refresh` (each says so). A tainted session
   is recorded and reported, not frozen.
@@ -705,7 +709,10 @@ kubernetes:
   storage_class: shared-zfs      # the user's disk (required)
   node_selector: {}              # added to session pods
   tolerations: []                # added to session pods
-  session_storage_class: ""      # each session's home volume, deleted with it (default: storage_class)
+  session_storage_class: ""      # each session's home and taint-flag volumes, deleted with it
+                                 # (default: storage_class); like storage_class, several pods on
+                                 # a node must be able to mount one volume (the audit sidecar reads
+                                 # the home), and it should delete its volumes when released
   cpu: 2                         # guaranteed per session; cpu_limit / memory_limit: the ceiling
   memory: 8Gi                    #   (default 16 and 32Gi)
   user_disk_size: 100Gi          # each user's disk
@@ -721,7 +728,8 @@ selector and the runtime class's own scheduling do).
 
 `aidc k8s check` reads it and checks, without changing anything, that kubectl reaches the
 cluster, the runtime class and storage class exist, a ready node can take session pods, and you
-may create namespaces. Needs `kubectl` and `yq`.
+may create pods in your namespace (and, for `setup` and `user add`, namespaces). Needs `kubectl`
+and `yq`.
 
 ## Config
 

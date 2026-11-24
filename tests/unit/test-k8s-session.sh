@@ -53,17 +53,24 @@ case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
-    *"get deployment,statefulset -l"*) [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
+    *"get deployment,statefulset -l"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get deployment "*"-proxy"*) [ "${K_EXISTS:-}" = 1 ] || exit 1 ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
-    *"get pvc -l"*) printf 'persistentvolumeclaim/home-demo-dev-0\npersistentvolumeclaim/demo-audit\n' ;;
+    *"get pvc -l"*"aidc/kept=audit"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
     *"get statefulset demo-dev -o json"*) [ "${K_EXISTS:-}" = 1 ] || exit 1
-        echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi"}}}' ;;
-    *"get statefulset -l app=dev"*) [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
+        echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi","aidc/audit":"demo-audit-20261124050000"}}}' ;;
+    *"get statefulset -l app=dev"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
     *"get pod demo-dev-0 -o jsonpath"*) printf 'Running' ;;
     *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
-    *"exec pod/demo-proxy-abc -c policy -- cat /var/state/tainted"*) [ "${K_TAINTED:-}" = 1 ] && echo '{"trigger":"malware_domains"}' || exit 1 ;;
+    *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
+        [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
+        if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
+    *"exec pod/demo-proxy-abc -c audit -- /usr/local/bin/finalize.sh"*) : ;;
+    *"get networkpolicy -o name"*) printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
+    *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
 esac
 exit 0
 STUB
@@ -116,8 +123,24 @@ assert_eq "session size: 2 CPU / 8Gi guaranteed, the configured ceiling" \
 assert_eq "the user's disk is mounted at /home/<user>, the home on its own volume" \
     '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/vscode"}]' \
     "$(dev '.spec.template.spec.containers[0].volumeMounts')"
-assert_eq "the home volume is on the session storage class (deleted with the session)" '"scratch"' \
-    "$(dev '.spec.volumeClaimTemplates[0].spec.storageClassName')"
+pvc() { q "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$1\") | .spec.storageClassName" | tail -1; }
+assert_eq "the home volume is on the session storage class (deleted with the session)" '"scratch"' "$(pvc demo-home)"
+assert_eq "the taint flag's volume outlives the proxy pod, on the session class" '"scratch"' "$(pvc demo-state)"
+assert_eq "the proxy pod keeps the taint flag on that volume, not in pod scratch space" \
+    '{"name":"state","persistentVolumeClaim":{"claimName":"demo-state"}}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "state")' | tail -1)"
+assert_has "the audit sidecar reads the session home (shell history, Claude transcripts)" \
+    '{"name":"home","mountPath":"/var/aidc/dev-home","readOnly":true}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "audit") | .volumeMounts' | tail -1)"
+assert_has "the audit record starts with meta.json and the config snapshot" "seed-audit" \
+    "$(q 'select(.kind == "Deployment") | [.spec.template.spec.initContainers[].name]' | tail -1)"
+audit_claim=$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.labels["aidc/kept"] == "audit") | .metadata.name' | tail -1 | tr -d '"')
+case "$audit_claim" in
+    demo-audit-[0-9]*) echo "  PASS: the audit claim is named for its creation time ($audit_claim)"; PASS=$((PASS + 1)) ;;
+    *) echo "  FAIL: the audit claim is named for its creation time (got '$audit_claim')"; FAIL=$((FAIL + 1)) ;;
+esac
+assert_eq "the proxy pod has resource requests (not first in line for eviction)" '{"cpu":"100m","memory":"256Mi"}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .resources.requests' | tail -1)"
 assert_has "the inner Docker uses overlay2 (Sysbox gives it a real /var/lib/docker)" \
     '{"name":"AIDC_DOCKER_STORAGE_DRIVER","value":"overlay2"}' "$(dev '.spec.template.spec.containers[0].env')"
 assert_eq "the repo folder is made as the session user" '[{"runAsUser":1000,"runAsGroup":1000},["mkdir","-p","/home/alice/code/proj"]]' \
@@ -138,14 +161,24 @@ assert_eq "the proxy's DNS is Quad9 only" '["9.9.9.9/32","149.112.112.112/32"]' 
 assert_eq "the proxy pod resolves through Quad9, the only DNS its policy allows (the refresher needs it for the blocklist feeds)" \
     '["None",["9.9.9.9","149.112.112.112"]]' \
     "$(q 'select(.kind == "Deployment") | .spec.template.spec | [.dnsPolicy, .dnsConfig.nameservers]' | tail -1)"
-assert_eq "the audit volume is on the user's (retained) storage class" '"shared-disk"' \
-    "$(q 'select(.kind == "PersistentVolumeClaim") | .spec.storageClassName' | tail -1)"
+assert_eq "the audit volume is on the user's (retained) storage class" '"shared-disk"' "$(pvc "$audit_claim")"
 assert_has "the proxy pod seeds squid's folder before squid starts" "seed-squid-etc" \
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.initContainers[].name' | tail -1)"
 assert_has "images come from the cluster's registry at this version" "localhost:5000/aidc/dev-base:" \
     "$(dev '.spec.template.spec.containers[0].image')"
 
+printf 'claude_mode: safe\ntaint_response: notify\n' >> "$HOME/.config/aidc/config.yaml"
+run create demo --backend kubernetes >/dev/null
+assert_has "the user's config reaches the session (claude_mode)" '{"name":"AIDC_CLAUDE_MODE","value":"safe"}' \
+    "$(dev '.spec.template.spec.containers[0].env')"
+assert_has "and the policy sidecar (taint_response)" '{"name":"AIDC_TAINT_RESPONSE","value":"notify"}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "policy") | .env' | tail -1)"
+sed -i '/^claude_mode: safe$/d; /^taint_response: notify$/d' "$HOME/.config/aidc/config.yaml"
+
 echo "=== create refusals ==="
+out=$(run create 9lives --backend kubernetes)
+assert_has "a name a Kubernetes Service cannot take is refused" "starts with a letter" "$out"
+assert_eq "and nothing was applied for it" "" "$(cat "$K_APPLIED")"
 out=$(K_NO_DISK=1 run create demo --backend kubernetes)
 assert_has "no user disk: says to run aidc user add" "run \`aidc user add alice\` first" "$out"
 out=$(K_EXISTS=1 run create demo --backend kubernetes)
@@ -158,14 +191,14 @@ assert_has "an option the backend does not have yet is refused by name" "not sup
 echo "=== aidc kill --backend kubernetes ==="
 out=$(K_EXISTS=1 run kill demo --backend kubernetes)
 log=$(cat "$K_LOG")
+assert_has "kill finalizes the audit first (last sweep, killed_at)" "exec pod/demo-proxy-abc -c audit -- /usr/local/bin/finalize.sh" "$log"
 assert_has "kill removes the session's objects by its label" \
-    "delete statefulset,deployment,service,networkpolicy -l aidc/session=demo" "$log"
-assert_has "kill removes the home volume" "delete persistentvolumeclaim/home-demo-dev-0" "$log"
-case "$log" in
-    *"delete persistentvolumeclaim/demo-audit"*) echo "  FAIL: kill must keep the audit volume"; FAIL=$((FAIL + 1)) ;;
-    *) echo "  PASS: kill keeps the audit volume"; PASS=$((PASS + 1)) ;;
-esac
-assert_has "and says where the audit is" "audit kept in volume claim demo-audit" "$out"
+    "delete statefulset,deployment,service,networkpolicy,configmap -l aidc/session=demo" "$log"
+assert_has "kill removes the session's volumes except the kept audit" "delete pvc -l aidc/session=demo,aidc/kept!=audit" "$log"
+assert_has "and says where the audit is" "its audit trail is kept in demo-audit-20261124050000" "$out"
+finalize_line=$(grep -n 'finalize.sh' "$K_LOG" | head -n1 | cut -d: -f1)
+delete_line=$(grep -n 'delete statefulset' "$K_LOG" | head -n1 | cut -d: -f1)
+assert_eq "the audit is finalized before anything is deleted" "yes" "$([ "${finalize_line:-99}" -lt "${delete_line:-0}" ] && echo yes)"
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 
@@ -200,13 +233,22 @@ assert_has "a cluster session's verb the backend lacks says so" "not available o
 out=$(K_EXISTS=1 run kill demo)
 assert_has "kill finds a cluster session without the flag" "session demo removed" "$out"
 
+: > "$D_LOG"; out=$(K_DOWN=1 run logs demo --component squid)
+assert_has "an unreachable cluster is said, not taken for 'no such session'" "the configured cluster did not answer" "$out"
+assert_has "and the verb falls back to Docker" "docker " "$(cat "$D_LOG")"
+out=$(K_DOWN=1 run list --backend kubernetes)
+assert_has "list says the cluster did not answer instead of 'no sessions'" "the cluster did not answer" "$out"
+
 echo "=== the config's default backend for create ==="
 printf 'backend: kubernetes\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run create demo)
 assert_has "backend: kubernetes in the config makes create use the cluster" "session demo is ready" "$out"
+sed -i 's/^backend: kubernetes$/backend: "kubernetes"/' "$HOME/.config/aidc/config.yaml"
+out=$(run create demo)
+assert_has "a quoted backend value counts too" "session demo is ready" "$out"
 out=$(run create demo --backend docker --help)
 assert_has "--backend docker still wins over the config" "aidc create" "$out"
-sed -i '/^backend: kubernetes$/d' "$HOME/.config/aidc/config.yaml"
+sed -i '/^backend: /d' "$HOME/.config/aidc/config.yaml"
 
 echo "=== list, attach, status, logs ==="
 out=$(K_EXISTS=1 run list)
@@ -220,6 +262,10 @@ assert_has "status names the repo" "repo:     /home/alice/code/proj" "$out"
 assert_has "status says the session is clean" "taint:    clean" "$out"
 out=$(K_EXISTS=1 K_TAINTED=1 run status demo)
 assert_has "status shows a taint" "taint:    TAINTED" "$out"
+out=$(K_EXISTS=1 K_POLICY_DOWN=1 run status demo)
+assert_has "a policy sidecar that does not answer is unknown, never clean" "taint:    unknown" "$out"
+assert_has "status confirms the lockdown's policies are there" "egress:   enforced" "$(K_EXISTS=1 run status demo)"
+assert_has "status names the kept audit claim" "audit:    volume claim demo-audit-20261124050000" "$out"
 out=$(K_EXISTS=1 run logs demo --component nonesuch)
 assert_has "an unknown component is refused by name" "unknown component: nonesuch" "$out"
 

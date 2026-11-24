@@ -117,7 +117,6 @@ k8s_kubectl() {
 # Names. A namespace name is a DNS label: at most 63 characters of [a-z0-9-].
 k8s_system_ns()  { printf '%s-system' "$AIDC_K8S_PREFIX"; }
 k8s_user_ns()    { printf '%s-u-%s' "$AIDC_K8S_PREFIX" "${1:-$AIDC_K8S_USER}"; }
-k8s_session_ns() { printf '%s-%s-%s' "$AIDC_K8S_PREFIX" "$AIDC_K8S_USER" "$1"; }
 
 # k8s_valid_label <value>: 0 when <value> can be part of a namespace name.
 k8s_valid_label() {
@@ -140,4 +139,20 @@ k8s_require() {
     k8s_valid_label "$AIDC_K8S_USER" || { err "kubernetes.user '${AIDC_K8S_USER}' is not a DNS label"; bad=1; }
     [ -n "$AIDC_K8S_STORAGE_CLASS" ] || { err "kubernetes.storage_class is not set"; bad=1; }
     [ "$bad" = 0 ]
+}
+
+# k8s_session_taint <namespace> <session>: "yes <flag json>", "no", or "unknown <why>", read
+# from the session's policy sidecar. Only the flag file being absent is "no": a sidecar that
+# cannot be asked is unknown, never clean.
+k8s_session_taint() {
+    local ns="$1" s="$2" proxy out
+    proxy=$(k8s_kubectl -n "$ns" get pod -l "aidc/session=${s},app=proxy" -o name 2>/dev/null | head -n1)
+    [ -n "$proxy" ] || { printf 'unknown (no proxy pod)\n'; return 0; }
+    if out=$(k8s_kubectl -n "$ns" exec "$proxy" -c policy -- \
+            sh -c 'if [ -e /var/state/tainted ]; then printf "yes "; cat /var/state/tainted; else echo no; fi' \
+            </dev/null 2>&1); then
+        printf '%s\n' "$out"
+    else
+        printf 'unknown (the policy sidecar did not answer)\n'
+    fi
 }

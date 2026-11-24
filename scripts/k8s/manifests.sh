@@ -19,9 +19,14 @@ K8S_MANAGED_BY="app.kubernetes.io/managed-by: aidc"
 # registry) still have to land where session pods do, because the node pulls session images
 # from the registry over its own loopback address.
 k8s_node_selector() {
-    local rc
-    rc=$(k8s_kubectl get runtimeclass "$AIDC_K8S_RUNTIME_CLASS" -o json 2>/dev/null \
-        | yq -p=json -o=json -I=0 '.scheduling.nodeSelector // {}' 2>/dev/null || true)
+    local rc json
+    # Unreadable is not "no selector": an empty one would let the registry or a builder land on
+    # a node sessions never use.
+    json=$(k8s_kubectl get runtimeclass "$AIDC_K8S_RUNTIME_CLASS" -o json 2>/dev/null) || {
+        err "cannot read the runtime class ${AIDC_K8S_RUNTIME_CLASS}"
+        return 1
+    }
+    rc=$(printf '%s' "$json" | yq -p=json -o=json -I=0 '.scheduling.nodeSelector // {}' 2>/dev/null || true)
     [ -n "$rc" ] || rc='{}'
     # shellcheck disable=SC2016  # $m is yq's variable, not the shell's
     printf '%s\n%s\n' "$rc" "$AIDC_K8S_NODE_SELECTOR" \
@@ -235,7 +240,8 @@ spec:
 EOF
 }
 
-# k8s_render_session <session> <repo-path> <profile> <node-selector-json> [proxy-ip]: one
+# k8s_render_session <session> <repo-path> <profile> <node-selector-json> <audit-claim>
+#     [proxy-ip]: one
 # session's NetworkPolicies, proxy pod (squid, refresher, policy, audit), its Service, and the
 # dev StatefulSet, all in the user's namespace and named <session>-*. Sessions live in the
 # user's namespace, not one each, because every session mounts the user's one disk and a pod
@@ -253,7 +259,7 @@ k8s_render_session() {
     # aidc's images are pulled every time (imagePullPolicy: Always): `aidc k8s build --force`
     # replaces an image under the same version tag, and a node keeping its cached copy would run
     # the old one (it did). The registry is on the node, so a pull is cheap.
-    local session="$1" repo="$2" profile="$3" sel="$4" proxy_ip="${5:-}" ns img
+    local session="$1" repo="$2" profile="$3" sel="$4" audit="$5" proxy_ip="${6:-}" ns img
     ns=$(k8s_user_ns "$AIDC_K8S_USER")
     img="${AIDC_K8S_REGISTRY_PULL}/aidc"
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, aidc/session: ${session}"
@@ -285,13 +291,36 @@ spec:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
 ---
+# The audit trail outlives the session (aidc kill keeps it), on the user's retained class, and
+# is named for its creation time so a later session of the same name never writes over it.
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: ${session}-audit, namespace: ${ns}, labels: {${labels}}}
+metadata: {name: ${audit}, namespace: ${ns}, labels: {${labels}, aidc/kept: audit}}
 spec:
   storageClassName: ${AIDC_K8S_STORAGE_CLASS}
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 5Gi}}
+---
+# The taint flag outlives the proxy pod (a replaced pod must not read as clean: SEC-06), and
+# goes with the session.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ${session}-state, namespace: ${ns}, labels: {${labels}}}
+spec:
+  storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+# The session user's home: mounted by the dev pod and, read-only, by the audit sidecar, which
+# collects its shell history and Claude transcripts (SEC-07, NET-08). Two pods mount it, so the
+# session storage class must allow that, as the user's disk class does; it goes with the session.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ${session}-home, namespace: ${ns}, labels: {${labels}}}
+spec:
+  storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_HOME_SIZE}}}
 ---
 apiVersion: v1
 kind: Service
@@ -320,6 +349,16 @@ spec:
       dnsPolicy: None
       dnsConfig: {nameservers: [9.9.9.9, 149.112.112.112]}
       initContainers:
+        # The audit record's first files, as aidc create writes them on Docker: meta.json (the
+        # audit sidecar stamps tainted_at and killed_at into it) and the config snapshot. Only
+        # when absent: a restarted proxy pod must not reset them.
+        - name: seed-audit
+          image: ${img}/audit:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, 'for f in meta.json config-snapshot.yaml; do [ -e "/var/aidc/audit/\$f" ] || cp "/seed/\$f" "/var/aidc/audit/\$f"; done']
+          volumeMounts:
+            - {name: audit, mountPath: /var/aidc/audit}
+            - {name: audit-seed, mountPath: /seed}
         # A Docker volume starts as a copy of the image's folder; an emptyDir starts empty.
         - name: seed-squid-etc
           image: ${img}/squid:${AIDC_VERSION_TAG}
@@ -332,18 +371,22 @@ spec:
           imagePullPolicy: Always
           env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}]
           readinessProbe: {exec: {command: [/usr/local/bin/healthcheck.sh]}, periodSeconds: 10}
+          # Requests keep the proxy out of the BestEffort class, first in line for eviction.
+          resources: {requests: {cpu: 100m, memory: 256Mi}}
           volumeMounts:
             - {name: blocklist, mountPath: /etc/squid}
             - {name: squid-log, mountPath: /var/log/squid}
         - name: refresher
           image: ${img}/refresher:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
+          resources: {requests: {cpu: 50m, memory: 128Mi}}
           volumeMounts:
             - {name: blocklist, mountPath: /etc/squid}
             - {name: aidc-log, mountPath: /var/log/aidc}
         - name: policy
           image: ${img}/policy:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
+          resources: {requests: {cpu: 50m, memory: 64Mi}}
           env:
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_TAINT_RESPONSE, value: "${AIDC_TAINT_RESPONSE:-freeze}"}
@@ -358,6 +401,7 @@ spec:
         - name: audit
           image: ${img}/audit:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
+          resources: {requests: {cpu: 50m, memory: 64Mi}}
           env:
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_PROFILE, value: "${profile}"}
@@ -365,13 +409,16 @@ spec:
             - {name: squid-log, mountPath: /var/log/squid, readOnly: true}
             - {name: aidc-log, mountPath: /var/log/aidc, readOnly: true}
             - {name: state, mountPath: /var/state, readOnly: true}
+            - {name: home, mountPath: /var/aidc/dev-home, readOnly: true}
             - {name: audit, mountPath: /var/aidc/audit}
       volumes:
         - {name: blocklist, emptyDir: {}}
         - {name: squid-log, emptyDir: {}}
         - {name: aidc-log, emptyDir: {}}
-        - {name: state, emptyDir: {}}
-        - {name: audit, persistentVolumeClaim: {claimName: ${session}-audit}}
+        - {name: state, persistentVolumeClaim: {claimName: ${session}-state}}
+        - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
+        - {name: audit, persistentVolumeClaim: {claimName: ${audit}}}
+        - {name: audit-seed, configMap: {name: ${session}-audit-seed}}
 EOF
     [ -n "$proxy_ip" ] || return 0
     cat <<EOF
@@ -382,7 +429,7 @@ metadata:
   name: ${session}-dev
   namespace: ${ns}
   labels: {${labels}, app: dev}
-  annotations: {aidc/repo: "${repo}", aidc/profile: "${profile}"}
+  annotations: {aidc/repo: "${repo}", aidc/profile: "${profile}", aidc/audit: "${audit}"}
 spec:
   replicas: 1
   serviceName: ""
@@ -439,11 +486,6 @@ spec:
             - {name: home, mountPath: /home/vscode}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
-  volumeClaimTemplates:
-    - metadata: {name: home, labels: {${labels}}}
-      spec:
-        storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
-        accessModes: [ReadWriteOnce]
-        resources: {requests: {storage: ${AIDC_K8S_HOME_SIZE}}}
+        - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
 EOF
 }

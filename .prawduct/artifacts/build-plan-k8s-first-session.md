@@ -136,6 +136,17 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   installed aidc uses; instead, a running Docker session reads 1500 both ways (so no `--mtu` is
   passed and dockerd starts as before) and `tests/unit/test-dockerd-mtu.sh` covers the choice.
   The Docker smoke passed at the end of wave 1 on the same scripts.
+- Cumulative review fix pass: create now loads the user's config (`load_config`, with the
+  repo-settings report) — it had called an undefined function and silently used defaults; the
+  taint flag lives on a per-session claim (an emptyDir lost it with the proxy pod); the audit is
+  complete (the sidecar reads the session home for shell history and transcripts, so the home is
+  its own claim on `session_storage_class`, which must allow two pods; meta.json and the config
+  snapshot are seeded at create; kill runs finalize.sh first); audit claims are named
+  `<session>-audit-<UTC time>`; failed cluster reads say unknown or error instead of answering
+  (lookup, list, status, and Docker status too); names a Service cannot take are refused before
+  anything is created; `aidc k8s check` asks for pod permission in the user's namespace. The
+  owner's cluster gets a shared, Delete storage class for session volumes, in their private
+  repos.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

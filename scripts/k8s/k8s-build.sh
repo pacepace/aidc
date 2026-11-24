@@ -63,7 +63,8 @@ if [ -n "$ONLY" ]; then
 fi
 
 info "starting builder pod ${BUILDER} in ${ns}"
-k8s_render_builder "$BUILDER" "$(k8s_node_selector)" | k8s_kubectl apply -f - >/dev/null
+sel=$(k8s_node_selector) || exit 1
+k8s_render_builder "$BUILDER" "$sel" | k8s_kubectl apply -f - >/dev/null
 k8s_kubectl -n "$ns" wait --for=condition=Ready "pod/${BUILDER}" --timeout=300s >/dev/null \
     || die "builder pod did not start; see: kubectl -n ${ns} describe pod ${BUILDER}"
 for _ in $(seq 60); do

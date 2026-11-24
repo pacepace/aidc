@@ -13,10 +13,12 @@ history work across the cluster and the user's own machines.
 **Requirements implemented:** K8S-01 … K8S-25 (new, `docs/requirements.md`). Carries over NET-01,
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
-**Status:** design. Owner rulings of 2026-11-23 are recorded in `.prawduct/owner-rulings.md`.
-Sysbox, Docker-in-session and the GPU are measured on the reference cluster (below). Egress enforcement,
-account switching and Syncthing are not yet measured; each open item says what will settle it.
-Items marked **proposal** await the owner.
+**Status:** being built. Built and checked on the reference cluster (`tests/smoke/k8s.sh`): the
+backend seam, the in-cluster images, users' disks, and sessions (create, attach, list, status,
+logs, kill) with the lockdown, Docker inside, the blocklist, taint and audit. Not built yet: the
+git container, the in-cluster MCP server, account switching, Syncthing, ports. Owner rulings are
+in `.prawduct/owner-rulings.md`; each open item says what will settle it, and items marked
+**proposal** await the owner.
 
 ---
 
@@ -201,7 +203,7 @@ Default size: 2 CPU and 8 GB guaranteed, may burst to 16 CPU and 32 GB; both set
 
 Same model as Docker (NET-01/02/03/14), rebuilt with NetworkPolicy (K8S-12, K8S-13):
 
-- default-deny ingress and egress in each session namespace;
+- default-deny ingress and egress in the user's namespace, where the user's sessions live;
 - dev pod egress: TCP 3128 to its own squid pod, nothing else; `dnsPolicy: None` so it cannot
   query cluster DNS; `automountServiceAccountToken: false`;
 - squid egress: Quad9 for DNS, and public addresses only (`0.0.0.0/0` except `10/8`,

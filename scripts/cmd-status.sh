@@ -79,11 +79,18 @@ done
 # Taint detail.
 POLICY_CT="$(container_name "$NAME" policy)"
 printf '\n-- taint status --\n'
-if docker exec "$POLICY_CT" test -f /var/state/tainted >/dev/null 2>&1; then
+# `test -f` says "no flag" by exiting 1 with nothing on stderr. docker exits 1 too when the
+# policy container is gone, stopped or paused, but says why on stderr: that is not a clean
+# session, and is said as such.
+taint_rc=0
+taint_err=$(docker exec "$POLICY_CT" test -f /var/state/tainted 2>&1 >/dev/null) || taint_rc=$?
+if [ "$taint_rc" -eq 0 ]; then
     printf 'TAINTED.\n'
     docker exec "$POLICY_CT" cat /var/state/tainted 2>/dev/null || true
-else
+elif [ "$taint_rc" -eq 1 ] && [ -z "$taint_err" ]; then
     printf 'clean.\n'
+else
+    printf 'unknown: the policy sidecar did not answer (%s).\n' "${taint_err:-docker exec exited ${taint_rc}}"
 fi
 
 DEV_CT="$(container_name "$NAME" dev)"

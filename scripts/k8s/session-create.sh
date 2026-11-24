@@ -40,8 +40,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 validate_session_name "$NAME"
+# Stricter than Docker's names: a Kubernetes Service name must start with a letter, and a label
+# value must end with a letter or digit. Checked before anything is created, so a refused name
+# leaves nothing behind.
+printf '%s' "$NAME" | grep -Eq '^[a-z]([a-z0-9-]*[a-z0-9])?$' \
+    || die "on the kubernetes backend a session name starts with a letter and ends with a letter or digit: ${NAME}"
 k8s_require || exit 1
-aidc_config_load "${REPO:-$PWD}" >/dev/null 2>&1 || aidc_config_defaults
+# The user's config, and the repo's own .aidc/config.yaml as cmd-create.sh reads it (load_config
+# also reports the repo settings it refused: SEC-09). Read from the repo on this machine when it
+# is here; the cluster copy is not readable from here.
+LOCAL_REPO="${REPO:-$PWD}"
+[ -d "$LOCAL_REPO" ] || LOCAL_REPO="$PWD"
+load_config "$LOCAL_REPO" "$LOCAL_REPO"
+aidc_report_repo_requests
 PROFILE="${PROFILE_OVERRIDE:-${AIDC_PROFILE:-multi}}"
 
 # k8s_cluster_repo_path <path>: where <path> is on the user's disk.
@@ -65,9 +76,27 @@ if k8s_kubectl -n "$ns" get deployment "${NAME}-proxy" >/dev/null 2>&1; then
     die "session '${NAME}' already exists (aidc kill ${NAME} --backend kubernetes)"
 fi
 
-sel=$(k8s_node_selector)
-info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE})"
-k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" | k8s_kubectl apply -f - >&2
+sel=$(k8s_node_selector) || exit 1
+AUDIT_CLAIM="${NAME}-audit-$(date -u +%Y%m%d%H%M%S)"
+info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, audit ${AUDIT_CLAIM})"
+info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
+info "  profile=${PROFILE} taint_response=${AIDC_TAINT_RESPONSE} claude_mode=${AIDC_CLAUDE_MODE}"
+
+# The audit record's first files, as cmd-create.sh writes them on Docker; the proxy pod copies
+# them onto the audit claim before anything else runs.
+seed=$(mktemp -d)
+trap 'rm -rf "$seed"' EXIT
+emit_loaded_config_yaml > "${seed}/config-snapshot.yaml"
+jq -n --arg session "$NAME" --arg profile "$PROFILE" --arg repo "$REPO_PATH" \
+    --arg created "$(date -u +%FT%TZ)" --arg taint "$AIDC_TAINT_RESPONSE" \
+    --arg ns "$ns" --arg claim "$AUDIT_CLAIM" \
+    '{session:$session, profile:$profile, repo:$repo, created_at:$created, taint_response:$taint,
+      backend:"kubernetes", namespace:$ns, audit_claim:$claim}' > "${seed}/meta.json"
+k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/meta.json" \
+    --from-file="${seed}/config-snapshot.yaml" --dry-run=client -o yaml \
+    | yq '.metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/session": "'"${NAME}"'"}' \
+    | k8s_kubectl apply -f - >&2
+k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" | k8s_kubectl apply -f - >&2
 proxy_ip=""
 for _ in $(seq 30); do
     proxy_ip=$(k8s_kubectl -n "$ns" get service "${NAME}-proxy" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
@@ -78,7 +107,7 @@ done
 info "waiting for the proxy (squid, blocklist, policy, audit)"
 k8s_kubectl -n "$ns" rollout status "deployment/${NAME}-proxy" --timeout=300s >&2 \
     || die "the proxy did not become ready; see: kubectl -n ${ns} describe pod -l aidc/session=${NAME},app=proxy"
-k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$proxy_ip" | k8s_kubectl apply -f - >&2
+k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" "$proxy_ip" | k8s_kubectl apply -f - >&2
 info "waiting for the dev pod to be ready"
 pod="${NAME}-dev-0"
 for _ in $(seq 150); do

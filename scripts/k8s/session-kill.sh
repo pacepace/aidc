@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# aidc kill <name> --backend kubernetes: remove a session from the cluster.
+# aidc kill <name> (a Kubernetes session): remove the session from the cluster.
 #
-# Everything the session made goes (labelled aidc/session=<name>): its dev StatefulSet and
-# home volume, its proxy, Service and NetworkPolicies. Its audit volume is kept (SEC-06), and so
-# is the user's disk with the repo on it.
+# The audit sidecar finishes first, as on Docker: one last sweep, and killed_at stamped into
+# meta.json. Then everything the session made goes (labelled aidc/session=<name>): its dev
+# StatefulSet, proxy, Service, NetworkPolicies, home, state and audit seed. Its audit claim
+# (labelled aidc/kept=audit, named for its creation time) stays, and so does the user's disk.
 
 set -euo pipefail
 
@@ -12,7 +13,7 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/lib.sh"
 
 case "${1:-}" in
-    -h|--help) printf 'aidc kill <name> --backend kubernetes\n\nRemoves the session from the cluster; its audit volume and your disk stay.\n'; exit 0 ;;
+    -h|--help) printf 'aidc kill <name>\n\nRemoves the session from the cluster; its audit claim and your disk stay.\n'; exit 0 ;;
 esac
 NAME="${1:-}"
 validate_session_name "$NAME"
@@ -22,12 +23,13 @@ sel="aidc/session=${NAME}"
 if [ -z "$(k8s_kubectl -n "$ns" get deployment,statefulset -l "$sel" -o name 2>/dev/null)" ]; then
     die "no session '${NAME}' in ${ns}"
 fi
+audit=$(k8s_kubectl -n "$ns" get pvc -l "${sel},aidc/kept=audit" -o name 2>/dev/null | head -n1)
+proxy=$(k8s_kubectl -n "$ns" get pod -l "${sel},app=proxy" -o name 2>/dev/null | head -n1)
+if [ -n "$proxy" ]; then
+    k8s_kubectl -n "$ns" exec "$proxy" -c audit -- /usr/local/bin/finalize.sh </dev/null >&2 \
+        || info "WARNING: the audit sidecar's final sweep did not run; the audit claim keeps its last sweep"
+fi
 info "removing session ${NAME} from ${ns}"
-k8s_kubectl -n "$ns" delete statefulset,deployment,service,networkpolicy -l "$sel" --wait=true >&2
-for pvc in $(k8s_kubectl -n "$ns" get pvc -l "$sel" -o name 2>/dev/null); do
-    case "$pvc" in
-        "persistentvolumeclaim/${NAME}-audit") ;;
-        *) k8s_kubectl -n "$ns" delete "$pvc" --wait=false >&2 ;;
-    esac
-done
-info "session ${NAME} removed; audit kept in volume claim ${NAME}-audit (namespace ${ns})"
+k8s_kubectl -n "$ns" delete statefulset,deployment,service,networkpolicy,configmap -l "$sel" --wait=true >&2
+k8s_kubectl -n "$ns" delete pvc -l "${sel},aidc/kept!=audit" --wait=false >&2
+info "session ${NAME} removed; its audit trail is kept in ${audit#persistentvolumeclaim/} (namespace ${ns})"

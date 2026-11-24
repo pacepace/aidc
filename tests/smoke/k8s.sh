@@ -113,12 +113,44 @@ assert "the audit volume holds the policy events" \
     "k8s_kubectl -n '$NS' exec '$(proxy_pod)' -c audit -- grep -q tainted /var/aidc/audit/policy-events.log </dev/null"
 
 echo "[7/7] kill"
-in_dev "rm -rf '/home/${AIDC_K8S_USER}${REPO#"$HOME"}'" >/dev/null 2>&1 || true
+REL="${REPO#"$HOME"}"
+DISK_REPO="/home/${AIDC_K8S_USER}${REL}"
+in_dev "echo kept > '${DISK_REPO}/marker'" >/dev/null 2>&1 || true
+AUDIT=$(k8s_kubectl -n "$NS" get statefulset "${SESSION}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null)
 assert "aidc kill removes the session" "'$AIDC' kill '$SESSION' </dev/null"
 trap - EXIT INT TERM
 assert "nothing of it is left but its audit claim" \
     "[ -z \"\$(k8s_kubectl -n '$NS' get statefulset,deployment,service,networkpolicy -l aidc/session=$SESSION -o name)\" ]"
-assert "its audit claim is kept" "k8s_kubectl -n '$NS' get pvc '${SESSION}-audit'"
+assert "its audit claim is kept (${AUDIT:-none named})" "[ -n '$AUDIT' ] && k8s_kubectl -n '$NS' get pvc '$AUDIT'"
+# A reader pod on the kept audit claim and the user's disk: what outlives the session.
+READER="${SESSION}-reader"
+k8s_kubectl -n "$NS" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: ${READER}, namespace: ${NS}, labels: {app.kubernetes.io/managed-by: aidc}}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  nodeSelector: $(k8s_node_selector)
+  tolerations: ${AIDC_K8S_TOLERATIONS}
+  containers:
+    - {name: r, image: "${AIDC_K8S_REGISTRY_PULL}/aidc/audit:${AIDC_VERSION_TAG}", command: [sleep, "300"],
+       volumeMounts: [{name: audit, mountPath: /audit}, {name: disk, mountPath: /disk}]}
+  volumes:
+    - {name: audit, persistentVolumeClaim: {claimName: "${AUDIT}"}}
+    - {name: disk, persistentVolumeClaim: {claimName: disk}}
+YAML
+k8s_kubectl -n "$NS" wait --for=condition=Ready "pod/${READER}" --timeout=180s >/dev/null 2>&1
+rd() { k8s_kubectl -n "$NS" exec "$READER" -- sh -c "$1" </dev/null; }
+assert "the audit trail has meta.json, stamped killed_at by the final sweep" "rd 'jq -e .killed_at /audit/meta.json'"
+meta_names_it() { [ "$(rd "jq -r '.session + \" \" + .backend' /audit/meta.json")" = "${SESSION} kubernetes" ]; }
+assert "meta.json names the session and its backend" "meta_names_it"
+assert "the audit trail has the config snapshot" "rd 'test -s /audit/config-snapshot.yaml'"
+assert "the audit trail has squid's access log" "rd 'test -s /audit/squid-access.log'"
+assert "the user's disk outlives the session (a file written in it is still there)" \
+    "rd 'grep -q kept /disk${REL}/marker'"
+rd "rm -rf '/disk${REL}'" >/dev/null 2>&1 || true
+k8s_kubectl -n "$NS" delete pod "$READER" --wait=false >/dev/null 2>&1 || true
 rmdir "$REPO" "$(dirname "$REPO")" 2>/dev/null || true
 
 echo
@@ -126,5 +158,5 @@ echo "=== kubernetes smoke summary ==="
 echo "passed:   $PASS"
 echo "failed:   $FAIL"
 echo "elapsed:  $(( $(date +%s) - START ))s"
-echo "kept:     audit claim ${SESSION}-audit in ${NS}"
+echo "kept:     audit claim ${AUDIT:-?} in ${NS}"
 [ "$FAIL" -eq 0 ]

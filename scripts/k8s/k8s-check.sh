@@ -19,7 +19,7 @@ aidc k8s check
 Checks, read-only, that the cluster in the `kubernetes:` block of
 ~/.config/aidc/config.yaml can run aidc sessions: kubectl reaches it, the runtime
 class and the storage class exist, a ready node can take session pods, and you may
-create namespaces. Exits 1 when something is missing.
+create pods in your namespace. Exits 1 when something is missing.
 EOF
         exit 0 ;;
 esac
@@ -73,10 +73,18 @@ else
     missing "cannot list nodes"
 fi
 
-if [ "$(k8s_kubectl auth can-i create namespaces 2>/dev/null || true)" = "yes" ]; then
-    ok "you may create namespaces"
+# Sessions live in the user's namespace: what they need is pods there. Making namespaces is only
+# for `aidc k8s setup` and `aidc user add`, which an admin may run instead.
+user_ns=$(k8s_user_ns "$AIDC_K8S_USER")
+if [ "$(k8s_kubectl auth can-i create pods -n "$user_ns" 2>/dev/null || true)" = "yes" ]; then
+    ok "you may create pods in ${user_ns} (your sessions live there)"
 else
-    missing "permission to create namespaces (each session gets its own)"
+    missing "permission to create pods in ${user_ns} (your sessions live there)"
+fi
+if [ "$(k8s_kubectl auth can-i create namespaces 2>/dev/null || true)" = "yes" ]; then
+    ok "you may create namespaces (aidc k8s setup, aidc user add)"
+else
+    note "you may not create namespaces: an admin runs \`aidc k8s setup\` and \`aidc user add\`"
 fi
 
 sys_ns=$(k8s_system_ns)

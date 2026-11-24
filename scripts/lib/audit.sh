@@ -14,7 +14,7 @@
 # size is bytes ("?" when unknown), and state is one of:
 #   running   the session still exists: never trimmed
 #   kept      killed with aidc kill
-#   ended     the session is gone, but its trail was never closed (no killed_at)
+#   ended     Docker: the session is gone, but its trail was never closed (no killed_at)
 #   released  Kubernetes: the claim is gone, its volume (and data) is not
 #   unknown   Docker could not be asked whether the session still exists: never trimmed
 

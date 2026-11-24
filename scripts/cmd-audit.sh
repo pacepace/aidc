@@ -29,7 +29,7 @@ aidc audit <subcommand>
   --backend docker|kubernetes   only that backend's trails (default: both, where present)
 
 States: running (the session still exists: never trimmed), kept (killed with aidc kill),
-ended (the session went without aidc kill), released (Kubernetes: the claim is gone but its
+ended (Docker: the session went without aidc kill), released (Kubernetes: the claim is gone but its
 volume is not; trim removes the volume and its data), unknown (Docker could not be asked:
 never trimmed).
 

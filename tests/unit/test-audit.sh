@@ -279,6 +279,8 @@ assert_eq "a claim a session's StatefulSet names is running" "running" \
     "$(printf '%s\n' "$out" | awk '$1 == "run-audit-20260101000000" { print $(NF-1) }')"
 assert_eq "a claim a pod mounts is running" "running" \
     "$(printf '%s\n' "$out" | awk '$1 == "mnt-audit-20260101000000" { print $(NF-1) }')"
+assert_eq "a claim no session uses is kept, even with no kill time recorded" "kept" \
+    "$(printf '%s\n' "$out" | awk '$1 == "old-audit-20260101000000" { print $(NF-1) }')"
 assert_eq "a released audit volume whose claim is gone is listed" "released" \
     "$(printf '%s\n' "$out" | awk '$1 == "pv-orphan" { print $(NF-1) }')"
 assert_not_has "a released volume that is not an audit trail is not" "pv-other" "$out"

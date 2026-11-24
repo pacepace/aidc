@@ -65,8 +65,9 @@ $(k8s_kubectl -n "$NS" get pod --request-timeout=10s \
                ($a["aidc/killed-at"] // "-"),
                ($a["aidc/tainted"] // "?"),
                ($a["aidc/size-bytes"] // "?"),
-               (if ($running | index($c.metadata.name)) then "running"
-                elif $a["aidc/killed-at"] then "kept" else "ended" end),
+               # A claim no session uses is kept: only aidc kill leaves one behind (a claim
+               # killed before aidc recorded the kill shows no kill time).
+               (if ($running | index($c.metadata.name)) then "running" else "kept" end),
                ("claim " + $ns + "/" + $c.metadata.name
                  + (if $c.spec.volumeName then ", volume " + $c.spec.volumeName
                       + (if $v then " (" + $v.spec.persistentVolumeReclaimPolicy + ")" else "" end)

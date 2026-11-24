@@ -823,13 +823,13 @@ class TestPostTurnInstrumentation:
 
 
 # --- loop guard (prod incident 2026-07-03: orchestrator<->session runaway) ----
-# A runaway where the orchestrator (the coordinator) and a session answer each other forever
+# A runaway where the orchestrator (the orchestrator) and a session answer each other forever
 # has no natural end, so the guard caps an unbroken run of deliveries; only a long
 # idle gap resets it, so a slow runaway still trips. The run is durable so a short MCP
 # restart stays latched. It counts only replies to the orchestrator's own prompts: a
 # prompt typed at the terminal (or sent for a person) puts a human in the loop, which
 # a runaway never has, and resets the run. 2026-10-08: counting every delivery dropped
-# The coordinator's reply to the 11th of Pace's prompts that morning, the 21st delivery
+# The orchestrator's reply to the 11th of Pace's prompts that morning, the 21st delivery
 # counting the task notifications between them.
 
 class TestLoopGuard:
@@ -967,7 +967,7 @@ class TestLoopGuard:
                 _assistant(uuid, f"noted {n}")]
 
     async def test_a_morning_at_the_terminal_never_trips(self, tmp_path):
-        """2026-10-08 at the coordinator: prompts typed at the terminal, each with task
+        """2026-10-08 at the orchestrator: prompts typed at the terminal, each with task
         notifications answered between them, and no orchestrator prompt at all. Every
         reply is delivered, well past the cap, with nothing dead-lettered."""
         base = tmp_path / "t"; state = tmp_path / "s"
@@ -2153,7 +2153,7 @@ class TestARewatchDoesNotStallTheServer:
     """Live 2026-10-21/22: the orchestrator calls session_unwatch and session_watch
     before each session_send. Unwatching dropped what the server knew of the
     session's earlier transcripts, so the new watcher's first pass read every one of
-    them again (29 files, 775 MB for `coordinator`; about 9 s measured) on the event loop,
+    them again (29 files, 775 MB for `orchestrator`; about 9 s measured) on the event loop,
     and the session_send waiting on it took 12-15 s to answer."""
 
     def _session_with_history(self, tmp_path, monkeypatch):
@@ -2207,7 +2207,7 @@ class TestAJoinedPromptIsAnsweredInTheRunningTurn:
     async def test_the_turn_it_joined_is_delivered_once_without_a_terminal_note(self, tmp_path):
         """session_send(deliver="join"): the prompt reaches the transcript only as a
         queue-operation and its queued_command attachment, and the answer is part of
-        the running turn's reply. Fixture shapes from the coordinator, 2026-10-22."""
+        the running turn's reply. Fixture shapes from the orchestrator, 2026-10-22."""
         from pathlib import Path
         evening = [json.loads(ln) for ln in
                    (Path(__file__).parent / "fixtures" / "claude-2.1.300-notification-turn.jsonl")

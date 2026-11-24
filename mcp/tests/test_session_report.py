@@ -119,7 +119,7 @@ async def test_status_of_an_idle_session_names_no_work(facts):
 
 
 async def test_status_of_a_turn_a_background_task_opened_names_the_task(facts, tmp_path):
-    """The coordinator, 2026-10-22: for 47 minutes working_on named the person's prompt the
+    """The orchestrator, 2026-10-22: for 47 minutes working_on named the person's prompt the
     agent had answered before a task notification opened a new turn."""
     path = tmp_path / "transcripts" / "proj" / "s1.jsonl"
     lines = path.read_text().splitlines()

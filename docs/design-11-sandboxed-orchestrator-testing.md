@@ -1,6 +1,6 @@
 # Design 11 — Testing an Orchestrator That Runs Inside a Dev Container
 
-**What this covers.** How an orchestrator under development (the coordinator) runs inside an aidc dev
+**What this covers.** How an orchestrator under development (the orchestrator) runs inside an aidc dev
 container, iterating on its own code, while it drives another aidc session through an `aidc-mcp`
 server. It also covers what keeps that from handing the sandboxed agent control of every session
 on the host.
@@ -8,8 +8,8 @@ on the host.
 **Requirements implemented:** MCP-31 (session-scoped MCP). Relates to MCP-12 (dev containers
 cannot reach `aidc-mcp`).
 
-**Status:** built, and used for the joint test with the coordinator session on 2026-09-17
-(`.prawduct/artifacts/joint-test-coordinator.md`).
+**Status:** built, and used for the joint test with the orchestrator session on 2026-09-17
+(`.prawduct/artifacts/joint-test-orchestrator.md`).
 
 ---
 
@@ -58,10 +58,10 @@ host
 ├─ aidc-mcp (live, :7878)                 untouched
 ├─ test aidc-mcp (this branch, :17878)    AIDC_MCP_ALLOWED_SESSIONS=jointtest
 │    own token, state dir, audit log, config.yaml (callback_url → orchestrator)
-├─ session `coordinator-test` (dev container) orchestrator agent + the coordinator running
-│    the coordinator → http://10.23.68.16:17878/mcp via squid, with the test token
-│    the coordinator API published with `aidc proxy` → host 0.0.0.0:<port>
-└─ session `jointtest` (dev container)    the Claude session the coordinator drives
+├─ session `orchestrator-test` (dev container) orchestrator agent + the orchestrator running
+│    the orchestrator → http://10.23.68.16:17878/mcp via squid, with the test token
+│    the orchestrator API published with `aidc proxy` → host 0.0.0.0:<port>
+└─ session `jointtest` (dev container)    the Claude session the orchestrator drives
 ```
 
 The test MCP runs from the branch checkout on the host (`python -m aidc_mcp` with

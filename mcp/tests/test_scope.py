@@ -78,7 +78,7 @@ async def test_every_named_tool_refuses_a_session_outside_the_scope(
         tool, app, monkeypatch, forbid_side_effects):
     monkeypatch.setenv(scope.ENV, "jointtest")
     fn = app._tool_manager._tools[tool].fn
-    result = fn(name="coordinator", **CALLS[tool])
+    result = fn(name="orchestrator", **CALLS[tool])
     if inspect.isawaitable(result):
         result = await result
     assert result["ok"] is False
@@ -106,7 +106,7 @@ async def test_every_tool_that_takes_a_session_name_refuses_out_of_scope(
     for tool_name, tool in app._tool_manager._tools.items():
         if tool_name == "session_create" or "name" not in inspect.signature(tool.fn).parameters:
             continue
-        result = tool.fn(name="coordinator", **_dummy_args(tool.fn))
+        result = tool.fn(name="orchestrator", **_dummy_args(tool.fn))
         if inspect.isawaitable(result):
             result = await result
         assert result["ok"] is False, tool_name
@@ -141,7 +141,7 @@ async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     raw = ("SESSION   STATUS   PROFILE\n"
            "jointtest Up 1 min multi\n"
-           "the coordinator   Up 2 days multi\n")
+           "other     Up 2 days multi\n")
     monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": raw, "stderr": ""})
     out = (await app._tool_manager._tools["session_list"].fn())["data"]["raw"]
@@ -158,15 +158,15 @@ async def test_in_scope_calls_go_through(app, monkeypatch, idle_session):
 
 async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
-    monkeypatch.setattr(resources, "_run", lambda args: "SESSION X\ncoordinator Up\njointtest Up\n")
+    monkeypatch.setattr(resources, "_run", lambda args: "SESSION X\norchestrator Up\njointtest Up\n")
     a = MCPServer("r")
     resources.register(a)
     fns = {str(t.uri_template): t.fn for t in a._resource_manager._templates.values()}
     fns.update({str(r.uri): r.fn for r in a._resource_manager._resources.values()})
-    assert "outside" in json.loads(await fns["aidc://sessions/{name}/status"](name="coordinator"))["error"]
-    assert "outside" in json.loads(await fns["aidc://sessions/{name}/audit"](name="coordinator"))["error"]
+    assert "outside" in json.loads(await fns["aidc://sessions/{name}/status"](name="orchestrator"))["error"]
+    assert "outside" in json.loads(await fns["aidc://sessions/{name}/audit"](name="orchestrator"))["error"]
     assert "outside" in json.loads(
-        await fns["aidc://sessions/{name}/audit/{filename}"](name="coordinator", filename="a"))["error"]
+        await fns["aidc://sessions/{name}/audit/{filename}"](name="orchestrator", filename="a"))["error"]
     assert "error" in json.loads(await fns["aidc://config"]())
     assert json.loads(await fns["aidc://sessions"]())["raw"] == "SESSION X\njointtest Up\n"
 
@@ -174,12 +174,12 @@ async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
 async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
     from aidc_mcp import transcript as ts
     monkeypatch.setenv(scope.ENV, "jointtest")
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "coordinator", [ts.QueuedPrompt("x", "t")])
+    ts.save_send_queue(tools._WATCHER_STATE_DIR, "orchestrator", [ts.QueuedPrompt("x", "t")])
 
     async def never(name):
         raise AssertionError("checked a session outside the scope")
 
     monkeypatch.setattr(tools, "_session_instance", never)
     await tools.resume_send_queues()
-    assert "coordinator" not in tools._pending_sends
-    assert ts.send_queue_path(tools._WATCHER_STATE_DIR, "coordinator").exists()
+    assert "orchestrator" not in tools._pending_sends
+    assert ts.send_queue_path(tools._WATCHER_STATE_DIR, "orchestrator").exists()

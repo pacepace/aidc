@@ -1,6 +1,6 @@
 """What stops a session_invoke whose caller has gone, through the real transport.
 
-2026-10-22 23:04Z, the coordinator: Pace pressed stop on a session_invoke in the coordinator's UI;
+2026-10-22 23:04Z, the orchestrator: Pace pressed stop on a session_invoke in the orchestrator's UI;
 aidc-mcp logged nothing, and the host's docker exec and the claude run inside the
 container both went on. These tests serve server.build_app() with uvicorn on a local
 port and speak to it with a real HTTP client, the way an orchestrator does, then end
@@ -11,7 +11,7 @@ never ends by itself, and stopping it in the container is recorded.
 Measured on MCP SDK 2.3 with the 2025-11-25 protocol: the SDK cancels the handler on a
 cancel notification and on DELETE, but not on a dropped connection; the handler then
 runs on with nobody to answer. disconnect.StopInvokeOnDisconnect covers that case. A
-client that abandons a call without any of the three (the coordinator's stop button, on the
+client that abandons a call without any of the three (the orchestrator's stop button, on the
 evidence of 23:04Z) cannot be seen; the one-run-per-session guard and session_status's
 headless_runs are what is left for it.
 """

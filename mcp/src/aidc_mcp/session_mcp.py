@@ -28,7 +28,7 @@ input, never in a command line, and never into the audit log, a tool result or
 this module's errors (:func:`scrub`).
 
 **The URL is this server's to say.** The caller gives a path; the base is
-``coordinator.callback_url``, the address the orchestrator's API already has from
+``orchestrator.callback_url``, the address the orchestrator's API already has from
 here. A caller cannot point a session at another host.
 """
 
@@ -155,7 +155,7 @@ def check(server: str, path: str, bearer: str, base_url: str) -> str:
             "invalid_argument")
     if not base_url:
         raise SessionMcpError(
-            "coordinator.callback_url not set in ~/.config/aidc/config.yaml", "not_configured")
+            "orchestrator.callback_url not set in ~/.config/aidc/config.yaml", "not_configured")
     return f"{base_url.rstrip('/')}{path}"
 
 

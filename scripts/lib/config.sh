@@ -123,7 +123,7 @@ mcp:
                             # offered at all.
 
 # Only relevant if an orchestrator drives sessions over MCP: where session_invoke_async / session_send POST results back.
-coordinator:
+orchestrator:
   callback_url: ""           # base URL of the orchestrator's callback endpoint, e.g. https://orchestrator.example.com
   send_speaker: false        # add "speaker": "human"|"agent" to session_send replies. Leave off until
                              # the orchestrator records human turns instead of dropping them.
@@ -429,7 +429,7 @@ dns_servers|list|operator|AIDC_DNS_SERVERS
 networks|list|operator|AIDC_NETWORKS
 egress_tcp|list|operator|AIDC_EGRESS_TCP
 mcp|block|global|
-coordinator|block|global|
+orchestrator|block|global|
 ROWS
 }
 

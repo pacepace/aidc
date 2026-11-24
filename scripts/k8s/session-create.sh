@@ -23,20 +23,37 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-aidc create <name> --backend kubernetes [--profile P]
+aidc create <name> --backend kubernetes [--profile P] [--cpu N] [--memory Q]
+                                         [--cpu-limit N] [--memory-limit Q]
 
 Starts a session in the cluster of the `kubernetes:` config, on your disk there
 (`aidc user add` makes it). The session sees your whole disk and starts in the current
 directory's place on it (made when missing). It takes no --repo: add repos with
 `aidc repo add`, and the session makes its own worktree and branch in one with
 `git worktree add`. P is the toolchain profile (default: the config's, else multi).
+
+Size: --cpu and --memory are what the session is guaranteed (default: the config's
+kubernetes.cpu and .memory, else 2 and 8Gi); --cpu-limit and --memory-limit what it may
+use when the node has room (kubernetes.cpu_limit and .memory_limit, else 16 and 32Gi).
+CPU as 2, 1.5 or 500m; memory as 8Gi or 512Mi. A request above the configured limit
+raises the limit to it, unless a limit is given too.
 USAGE
 }
 
-NAME="" PROFILE_OVERRIDE=""
+NAME="" PROFILE_OVERRIDE="" CPU="" MEMORY="" CPU_LIMIT="" MEMORY_LIMIT=""
+# need_value <flag> <value>: a flag's value, not missing and not the next flag.
+need_value() { case "${2:-}" in ""|-*) die "$1 needs a value" ;; esac; }
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
+        --cpu|--memory|--cpu-limit|--memory-limit)
+            need_value "$1" "${2:-}"
+            case "$1" in --cpu) CPU="$2" ;; --memory) MEMORY="$2" ;; --cpu-limit) CPU_LIMIT="$2" ;; --memory-limit) MEMORY_LIMIT="$2" ;; esac
+            shift 2 ;;
+        --cpu=*) CPU="${1#*=}"; shift ;;
+        --memory=*) MEMORY="${1#*=}"; shift ;;
+        --cpu-limit=*) CPU_LIMIT="${1#*=}"; shift ;;
+        --memory-limit=*) MEMORY_LIMIT="${1#*=}"; shift ;;
         --repo|--repo=*)
             die "--repo is not used on the kubernetes backend: the session sees your whole disk. Add the repo with \`aidc repo add <owner/name>\`; the session makes its own worktree and branch in it (git worktree add)" ;;
         --profile) PROFILE_OVERRIDE="${2:-}"; shift 2 ;;
@@ -59,6 +76,23 @@ k8s_require || exit 1
 load_config "$PWD" "$PWD"
 aidc_report_repo_requests
 PROFILE="${PROFILE_OVERRIDE:-${AIDC_PROFILE:-multi}}"
+# The size: flags over the config (k8s_require loaded it). A request above the configured limit
+# with no limit given raises the limit to it: asking for more than the default ceiling means
+# wanting it.
+size_flag() { # <flag> <value> <request var> <limit var> <limit flag value> <fn>
+    local v="$2" q l
+    [ -n "$v" ] || return 0
+    printf -v "$3" '%s' "$v"
+    if [ -z "$5" ] && q=$("$6" "$v") && l=$("$6" "${!4}") && awk -v a="$q" -v b="$l" 'BEGIN { exit !(a > b) }'; then
+        info "$1 ${v} is above the configured limit ${!4}: the limit is ${v} too"
+        printf -v "$4" '%s' "$v"
+    fi
+}
+[ -z "$CPU_LIMIT" ] || AIDC_K8S_CPU_LIMIT="$CPU_LIMIT"
+[ -z "$MEMORY_LIMIT" ] || AIDC_K8S_MEMORY_LIMIT="$MEMORY_LIMIT"
+size_flag --cpu "$CPU" AIDC_K8S_CPU_REQUEST AIDC_K8S_CPU_LIMIT "$CPU_LIMIT" k8s_cpu_milli
+size_flag --memory "$MEMORY" AIDC_K8S_MEMORY_REQUEST AIDC_K8S_MEMORY_LIMIT "$MEMORY_LIMIT" k8s_memory_bytes
+k8s_check_size || exit 1
 
 REPO_PATH=$(k8s_cluster_repo_path "$PWD") \
     || die "run aidc create from under your home directory (${HOME}) or /home/${AIDC_K8S_USER}: the session starts at the same place on your disk (got ${PWD})"
@@ -122,6 +156,7 @@ AUDIT_CLAIM="${NAME}-audit-$(date -u +%Y%m%d%H%M%S)"
 info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, audit ${AUDIT_CLAIM})"
 info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
 info "  profile=${PROFILE} taint_response=${AIDC_TAINT_RESPONSE} claude_mode=${AIDC_CLAUDE_MODE}"
+info "  size: ${AIDC_K8S_CPU_REQUEST} CPU / ${AIDC_K8S_MEMORY_REQUEST} guaranteed, up to ${AIDC_K8S_CPU_LIMIT} / ${AIDC_K8S_MEMORY_LIMIT}"
 
 # The audit record's first files, as cmd-create.sh writes them on Docker; the proxy pod copies
 # them onto the audit claim before anything else runs.

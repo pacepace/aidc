@@ -20,6 +20,8 @@ sts=$(k8s_kubectl -n "$ns" get statefulset "${NAME}-dev" -o json) \
 printf 'session:  %s (kubernetes, namespace %s)\n' "$NAME" "$ns"
 printf 'repo:     %s\n' "$(printf '%s' "$sts" | yq -p=json '.metadata.annotations["aidc/repo"] // "?"')"
 printf 'profile:  %s\n' "$(printf '%s' "$sts" | yq -p=json '.metadata.annotations["aidc/profile"] // "?"')"
+printf 'size:     %s\n' "$(printf '%s' "$sts" | yq -p=json '.spec.template.spec.containers[] | select(.name == "dev") | .resources |
+    ((.requests.cpu // "?") + " CPU / " + (.requests.memory // "?") + " guaranteed, up to " + (.limits.cpu // "?") + " / " + (.limits.memory // "?"))' 2>/dev/null || echo '?')"
 printf 'pods:\n'
 k8s_kubectl -n "$ns" get pods -l "aidc/session=${NAME}" --request-timeout=10s \
     -o custom-columns='  NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,NODE:.spec.nodeName,STARTED:.status.startTime' 2>/dev/null \

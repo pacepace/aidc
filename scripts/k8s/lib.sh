@@ -154,6 +154,48 @@ k8s_require() {
     [ "$bad" = 0 ]
 }
 
+# Session size (K8S-19). Quantities are checked here, before anything is rendered: a manifest
+# with a bad one is refused by the API server half way through a create.
+# k8s_cpu_milli <quantity>: the CPU quantity in millicores ("2", "1.5", "500m"), or returns 1.
+k8s_cpu_milli() {
+    case "$1" in
+        *m) printf '%s' "${1%m}" | grep -Eqx '[1-9][0-9]{0,6}' || return 1; printf '%s' "${1%m}" ;;
+        *) printf '%s' "$1" | grep -Eqx '[0-9]{1,4}(\.[0-9]{1,3})?' || return 1
+           awk -v q="$1" 'BEGIN { m = int(q * 1000 + 0.5); if (m < 1) exit 1; print m }' ;;
+    esac
+}
+# k8s_memory_bytes <quantity>: the memory quantity in bytes ("8Gi", "512Mi", "8G", "1073741824"),
+# or returns 1.
+k8s_memory_bytes() {
+    local n u
+    printf '%s' "$1" | grep -Eqx '[0-9]{1,13}(\.[0-9]{1,3})?(Ki|Mi|Gi|Ti|K|M|G|T)?' || return 1
+    n=$(printf '%s' "$1" | sed -E 's/[KMGT]i?$//') u="${1#"$n"}"
+    awk -v n="$n" -v u="$u" 'BEGIN {
+        f["Ki"] = 1024; f["Mi"] = 1024^2; f["Gi"] = 1024^3; f["Ti"] = 1024^4
+        f["K"] = 1e3; f["M"] = 1e6; f["G"] = 1e9; f["T"] = 1e12; f[""] = 1
+        b = n * f[u]; if (b < 1) exit 1; printf "%.0f\n", b }'
+}
+# k8s_check_size: AIDC_K8S_CPU_REQUEST / _MEMORY_REQUEST / _CPU_LIMIT / _MEMORY_LIMIT are
+# quantities and each request is at most its limit; prints why to stderr and returns 1 when not.
+k8s_check_size() {
+    local rq lm what word req_var lim_var fn bad=0
+    for what in CPU MEMORY; do
+        req_var="AIDC_K8S_${what}_REQUEST" lim_var="AIDC_K8S_${what}_LIMIT" fn=k8s_cpu_milli word=cpu
+        [ "$what" = MEMORY ] && fn=k8s_memory_bytes word=memory
+        if ! rq=$("$fn" "${!req_var}"); then
+            printf '[aidc] error: %s request %s is not a quantity (e.g. %s)\n' "$word" "${!req_var}" \
+                "$([ "$what" = CPU ] && echo '2, 1.5 or 500m' || echo '8Gi or 512Mi')" >&2; bad=1; continue
+        fi
+        if ! lm=$("$fn" "${!lim_var}"); then
+            printf '[aidc] error: %s limit %s is not a quantity\n' "$word" "${!lim_var}" >&2; bad=1; continue
+        fi
+        if awk -v a="$rq" -v b="$lm" 'BEGIN { exit !(a > b) }'; then
+            printf '[aidc] error: the %s request (%s) is above its limit (%s)\n' "$word" "${!req_var}" "${!lim_var}" >&2; bad=1
+        fi
+    done
+    [ "$bad" = 0 ]
+}
+
 # k8s_session_taint <namespace> <session>: "yes <flag json>", "no", or "unknown <why>", read
 # from the session's policy sidecar. Only the flag file being absent is "no": a sidecar that
 # cannot be asked is unknown, never clean.

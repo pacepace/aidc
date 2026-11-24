@@ -819,8 +819,10 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   connect to it. `aidc repo add` clones onto your disk; sessions make group-writable files
   (umask 002), so the git container can tidy their worktrees. `aidc git status` warns when its
   private copies take more than `git_storage_warn` (default 1Gi).
-- `aidc create <name> --backend kubernetes [--profile P]`: a session in the cluster, in your
-  namespace. It sees your whole disk and starts at the current directory's place on it: a path
+- `aidc create <name> --backend kubernetes [--profile P] [--cpu N] [--memory Q] [--cpu-limit N]
+  [--memory-limit Q]`: a session in the cluster, in your namespace. `--cpu`/`--memory` are what
+  it is guaranteed, the limits what it may use when the node has room (defaults below); a request
+  above the configured limit raises the limit with it, and `aidc status` shows the size. It sees your whole disk and starts at the current directory's place on it: a path
   under your home directory is the same path under `/home/<user>` on the disk, so a repo's
   Claude history has the same name everywhere. There is no `--repo` here: a session that works
   on an added repo makes its own worktree and branch in it

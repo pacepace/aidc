@@ -75,7 +75,11 @@ case "$*" in
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"get pvc -l"*"aidc/kept=audit"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
     *"get statefulset demo-dev -o json"*) [ "${K_EXISTS:-}" = 1 ] || exit 1
-        echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi","aidc/audit":"demo-audit-20261124050000"}}}' ;;
+        if [ "${K_SIZED:-}" = 1 ]; then
+            echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj"}},"spec":{"template":{"spec":{"containers":[{"name":"dev","resources":{"requests":{"cpu":"4","memory":"12Gi"},"limits":{"cpu":"16","memory":"32Gi"}}}]}}}}'
+        else
+            echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi","aidc/audit":"demo-audit-20261124050000"}}}'
+        fi ;;
     *"get statefulset -l app=dev"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
     *"get pod demo-dev-0 -o jsonpath"*) printf 'Running' ;;
@@ -203,6 +207,37 @@ assert_has "the proxy pod seeds squid's folder before squid starts" "seed-squid-
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.initContainers[].name' | tail -1)"
 assert_has "images come from the cluster's registry at this version" "localhost:5000/aidc/dev-base:" \
     "$(dev '.spec.template.spec.containers[0].image')"
+
+echo "=== session size at create (K8S-19) ==="
+res() { dev '.spec.template.spec.containers[] | select(.name == "dev") | .resources'; }
+out=$(run create demo --backend kubernetes --cpu 4 --memory 12Gi)
+assert_eq "--cpu and --memory set what the session is guaranteed; the limits stay the configured ones" \
+    '{"requests":{"cpu":"4","memory":"12Gi"},"limits":{"cpu":"16","memory":"64Gi"}}' "$(res)"
+assert_has "create says the size" "size: 4 CPU / 12Gi guaranteed, up to 16 / 64Gi" "$out"
+run create demo --backend kubernetes --cpu=500m --memory=512Mi --cpu-limit=2 --memory-limit=1Gi >/dev/null
+assert_eq "every flag, in its --flag=value form too" \
+    '{"requests":{"cpu":"500m","memory":"512Mi"},"limits":{"cpu":"2","memory":"1Gi"}}' "$(res)"
+out=$(run create demo --backend kubernetes --cpu 24)
+assert_eq "a request above the configured limit raises the limit to it" \
+    '{"requests":{"cpu":"24","memory":"8Gi"},"limits":{"cpu":"24","memory":"64Gi"}}' "$(res)"
+assert_has "and says so" "--cpu 24 is above the configured limit 16: the limit is 24 too" "$out"
+out=$(run create demo --backend kubernetes --memory 2Gi --memory-limit 1Gi)
+assert_has "a request above a limit given with it is refused" "the memory request (2Gi) is above its limit (1Gi)" "$out"
+assert_eq "and nothing is applied" "" "$(cat "$K_APPLIED")"
+for bad in "--cpu two" "--cpu 0" "--memory 8gb" "--memory -1" "--cpu-limit 1.23456" "--memory"; do
+    # shellcheck disable=SC2086  # the flag and its value, split on purpose
+    out=$(run create demo --backend kubernetes $bad)
+    assert_has "'$bad' is refused before anything is made" "exit=1" "$out"
+    assert_eq "  (nothing applied for '$bad')" "" "$(cat "$K_APPLIED")"
+done
+out=$(run create demo --backend kubernetes --cpu 2.5)
+assert_eq "a fractional CPU count is taken as Kubernetes writes it" '"2.5"' "$(dev '.spec.template.spec.containers[] | select(.name == "dev") | .resources.requests.cpu')"
+printf '  cpu: lots\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(run create demo --backend kubernetes)
+assert_has "a bad size in the config is refused by name too" "cpu request lots is not a quantity" "$out"
+sed -i '/^  cpu: lots$/d' "$HOME/.config/aidc/config.yaml"
+out=$(K_EXISTS=1 K_SIZED=1 run status demo)
+assert_has "status shows the session's size" "size:     4 CPU / 12Gi guaranteed, up to 16 / 32Gi" "$out"
 
 printf 'claude_mode: safe\ntaint_response: notify\n' >> "$HOME/.config/aidc/config.yaml"
 run create demo --backend kubernetes >/dev/null

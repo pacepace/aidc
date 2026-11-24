@@ -89,6 +89,11 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   also take no inbound connections (NetworkPolicy). Checked live on the reference cluster: the
   builder listens on its unix socket only; the node pulls through the loopback host port with
   the registry fence in place; a pod outside the system namespace cannot reach the registry.
+- Chunk 03: `aidc user add` binds the disk with a one-shot pod (the claim waits for a first
+  consumer) that gives the disk's top folder to the session user (uid 1000); a second run only
+  checks a bound disk, never touches it. Checked live on the owner's cluster: the disk binds as a
+  shared ZFS dataset, and a Sysbox pod and a plain pod mount it at once with file owners intact.
+  The owner's storage class and parent dataset live in their private repos (merged there).
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

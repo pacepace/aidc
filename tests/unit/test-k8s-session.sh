@@ -96,6 +96,10 @@ q() { yq -N ea "$1" -o=json -I=0 "$K_APPLIED"; }
 echo "=== aidc create --backend kubernetes ==="
 out=$(run create demo --backend kubernetes)
 assert_has "a session is created and reported ready" "session demo is ready" "$out"
+# A mount naming a volume the pod does not declare makes the API server reject the whole pod,
+# so every session create would fail.
+assert_eq "every volume mount in every rendered pod names a volume the pod declares" "" \
+    "$(yq -N ea 'select(.kind == "Deployment" or .kind == "Pod" or .kind == "StatefulSet") | (.spec.template.spec // .spec) as $p | ([($p.containers[], $p.initContainers[]?) | .volumeMounts[]?.name] - [$p.volumes[]?.name]) | .[]' "$K_APPLIED" | sort -u | paste -sd' ' -)"
 assert_has "exit 0" "exit=0" "$out"
 assert_has "the repo under this machine's home maps to /home/<user> on the disk" \
     "repo /home/alice/code/proj" "$out"

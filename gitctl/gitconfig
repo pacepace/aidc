@@ -1,9 +1,9 @@
-# /etc/gitconfig in the git container (root-owned). git runs here as gitrun, and only through
-# /opt/aidc/bin/git (gitctl/git-wrapper.sh), which also passes these on the command line.
+# /etc/gitconfig in the git container (root-owned): the agent's own git. The agent (uid 2000)
+# runs git as itself, with no credential, so this only protects the agent: no repo hooks or
+# fsmonitor, no transport that runs a command. gitctl's git (as gitrun) reads no system config.
 [core]
 	hooksPath = /dev/null
 	fsmonitor = false
-	pager = cat
 [protocol "ext"]
 	allow = never
 [commit]
@@ -12,12 +12,10 @@
 	gpgSign = false
 [init]
 	defaultBranch = main
-# The GitHub token is gitcred's; gitrun asks for it through the one sudo rule it has. The empty
-# value clears any helper set before this one.
-[credential "https://github.com"]
-	helper =
-	helper = !sudo -n -u gitcred /opt/aidc/lib/gitctl/cred-helper.sh
-	useHttpPath = false
+# The repos belong to the git container's gitrun user, with their config locked; the agent,
+# which holds nothing, reads them as they are.
+[safe]
+	directory = *
 # The author and committer: the user's own name and email, written by the login step as
 # gitcred (a later chunk). Commits show as the user; nothing is signed. A missing file is
 # skipped.

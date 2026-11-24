@@ -457,7 +457,7 @@ spec:
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
           command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/vscode/. /seed/; chown 1000:1000 /seed && chmod 0755 /seed']
-          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}]
+          volumeMounts: [{name: home, mountPath: /seed}]
         # The repo folder, made as the session user when it is not on the disk yet.
         - name: repo-dir
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
@@ -510,11 +510,12 @@ EOF
 #
 # It runs as the git user (uid 2000; its own group 2000, plus the session group 1000 that the
 # shared parts of a repo belong to), unprivileged, with no API token and no service links.
-# The agent and the user's terminal run as that user, which holds no secret: the real git runs
-# as gitrun and the real gh as gitcred, reached only through sudo rules naming the wrappers
-# that apply the hard rules (gitctl/sudoers). sudo is a setuid program, so this container
-# alone may escalate, holding only the capabilities a user switch needs (SETUID, SETGID, and
-# AUDIT_WRITE for sudo's audit record); it can become those two users and nothing else. The
+# The agent and the user's terminal run as that user, which holds no credential: what needs
+# the GitHub login goes through gitctl's fixed verbs, which run git as gitrun and gh as gitcred
+# through the one sudo rule that names gitctl (gitctl/sudoers). sudo is a setuid program, so
+# this container alone may escalate, holding only the capabilities a user switch needs
+# (SETUID, SETGID, and AUDIT_WRITE for sudo's audit record); it can become those two users,
+# for gitctl only. The
 # GitHub login lives on its own claim, git-cred, readable by gitcred only.
 # Egress is Quad9 and public addresses only, as the session proxy's, so a key held here cannot
 # be walked to the API server, a node, a session or the LAN; nothing may connect to it (the

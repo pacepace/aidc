@@ -14,8 +14,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8
 
 # git and ssh for the pushes, tmux for the user's terminal, tini to reap what tmux leaves.
-# curl only for the downloads below and Claude Code's own updates. sudo is how the wrapped git
-# and gh switch to the users that run the real ones; jq reads Claude Code's hook input.
+# curl only for the downloads below and Claude Code's own updates. sudo is how gitctl switches
+# to the users that hold the login; jq reads Claude Code's hook input and gh's JSON.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
@@ -64,40 +64,38 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 
 # The hard rules in code (docs/design-12-kubernetes.md, "Git", K8S-24), and the GitHub login
 # out of the agent's reach. Three users:
-#   git     (2000) the agent and the user's terminal; holds no secret;
-#   gitrun  (2002) runs the real git (its own group, plus the session group the shared parts of
-#                  a repo belong to); holds no secret, and its home is root's and empty, so git
-#                  run as it cannot plant config for itself;
-#   gitcred (2001) runs the real gh and git's credential helper; the only user that can read
-#                  the GitHub login, in its home on the git-cred claim (/var/lib/gitctl/gitcred).
-# git reaches the other two only through sudo rules naming the wrappers (gitctl/sudoers), which
-# check every command before the real git or gh runs; they come first on PATH. The real
-# binaries stay where they are: called by path they run as the agent, without the login.
+#   git     (2000) the agent and the user's terminal; runs ordinary git as itself and holds no
+#                  credential, so nothing it runs can reach GitHub;
+#   gitrun  (2002) runs git for gitctl's fetch and push (its own group, plus the session group
+#                  a repo's shared parts belong to); holds no secret; its home is root's;
+#   gitcred (2001) runs gh and git's credential helper; the only user that can read the
+#                  GitHub login, in its home on the git-cred claim (/var/lib/gitctl/gitcred).
+# git reaches the other two only through gitctl (gitctl/sudoers), a set of fixed verbs that
+# build their own command lines. /opt/aidc/bin, first on PATH, holds gitctl and a gh that
+# points there.
 RUN groupadd -g 2001 gitcred \
     && useradd -M -u 2001 -g 2001 -d /var/lib/gitctl/gitcred -s /usr/sbin/nologin gitcred \
     && groupadd -g 2002 gitrun \
     && useradd -M -u 2002 -g 2002 -G session -d /home/gitrun -s /usr/sbin/nologin gitrun \
     && install -d -o root -g root -m 0755 /home/gitrun /var/lib/gitctl \
     && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred
-COPY gitctl-rules.sh git-wrapper.sh gh-wrapper.sh msg-check.sh cred-helper.sh claude-hook.sh install-guards.sh /opt/aidc/lib/gitctl/
+COPY gitctl-rules.sh gitctl.sh gh-shim.sh cred-helper.sh claude-hook.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
 COPY managed-settings.json /etc/claude-code/managed-settings.json
 RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/aidc-gitctl \
     && chmod 0755 /opt/aidc /opt/aidc/lib /opt/aidc/lib/gitctl /etc/claude-code \
     && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
-    && chmod 0755 /opt/aidc/lib/gitctl/*-wrapper.sh /opt/aidc/lib/gitctl/msg-check.sh \
+    && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/gh-shim.sh \
                   /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \
-                  /opt/aidc/lib/gitctl/install-guards.sh \
     && chmod 0440 /etc/sudoers.d/aidc-gitctl \
     && visudo -c -f /etc/sudoers.d/aidc-gitctl \
     && install -d -m 0755 /opt/aidc/bin \
-    && ln -s /opt/aidc/lib/gitctl/git-wrapper.sh /opt/aidc/bin/git \
-    && ln -s /opt/aidc/lib/gitctl/gh-wrapper.sh /opt/aidc/bin/gh \
-    && /opt/aidc/lib/gitctl/install-guards.sh /usr/lib/git-core /opt/aidc/git-core /opt/aidc/lib/gitctl/git-wrapper.sh \
+    && ln -s /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/bin/gitctl \
+    && ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/aidc/bin:*) ;; *) PATH="/opt/aidc/bin:$PATH" ;; esac' \
         > /etc/profile.d/aidc-gitctl.sh \
-    # ~/.profile puts ~/.local/bin first; the wrappers go before it.
+    # ~/.profile puts ~/.local/bin first; /opt/aidc/bin goes before it.
     && printf '\n%s\n' 'PATH="/opt/aidc/bin:$PATH"' >> /home/git/.profile
 
 COPY gitctl-main.sh /usr/local/bin/gitctl-main.sh

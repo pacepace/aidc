@@ -1,13 +1,11 @@
 # /etc/sudoers.d/aidc-gitctl in the git container (root-owned, 0440).
 #
-# The agent's user (git) holds no secret. It runs real git only as gitrun and real gh only as
-# gitcred, and only through the wrappers, which apply the hard rules before anything runs.
-# gitrun gets the GitHub token only from the credential helper, as gitcred. Any arguments may
-# follow a wrapper: checking them is the wrapper's job. env_reset (sudo's default, stated
+# The agent's user (git) holds no secret. The one thing it may run as another user is gitctl,
+# whose verbs build their own git and gh command lines (as gitrun: fetch, push; as gitcred: the
+# pull requests and the login) and re-check every argument as that user. gitrun gets the
+# GitHub token only from the credential helper, as gitcred. env_reset (sudo's default, stated
 # here) drops everything the caller exported.
 Defaults:git,gitrun,gitcred env_reset, !lecture, !use_pty
-Defaults:git,gitrun,gitcred secure_path="/opt/aidc/bin:/usr/local/bin:/usr/bin:/bin"
-git     ALL=(gitrun)  NOPASSWD: /opt/aidc/lib/gitctl/git-wrapper.sh
-git     ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gh-wrapper.sh
-gitcred ALL=(gitrun)  NOPASSWD: /opt/aidc/lib/gitctl/git-wrapper.sh
-gitrun  ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
+Defaults:git,gitrun,gitcred secure_path="/usr/bin:/bin"
+git     ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+gitrun  ALL=(gitcred)        NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh

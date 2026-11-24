@@ -24,16 +24,23 @@ Items marked **proposal** await the owner.
 
 ```
 cluster (the session node)
-├─ namespace aidc-<user>                    one per user
-│   ├─ aidc-mcp                             the user's MCP server (K8S-07)
-│   ├─ git container                        Claude Code + SSH key + gh (K8S-04..06)
-│   ├─ syncthing                            Claude state <-> user's machines (K8S-18)
-│   └─ PVC code-<user>                      all the user's repos + worktrees (K8S-02)
-└─ namespace aidc-<user>-<session>          one per session
-    ├─ dev pod   (runtimeClass sysbox-runc) Claude, Docker, optional GPU
-    ├─ squid pod (+ policy, refresher)      the only way out (K8S-12)
-    └─ NetworkPolicy default-deny
+├─ namespace <prefix>-system                aidc's own: the image registry, builds
+│   ├─ registry                             loopback host port for pulls; pushes from builders only
+│   └─ builder (during `aidc k8s build`)    privileged, deleted after (see "Images")
+└─ namespace <prefix>-u-<user>              one per user; default-deny NetworkPolicy
+    ├─ PVC disk                             all the user's repos + worktrees (K8S-02)
+    ├─ <session>-dev  (StatefulSet)         Claude, Docker, optional GPU; sysbox-runc
+    ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit: the only way out
+    ├─ <session>-audit (PVC)                kept by `aidc kill`
+    ├─ git container (later)                Claude Code + SSH key + gh (K8S-04..06)
+    ├─ aidc-mcp (later)                     the user's MCP server (K8S-07)
+    └─ syncthing (later)                    Claude state <-> user's machines (K8S-18)
 ```
+
+Sessions live in their user's namespace, named `<session>-*`, not one namespace each: every
+session mounts the user's one disk, and a pod can mount only claims of its own namespace.
+Labels and per-session NetworkPolicies keep sessions apart, and `aidc kill` removes a session
+by its label (decided while building; the plan records it).
 
 The Docker backend stays. The same `aidc` commands, the MCP server and the orchestrator work
 against either (K8S-01).
@@ -125,6 +132,31 @@ owner in every other pod, and after the session restarts. Sessions run only on t
 the per-user volume is a dataset on the node's local ZFS, one per user, mounted as a local volume
 (ruled 2026-11-24).
 
+## Images: built in the cluster, kept in a private registry
+
+aidc's images are built inside the cluster and kept in a registry in `<prefix>-system` (owner
+ruling; REL-08 amended: never pushed to a public registry). `aidc k8s setup` makes the registry;
+`aidc k8s build` builds every image from this aidc install's own files.
+
+- **Pulls with no node configuration.** The registry listens on its node's loopback only
+  (`hostPort` with `hostIP: 127.0.0.1`); session pods name images `localhost:<port>/aidc/...`,
+  which containerd pulls over plain HTTP without any registry configuration. One replica on one
+  node means only that node pulls, so sessions run there (the shared node selector).
+- **Pushes from builders only.** A NetworkPolicy lets only builder pods of the system namespace
+  reach the registry: a session that could push could replace the squid or policy image that
+  enforces its own egress. Measured: the node pulls; a pod elsewhere is refused.
+- **A privileged builder, during builds only** (owner ruling). The squid image's base (Canonical's
+  ubuntu/squid Rock) owns its files as UID 584792, which no user namespace (0-65535) can hold, so
+  a Sysbox builder cannot build it. The builder runs `dockerd` itself, on its unix socket only
+  (the dind image's entrypoint adds an unauthenticated TCP listener whatever flags it gets: seen
+  live), takes no inbound connections, and is deleted when the build ends. Its namespace is the
+  only one aidc labels to allow privileged pods.
+- **The pod network's MTU.** An overlay (VXLAN) carries smaller packets than Docker's default
+  1500; inner Docker networks left at 1500 stall large transfers (a git clone reset after 150 s).
+  The builder and every session's inner dockerd take the pod's MTU.
+- **Always pulled.** `aidc k8s build --force` replaces an image under the same version tag, so
+  session pods pull aidc's images every time (the registry is on the node; a pull is cheap).
+
 ## Sessions: Sysbox, Docker inside, GPU on request
 
 Sessions do not run in VMs (Kata rejected: slow, trouble inside Kubernetes, cannot share the
@@ -179,6 +211,16 @@ Same model as Docker (NET-01/02/03/14), rebuilt with NetworkPolicy (K8S-12, K8S-
 - the policy sidecar's taint webhook is the one allowed path to the user's MCP server;
 - `--egress-tcp HOST:PORT` (NET-15) becomes a socat relay pod per host with a ClusterIP Service,
   a `hostAliases` entry in the dev pod, and an egress rule for exactly that `/32:port`.
+
+As built, the lockdown carries three details the measurements above did not need:
+- the proxy pod resolves through Quad9 only (`dnsPolicy: None`): the refresher's feed downloads
+  resolve through resolv.conf, and with cluster DNS (blocked by its policy) every session ran
+  with an empty malware blocklist until this was fixed;
+- the dev pod's proxy settings carry the proxy Service's address, not the name `aidc-proxy`
+  (which only the dev pod's own hosts file knows), so an inner container handed `$HTTPS_PROXY`
+  can use it without DNS;
+- under Sysbox, `/sys/class/net` inside the pod lists the NODE's interfaces, so the inner
+  dockerd reads its MTU from the kernel (an ioctl in the pod's network namespace), not sysfs.
 
 Unlike Docker, NetworkPolicy rules live in the node's network namespace, outside the pod, so a
 process inside the pod cannot remove them. That only holds while the pod cannot reach the node,
@@ -328,8 +370,12 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
   process handling (sync or async, timeouts, stdin). `mcp/tests/test_backend.py` fails if any
   other module starts `docker` or spells a container name. The Kubernetes backend answers the
   same functions with `kubectl` and namespace/pod names.
-- **CLI:** the switch point is the dispatcher: `scripts/aidc` runs `scripts/cmd-<verb>.sh`, and
-  the Kubernetes verbs go beside those, picked by the session's backend. Wrapping each Docker
+- **CLI:** the switch point is the dispatcher: `scripts/aidc` runs `scripts/cmd-<verb>.sh` for
+  Docker and `scripts/k8s/session-<verb>.sh` for Kubernetes. `--backend docker|kubernetes`
+  chooses; without it, `create` takes the config's top-level `backend:`, a verb that names a
+  session asks the configured cluster first (`scripts/k8s/session-where.sh`, quiet when no
+  cluster is configured) and goes to Docker otherwise, and `list` shows both. A verb the
+  Kubernetes backend lacks says so. Wrapping each Docker
   call in a shell backend library was considered and not done: nearly every call is in a per-verb
   script whose Kubernetes form shares little with it (namespaces and NetworkPolicy instead of
   networks and sidecar containers), so the wrapper would have one implementation and guessed

@@ -673,6 +673,22 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
   privileged pods.
 - `aidc user add <name>`: the user's namespace and disk.
+- `aidc create <name> --backend kubernetes [--repo PATH] [--profile P]`: a session in the
+  cluster, in your namespace, on your disk. PATH is given as on your own machine; a path under
+  your home directory is the same path under `/home/<user>` on the disk, so a repo's Claude
+  history has the same name everywhere. A top-level `backend: kubernetes` in the config makes
+  the cluster the default for `create`.
+- `aidc attach | status | logs | kill <name>` find the session where it lives (the cluster is
+  asked first when one is configured); `aidc list` shows both backends. `kill` keeps the
+  session's audit volume (`<name>-audit`) and your disk.
+- Not yet on this backend: `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`, and
+  `restart`, `upgrade`, `proxy`, `network`, `egress`, `refresh` (each says so). A tainted session
+  is recorded and reported, not frozen.
+
+Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
+the pod: the dev pod reaches only its own Squid and has no DNS at all (Squid resolves names), so
+tools must use the proxy settings in the environment; Docker runs inside without privileged mode
+(Sysbox), and an inner container reaches the internet only when handed `$HTTPS_PROXY`.
 
 The cluster needs a runtime that runs Docker inside a pod without privileged mode (Sysbox,
 measured with Sysbox 0.7.2 on k3s 1.35) and a storage class whose volumes several pods on one
@@ -689,6 +705,9 @@ kubernetes:
   storage_class: shared-zfs      # the user's disk (required)
   node_selector: {}              # added to session pods
   tolerations: []                # added to session pods
+  session_storage_class: ""      # each session's home volume, deleted with it (default: storage_class)
+  cpu: 2                         # guaranteed per session; cpu_limit / memory_limit: the ceiling
+  memory: 8Gi                    #   (default 16 and 32Gi)
   user_disk_size: 100Gi          # each user's disk
   registry:                      # where aidc keeps the images it builds in the cluster
     port: 5000                   # push: registry.<prefix>-system.svc.cluster.local:<port>

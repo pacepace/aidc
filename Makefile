@@ -1,4 +1,4 @@
-.PHONY: help install uninstall lint smoke clean
+.PHONY: help install uninstall lint smoke smoke-k8s clean
 
 help:
 	@echo "Targets:"
@@ -6,6 +6,7 @@ help:
 	@echo "  uninstall Remove the aidc symlink from ~/.local/bin"
 	@echo "  lint      Lint shell scripts with shellcheck"
 	@echo "  smoke     Run smoke tests against a freshly created session"
+	@echo "  smoke-k8s Run the Kubernetes smoke against the configured cluster"
 	@echo "  clean     Remove generated artifacts"
 
 install:
@@ -28,12 +29,15 @@ lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck not installed"; exit 1; }
 	shellcheck --severity=warning \
 	    install.sh \
-	    scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh \
+	    scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh scripts/k8s/*.sh \
 	    proxy/refresher/*.sh proxy/policy/*.sh proxy/audit/*.sh
 	bash release/lint-formula-template.sh
 
 smoke:
 	bash tests/smoke/run.sh
+
+smoke-k8s:
+	bash tests/smoke/k8s.sh
 
 clean:
 	rm -f proxy/squid/blocklist.txt

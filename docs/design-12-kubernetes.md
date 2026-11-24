@@ -66,21 +66,50 @@ read-only managed settings file; and wrapped `git` and `gh` binaries that refuse
 Anything else left behind (unmerged, unpushed, orphaned worktrees) is flagged to the user at
 once, not left to rot.
 
-### Proposal: the git container never runs code from the shared disk
+### Proposal: lock the parts of the repo that can run code
 
-A repo on the shared disk is writable by sandboxed sessions. A session can plant
-`.git/hooks/*`, `core.fsmonitor`, `core.sshCommand`, filters or `includeIf` in `.git/config`, and
-any of those run as soon as a trusted process runs `git` in that folder. So the git container
-keeps **its own private clone** of each repo and moves data over the git protocol only:
+A repo on the shared disk is written by sandboxed sessions. Git runs code from only two places
+in a repo: its settings file (`.git/config`: hooks path, fsmonitor, ssh command, filters) and its
+hooks folder. If a session could change either, the next trusted `git` command would run the
+session's code next to the SSH key. So the repo is shared, but those parts are locked by file
+permissions:
 
-- **session → git container:** the git container fetches the session's branch from a read-only
-  `git daemon` (or `git upload-pack` over exec) serving the session's worktree. Fetch transfers
-  objects; it runs no hooks and reads no config from the far side.
-- **git container → session:** sessions fetch updates (`main`, rebased bases) from a read-only
-  `git daemon` the git container serves from its private clone.
-- Pushes to GitHub happen only from the private clone, after the checks.
+- the git container's user owns `.git/` itself, `.git/config`, `hooks/`, `info/` and
+  `objects/info/`; sessions can read them and cannot change, replace or add to them;
+- sessions (a different user, in a shared group) can write `objects/`, `refs/`, `reftable/` and
+  their own worktree's admin folder, which is all a commit, branch, merge, rebase or stash needs;
+- repos use git's reftable ref storage, so no ref change needs a lock file in the locked
+  top-level folder, and `core.sharedRepository=group` keeps files group-writable both ways;
+- the git container runs git only in the main repo, never in a session's worktree, and always
+  with `-c core.hooksPath=/dev/null -c core.fsmonitor=false` as a backstop.
 
-Cost: one extra copy of each repo per user (objects only), and a fetch step before each push.
+There is one copy of each repo and no fetch step: a session's commit is in the shared repo the
+moment it is made, and so is anything the git container fetches from GitHub.
+
+Measured 2026-11-24 on ranch-dev01 (git 2.49, git-container pod as uid 2000, Sysbox session pod
+as uid 1000, one shared volume):
+
+| As the session | Result |
+|---|---|
+| status, commit, branch, switch, merge, stash, rebase, tag | works |
+| delete a branch or tag | works with reftable; warns that it cannot remove the branch's entry in the locked settings (harmless). With the older ref files storage, every ref delete fails |
+| `git gc` | refused (the git container does it) |
+| write `.git/config`, `git config …`, add a hook, replace `hooks/`, write `info/attributes`, `objects/info/alternates`, new files in `.git/` | refused |
+| write its worktree's `config.worktree` | allowed, but git ignores it unless `extensions.worktreeConfig` is set in the locked settings, and the git container never runs in worktrees |
+| move `main` or another branch | allowed: refs are data. GitHub branch protection and the git container's checks before a push cover it |
+
+| As the git container | Result |
+|---|---|
+| log, push the session's branch, fetch, delete branches, `gc`, list worktrees | works; no planted code ran |
+
+Setup needs: the session's worktree admin folder (`.git/worktrees/<name>/`) owned by the
+session user (git's ownership check refuses otherwise) and group-setgid, so files the git
+container rewrites during `gc` stay writable by the session.
+
+Storage note: the per-user volume is mounted by the git container and every session at once.
+OpenEBS ZFS refused a second mount of the same volume (`device already mounted`); local-path
+allowed it. The real volume needs a class that allows several pods on one node (for ZFS LocalPV,
+`shared: "yes"`; to verify).
 
 ## Sessions: Sysbox, Docker inside, GPU on request
 
@@ -243,5 +272,6 @@ Kubernetes code lands.
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |
+| Shared per-user volume on ZFS (`shared: "yes"`) | live test |
 | Sysbox node setup in agent-cluster scripts | owner proposal |
 | LAN name, wildcard cert, DNS | owner proposal |

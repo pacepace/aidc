@@ -10,7 +10,7 @@ the sandbox, how sessions get Docker and the GPU without privileged mode, how eg
 fenced, how ports reach the user, and how Claude logins, account switching and conversation
 history work across the cluster and the user's own machines.
 
-**Requirements implemented:** K8S-01 … K8S-25 (new, `docs/requirements.md`). Carries over NET-01,
+**Requirements implemented:** K8S-01 … K8S-26 (new, `docs/requirements.md`). Carries over NET-01,
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** being built. Built and checked on the reference cluster (`tests/smoke/k8s.sh`): the
@@ -34,7 +34,7 @@ cluster (the session node)
     ├─ PVC disk                             all the user's repos + worktrees (K8S-02)
     ├─ <session>-dev  (StatefulSet)         Claude, Docker, optional GPU; sysbox-runc
     ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit: the only way out
-    ├─ <session>-audit (PVC)                kept by `aidc kill`
+    ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (later)                     the user's MCP server (K8S-07)
     └─ syncthing (later)                    Claude state <-> user's machines (K8S-18)

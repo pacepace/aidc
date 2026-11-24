@@ -81,6 +81,7 @@ case "$*" in
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
         if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
     *"exec pod/demo-proxy-abc -c audit -- /usr/local/bin/finalize.sh"*) : ;;
+    *"exec pod/demo-proxy-abc -c audit -- sh -c du -sk /var/aidc/audit"*) printf '2048\nyes\n' ;;
     *"get networkpolicy default-deny"*) [ "${K_NO_DENY:-}" = 1 ] && { echo 'not found' >&2; exit 1; } ;;
     *"get networkpolicy -o name"*) printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
     *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
@@ -226,6 +227,12 @@ assert_has "and says where the audit is" "its audit trail is kept in demo-audit-
 finalize_line=$(grep -n 'finalize.sh' "$K_LOG" | head -n1 | cut -d: -f1)
 delete_line=$(grep -n 'delete statefulset' "$K_LOG" | head -n1 | cut -d: -f1)
 assert_eq "the audit is finalized before anything is deleted" "yes" "$([ "${finalize_line:-99}" -lt "${delete_line:-0}" ] && echo yes)"
+annotate=$(grep 'annotate persistentvolumeclaim/demo-audit-20261124050000' "$K_LOG")
+assert_has "kill records the trail's size after the final sweep on the kept claim" "aidc/size-bytes=2097152" "$annotate"
+assert_has "and whether the session was tainted" "aidc/tainted=yes" "$annotate"
+assert_has "and when it was killed" "aidc/killed-at=20" "$annotate"
+annotate_line=$(grep -n 'annotate persistentvolumeclaim' "$K_LOG" | head -n1 | cut -d: -f1)
+assert_eq "the size is measured after the final sweep" "yes" "$([ "${finalize_line:-99}" -lt "${annotate_line:-0}" ] && echo yes)"
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 

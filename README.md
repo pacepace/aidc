@@ -515,6 +515,33 @@ aidc kill eng-ai-bot
 
 Removes every container + volume + network for the session. Two things on the host stay: the audit dir, and — when `share_scratchpad` is on — the bridged scratchpad at `/tmp/claude-<uid>/<encoded>/`, which is the point of bridging it (a session you pop back in later still finds its files). Nothing sweeps those per-session directories, so they accumulate until a host reboot clears `/tmp`; delete the ones you are done with by hand.
 
+### Kept audit trails
+
+Every session's audit trail outlives it: a folder under `audit_dir` on Docker, a kept volume
+claim on Kubernetes. They add up, so:
+
+```bash
+aidc audit list                       # every kept trail, both backends: session, created, killed,
+                                      # tainted, size, state
+aidc audit trim --older-than 30d      # trails created more than 30 days ago (12h, 2w also work)
+aidc audit trim eng-ai-bot            # all of a session's trails, or one by the name list shows
+aidc audit trim --older-than 30d --dry-run
+```
+
+`trim` lists exactly what will go and asks first (`--yes` to skip the question; with no
+terminal and no `--yes` it removes nothing). It never removes the trail of a session that still
+exists, running or stopped. On Kubernetes it sets the claim's volume to `Delete` before
+deleting the claim, so the provisioner removes the volume and its data even on a storage class
+that retains volumes; it waits for that and says so, or names the volume if the provisioner
+keeps it. A released audit volume whose claim was deleted some other way is listed and trimmed
+the same way. `--backend docker|kubernetes` limits either command to one backend.
+
+Every aidc command warns when the kept trails total more than 100 MB (`AIDC_AUDIT_WARN_BYTES`
+changes the threshold). On Docker that is one `du` of the audit dir. On Kubernetes the check
+runs only during cluster commands and reads a total cached for a day
+(`~/.cache/aidc/audit-k8s-size`), from the sizes `aidc kill` records on each kept claim; a
+running session's trail, or one killed before aidc recorded sizes, counts as unknown.
+
 ### Picking up a new dev image
 
 `aidc restart <name>` restarts the dev container **in place from the existing image** (fast — ~10s — preserves the dev-home volume and Claude's conversation state). It does NOT pull a fresh image, even if the underlying `aidc/dev-base` was rebuilt at a newer version.
@@ -747,6 +774,7 @@ attaching (`aidc attach git`) or with `aidc git approve|deny`.
 | `aidc update [--check]` | Update the aidc CLI itself to the latest release, by whichever method installed it (install.sh, Homebrew, or git). Then `aidc rebuild`. |
 | `aidc upgrade <name> [--yes]` | Swap a session's dev container onto the freshly-rebuilt image. Proxy stack untouched; adhoc forwards removed. Recreates from the compose file rendered at create time, kept in `~/.local/state/aidc/sessions/<name>.yaml`. A session made before v1.9.9 kept it in `/tmp`: if that copy is still there it is moved into place and the upgrade goes ahead; if a reboot or a cleanup took it, the session can only be recreated. Does **not** replace the session's Claude Code: it lives in the dev-home volume and auto-updates in-session. Prompts before interrupting an in-flight claude conversation. |
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
+| `aidc audit list` / `aidc audit trim [--older-than <age>] [<name>...] [--yes] [--dry-run]` | List kept audit trails (both backends), or remove old or named ones; never a running session's (see "Kept audit trails"). |
 | `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. |
 | `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
@@ -804,10 +832,9 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
 - `aidc attach | status | logs | kill <name>` find the session where it lives (the cluster is
   asked first when one is configured); `aidc list` shows both backends. `kill` keeps the
   session's audit volume (`<name>-audit-<UTC time>`, named for when it was made, so a later
-  session of the same name never writes over it) and your disk. Kept audit volumes add up: list
-  them with `kubectl -n <prefix>-u-<you> get pvc -l aidc/kept=audit` and delete one with
-  `kubectl delete pvc` when you no longer need it (on a storage class that retains its volumes,
-  delete the released PV too).
+  session of the same name never writes over it) and your disk, and records the trail's size on
+  the claim. Kept audit volumes add up: `aidc audit list` and `aidc audit trim` (see "Kept audit
+  trails") remove them with their volume and data, whatever the storage class retains.
 - Not yet on this backend: `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`, and
   `restart`, `upgrade`, `proxy`, `network`, `egress`, `refresh` (each says so). A tainted session
   is recorded and reported, not frozen.

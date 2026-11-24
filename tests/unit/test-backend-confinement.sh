@@ -33,6 +33,8 @@ common.sh:remove_adhoc_forwards
 common.sh:remove_session_networks
 common.sh:wait_for_dev_ready
 config.sh:aidc_mcp_deny_target
+audit.sh:_aidc_audit_docker_mounts
+audit.sh:aidc_audit_docker_remove
 "
 
 # docker_calls <file>: "<line>:<function>" for each line that runs docker as a command

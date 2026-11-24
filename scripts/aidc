@@ -109,18 +109,39 @@ if [ -z "$BACKEND" ]; then
             fi
             ;;
         list)
-            if bash "$AIDC_SCRIPTS/k8s/session-where.sh" --configured; then
-                # The Docker list first; on a machine without Docker it says nothing.
-                if out=$(bash "$AIDC_SCRIPTS/cmd-list.sh" "$@" 2>/dev/null); then printf '%s\n\n' "$out"; fi
-                exec bash "$AIDC_SCRIPTS/k8s/session-list.sh"
-            fi
+            bash "$AIDC_SCRIPTS/k8s/session-where.sh" --configured && LIST_BOTH=1
             ;;
     esac
 fi
-# `aidc git` and `aidc repo` serve both backends themselves (lib/git-common.sh,
-# aidc_default_backend): the flag, if any, goes with them.
+
+# Every command warns when the kept audit trails total more than 100 MB (K8S-26), without
+# slowing it: on Docker one du of the audit dir; on Kubernetes only during a cluster command,
+# from a total cached for about a day (lib/audit.sh). `aidc audit` shows the sizes itself.
+if [ "$SUBCOMMAND" != audit ]; then
+    # shellcheck source=lib/audit.sh
+    . "$AIDC_SCRIPTS/lib/audit.sh"
+    aidc_audit_warn_docker || true
+    CLUSTER_CMD=0
+    case "${BACKEND:-}" in kubernetes|k8s) CLUSTER_CMD=1 ;; esac
+    [ "${LIST_BOTH:-0}" = 1 ] && CLUSTER_CMD=1
+    case "$SUBCOMMAND" in
+        git|repo)
+            # shellcheck source=lib/git-common.sh
+            . "$AIDC_SCRIPTS/lib/git-common.sh"
+            [ "$(AIDC_BACKEND_FLAG="$BACKEND" aidc_default_backend 2>/dev/null)" = kubernetes ] && CLUSTER_CMD=1 ;;
+    esac
+    [ "$CLUSTER_CMD" = 1 ] && { aidc_audit_warn_k8s || true; }
+fi
+
+if [ "${LIST_BOTH:-0}" = 1 ]; then
+    # The Docker list first; on a machine without Docker it says nothing.
+    if out=$(bash "$AIDC_SCRIPTS/cmd-list.sh" "$@" 2>/dev/null); then printf '%s\n\n' "$out"; fi
+    exec bash "$AIDC_SCRIPTS/k8s/session-list.sh"
+fi
+# `aidc git`, `aidc repo` and `aidc audit` serve both backends themselves (lib/git-common.sh,
+# aidc_default_backend; cmd-audit.sh): the flag, if any, goes with them.
 case "$SUBCOMMAND" in
-    git|repo)
+    git|repo|audit)
         AIDC_BACKEND_FLAG="$BACKEND"; export AIDC_BACKEND_FLAG
         exec bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" "$@" ;;
 esac

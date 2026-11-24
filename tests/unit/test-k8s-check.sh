@@ -98,7 +98,7 @@ kubernetes:
   context: lab
   kubeconfig: ~/kube/lab.yaml
   namespace_prefix: dev
-  user: brooks
+  user: alice
   runtime_class: sysbox
   storage_class: shared-zfs
   node_selector: {gpu: "yes"}
@@ -107,7 +107,7 @@ kubernetes:
   registry: {port: 5001}
 EOF
 assert_eq "every key read; ~/ expanded; registry names follow the prefix and port" \
-    "true|lab|${HOME}/kube/lab.yaml|dev|brooks|sysbox|shared-zfs|{\"gpu\":\"yes\"}|[{\"key\":\"role\",\"operator\":\"Equal\",\"value\":\"dev\",\"effect\":\"NoSchedule\"}]|registry.dev-system.svc.cluster.local:5001|localhost:5001|" \
+    "true|lab|${HOME}/kube/lab.yaml|dev|alice|sysbox|shared-zfs|{\"gpu\":\"yes\"}|[{\"key\":\"role\",\"operator\":\"Equal\",\"value\":\"dev\",\"effect\":\"NoSchedule\"}]|registry.dev-system.svc.cluster.local:5001|localhost:5001|" \
     "$(settings)"
 
 cat > "$CFG" <<'EOF'

@@ -2,8 +2,8 @@
 # aidc k8s build: build aidc's images inside the cluster and keep them in its registry.
 #
 # The same images and build contexts as `aidc rebuild` (aidc_image_inventory), built by
-# Docker in a builder pod under the configured runtime class, from this aidc install's own
-# files streamed in as tar. Each image is tagged with this aidc version and pushed to the
+# Docker in a privileged builder pod (owner ruling 2026-11-24: the squid image's base needs
+# UIDs no user namespace has), from this aidc install's own files streamed in as tar. Each image is tagged with this aidc version and pushed to the
 # in-cluster registry; an image already there for this version is skipped unless --force.
 # The builder pod is deleted when the build ends, whichever way it ends.
 
@@ -59,7 +59,7 @@ if [ -n "$ONLY" ]; then
 fi
 
 info "starting builder pod ${BUILDER} in ${ns}"
-k8s_render_builder "$BUILDER" | k8s_kubectl apply -f - >/dev/null
+k8s_render_builder "$BUILDER" "$(k8s_node_selector)" | k8s_kubectl apply -f - >/dev/null
 k8s_kubectl -n "$ns" wait --for=condition=Ready "pod/${BUILDER}" --timeout=300s >/dev/null \
     || die "builder pod did not start; see: kubectl -n ${ns} describe pod ${BUILDER}"
 for _ in $(seq 60); do
@@ -83,7 +83,11 @@ while IFS='|' read -r tag context dockerfile; do
     info "==> building ${tag}"
     dir="/build/${repo#aidc/}"
     bexec sh -c "rm -rf '${dir}' && mkdir -p '${dir}'"
-    tar -C "$context" -czf - . | bexec tar -C "$dir" -xzf -
+    # Local caches and virtualenvs are never part of an image (each .dockerignore drops them
+    # too); leaving them out of the stream saves sending them.
+    tar -C "$context" --exclude=.venv --exclude=__pycache__ --exclude=node_modules \
+        --exclude=.pytest_cache --exclude=.mypy_cache --exclude=.ruff_cache -czf - . \
+        | bexec tar -C "$dir" -xzf -
     build_args=()
     case "$tag" in
         aidc/dev-base:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;

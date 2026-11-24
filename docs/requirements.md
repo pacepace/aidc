@@ -256,10 +256,10 @@ Design: `docs/design-12-kubernetes.md`. Source for all rows: owner rulings of 20
 | K8S-07 | Each user MUST have one aidc MCP server running in the cluster, so sessions run and replies arrive while the user's machine sleeps. | P0 | rulings-2026-11-23 |
 | K8S-08 | The git container MUST delete merged branches and their worktrees, and flag anything else left behind (unmerged, unpushed, orphaned) to the user at once. | P0 | rulings-2026-11-23 |
 | K8S-09 | The user MUST be able to view and edit their cluster code with VS Code attached to a pod mounting their volume. | P1 | rulings-2026-11-23 |
-| K8S-10 | Sessions MUST be able to run Docker (including compose and testcontainers) without privileged mode or VMs; on ranch-dev01 this is Sysbox (`sysbox-runc`, `hostUsers: false`). | P0 | rulings-2026-11-23 |
+| K8S-10 | Sessions MUST be able to run Docker (including compose and testcontainers) without privileged mode or VMs; on the reference cluster this is Sysbox (`sysbox-runc`, `hostUsers: false`). | P0 | rulings-2026-11-23 |
 | K8S-11 | A session MUST get the GPU only when requested at create (`--gpu`). | P1 | rulings-2026-11-23 |
 | K8S-12 | A session's only egress MUST be its own Squid proxy, enforced by NetworkPolicy outside the pod; the dev pod has no cluster DNS and no service-account token. | P0 | rulings-2026-11-23, NET-01, NET-14 |
-| K8S-13 | Neither a session nor its Squid MAY reach the MCP server, the git container, other namespaces, the Kubernetes API, nodes, the LAN or ZeroTier, except the policy sidecar's taint webhook to the user's MCP server. | P0 | MCP-12, NET-14 |
+| K8S-13 | Neither a session nor its Squid MAY reach the MCP server, the git container, other namespaces, the Kubernetes API, nodes, the LAN or a VPN, except the policy sidecar's taint webhook to the user's MCP server. | P0 | MCP-12, NET-14 |
 | K8S-14 | A session's published port MUST be reachable through a tunnel aidc opens to the user's current machine, using the user's own cluster credentials. | P0 | rulings-2026-11-23 |
 | K8S-15 | On request at create, a session port MAY be exposed on the home network at a stable name, removed at kill; a login in front of it is optional, chosen at create. | P1 | rulings-2026-11-23 |
 | K8S-16 | Each user's Claude logins SHOULD be set up once in their area and used by every session (fallback: per-session login). | P0 | rulings-2026-11-23 |
@@ -271,4 +271,4 @@ Design: `docs/design-12-kubernetes.md`. Source for all rows: owner rulings of 20
 | K8S-22 | After a node reboot, sessions MUST come back on their own with files, branches and conversation intact, and Claude resumes. | P0 | rulings-2026-11-23 |
 | K8S-23 | The git container SHOULD check a repo's GitHub protections on first use and offer to turn on missing ones, applying them only with the user's OK. | P1 | rulings-2026-11-23 |
 | K8S-24 | The git hard rules (no force-push, merge commits only, no attribution) MUST be enforced by code the git container's Claude cannot override, not only by its instructions. | P0 | rulings-2026-11-23 |
-| K8S-25 | Sessions MUST come with testament (Brooks's distributed test runner, the.ranch `apps/testament`) installed, at a pinned version, so work in a session can run tests through it. | P1 | rulings-2026-11-24 |
+| K8S-25 | Sessions MUST come with testament (a distributed test runner) installed, at a pinned version, so work in a session can run tests through it. | P1 | rulings-2026-11-24 |

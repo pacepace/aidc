@@ -27,7 +27,7 @@ docs/design-12-kubernetes.md) · **Branch:** `feature/k8s-first-session` (off
 ## Goals
 
 **Response taken:** proceed, citing it. The owner said "go" (2026-11-24) to "a first Kubernetes
-session on ranch-dev01 that you can create, attach to and kill"; rulings of 2026-11-23/24 in
+session on the owner's cluster that you can create, attach to and kill"; rulings of 2026-11-23/24 in
 `.prawduct/owner-rulings.md` fix the shape (Sysbox, per-user local ZFS disk, NetworkPolicy
 egress, in-cluster registry, generic configuration).
 
@@ -41,11 +41,11 @@ taint "freeze" response (this wave records and reports a taint; freezing a pod i
 later), VS Code attach.
 
 **Architecture:**
-- **Generic, configured** (ruling 2026-11-24): nothing ranch-specific in aidc. A `kubernetes:`
+- **Generic, configured** (ruling 2026-11-24): nothing specific to the owner's cluster in aidc. A `kubernetes:`
   block in `~/.config/aidc/config.yaml` names the kubeconfig context, the namespace prefix, node
   selector and tolerations, the Sysbox runtime class, the per-user storage class, and the registry
-  (push address inside the cluster, pull address the node uses). The ranch's values live in
-  agent-cluster, with the cluster objects they need (storage class) in the.ranch.
+  (push address inside the cluster, pull address the node uses). The owner's values live in
+  their private repos, with the cluster objects they need (storage class).
 - **Switch point:** the dispatcher (wave 1). `scripts/k8s/cmd-<verb>.sh` implements a verb for
   the Kubernetes backend; `scripts/aidc` runs it when the session is a Kubernetes one (create:
   `--backend kubernetes` or the config default; other verbs: the session is found in the cluster
@@ -78,8 +78,8 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   users (ruling 2026-11-23, users are trusted peers).
 
 **Decisions made mid-build:**
-- Chunk 01: the ranch's example config moves to chunk 03, where its storage class exists to name
-  in it; one agent-cluster PR instead of two (Constraints: generic, ranch config outside aidc).
+- Chunk 01: the owner's example config moves to chunk 03, where its storage class exists to name
+  in it; one PR to the owner's private repo instead of two (Constraints: generic).
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 
@@ -99,10 +99,10 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
 - **Deliverables:** config keys read in `scripts/lib/config.sh`; new `scripts/k8s/` with a
   shared `lib.sh` (kubectl with the configured context, naming); `aidc k8s check`: kubectl
   present, context reachable, runtime class, storage class, a schedulable node, registry
-  answering. README section; an example config for the ranch in agent-cluster.
+  answering. README section; the owner's example config in their private repo.
 - **Tests:** shell unit tests with a kubectl stub: config parsing (defaults, overrides, missing
   block), each check's pass and fail; the confinement test extended to kubectl.
-- **Acceptance criteria:** `aidc k8s check` passes against the ranch with the agent-cluster
+- **Acceptance criteria:** `aidc k8s check` passes against the owner's cluster with its
   config, and fails with a clear message for each missing piece.
 
 ### Chunk 02: Images in the cluster
@@ -115,7 +115,7 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
   build contexts as a tar stream; images tagged with the aidc version; `aidc k8s build` skips
   images already present for the version (like `ensure_image`).
 - **Tests:** unit tests for the rendered manifests and the build sequence (kubectl stub);
-  live: build all images on the ranch, then pull one on the node.
+  live: build all images on the owner's cluster, then pull one on the node.
 - **Acceptance criteria:** every image a session needs is in the registry for this version.
 - **Critic mode:** chunk
 
@@ -124,10 +124,9 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
 - **Description:** `aidc user add <name>` creates the user's namespace and disk.
 - **Depends on:** Chunk 02
 - **Deliverables:** namespace with owner labels; PVC on the configured storage class; for the
-  ranch, the storage class (the.ranch) and the parent dataset (agent-cluster node step) as their
-  own PRs.
+  owner's cluster, the storage class and the parent dataset in their private repos.
 - **Tests:** unit (manifests, idempotence); live: the PVC binds and two pods share it.
-- **Acceptance criteria:** `aidc user add pace` on the ranch gives a usable disk.
+- **Acceptance criteria:** `aidc user add pace` on the owner's cluster gives a usable disk.
 
 ### Chunk 04: Create and kill a session
 
@@ -138,8 +137,8 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
   way out); the dev image's entrypoint working under Sysbox; readiness wait; kill deletes the
   namespace and leaves the user's disk.
 - **Tests:** unit (rendered manifests: every policy, the security settings, the labels);
-  live: create on the ranch, Docker runs inside, an allowed and a blocked domain behave, kill.
-- **Acceptance criteria:** a session is created and killed on the ranch with the plain commands.
+  live: create on the owner's cluster, Docker runs inside, an allowed and a blocked domain behave, kill.
+- **Acceptance criteria:** a session is created and killed on the owner's cluster with the plain commands.
 - **Critic mode:** chunk
 
 ### Chunk 05: Attach, list, status, logs
@@ -153,20 +152,20 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
 
 ### Chunk 06: End to end and docs
 
-- **Description:** a full run on the ranch and the documentation.
+- **Description:** a full run on the owner's cluster and the documentation.
 - **Depends on:** Chunk 05
 - **Deliverables:** a Kubernetes smoke script (create, Docker inside, egress allowed and blocked,
   taint recorded, kill, user disk kept); README and design-12 updated to what was built; change
   record.
-- **Tests:** the smoke script on the ranch; Docker smoke still green.
+- **Tests:** the smoke script on the owner's cluster; Docker smoke still green.
 - **Acceptance criteria:** both smokes pass.
 - **Type:** cumulative-final
 
 ## Verification Strategy
 
-Each chunk is checked on the ranch as a user would use it, not only with stubs: run the command,
+Each chunk is checked on the owner's cluster as a user would use it, not only with stubs: run the command,
 look at the cluster objects it made, and use the session. Scratch objects go in their own
-namespaces and are deleted after; node changes, if any, go through agent-cluster.
+namespaces and are deleted after; node changes, if any, go through the cluster operator's own repos.
 
 ## Governance Checkpoints
 

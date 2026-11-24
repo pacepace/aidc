@@ -1,7 +1,11 @@
 # Design 12 — Running aidc Sessions on Kubernetes
 
 **What this covers.** A second place for aidc sessions to run: a Kubernetes cluster (first target
-ranch-dev01, an agent node of the ranch k3s cluster). It covers where code lives, how git leaves
+a k3s cluster with a GPU node that runs Sysbox).
+Measurements below come from the reference cluster aidc was developed against: k3s 1.35.5
+with one amd64 agent node for sessions (Ubuntu 26.04, kernel 7.0, OpenZFS 2.4.1, containerd
+2.2.3, Sysbox 0.7.2, an NVIDIA GPU). Nothing in aidc depends on that cluster: every
+cluster-specific value is configuration (README, "Kubernetes backend"). It covers where code lives, how git leaves
 the sandbox, how sessions get Docker and the GPU without privileged mode, how egress stays
 fenced, how ports reach the user, and how Claude logins, account switching and conversation
 history work across the cluster and the user's own machines.
@@ -10,7 +14,7 @@ history work across the cluster and the user's own machines.
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** design. Owner rulings of 2026-11-23 are recorded in `.prawduct/owner-rulings.md`.
-Sysbox, Docker-in-session and the GPU are measured on ranch-dev01 (below). Egress enforcement,
+Sysbox, Docker-in-session and the GPU are measured on the reference cluster (below). Egress enforcement,
 account switching and Syncthing are not yet measured; each open item says what will settle it.
 Items marked **proposal** await the owner.
 
@@ -19,7 +23,7 @@ Items marked **proposal** await the owner.
 ## Shape
 
 ```
-cluster (ranch-dev01)
+cluster (the session node)
 ├─ namespace aidc-<user>                    one per user
 │   ├─ aidc-mcp                             the user's MCP server (K8S-07)
 │   ├─ git container                        Claude Code + SSH key + gh (K8S-04..06)
@@ -51,7 +55,7 @@ only thing that pushes, pulls or opens PRs (K8S-04). It runs Claude Code with th
 - merge commits only; never force-push; no AI attribution in commits, PRs, code or docs;
 - git mode per session, from **ask** (default, waits in the git container's terminal for the
   user) to **rules** (the agent decides by the rules); each user sets their own default (K8S-05);
-- an orchestrator the user drives (for example metallm) may approve through the user's MCP
+- an orchestrator the user drives may approve through the user's MCP
   server; sandboxed sessions never reach that server (K8S-06);
 - the first time it meets a repo it checks the GitHub protections (no force push, merge commits
   only) and offers to turn on any that are missing (K8S-23).
@@ -86,7 +90,7 @@ permissions:
 There is one copy of each repo and no fetch step: a session's commit is in the shared repo the
 moment it is made, and so is anything the git container fetches from GitHub.
 
-Measured 2026-11-24 on ranch-dev01 (git 2.49, git-container pod as uid 2000, Sysbox session pod
+Measured 2026-11-24 on the reference cluster (git 2.49, git-container pod as uid 2000, Sysbox session pod
 as uid 1000, one shared volume):
 
 | As the session | Result |
@@ -108,16 +112,16 @@ container rewrites during `gc` stay writable by the session.
 
 Storage: the per-user volume is mounted by the git container and every session at once, and
 sessions run with Kubernetes user namespaces (`hostUsers: false`, which Sysbox needs: a Sysbox pod
-without it failed to start). Measured 2026-11-24 on ranch-dev01:
+without it failed to start). Measured 2026-11-24 on the reference cluster:
 
 | Volume | Several pods | Session's files on disk |
 |---|---|---|
 | local-path (a folder on the node's ZFS) | yes | correct (uid 1000 shows as 1000 everywhere) |
 | OpenEBS ZFS LocalPV (default) | no: `device already mounted` | not reached |
-| NFS from the node's ZFS (as the station songs share) | yes | wrong: written as a host uid derived from that pod's own ID range (e.g. 2211906536), and every other pod's files show as `nobody` |
+| NFS from the node's ZFS | yes | wrong: written as a host uid derived from that pod's own ID range (e.g. 2211906536), and every other pod's files show as `nobody` |
 
 NFS cannot carry Kubernetes' ID remapping, so a session's files would belong to a different
-owner in every other pod, and after the session restarts. Sessions run only on ranch-dev01, so
+owner in every other pod, and after the session restarts. Sessions run only on the session node, so
 the per-user volume is a dataset on the node's local ZFS, one per user, mounted as a local volume
 (ruled 2026-11-24).
 
@@ -128,7 +132,7 @@ GPU). Docker inside sessions is a core need (databases, NATS, testcontainers). S
 **Sysbox** (RuntimeClass `sysbox-runc`, `hostUsers: false`), which gives a real Docker daemon in
 an unprivileged pod (K8S-10).
 
-Measured 2026-11-23 on ranch-dev01 (Ubuntu 26.04, kernel 7.0.0-43, ZFS 2.4.1, k3s 1.35.5,
+Measured 2026-11-23 on the reference cluster (Ubuntu 26.04, kernel 7.0, ZFS 2.4.1, k3s 1.35.5,
 containerd 2.2.3, Sysbox 0.7.2), in an unprivileged Sysbox pod whose root maps to an
 unprivileged host uid:
 
@@ -137,26 +141,26 @@ unprivileged host uid:
 | `docker run hello-world` (Docker 29, overlayfs, cgroup v2) | pass |
 | compose: postgres 17 + NATS 2.11 | healthy, `select 42` |
 | testcontainers (Python, postgres) | pass |
-| `nvidia-smi -L` | RTX 3080 visible |
+| `nvidia-smi -L` | the node's GPU visible |
 
-Node setup this needs, done by agent-cluster `make dev-node NODE=ranch-dev01 STEPS=sysbox`
-(agent-cluster #39) and the.ranch `apps/platform/sysbox` (#248):
+Node setup this needs (on the reference cluster, done by its operator's node scripts; aidc
+documents it but does not change nodes):
 
 1. `sysbox-ce` 0.7.2 package.
 2. A `sysbox-runc` runtime in k3s's containerd template
    (`/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl`), then a k3s-agent restart.
 3. AppArmor local rule letting `fusermount3` mount under `/var/lib/sysboxfs`.
-4. RuntimeClass `sysbox-runc` pinned to ranch-dev01 with the dev toleration.
+4. A RuntimeClass `sysbox-runc` pinned to the session node(s).
 
 The GPU is given only when asked for at create (`--gpu`, K8S-11). The cluster's NVIDIA device
-plugin hands GPUs to pods through CDI (the.ranch #246), so it works under any runtime,
+plugin hands GPUs to pods through CDI, so it works under any runtime,
 Sysbox included.
 
 Rootless Docker and Podman were tried and dropped: they needed the AppArmor user-namespace
 restriction lifted, a smaller ID range and a tun device plugin, and still did not run.
 
-Sessions come with testament installed (K8S-25), so tests can run through Brooks's test
-runner; its coordinator is the.ranch `apps/testament`.
+Sessions come with testament installed (K8S-25), so tests can run through that distributed
+test runner.
 
 Default size: 2 CPU and 8 GB guaranteed, may burst to 16 CPU and 32 GB; both settable at create
 (K8S-19). Expected load is 4–8 sessions per user.
@@ -170,7 +174,7 @@ Same model as Docker (NET-01/02/03/14), rebuilt with NetworkPolicy (K8S-12, K8S-
   query cluster DNS; `automountServiceAccountToken: false`;
 - squid egress: Quad9 for DNS, and public addresses only (`0.0.0.0/0` except `10/8`,
   `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10`, `127/8`), so it cannot reach the MCP
-  server, the git container, other namespaces, the API server, nodes, the LAN or ZeroTier;
+  server, the git container, other namespaces, the API server, nodes, the LAN or a VPN;
   squid also denies those destinations itself;
 - the policy sidecar's taint webhook is the one allowed path to the user's MCP server;
 - `--egress-tcp HOST:PORT` (NET-15) becomes a socat relay pod per host with a ClusterIP Service,
@@ -180,7 +184,7 @@ Unlike Docker, NetworkPolicy rules live in the node's network namespace, outside
 process inside the pod cannot remove them. That only holds while the pod cannot reach the node,
 which is why sessions run unprivileged under Sysbox.
 
-Measured 2026-11-24 on ranch-dev01 (k3s 1.35.5, embedded kube-router policy controller): a
+Measured 2026-11-24 on the reference cluster (k3s 1.35.5, embedded kube-router policy controller): a
 Sysbox session pod (`hostUsers: false`, `dnsPolicy: None`, no service-account token) and a
 stand-in Squid pod, with the three policies above. kube-router rejects a denied TCP connection
 (connection refused) rather than dropping it; a baseline run with the policies removed showed
@@ -190,13 +194,13 @@ every target below open.
 |---|---|---|
 | its Squid, TCP 3128 | open | — |
 | internet (1.1.1.1:443) | refused | open (also :80; Quad9 :53 open) |
-| Kubernetes API service (10.45.0.1:443) | refused | refused |
-| cluster DNS (10.45.0.10:53) | refused, UDP unanswered | refused |
-| own node: ssh, kubelet (10.42.0.121:22, :10250) | refused | refused |
-| server node: API, Traefik (10.42.0.101:6443, :443) | refused | refused |
-| router (10.42.0.1:53), ZeroTier router (10.23.23.1:53) | refused | refused |
+| Kubernetes API service | refused | refused |
+| cluster DNS | refused, UDP unanswered | refused |
+| own node: ssh, kubelet | refused | refused |
+| another node: API server, ingress | refused | refused |
+| the LAN router, a VPN router | refused | refused |
 | pod in another namespace | refused | refused |
-| storage network NFS (10.43.0.121:2049) | timeout (the node's own NFS firewall, with or without policies) | timeout |
+| storage-network NFS | timeout (the node's own NFS firewall, with or without policies) | timeout |
 | DNS to Quad9 or the router, UDP | unanswered; name lookups fail | — |
 
 `kubectl port-forward` to the session pod still works under default-deny ingress (HTTP 200), so
@@ -211,13 +215,11 @@ node's network namespace, which the pod does not share).
 - **Tunnel** (K8S-14): `aidc` runs `kubectl port-forward` to the session with the user's own
   cluster credentials and reconnects it if it drops. Works from anywhere the user reaches the
   cluster.
-- **Home network** (K8S-15, optional at create): a Traefik Ingress with a stable name such as
-  `<session>-<user>.dev.ranch.illuminati.org`, removed at kill. No login by default; the user
-  can add one at create when a page needs protecting (ruled 2026-11-24). The
-  owner's phone is on ZeroTier and can reach it. Needs a `*.dev.ranch.illuminati.org` wildcard
-  certificate (cert-manager, DNS-01, already wired). DNS already works: the RB5009's regexp
-  entry `.*\.ranch\.illuminati\.org` answers these names (checked 2026-11-24), and ZeroTier
-  clients' split DNS for `ranch.illuminati.org` covers them.
+- **Home network** (K8S-15, optional at create): an Ingress with a stable name such as
+  `<session>-<user>.<configured domain>`, removed at kill. No login by default; the user can add
+  one at create when a page needs protecting (ruled 2026-11-24). Needs a wildcard certificate
+  for the domain and DNS that points its names at the ingress; a phone reaches it over whatever
+  network or VPN already reaches the cluster.
 
 ## Claude: logins, account switching, history
 
@@ -269,7 +271,7 @@ with `--resume <session>` (seconds of downtime, cold prompt cache).
 
 Jean-Claude (profiles `~/.claude-<name>`) was assessed: it shares settings, hooks, agents and
 skills across profiles and syncs settings through git, but does no credential switching, and
-conversations do not follow across profiles (Brooks confirmed). We may reuse its layout; we do
+conversations do not follow across profiles (confirmed by a user of it). We may reuse its layout; we do
 not depend on it.
 
 ### One history per repo, on every machine

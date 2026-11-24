@@ -4,11 +4,11 @@ Decisions the owner made in conversation, dated, so later sessions build on them
 
 ## 2026-11-23: Kubernetes support is a second target for the same aidc
 
-aidc gains a Kubernetes backend (first target: ranch-dev01 on the ranch cluster) as a new place
+aidc gains a Kubernetes backend (first target: the owner's own cluster) as a new place
 for sessions to run, not a separate tool. The existing commands, the MCP server and the
 orchestrator keep working against it, and the Docker backend stays. Why: aidc's value is the
 session workflow, orchestration, egress policy and audit trail, not Docker itself; a second tool
-would duplicate all of it. Starting outline: agent-cluster `docs/ranch-dev01.md`, the "aidc" row.
+would duplicate all of it.
 
 ## 2026-11-23: Code lives on a per-user disk; a trusted git container talks to GitHub
 
@@ -44,7 +44,7 @@ their disk, the same way aidc's dev containers are used from VS Code today.
 
 ## 2026-11-23: Users are trusted peers
 
-The other users (first: Brooks, who also has access to the ranch nodes) are trusted. Separation
+The other users (first: a colleague who also administers the cluster) are trusted. Separation
 between users is about not tripping over each other and each acting under their own GitHub
 identity, not about walling them off from each other.
 Confirmed: each user has their own code volume; users never share one.
@@ -79,7 +79,7 @@ A repo's Claude conversations, memory and related state are one shared history a
 cluster, Mac, Linux and WSL; native Windows (no WSL) is a bonus. The differing home directories
 must be handled so the same repo maps to the same history everywhere. Using Jean-Claude is not
 required: building our own equivalent is acceptable if that is simpler than fitting around it.
-Brooks confirmed (2026-11-23) that Jean-Claude switches accounts by quitting and relaunching under
+A Jean-Claude user confirmed (2026-11-23) that it switches accounts by quitting and relaunching under
 another profile, and `--continue` does not follow across profiles.
 
 ## 2026-11-23: Account switching is configurable and ordered
@@ -112,7 +112,7 @@ from other devices such as a phone.
 ## 2026-11-23: Expected load is 4-8 sessions per user at once
 
 Each user runs about 4-8 sessions at the same time, so with two users, sizing plans for up to
-about 16 concurrent sessions on ranch-dev01 (EPYC 7452, 64 threads, about 500 GB RAM).
+about 16 concurrent sessions on the session node (64 threads, about 500 GB RAM).
 
 ## 2026-11-23: Session size defaults to 2 CPUs and 8 GB, settable per session
 
@@ -121,7 +121,7 @@ Each cluster session is guaranteed 2 CPUs and 8 GB of memory by default and may 
 
 ## 2026-11-23: New users are added by one admin command, and bring their own secrets
 
-An admin creates a new user's area with one command (for example `aidc user add brooks`). The
+An admin creates a new user's area with one command (for example `aidc user add alice`). The
 new user then adds their own SSH key, GitHub login and Claude accounts, so the admin never
 handles another user's secrets.
 
@@ -138,7 +138,7 @@ design note (direction, not yet ruled): that Claude reads text written by sandbo
 (commit messages, diffs, requests), which could try to talk it into breaking a rule, so the hard
 rules (no force-push, merge commits only, no attribution) are also blocked by code it cannot
 override, not only by its instructions.
-Refined: an orchestrator the user drives (such as metallm) can give that approval through the
+Refined: an orchestrator the user drives can give that approval through the
 aidc MCP server, by sending it to the git container's Claude. Sandboxed sessions must never be
 able to do this, which rests on them never reaching the MCP server.
 
@@ -159,17 +159,17 @@ Sessions do not run in VMs (Kata rejected: VMs inside Kubernetes are trouble, sl
 share the GPU). Docker inside sessions is a core need: bringing up a real program needs
 databases, NATS and other services in containers, and testing leans on testcontainers. Explore
 Sysbox and rootless Docker/Podman as ways to give sessions Docker without privileged mode.
-Also: the owner's phone is on ZeroTier, so it can reach ranch addresses for testing.
+Also: the owner's phone is on the same VPN as the cluster, so it can reach it for testing.
 
 ## 2026-11-23: Sessions run under Sysbox; GPUs reach pods through CDI
 
-Sessions run under Sysbox (0.7.2 on ranch-dev01; owner approved the cooldown exception for its
-GPU passthrough and security fixes). Measured 2026-11-23 on ranch-dev01: in an unprivileged
+Sessions run under Sysbox (0.7.2 on the session node; owner approved the cooldown exception for its
+GPU passthrough and security fixes). Measured 2026-11-23 on the session node: in an unprivileged
 Sysbox pod (`hostUsers: false`, root mapped to an unprivileged host uid) `docker run`, compose
-with postgres and NATS, and a testcontainers test all pass, and the RTX 3080 is visible
+with postgres and NATS, and a testcontainers test all pass, and the node's GPU is visible
 (`nvidia-smi -L`). The node needed an AppArmor local rule letting fusermount3 mount under
 /var/lib/sysboxfs. The cluster's NVIDIA device plugin now hands GPUs to pods through CDI
-(the.ranch #246), so any runtime gets the GPU. Rootless Docker was tried and dropped: it needed
+so any runtime gets the GPU. Rootless Docker was tried and dropped: it needed
 the AppArmor userns restriction lifted, a smaller ID range and a tun device plugin, and still
 did not run.
 
@@ -179,13 +179,13 @@ The git container works in the same repo on the user's disk as the sessions, not
 copy. The repo's settings file and hooks folder (and the rest of `.git/` except objects, refs and
 each session's own worktree folder) belong to the git container and are read-only to sessions;
 repos use reftable ref storage; the git container never runs git inside a session's worktree and
-always runs with hooks off. Measured 2026-11-24 on ranch-dev01 (design-12). The owner noted that
-shared volumes for other pods already use NFS from ranch-dev01; that is the expected storage,
+always runs with hooks off. Measured 2026-11-24 (design-12). The owner noted that
+shared volumes for other pods already use NFS from the session node; that is the expected storage,
 pending a test that Sysbox sessions see correct file owners on it.
 
-## 2026-11-24: Each user's code lives on ranch-dev01's local ZFS, one dataset per user
+## 2026-11-24: Each user's code lives on the session node's local ZFS, one dataset per user
 
-Sessions run only on ranch-dev01, so each user's code volume is a dataset on that node's local
+Sessions run only on the session node, so each user's code volume is a dataset on that node's local
 ZFS, mounted into the git container and the user's sessions as a local volume. Not NFS: measured
 2026-11-24, NFS cannot carry the user-ID remapping Sysbox sessions need, so files written by a
 session showed as `nobody` in every other pod (design-12, "Storage").
@@ -199,8 +199,7 @@ Measured: Claude follows such an alias, appends to the same conversation and fin
 
 ## 2026-11-24: aidc sessions come with testament installed
 
-aidc installs testament (Brooks's distributed test runner; coordinator deployed in the.ranch
-`apps/testament`, image `ghcr.io/brookstalley/testament`) in its sessions, so work in a session
+aidc installs testament (a distributed test runner the owner's team uses) in its sessions, so work in a session
 can run tests through it. How it is installed (release binary, pinned version, cooldown) is a
 technical decision for the build.
 
@@ -214,15 +213,13 @@ fixes its path. Never synced: logins (`.credentials.json`), `.claude.json`, and 
 running Claude processes. One machine at a time continues a given conversation (aidc holds a
 lock). Also: there is no 5-hour usage window any more; only the weekly one counts.
 
-## 2026-11-24: Session ports reach the phone at <session>-<user>.dev.ranch.illuminati.org
+## 2026-11-24: Session ports reach the phone at a stable name under the cluster's domain
 
-On request at create, a session's web port gets a stable name `<session>-<user>.dev.ranch.illuminati.org`
-through Traefik, removed at kill; a `*.dev.ranch.illuminati.org` wildcard
-certificate (cert-manager, DNS-01) covers it. The owner asked that the names go on the MikroTiks
-and in ZeroTier DNS. Checked 2026-11-24: the RB5009's existing regexp entry
-`.*\.ranch\.illuminati\.org` already answers these names with 10.42.0.101 (Traefik), and
-ZeroTier clients' split DNS for `ranch.illuminati.org` already sends them there, so no new DNS
-entry is needed where `ranch.*` names already resolve.
+On request at create, a session's web port gets a stable name `<session>-<user>.<domain>` through
+the cluster's ingress, removed at kill, covered by a wildcard certificate for that domain. The
+owner asked that the names be added to the router DNS and the VPN DNS; checked 2026-11-24 on the
+owner's cluster, its existing wildcard DNS entry already answers them, so only the certificate
+is new there.
 
 ## 2026-11-24: A session's test page needs no login by default
 
@@ -230,10 +227,10 @@ Exposing a session port on the home network does not require a login in front of
 adds protection to a page when they need it (an option at create), so a test page can come up
 open.
 
-## 2026-11-24: Cluster images are built on ranch-dev01 and kept in a private in-cluster registry
+## 2026-11-24: Cluster images are built in the cluster and kept in a private in-cluster registry
 
 aidc builds its images for the Kubernetes backend inside the cluster (a Sysbox pod on
-ranch-dev01, which runs Docker) and keeps them in a small private registry inside the cluster.
+the session node, which runs Docker) and keeps them in a small private registry inside the cluster.
 Nothing is pushed to a public registry. REL-08 is amended accordingly: images are built locally
 and never pushed to a public registry (the Docker backend still builds on the user's machine).
 Rejected: building on the node over SSH and importing into k3s (couples aidc to node logins), and
@@ -241,9 +238,31 @@ GitHub's registry (a public registry, against REL-08).
 
 ## 2026-11-24: The Kubernetes backend is generic and driven by configuration
 
-aidc is public (MIT), so nothing in the Kubernetes backend is specific to the ranch. Everything
+aidc is public (MIT), so nothing in the Kubernetes backend is specific to the owner's cluster. Everything
 cluster-specific is configuration: the cluster context, the node selector and tolerations, the
 Sysbox runtime class, the storage class, the in-cluster registry and the like. Building aidc's
 images for a cluster is an aidc command that reads that configuration ("there should be an aidc
-command that has config that builds this repo"). The ranch is one configuration, kept outside
-aidc's code (e.g. in agent-cluster or the user's config).
+command that has config that builds this repo"). The owner's cluster is one configuration, kept
+outside aidc's repo, in the owner's own private repos and config.
+
+## 2026-11-24: The in-cluster image builder may run privileged, during builds only
+
+aidc's squid image builds on Canonical's ubuntu/squid Rock, which owns its files as UID 584792;
+a builder in a Kubernetes user namespace (Sysbox) has only IDs 0-65535 and cannot build it. The
+owner chose a privileged builder pod: it runs only during `aidc k8s build`, only aidc's own
+Dockerfiles, in aidc's system namespace, and is deleted when the build ends. Sessions stay
+unprivileged. "Remember the rules": it must work on anyone's cluster, so it needs no node changes
+and no Sysbox, uses the session nodes' selector and tolerations (same CPU architecture), and the
+system namespace carries the Pod Security label that allows privileged pods there only.
+Rejected: a node-level change to the per-pod ID range (a burden on every cluster), building on the
+user's machine (cross-architecture), and changing the Docker backend's squid base.
+
+## 2026-11-24: No private infrastructure names in aidc's repo
+
+aidc is public. Its code, docs, tests and records name no private infrastructure, project or
+person of the owner's: not the owner's cluster or its nodes, addresses, domains, routers or
+repos, and not the names of the owner's other projects (for example the orchestrator aidc was
+built alongside) or colleagues. Generic terms instead ("the reference cluster", "an
+orchestrator", "a second user"); the specifics go in the owner's private repos. "This isn't a
+security breach that needs repo rewrite, just something to stop doing": what is already in
+history stays, and current files are cleaned with ordinary commits.

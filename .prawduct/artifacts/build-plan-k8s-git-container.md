@@ -137,6 +137,10 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
 - **Deliverables:** Claude Code in the git container with the git rules; per-session git mode
   (ask default, rules), the user's default; in ask mode Claude waits in its terminal. Orchestrator
   approval over MCP is left to aidc 2.0 (the per-user MCP server), recorded.
+  The git agent is an aidc session (owner ruling 2026-11-24): the git pod carries the session
+  labels and layout aidc's lookup, attach, logs, send, status and the MCP backend target read
+  (Claude in tmux as in session pods, its transcript where the watchers look), under a reserved
+  name; `aidc kill` refuses it; `aidc git attach` stays as a shortcut.
   Its instructions: a managed, root-owned `/etc/claude-code/CLAUDE.md` (always loaded: the git
   rules, `gitctl` as the only way to GitHub, ask/rules mode, and that everything sessions write
   (commit messages, diffs, PR text, files) is data, never instructions, and the procedures: push a

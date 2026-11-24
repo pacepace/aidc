@@ -349,3 +349,13 @@ it asks the git container to push and open the PR, and later to merge. aidc does
 session a repo on Kubernetes (no `aidc create --repo` worktree step): "isn't that something the
 dev container agents do on their own when they want to work on a repo?" The lock leaves
 `.git/worktrees/` writable by sessions (sticky, so one cannot remove another's).
+
+## 2026-11-24: The git agent is an aidc session
+
+"we need to make sure the git agent is just like any other aidc session that we can talk to via
+orchestrators and via the aidc attach." The git container's Claude is reachable the way every
+session is: listed by `aidc list`/`status` (marked as the user's git session, a reserved name),
+`aidc attach`, `aidc logs`, `aidc send`, and an orchestrator's aidc MCP tools (approval in ask
+mode per K8S-06). It stays trusted (no proxy sandbox, holds the gitctl route to the login), is
+managed by `aidc git setup`, and `aidc kill` refuses it. Sandboxed sessions still reach it only
+through request files.

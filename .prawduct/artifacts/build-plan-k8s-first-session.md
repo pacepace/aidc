@@ -186,7 +186,8 @@ sidecar's pause through the Docker socket). Chunk 04 starts by running them.
 
 - **Description:** the everyday verbs for a Kubernetes session, from any of the user's machines.
 - **Depends on:** Chunk 04
-- **Deliverables:** dispatcher routing by where the session lives; `attach` (tmux over
+- **Deliverables:** the config's default backend for `create` (`backend: kubernetes`), and `kill`
+  without the flag; dispatcher routing by where the session lives; `attach` (tmux over
   `kubectl exec -it`), `list` (both backends), `status` (pods, taint, egress), `logs`.
 - **Tests:** unit with docker and kubectl stubs for routing and output.
 - **Acceptance criteria:** the owner attaches to a cluster session and works in Claude.

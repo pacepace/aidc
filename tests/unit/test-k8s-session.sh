@@ -163,6 +163,20 @@ assert_has "killing a session that does not exist says so" "no session 'demo'" "
 echo "=== the dispatcher's --backend switch ==="
 out=$(run attach demo --backend kubernetes)
 assert_has "a verb the backend does not have yet is refused" "not available on the kubernetes backend yet" "$out"
+# A Docker verb must get exactly the arguments it would get without the flag.
+cat > "$SCRATCH/bin/docker" <<'DSTUB'
+#!/bin/sh
+printf 'docker %s\n' "$*" >> "$D_LOG"
+exit 0
+DSTUB
+chmod +x "$SCRATCH/bin/docker"
+export D_LOG="$SCRATCH/docker.log"
+: > "$D_LOG"; run logs demo --component squid >/dev/null; plain=$(cat "$D_LOG")
+: > "$D_LOG"; run logs demo --backend docker --component squid >/dev/null; flagged=$(cat "$D_LOG")
+: > "$D_LOG"; run logs --backend=docker demo --component squid >/dev/null; flagged2=$(cat "$D_LOG")
+assert_eq "--backend docker leaves a Docker verb's arguments as they were" "$plain" "$flagged"
+assert_eq "--backend=docker, anywhere on the line, too" "$plain" "$flagged2"
+assert_has "and the Docker verb really ran" "docker " "$plain"
 out=$(run list --backend nonesuch)
 assert_has "an unknown backend is refused" "unknown backend: nonesuch" "$out"
 

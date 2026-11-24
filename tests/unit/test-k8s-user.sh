@@ -88,6 +88,9 @@ assert_eq "the init pod carries the configured tolerations" '[{"key":"role","ope
     "$(k 'select(.kind == "Pod") | .spec.tolerations')"
 assert_eq "the init pod has no API token" 'false' "$(k 'select(.kind == "Pod") | .spec.automountServiceAccountToken')"
 assert_has "the init pod is removed after it ran" "delete pod disk-init --wait=false" "$(cat "$K_LOG")"
+assert_eq "the user's namespace denies all traffic by default (sessions share it; each allows only its own)" \
+    '[{"namespace":"aidc-u-alice","spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}}]' \
+    "$(k '[select(.kind == "NetworkPolicy") | {"namespace": .metadata.namespace, "spec": .spec}]')"
 
 echo "=== a user whose disk is already in use ==="
 out=$(K_PVC_PHASE=Bound add alice)

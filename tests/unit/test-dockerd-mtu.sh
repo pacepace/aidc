@@ -38,13 +38,15 @@ check "a plain Docker host's 1500 passes nothing (dockerd started as before)" "1
 check "a jumbo-frame MTU passes nothing (Docker's default is safe below it)" "9000" ""
 check "an unreadable value passes nothing" "abc" ""
 check "an interface that exists nowhere passes nothing" "<missing>" ""
-# Under Sysbox /sys/class/net lists the node's interfaces, so the pod's eth0 is not there and
-# the MTU comes from the kernel instead. The loopback interface exists everywhere.
-got=$(AIDC_MTU_SYSFS="$SCRATCH/empty-sysfs" iface_mtu lo)
-if [ -n "$got" ] && [ "$got" -ge 1500 ] 2>/dev/null; then
-    echo "  PASS: with no sysfs entry the MTU is read from the kernel (lo: $got)"; PASS=$((PASS + 1))
+# Under Sysbox /sys/class/net lists the NODE's interfaces, so the kernel's answer for this
+# network namespace must win over sysfs: a fake sysfs saying lo is 1450 must not be believed
+# (lo exists everywhere, so the kernel read always answers for it).
+mkdir -p "$SCRATCH/lying-sysfs/lo"; printf '1450\n' > "$SCRATCH/lying-sysfs/lo/mtu"
+got=$(AIDC_MTU_SYSFS="$SCRATCH/lying-sysfs" iface_mtu lo)
+if [ -n "$got" ] && [ "$got" != 1450 ] && [ "$got" -ge 1500 ] 2>/dev/null; then
+    echo "  PASS: the kernel's MTU wins over sysfs, which may show the node's (lo: $got)"; PASS=$((PASS + 1))
 else
-    echo "  FAIL: with no sysfs entry the kernel read gave '$got' for lo"; FAIL=$((FAIL + 1))
+    echo "  FAIL: the kernel read should win over sysfs for lo, got '$got'"; FAIL=$((FAIL + 1))
 fi
 
 echo

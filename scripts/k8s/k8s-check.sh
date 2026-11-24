@@ -100,7 +100,7 @@ K8S_LACKING_JQ='
 # does not grant, comma-separated; "" when it grants them all.
 _k8s_lacking() { jq -r --arg rules "$1" "$K8S_LACKING_JQ" <<<"$2"; }
 review=$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"%s"}}' "$user_ns" \
-    | k8s_kubectl create -f - -o json 2>/dev/null) || review=""
+    | k8s_kubectl create --validate=false -f - -o json 2>/dev/null) || review=""
 if [ -z "$review" ] || ! lack=$(_k8s_lacking "$K8S_USER_RULES" "$review" 2>/dev/null); then
     missing "cannot ask the cluster what your credentials may do in ${user_ns} (SelfSubjectRulesReview)"
 else

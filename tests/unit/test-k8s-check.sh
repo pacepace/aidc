@@ -71,7 +71,7 @@ case "$*" in
         [ "${K_CANI_NODES:-yes}" = no ] && { echo 'nodes is forbidden' >&2; exit 1; }
         printf '%b' "${K_NODES:-}" ;;
     *"auth can-i create namespaces"*) echo "${K_CANI_NS:-yes}" ;;
-    *"create -f - -o json"*)
+    *"create --validate=false -f - -o json"*)
         cat >/dev/null
         if [ -n "${K_RULES:-}" ]; then printf '%s' "$K_RULES"
         elif [ "${K_CANI:-yes}" = no ]; then

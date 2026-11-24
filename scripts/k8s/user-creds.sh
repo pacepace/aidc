@@ -130,5 +130,7 @@ chmod 0600 "$tmp"
 mv -f "$tmp" "$OUT"
 
 info "kubeconfig for ${USER_NAME} (ServiceAccount ${K8S_USER_SA} in ${ns}${until:+, valid until ${until}}): ${OUT}"
-info "hand it to ${USER_NAME} privately; in their ~/.config/aidc/config.yaml: kubernetes.kubeconfig: <where they keep it>, kubernetes.user: ${USER_NAME}"
+if [ "$OUT" != "$AIDC_K8S_KUBECONFIG" ]; then
+    info "hand it to ${USER_NAME} privately; in their ~/.config/aidc/config.yaml: kubernetes.kubeconfig: <where they keep it>, kubernetes.user: ${USER_NAME}"
+fi
 info "renew before it expires: aidc user creds ${USER_NAME} (an admin, or ${USER_NAME} with this kubeconfig)"

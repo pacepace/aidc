@@ -1,4 +1,4 @@
-# Design 13 — aidc's Control Plane as 3tears Tools
+# Design 13 — aidc 2.0: Adopting 3tears
 
 **What this covers.** Rebuilding aidc's MCP server (`mcp/`) on 3tears, the public MIT Python
 package family: each aidc tool becomes a 3tears tool, so one implementation is reachable two ways.
@@ -8,10 +8,13 @@ mesh's hub can publish them as MCP and HTTP API endpoints. Observability moves t
 `3tears-observe`.
 
 **Requirements:** owner rulings of 2026-11-24 ("aidc's MCP server becomes a 3tears tools
-server"); MCP-01..45 constrain what must be preserved.
+server"; "2.0 is 3tears adoption"; enhance 3tears where it falls short, starting with
+`3tears-mcp`; local mode or mesh; use `3tears-observe`); MCP-01..45 constrain what must be
+preserved.
 
-**Status:** investigation, 2026-11-24. To be built after the Kubernetes backend work (design-12).
-Read against 3tears 0.95.0 and aidc 1.9.10. Decisions marked **open** await the owner.
+**Status:** plan, 2026-11-24. Built after the Kubernetes backend work is finished (design-12;
+owner ruling). Read against 3tears 0.95.0 (all packages alpha, version-locked to one minor) and
+aidc 1.9.10. Decisions marked **open** await the owner.
 
 ---
 
@@ -99,6 +102,64 @@ is not in the 3tears repo, so what it supports is unknown here.
 | `audit.log_event` JSON access log | `3tears-observe` | Structured logs and traces through observe; keep a file sink for the access log, since it is aidc's audit record of tool calls. |
 | `session_create` opt-in (MCP-38) | — | Unchanged: the tool is registered only when enabled. |
 
+## Which 3tears packages aidc 2.0 uses
+
+Surveyed 2026-11-24: every package of 3tears 0.95, against aidc's needs. "Local" means it works
+with no 3tears infrastructure (no NATS, no Postgres, no hub).
+
+| Package | Use in aidc 2.0 | Local? | Notes |
+|---|---|---|---|
+| `3tears-mcp` | **Adopt, and enhance upstream** (below): the local MCP face, per-tool permissions, bearer identity | yes (base install; bring our own `Authorizer`) | Its `[grants]` extra needs Postgres: not used in local mode |
+| `3tears-tool-schema` | **Adopt**: flat, self-contained JSON schemas for every tool | yes | No dependencies |
+| `3tears-observe` | **Adopt**: structured logs with correlation, tracing, metrics | yes | Not an audit trail: the access log stays a file sink |
+| `3tears-agent-tools` | **Adopt for mesh mode**: `TearsTool` as the one tool definition, `ToolServer` on the mesh | the `TearsTool` type, yes; `ToolServer`, no | Heavy dependency tree; its closed `ToolResult` error vocabulary is the model for the new MCP error model |
+| `3tears-nats`, `3tears-registry` | **Mesh mode**: transport, catalog, routing, caller identity | no | Registry's real grants go through the hub |
+| `3tears-agent-audit` | **Mesh mode**: tool-call audit events to the hub's table | no (NATS) | Publish never raises, so events can be lost when NATS is down: keep the local audit file as the record of truth, or fix upstream |
+| `3tears-agent-acl` | **Later**: per-caller grants on the destructive tools for multi-user Kubernetes | no (Postgres) | Path-glob file grants fit `file_get` / `file_put` |
+| `3tears-iam` | **Later**: real login if multi-user grows past trusted peers | yes (in-memory stores) | OIDC, GitHub login, DPoP |
+| `3tears-object-store` | **Possible**: audit artifacts (filesystem driver, optionally encrypted) | yes (filesystem) | Importing it pulls aioboto3 and pins botocore |
+| `3tears-evals` | **Possible**: evaluate orchestrator behaviour against aidc offline | yes | Not a runtime need |
+| `3tears` (core) | **Not in local mode as it stands**: durable tiers need Postgres, NATS or git+NATS | no | Candidate upstream work: a filesystem L3 (below) |
+| scheduled-jobs, epoch, wake, channels, conversations, workspace, memory, identity, intention, knowledge, skills, models, langgraph, search, scrape, geo, backup, datasources, enforcement, interfaces, media-contracts | **Not used** | — | Built for multi-pod agent platforms (Postgres, conversations, customers) or unrelated domains. `wake` is a scheduler, not a "turn finished" notifier. `enforcement` would push 3tears conventions onto all of aidc's source. |
+
+What stays aidc's own: the service (watchers, send queues, exactly-once delivery with retry and
+dead letters, resume), the taint gate (as a custom `Authorizer` over per-session state), the
+session backends (Docker, Kubernetes), and the CLI.
+
+## Upstream work in 3tears
+
+In the order 2.0 needs it. Each is a 3tears change of its own, reviewed and released there,
+then picked up by pinning the family's new minor.
+
+1. **`3tears-mcp`: a call context for handlers.** Handlers are called as `handler(**arguments)`
+   and see nothing of the request, so they can neither report progress nor notice cancellation.
+   Add an opt-in context parameter (detected by signature, existing handlers unchanged) exposing
+   the progress token, `report_progress`, a log channel and a cancellation signal.
+2. **`3tears-mcp`: progress and logging.** Over Streamable HTTP these ride a per-request event
+   stream (`json_response=False`), which works even in stateless mode.
+3. **`3tears-mcp`: a richer error model.** Today the codes are literals in the dispatcher, and
+   several failures (identity unavailable among them) collapse into `PERMISSION_DENIED`. Add a
+   closed, documented code set with retryable and field metadata, an exception-to-code
+   registry, and room for a server's own codes, aligned with agent-tools' `ToolResult`
+   vocabulary. aidc's 20 codes then become real protocol codes, not only envelope text.
+4. **`3tears-mcp`: resources** (`McpResource`, `ResourceProvider`, list, read, templates, a
+   permission per resource), mirroring tools. Straightforward in both SDK majors.
+5. **`3tears-mcp`: an optional stateful mode** for `tools/list_changed`, resource subscriptions
+   and request-level cancellation, re-validating the bearer identity on every message (a
+   session outlives the request that opened it). Stateless stays the default.
+6. **A `TearsTool` → `McpTool` bridge**, so one tool definition serves both faces.
+7. **A way to serve `face_api` without the hub** (today only the hub serves API faces), so local
+   mode can also offer the HTTP API the owner wants.
+8. **Possible: a filesystem L3 for `3tears` core**, so aidc's durable state (queues, ledger,
+   watches, dead letters) can live in 3tears collections locally and move to Postgres or NATS
+   on a mesh without code changes. Weigh against keeping aidc's temp+rename files, which work.
+9. **`3tears-agent-audit`: a durable local sink or a publish that reports failure**, so an audit
+   trail cannot drop events silently.
+
+Two cross-cutting facts: `3tears-mcp` supports two MCP SDK majors (1.x and 2.x), so each feature
+is built twice unless 1.x is dropped first; and the family is alpha, with no compatibility
+across minor versions, so aidc pins one minor and moves with it.
+
 ## Contract
 
 Namespaced tool names, dropped resources and dropped dynamic descriptions are breaking changes,
@@ -116,22 +177,25 @@ agreed.
 
 ## Work, in order
 
-1. **Separate the service from the transport**: move watchers, queues, delivery and resume out
-   of `tools.py` into a service module with no MCP types; tools become thin. Behaviour preserved;
-   the large internal suites carry over.
-2. **The TearsTool layer and the local face**: each tool as a `TearsTool`; an adapter to
-   `3tears-mcp`; local mode serves as today. Wire tests rewritten for the new transport.
-3. **Observability on `3tears-observe`**, keeping the access log file.
-4. **Mesh mode**: a ToolServer entry point, pod identity and registration, grants, the mesh
-   delivery channel if agreed.
-5. **2.0 release**: contract regenerated, CHANGELOG, README.
+1. **Upstream, `3tears-mcp`**: items 1-5 above, as 3tears releases.
+2. **Separate the service from the transport** in aidc: watchers, queues, delivery and resume
+   out of `tools.py` into a service module with no MCP types; tools become thin. Behaviour
+   preserved; the large internal suites carry over. (Can start in parallel with step 1.)
+3. **Tools as `TearsTool`s, local face on the enhanced `3tears-mcp`** through the bridge;
+   schemas via `tool-schema`; the taint gate as an `Authorizer`; aidc's error codes as real
+   codes; progress, resources, `tools/list_changed` and cancellation kept. Wire tests rewritten.
+4. **Observability on `3tears-observe`**, keeping the access log file.
+5. **Mesh mode**: a `ToolServer` entry point, pod identity and registration, grants, mesh audit,
+   the mesh delivery channel if agreed; the per-user server on Kubernetes (K8S-07) runs in this
+   mode or locally.
+6. **aidc 2.0**: `published-tools.json` regenerated, CHANGELOG with the upgrade notes, README.
 
 ## Open questions for the owner
 
-1. Progress messages: local-only, or ask 3tears for a progress channel?
+1. Progress on the mesh: carry it through `TearsTool` (another upstream change in agent-tools
+   and the registry), or keep progress local and use the async tools on the mesh?
 2. Mesh delivery of finished turns: keep the webhook, or add a NATS subject the orchestrator
-   consumes?
+   consumes (agreed with the orchestrator, design-10 D5)?
 3. Packaging: one image with mesh support, or a light default plus a mesh variant?
-4. Upstream work in 3tears worth doing first: a `TearsTool` → `McpTool` adapter, MCP resources in
-   `3tears-mcp`, a way to serve `face_api` without the hub (the owner wants an API face; today
-   only the hub serves one).
+4. Durable state: a filesystem L3 in 3tears core (upstream item 8), or keep aidc's files?
+5. `3tears-mcp`'s SDK 1.x support: keep building each feature twice, or drop 1.x first?

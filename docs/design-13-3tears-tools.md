@@ -150,9 +150,16 @@ then picked up by pinning the family's new minor.
 6. **A `TearsTool` → `McpTool` bridge**, so one tool definition serves both faces.
 7. **A way to serve `face_api` without the hub** (today only the hub serves API faces), so local
    mode can also offer the HTTP API the owner wants.
-8. **Possible: a filesystem L3 for `3tears` core**, so aidc's durable state (queues, ledger,
-   watches, dead letters) can live in 3tears collections locally and move to Postgres or NATS
-   on a mesh without code changes. Weigh against keeping aidc's temp+rename files, which work.
+8. **Possible: L1 on a file, for an L1-only store.** 3tears already runs a collection with no
+   L2 (`NO_L2`) and no L3 (`l3_pool` None), and L1 has no size-based eviction (only the
+   absence markers are capped). L1 is SQLite opened as a named in-memory database
+   (`cache/sqlite.py`, `vfs=memdb`); a setting to open a file instead (write-ahead log on) would
+   make an L1-only store durable on one machine. aidc's queues, ledger, watches and dead letters
+   could then be 3tears collections locally, and gain L2/L3 on a mesh by configuration. To check
+   before relying on it: every path that drops an L1 row because L3 is the record (an
+   invalidation, a failed write's eviction) must not run in an L1-only store, and the
+   `DataStore` methods that refuse without an L3 must not be ones aidc needs. Weigh against
+   keeping aidc's temp+rename files, which work.
 9. **`3tears-agent-audit`: a durable local sink or a publish that reports failure**, so an audit
    trail cannot drop events silently.
 
@@ -197,5 +204,5 @@ agreed.
 2. Mesh delivery of finished turns: keep the webhook, or add a NATS subject the orchestrator
    consumes (agreed with the orchestrator, design-10 D5)?
 3. Packaging: one image with mesh support, or a light default plus a mesh variant?
-4. Durable state: a filesystem L3 in 3tears core (upstream item 8), or keep aidc's files?
+4. Durable state: an L1-on-a-file store in 3tears core (upstream item 8), or keep aidc's files?
 5. `3tears-mcp`'s SDK 1.x support: keep building each feature twice, or drop 1.x first?

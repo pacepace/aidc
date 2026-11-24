@@ -334,4 +334,6 @@ W-K7 ops (any time, owner) ; W-R release last
 
 Q-M1 answered by the owner (owner-rulings 2026-11-24): both, the in-cluster Service always and VPN/LAN exposure on request, behind the bearer token.
 
-Asked of the owner, one at a time: Q-K5 (the login in front of an exposed page, and the ingress/certificate the config names), Q-K7 (testament's release source), Q-K1 (account add flow), design-13 Q1-Q5.
+Q-K5 answered (owner-rulings 2026-11-24): the developer chooses per expose, login or none; the domain comes from the user's config.
+
+Asked of the owner one at a time, each only when its wave is about to be built: Q-K7 (testament's release source), Q-K1 (account add flow), design-13 Q1-Q5.

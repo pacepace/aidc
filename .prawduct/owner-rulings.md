@@ -410,3 +410,7 @@ Every piece of the Kubernetes program goes into 2.0 with the 3tears adoption: th
 ## 2026-11-24 — Where the orchestrator reaches the per-user MCP from (Q-M1)
 
 The orchestrator runs somewhere inside the owner's VPN: maybe in the cluster, maybe not. So the per-user MCP server is always reachable in the cluster by its Service name, and can also be exposed to the VPN/LAN when the config asks (an Ingress name with TLS, or a LAN address), always behind its bearer token. Both paths are built and tested in 2.0.
+
+## 2026-11-24 — The developer decides whether an exposed page has a login (Q-K5)
+
+Exposing a session port on the LAN is per use: sometimes with no password (testing), sometimes with one. The developer chooses at expose time (`--expose <port>` with or without a login option); aidc does not impose one. The wildcard domain the pages live under comes from the user's config, never the repo. Ask the owner questions only when the wave that needs the answer is about to be built.

@@ -6,14 +6,14 @@ branch: refactor/backend-seam
 lifecycle: active
 depends_on: [docs/design-12-kubernetes.md]
 governed_by: [.prawduct/artifacts/project-preferences.md, .claude/rules/learnings/core.md]
-partition: serial — chunk 01 is Python and could run beside 02, but 02-04 all edit scripts/lib/common.sh and the cmd-*.sh files, and 01 is small enough that a delegate's brief costs more than the work
+partition: serial — three small chunks, each depending on the last; a delegate's brief would cost more than the work
 ---
 
 # Build Plan — one switch point between aidc and Docker
 
 **Work:** `backend-seam` · **Branch:** `refactor/backend-seam` (off `design/k8s-backend`
 16a6122, which carries design-12 and the K8S requirements) · **Started:** 2026-11-24
-**Critic mode:** chunk review after 01 and 03, final after 05
+**Critic mode:** chunk review after 01, final after 03
 
 ## Goals
 
@@ -55,6 +55,15 @@ partition: serial — chunk 01 is Python and could run beside 02, but 02-04 all 
     `dev_list_args` + `session_of_dev`) instead of `session_instance()` / `dev_sessions()` |
     the callers keep their own subprocess handling (Goals, "Inferred"), and the backend owns
     both the command and the reading of its output | owner can veto]
+  - [DECISION: the CLI's switch point is the dispatcher, not a shell backend library; chunks
+    02-04 (per-verb `backend_*` functions) become one confinement chunk | nearly every CLI
+    Docker call is in a per-verb script (create, kill, network, proxy, egress) whose Kubernetes
+    form shares little with it (namespaces, NetworkPolicy), so wrapping each call now would be an
+    abstraction with one implementation and guessed signatures; moving the Docker helpers out of
+    common.sh would break the libraries-report-their-own-failures rule
+    (tests/unit/test-lib-self-contained.sh) or change how they fail. Shared helpers get extracted
+    when the Kubernetes verbs show which are shared. Departs from design-12 "Backend seam"
+    (backend_docker.sh / backend_k8s.sh), which chunk 03 updates | owner can veto]
 - **Level:** Medium-high. The MCP side is well understood (every call site read). The CLI side
   is 139 Docker calls across 20 files; the verb list in chunks 02-04 is a forecast that chunk 02's
   inventory may move.
@@ -72,31 +81,25 @@ partition: serial — chunk 01 is Python and could run beside 02, but 02-04 all 
   except `backend.py` names the `docker` binary; unit tests of `exec_argv` for each option.
 - Acceptance: `uv run --frozen pytest -q`, ruff and mypy clean.
 
-### Chunk 02: CLI backend library and read verbs
+### Chunk 02: CLI switch point and Docker confinement
 
-- `scripts/lib/backend_docker.sh`, sourced by `common.sh`: session/role addressing
-  (`backend_ct <session> <role>`), `backend_exec`, `backend_session_exists`,
-  `backend_session_state`, `backend_logs`, `backend_list_sessions`.
-- Move `attach`, `logs`, `status`, `list`, `restart` and the read helpers in `common.sh` onto it.
-- Inventory every remaining `docker` call by file and the verb it will become (recorded below
-  under Decisions).
+- The CLI's switch point is the dispatcher (`scripts/aidc` runs `scripts/cmd-<verb>.sh`): the
+  Kubernetes wave adds its verbs beside these and the dispatcher picks by the session's backend.
+  Documented in design-12 "Backend seam".
+- `tests/unit/test-backend-confinement.sh`: `docker` is invoked only in the files that implement
+  the Docker backend (the `cmd-*.sh` verbs, `lib/network.sh`, `lib/egress.sh`) and, in the shared
+  libraries, only inside the named Docker helper functions (`common.sh`: session_exists,
+  require_docker, ensure_image, aidc_session_audit_dir, list/remove_adhoc_forwards,
+  remove_session_networks, wait_for_dev_ready; `config.sh`: aidc_mcp_deny_target). Every other
+  shared library (`claude-state.sh`, `yq.sh`, `update.sh` …) stays Docker-free. Verified to fail on
+  a planted call.
 
-### Chunk 03: CLI lifecycle verbs
+### Chunk 03: End-to-end and docs
 
-- `create`, `kill`, `upgrade`, `rebuild`, `refresh`, `clean-env` call backend verbs
-  (`backend_create_session`, `backend_kill_session`, `backend_replace_dev`, image build).
-
-### Chunk 04: CLI network, proxy, egress and MCP verbs
-
-- `lib/network.sh`, `lib/egress.sh`, `cmd-proxy.sh`, `cmd-network.sh`, `cmd-egress.sh`,
-  `cmd-mcp.sh`, `lib/config.sh`, `lib/update.sh` go through backend verbs.
-
-### Chunk 05: Enforcement and end-to-end
-
-- `tests/unit/test-backend-seam.sh`: no `docker` invocation in `scripts/` outside
-  `lib/backend_docker.sh` (and the documented exceptions, if any).
 - `make smoke` on this host; MCP suite; every `tests/unit/*.sh`; record evidence.
-- Docs: design-12 "Backend seam" updated to what was built; CHANGELOG.
+- An MCP round trip against a real session (session_create, session_send, session_status,
+  session_exec, file_put, session_kill) through the new backend module.
+- design-12 "Backend seam" updated to what was built; CHANGELOG.
 
 ## Verification strategy
 

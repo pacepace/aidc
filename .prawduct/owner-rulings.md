@@ -217,9 +217,15 @@ lock). Also: there is no 5-hour usage window any more; only the weekly one count
 ## 2026-11-24: Session ports reach the phone at <session>-<user>.dev.ranch.illuminati.org
 
 On request at create, a session's web port gets a stable name `<session>-<user>.dev.ranch.illuminati.org`
-through Traefik with an auth middleware, removed at kill; a `*.dev.ranch.illuminati.org` wildcard
+through Traefik, removed at kill; a `*.dev.ranch.illuminati.org` wildcard
 certificate (cert-manager, DNS-01) covers it. The owner asked that the names go on the MikroTiks
 and in ZeroTier DNS. Checked 2026-11-24: the RB5009's existing regexp entry
 `.*\.ranch\.illuminati\.org` already answers these names with 10.42.0.101 (Traefik), and
 ZeroTier clients' split DNS for `ranch.illuminati.org` already sends them there, so no new DNS
 entry is needed where `ranch.*` names already resolve.
+
+## 2026-11-24: A session's test page needs no login by default
+
+Exposing a session port on the home network does not require a login in front of it. The user
+adds protection to a page when they need it (an option at create), so a test page can come up
+open.

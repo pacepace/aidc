@@ -191,7 +191,8 @@ API server, to kube-dns, to its own node, to another node, to a pod in another n
   cluster credentials and reconnects it if it drops. Works from anywhere the user reaches the
   cluster.
 - **Home network** (K8S-15, optional at create): a Traefik Ingress with a stable name such as
-  `<session>-<user>.dev.ranch.illuminati.org`, behind an auth middleware, removed at kill. The
+  `<session>-<user>.dev.ranch.illuminati.org`, removed at kill. No login by default; the user
+  can add one at create when a page needs protecting (ruled 2026-11-24). The
   owner's phone is on ZeroTier and can reach it. Needs a `*.dev.ranch.illuminati.org` wildcard
   certificate (cert-manager, DNS-01, already wired). DNS already works: the RB5009's regexp
   entry `.*\.ranch\.illuminati\.org` answers these names (checked 2026-11-24), and ZeroTier

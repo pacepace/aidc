@@ -94,6 +94,22 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   checks a bound disk, never touches it. Checked live on the owner's cluster: the disk binds as a
   shared ZFS dataset, and a Sysbox pod and a plain pod mount it at once with file owners intact.
   The owner's storage class and parent dataset live in their private repos (merged there).
+- [DECISION: chunk 04: sessions live in the user's namespace, named <session>-*, not one
+  namespace each | every session mounts the user's one disk and a pod can mount only claims of
+  its own namespace; labels plus per-session NetworkPolicies (and the user namespace's
+  default-deny from `aidc user add`) keep sessions apart, and kill deletes by label. Departs from
+  design-12 "Shape" (namespace per session), which chunk 06 updates | owner can veto]
+- Chunk 04: the dev pod has no DNS at all and reaches its proxy by a hostAliases entry for the
+  proxy Service's ClusterIP (the measured lockdown); the Docker backend's dev container can
+  resolve names. Audit goes to a per-session claim on the user's retained class, mounted by
+  policy and audit only (the dev pod no longer sees its audit folder, as it does on Docker),
+  and `aidc kill` keeps it. The home volume is on `kubernetes.session_storage_class`, deleted
+  with the session. The taint "freeze" response is a no-op here (no Docker socket; the policy
+  sidecar logs and records the taint). `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`
+  are refused by name on this backend for now.
+- Chunk 04: the dev image runs unchanged under Sysbox (measured: dockerd on overlay2, tmux,
+  ready marker); the one image change is the inner dockerd's MTU, which stalled a large
+  download from an inner container on the 1450 pod network.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

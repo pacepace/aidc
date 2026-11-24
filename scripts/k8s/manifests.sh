@@ -195,6 +195,14 @@ metadata:
     aidc/role: user
     aidc/user: ${user}
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ${ns}
+  labels: {${K8S_MANAGED_BY}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -224,5 +232,200 @@ spec:
       volumeMounts: [{name: disk, mountPath: /disk}]
   volumes:
     - {name: disk, persistentVolumeClaim: {claimName: disk}}
+EOF
+}
+
+# k8s_render_session <session> <repo-path> <profile> <node-selector-json> [proxy-ip]: one
+# session's NetworkPolicies, proxy pod (squid, refresher, policy, audit), its Service, and the
+# dev StatefulSet, all in the user's namespace and named <session>-*. Sessions live in the
+# user's namespace, not one each, because every session mounts the user's one disk and a pod
+# can mount only claims of its own namespace; labels and the policies below keep sessions apart
+# (the namespace's default-deny comes from `aidc user add`). Without proxy-ip the dev
+# StatefulSet is left out: it reaches its proxy by a hostAliases entry for the Service's
+# ClusterIP (no cluster DNS in the dev pod), so it is rendered once the Service has an address.
+#
+# The lockdown is the one measured on the reference cluster (docs/design-12-kubernetes.md,
+# "Egress"): the dev pod may open TCP 3128 to its own session's proxy and nothing else, and has
+# no DNS; the proxy pod takes connections only from its own dev pod and may reach Quad9 for DNS
+# and public addresses only. The rules live in the node's network namespace, which the Sysbox
+# dev pod does not share.
+k8s_render_session() {
+    local session="$1" repo="$2" profile="$3" sel="$4" proxy_ip="${5:-}" ns img
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    img="${AIDC_K8S_REGISTRY_PULL}/aidc"
+    local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, aidc/session: ${session}"
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${session}-dev-only-to-its-proxy, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {aidc/session: ${session}, app: dev}}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {aidc/session: ${session}, app: proxy}}}]
+      ports: [{protocol: TCP, port: 3128}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${session}-proxy-public-only, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {aidc/session: ${session}, app: proxy}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {aidc/session: ${session}, app: dev}}}]
+      ports: [{protocol: TCP, port: 3128}]
+  egress:
+    - to: [{ipBlock: {cidr: 9.9.9.9/32}}, {ipBlock: {cidr: 149.112.112.112/32}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ${session}-audit, namespace: ${ns}, labels: {${labels}}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: ${session}-proxy, namespace: ${ns}, labels: {${labels}}}
+spec:
+  selector: {aidc/session: ${session}, app: proxy}
+  ports: [{port: 3128}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ${session}-proxy, namespace: ${ns}, labels: {${labels}, app: proxy}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {aidc/session: ${session}, app: proxy}}
+  template:
+    metadata: {labels: {${labels}, app: proxy}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      initContainers:
+        # A Docker volume starts as a copy of the image's folder; an emptyDir starts empty.
+        - name: seed-squid-etc
+          image: ${img}/squid:${AIDC_VERSION_TAG}
+          command: [perl, -MFile::Copy, -e, 'copy("/etc/squid/\$_", "/seed/\$_") or die "\$_: \$!" for qw(squid.conf blocklist.txt state-actor-tlds.txt); mkdir "/seed/conf.d"']
+          volumeMounts: [{name: blocklist, mountPath: /seed}]
+      containers:
+        - name: squid
+          image: ${img}/squid:${AIDC_VERSION_TAG}
+          env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}]
+          readinessProbe: {exec: {command: [/usr/local/bin/healthcheck.sh]}, periodSeconds: 10}
+          volumeMounts:
+            - {name: blocklist, mountPath: /etc/squid}
+            - {name: squid-log, mountPath: /var/log/squid}
+        - name: refresher
+          image: ${img}/refresher:${AIDC_VERSION_TAG}
+          volumeMounts:
+            - {name: blocklist, mountPath: /etc/squid}
+            - {name: aidc-log, mountPath: /var/log/aidc}
+        - name: policy
+          image: ${img}/policy:${AIDC_VERSION_TAG}
+          env:
+            - {name: AIDC_SESSION, value: "${session}"}
+            - {name: AIDC_TAINT_RESPONSE, value: "${AIDC_TAINT_RESPONSE:-freeze}"}
+            - {name: AIDC_TLD_TAINTS, value: "${AIDC_TLD_TAINTS:-false}"}
+            - {name: AIDC_NOTIFY_WEBHOOK, value: "${AIDC_NOTIFY_WEBHOOK:-}"}
+          volumeMounts:
+            - {name: blocklist, mountPath: /etc/squid, readOnly: true}
+            - {name: squid-log, mountPath: /var/log/squid, readOnly: true}
+            - {name: aidc-log, mountPath: /var/log/aidc}
+            - {name: state, mountPath: /var/state}
+            - {name: audit, mountPath: /var/aidc/audit}
+        - name: audit
+          image: ${img}/audit:${AIDC_VERSION_TAG}
+          env:
+            - {name: AIDC_SESSION, value: "${session}"}
+            - {name: AIDC_PROFILE, value: "${profile}"}
+          volumeMounts:
+            - {name: squid-log, mountPath: /var/log/squid, readOnly: true}
+            - {name: aidc-log, mountPath: /var/log/aidc, readOnly: true}
+            - {name: state, mountPath: /var/state, readOnly: true}
+            - {name: audit, mountPath: /var/aidc/audit}
+      volumes:
+        - {name: blocklist, emptyDir: {}}
+        - {name: squid-log, emptyDir: {}}
+        - {name: aidc-log, emptyDir: {}}
+        - {name: state, emptyDir: {}}
+        - {name: audit, persistentVolumeClaim: {claimName: ${session}-audit}}
+EOF
+    [ -n "$proxy_ip" ] || return 0
+    cat <<EOF
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ${session}-dev
+  namespace: ${ns}
+  labels: {${labels}, app: dev}
+  annotations: {aidc/repo: "${repo}", aidc/profile: "${profile}"}
+spec:
+  replicas: 1
+  serviceName: ""
+  selector: {matchLabels: {aidc/session: ${session}, app: dev}}
+  template:
+    metadata: {labels: {${labels}, app: dev}}
+    spec:
+      runtimeClassName: ${AIDC_K8S_RUNTIME_CLASS}
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      # No cluster DNS: names are resolved by Squid, so a lookup cannot leave around it.
+      dnsPolicy: None
+      dnsConfig: {nameservers: [192.0.2.1]}
+      hostAliases: [{ip: "${proxy_ip}", hostnames: [aidc-proxy]}]
+      initContainers:
+        # The repo folder, made as the session user when it is not on the disk yet.
+        - name: repo-dir
+          image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          command: [mkdir, -p, "${repo}"]
+          securityContext: {runAsUser: 1000, runAsGroup: 1000}
+          volumeMounts: [{name: disk, mountPath: "/home/${AIDC_K8S_USER}"}]
+      containers:
+        - name: dev
+          image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          workingDir: "${repo}"
+          resources:
+            requests: {cpu: "${AIDC_K8S_CPU_REQUEST}", memory: "${AIDC_K8S_MEMORY_REQUEST}"}
+            limits: {cpu: "${AIDC_K8S_CPU_LIMIT}", memory: "${AIDC_K8S_MEMORY_LIMIT}"}
+          env:
+            - {name: HTTP_PROXY, value: "http://aidc-proxy:3128"}
+            - {name: HTTPS_PROXY, value: "http://aidc-proxy:3128"}
+            - {name: NO_PROXY, value: "localhost,127.0.0.1"}
+            - {name: http_proxy, value: "http://aidc-proxy:3128"}
+            - {name: https_proxy, value: "http://aidc-proxy:3128"}
+            - {name: no_proxy, value: "localhost,127.0.0.1"}
+            - {name: AIDC_SESSION, value: "${session}"}
+            - {name: AIDC_PROFILE, value: "${profile}"}
+            - {name: AIDC_REPO_PATH, value: "${repo}"}
+            - {name: AIDC_CLAUDE_MODE, value: "${AIDC_CLAUDE_MODE:-yolo}"}
+            - {name: AIDC_CLAUDE_RESUME, value: "${AIDC_CLAUDE_RESUME:-true}"}
+            - {name: CLAUDE_CONFIG_DIR, value: /home/vscode/.claude}
+            # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
+            - {name: AIDC_DOCKER_STORAGE_DRIVER, value: overlay2}
+          volumeMounts:
+            - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
+            - {name: home, mountPath: /home/vscode}
+      volumes:
+        - {name: disk, persistentVolumeClaim: {claimName: disk}}
+  volumeClaimTemplates:
+    - metadata: {name: home, labels: {${labels}}}
+      spec:
+        storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: ${AIDC_K8S_HOME_SIZE}}}
 EOF
 }

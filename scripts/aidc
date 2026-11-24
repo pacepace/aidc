@@ -74,6 +74,32 @@ if [ "$SUBCOMMAND" = "help" ] || [ "$SUBCOMMAND" = "-h" ] || [ "$SUBCOMMAND" = "
     exec bash "$AIDC_SCRIPTS/cmd-help.sh" "$@"
 fi
 
+# The backend switch point (docs/design-12-kubernetes.md, "Backend seam"): `--backend
+# kubernetes` runs the verb's Kubernetes implementation, scripts/k8s/session-<verb>.sh, instead
+# of the Docker one. `--backend docker` (the default) is the same as no flag.
+BACKEND="docker"
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --backend) BACKEND="${2:-}"; shift 2 || { err "--backend needs a value"; exit 2; } ;;
+        --backend=*) BACKEND="${1#--backend=}"; shift ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+case "$BACKEND" in
+    docker) ;;
+    kubernetes|k8s)
+        K8S_SCRIPT="$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh"
+        if [ ! -f "$K8S_SCRIPT" ]; then
+            err "aidc ${SUBCOMMAND} is not available on the kubernetes backend yet"
+            exit 2
+        fi
+        exec bash "$K8S_SCRIPT" "$@"
+        ;;
+    *) err "unknown backend: ${BACKEND}; the backends are docker and kubernetes"; exit 2 ;;
+esac
+
 SUBCOMMAND_SCRIPT="$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh"
 if [ ! -f "$SUBCOMMAND_SCRIPT" ]; then
     err "Unknown subcommand: $SUBCOMMAND"

@@ -174,6 +174,37 @@ aidc_testament_install tcopy texec 2>"$S/err"; RC=$?
 assert_eq "unconfigured: nothing goes into the session, the upgrade goes on" "0 " "$RC $(cat "$S/session.log")"
 assert_has "with the one line" "testament: not configured" "$(cat "$S/err")"
 
+echo "=== aidc upgrade (Docker) carries it into the session ==="
+# The session is already on the current image (nothing to swap): the testament step still runs,
+# through docker cp and docker exec as the session user. docker is a stub that logs.
+printf 'testament:\n  repo: git@example.invalid:team/testament.git\n' > "$CFG"
+mkdir -p "$HOME/.local/state/aidc/sessions"; printf 'services: {}\n' > "$HOME/.local/state/aidc/sessions/demo.yaml"
+cat > "$S/bin/docker" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$D_LOG"
+case "$*" in
+    info*) exit 0 ;;
+    "ps -a --filter label=aidc.session=demo -q") echo 0123456789ab ;;
+    "image inspect aidc/dev-base:"*) echo sha256:same ;;
+    "inspect aidc-demo-dev --format {{.Image}}") echo sha256:same ;;
+    *"testament --version"*) : ;;
+esac
+exit 0
+STUB
+chmod +x "$S/bin/docker"
+export D_LOG="$S/docker.log"; : > "$D_LOG"
+out=$(AIDC_ROOT="$AIDC_ROOT" AIDC_VERSION_TAG=vtest bash "$AIDC_SCRIPTS/cmd-upgrade.sh" demo --yes 2>&1); rc=$?
+assert_eq "the upgrade succeeds" 0 "$rc"
+assert_has "the newest wheel is copied into the dev container" "cp $HOME/.cache/aidc/testament/v0.12.0/testament-0.12.0-py3-none-any.whl aidc-demo-dev:/tmp/testament-0.12.0-py3-none-any.whl" "$(cat "$D_LOG")"
+assert_has "handed to the session user" "exec -u root aidc-demo-dev chown 1000:1000 /tmp/testament-0.12.0-py3-none-any.whl" "$(cat "$D_LOG")"
+assert_has "and installed as the session user, in its home" "exec -i -u vscode -e HOME=/home/vscode aidc-demo-dev sh -c uv tool install" "$(cat "$D_LOG")"
+assert_has "it says so" "testament: 0.12.0 installed in the session" "$out"
+rm -rf "$HOME/.cache/aidc/testament"; : > "$D_LOG"
+out=$(SSH_DENY=1 AIDC_ROOT="$AIDC_ROOT" AIDC_VERSION_TAG=vtest bash "$AIDC_SCRIPTS/cmd-upgrade.sh" demo --yes 2>&1); rc=$?
+assert_eq "no access: the upgrade still succeeds" 0 "$rc"
+assert_has "with the one line" "testament: cannot read its release tags with your SSH key" "$out"
+assert_eq "and nothing is copied in" "" "$(grep '^cp ' "$D_LOG")"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

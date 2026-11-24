@@ -35,9 +35,14 @@
 #   gitctl status | login | logout                       the GitHub login (gitcred's)
 #   gitctl storage                                       bytes in gitrun's copies and the bundles
 #   gitctl remove-copy <owner/name>                      delete gitrun's private copy of a repo
+#   gitctl has-copy <owner/name>                         yes when the repo is one the user added
 #
 # <repo> is a working copy (or a worktree of one) whose origin is
-# https://github.com/<owner>/<name>.
+# https://github.com/<owner>/<name>, a repo the user added (aidc repo add: gitctl clone, which
+# gives gitrun its private copy); every verb that reaches GitHub refuses any other repo, reads
+# included. A verb on a <repo> may end with `--expect-repo <owner/name>`: it is refused unless
+# the working copy's origin is that repo (the request watcher passes what the user approved).
+# push may also end with `--expect-commit <sha>`: refused unless that is the branch's commit.
 set -u
 
 self=$(readlink -f "${BASH_SOURCE[0]}")
@@ -73,7 +78,7 @@ ulimit -c 0 2>/dev/null || true
 verb="${1:-}"
 [ $# -gt 0 ] && shift
 case "$verb" in
-    clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy) VERB_ROLE=run ;;
+    clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy|has-copy|add-copy) VERB_ROLE=run ;;
     pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
@@ -119,12 +124,15 @@ g() {
         -c maintenance.auto=false "${helper[@]}" "$@"
 }
 
-# enter_copy OWNER/NAME: enter gitrun's private bare copy of the repo, making it when missing,
-# and bring it up to date with origin's branches. The store is gitrun's and open to no one
-# else (checked), so nothing in it was written by anyone but gitrun; each step down is entered
-# with cd -P and checked with pwd -P. Sets ORIGIN_URL.
+# enter_copy OWNER/NAME [new]: enter gitrun's private bare copy of the repo and bring it up to
+# date with origin's branches. Only `new` (gitctl clone: aidc repo add) makes a missing copy;
+# every other verb refuses a repo the user has not added. A copy made here whose fetch fails is
+# removed again, so a failed add leaves no repo looking added. The store is gitrun's and open
+# to no one else (checked), so nothing in it was written by anyone but gitrun; each step down
+# is entered with cd -P and checked with pwd -P. Sets ORIGIN_URL, and ORIGIN_HEAD to origin's
+# default branch as GitHub reports it (its HEAD), or the copy's when GitHub did not say.
 enter_copy() {
-    local slug="${1,,}" owner name store head
+    local slug="${1,,}" owner name store head made=0
     owner="${slug%/*}" name="${slug#*/}"
     [ -n "$RUN_STORE" ] || die "no private store for gitrun"
     cd -P -- "$RUN_STORE" 2>/dev/null || die "${RUN_STORE}: gitrun's store is missing"
@@ -132,29 +140,43 @@ enter_copy() {
     [ "$(stat -c %u .)" = "$(id -u)" ] || die "${RUN_STORE} is not gitrun's"
     (( 8#$(stat -c %a .) & 8#077 )) && die "${RUN_STORE} is open to others: gitrun keeps its copies where only it can go"
     umask 077
+    if [ "${2:-}" != new ] && [ ! -d "${owner}/${name}.git" ]; then
+        die "${1} is not one of the user's repos (the user adds it: aidc repo add ${1})"
+    fi
     { mkdir -p -- "$owner" && cd -P -- "$owner" && [ "$(pwd -P)" = "${store}/${owner}" ]; } \
         || die "${RUN_STORE}/${owner}: cannot enter it"
     if [ ! -e "${name}.git" ]; then
         env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
             "$REAL_GIT" init -q --bare --template= -- "${name}.git" || die "cannot make the private copy of ${1}"
+        made=1
     fi
     { cd -P -- "${name}.git" && [ "$(pwd -P)" = "${store}/${owner}/${name}.git" ]; } \
         || die "${RUN_STORE}/${owner}/${name}.git: cannot enter it"
     ORIGIN_URL=$(forge_url "$1")
-    g fetch -q --prune --no-tags --no-recurse-submodules --no-write-fetch-head "$ORIGIN_URL" \
-        '+refs/heads/*:refs/heads/*' || die "cannot fetch ${ORIGIN_URL}"
-    # HEAD names origin's default branch, so a clone checks that one out.
+    if ! g fetch -q --prune --no-tags --no-recurse-submodules --no-write-fetch-head "$ORIGIN_URL" \
+            '+refs/heads/*:refs/heads/*'; then
+        [ "$made" = 0 ] || { cd -P .. && rm -rf -- "${name}.git"; }
+        die "cannot fetch ${ORIGIN_URL}"
+    fi
+    if [ "$made" = 1 ] && [ -z "$(g for-each-ref --count=1 refs/heads/)" ]; then
+        cd -P .. && rm -rf -- "${name}.git"
+        die "${ORIGIN_URL} has no branches"
+    fi
+    # HEAD names origin's default branch, so a clone checks that one out, and push never
+    # moves it.
     head=$(g ls-remote --symref "$ORIGIN_URL" HEAD 2>/dev/null | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
     case "$head" in refs/heads/?*) g symbolic-ref HEAD "$head" 2>/dev/null || true ;; esac
+    ORIGIN_HEAD=$(g symbolic-ref -q --short HEAD 2>/dev/null || true)
     g gc --auto --quiet >/dev/null 2>&1 || true
 }
 
 # fetch (and clone's first half): origin's branches, as a bundle on stdout for the agent to
 # import into the working copy. gitrun writes it; the agent only reads it.
+# add-copy is the same for gitctl clone (aidc repo add): the one verb that makes a copy.
 run_fetch() {
     nargs $# 1; no_options "$@"
     gitctl_slug_ok "$1" || die "$GITCTL_REASON"
-    enter_copy "$1"
+    if [ "$verb" = add-copy ]; then enter_copy "$1" new; else enter_copy "$1"; fi
     [ -n "$(g for-each-ref --count=1 refs/heads/)" ] || die "${ORIGIN_URL} has no branches"
     if g rev-parse -q --verify HEAD >/dev/null; then g bundle create -q - HEAD --branches || die "cannot bundle ${ORIGIN_URL}"
     else g bundle create -q - --branches || die "cannot bundle ${ORIGIN_URL}"; fi
@@ -175,6 +197,9 @@ run_push() {
         [ "$branch" = "$b" ] && die "pushing to ${branch} directly is refused: it changes by pull request merges (gitctl pr-merge)"
     done
     enter_copy "$slug"
+    # Origin's default branch, whatever its name (trunk, ...), changes only by merges too.
+    [ -z "$ORIGIN_HEAD" ] || [ "$branch" != "$ORIGIN_HEAD" ] \
+        || die "pushing to ${branch} directly is refused: it is origin's default branch, which changes by pull request merges (gitctl pr-merge)"
     # Deleted when the verb ends, whatever the outcome (RUN_BUNDLE is global: the trap runs
     # after this function has returned).
     RUN_BUNDLE=$(mktemp ./incoming.XXXXXX) || die "cannot save the bundle"
@@ -272,6 +297,18 @@ run_remove_copy() {
     { cd -P -- "${slug}.git" && [ "$(pwd -P)" = "${store}/${slug}.git" ]; } || die "cannot enter the copy of ${1}"
     { cd -P .. && rm -rf -- "${slug#*/}.git"; } || die "cannot remove the copy of ${1}"
     echo "removed the private copy of ${1}"
+}
+
+# has-copy: whether gitrun holds a private copy of the repo, i.e. the user added it (aidc repo
+# add). Read only; makes nothing.
+run_has_copy() {
+    nargs $# 1; no_options "$@"
+    gitctl_slug_ok "$1" || die "$GITCTL_REASON"
+    local slug="${1,,}"
+    cd -P -- "$RUN_STORE" 2>/dev/null || die "${RUN_STORE}: gitrun's store is missing"
+    [ "$(stat -c %u .)" = "$(id -u)" ] || die "${RUN_STORE} is not gitrun's"
+    [ -d "${slug}.git" ] || die "${1} is not one of the user's repos (the user adds it: aidc repo add ${1})"
+    echo yes
 }
 
 # The largest bundle gitrun takes for a push (2 GiB): far beyond a branch's worth of commits,
@@ -495,33 +532,9 @@ as_run() {
     AIDC_GITCTL_ROLE=run bash "$self" "$@"
 }
 
-# The agent's own git, in a working copy anyone in the session group may have written. It runs
-# as the agent, never as gitrun, so the copy's config cannot reach the login; still, the
-# settings that run a program on the steps gitctl takes (hooks, fsmonitor, auto gc) are pinned
-# off, and no transport is allowed: bundles are imported with `bundle unbundle`, never fetched.
-# A filter driver the copy's config names runs its clean or smudge command on files git reads
-# or writes (status, worktree remove, reset), so every driver named there is overridden for the
-# call (clean and smudge `cat`, no process). The names are read from the config just before the
-# call, through GIT_CONFIG_COUNT, which takes a driver name of any spelling where `-c` would
-# split it at an `=`. Residual: a driver a session adds between that read and the call.
-ag() {
-    local dir=. key d n=0 envs=()
-    local -A seen=()
-    [ "${1:-}" = -C ] && dir="$2"
-    while IFS= read -r key; do
-        d="${key#filter.}"; d="${d%.*}"
-        { [ -n "$d" ] && [ -z "${seen[$d]:-}" ]; } || continue
-        seen[$d]=1
-        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.clean" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
-        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.smudge" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
-        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.process" "GIT_CONFIG_VALUE_${n}="); n=$((n + 1))
-    done < <(env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null \
-        "$REAL_GIT" -C "$dir" config --name-only --get-regexp '^filter\..*\.(clean|smudge|process)$' 2>/dev/null)
-    env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_CONFIG_GLOBAL=/dev/null \
-        GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_COUNT="$n" ${envs[@]+"${envs[@]}"} \
-        "$REAL_GIT" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c gc.auto=0 \
-        -c maintenance.auto=false -c protocol.allow=never -c credential.helper= "$@"
-}
+# The agent's own git in a working copy: gitctl_agent_git (gitctl-rules.sh), shared with the
+# request watcher so both read working copies the same way.
+ag() { gitctl_agent_git "$REAL_GIT" "$@"; }
 
 # The agent's bundles, in its own folder; each is deleted when the verb ends, whatever the
 # outcome, and any older than BUNDLE_MAX_AGE_MIN (a verb that was killed) at the next verb.
@@ -535,12 +548,18 @@ new_bundle() {
     trap 'rm -f "$BUNDLE"' EXIT
 }
 
-# The repo's slug, read as the agent from the working copy's origin.
+# The repo's slug, read as the agent from the working copy's origin, once: every later step of
+# the verb uses this value. It must be the repo the caller expects (--expect-repo, what the user
+# approved), and one the user added: GitHub is reached for no other repo, reads included.
 agent_slug() {
     local url
     url=$(ag -C "$1" remote get-url origin 2>/dev/null) || die "${1}: no origin remote"
     url_slug "$url" || die "$GITCTL_REASON"
     SLUG="$GITCTL_SLUG"
+    if [ -n "$EXPECT_SLUG" ] && [ "${SLUG,,}" != "${EXPECT_SLUG,,}" ]; then
+        die "${1}'s origin is now ${SLUG}, not ${EXPECT_SLUG} as approved: nothing done"
+    fi
+    as_run has-copy "$SLUG" >/dev/null || exit 1
 }
 
 # working_copy PATH: the working copy (or worktree) at PATH, in WC.
@@ -600,7 +619,7 @@ agent_clone() {
     [ -z "$(ls -A .)" ] || die "${path} is not empty"
     [ -w . ] || die "${path}: the git container cannot write it"
     new_bundle
-    as_run fetch "$slug" > "$BUNDLE" || exit 1
+    as_run add-copy "$slug" > "$BUNDLE" || exit 1
     umask 002
     # --shared=group: every folder in .git setgid from the start, so what either side writes
     # later stays the session group's.
@@ -707,7 +726,10 @@ agent_unpushed() {
 #   locked <path>                      a locked worktree (kept)
 #   orphaned <path>                    a folder that was a worktree, whose admin folder is gone
 #   cannot-delete <path> <why>         what the agent may not delete (a folder only a session
-#                                      can write: its umask was not 002)
+#                                      can write: its umask was not 002), or a worktree record
+#                                      naming a folder tidy never removes (outside the user's
+#                                      disk, reached through a symlink, the git container's
+#                                      request folder, or one holding the working copy)
 # Bases are origin's default branch and main, master and develop where origin has them. Only
 # branches that exist in this working copy are deleted on GitHub: a colleague's branch is not
 # this working copy's to tidy. Runs as the agent (in the session group); gitrun only deletes on
@@ -726,6 +748,28 @@ agent_tidy() {
         case " ${bases[*]} " in *" $b "*) ;; *) bases+=("$b") ;; esac
     done
     [ ${#bases[@]} -gt 0 ] || die "origin has no default branch, main, master or develop to tidy against"
+    # A worktree's path comes from its admin folder, which sessions write: tidy removes one only
+    # where it resolves, with no symlink on the way, inside the user's disk (/home/<user>; run
+    # from a checkout, AIDC_GITCTL_DISK_ROOT or the working copy's parent), and never the git
+    # container's folder there (.aidc: the request folder) nor a folder holding the working copy.
+    local area=""
+    if [ "$INSTALLED" = 1 ]; then
+        [[ "$WC" =~ ^(/home/[a-z0-9]([a-z0-9-]*[a-z0-9])?)/ ]] && area="${BASH_REMATCH[1]}"
+        case "$area" in /home/git|/home/gitrun) area="" ;; esac
+    else
+        area=$(realpath -e -- "${AIDC_GITCTL_DISK_ROOT:-${WC%/*}}" 2>/dev/null || true)
+    fi
+    removable() { # PATH
+        local r
+        [ -n "$area" ] || return 1
+        r=$(realpath -e -- "$1" 2>/dev/null) || return 1
+        [ "$r" = "$1" ] || return 1
+        case "$r/" in "$area"/?*) ;; *) return 1 ;; esac
+        case "$r/" in "$area/.aidc/"*) return 1 ;; esac
+        case "$WC/" in "$r/"*) return 1 ;; esac
+        case "${wts[0]}/" in "$r/"*) return 1 ;; esac
+        return 0
+    }
     merged_into() { # SHA: the first base that holds it, in INTO
         local x
         INTO=""
@@ -773,6 +817,10 @@ agent_tidy() {
             if [ "$i" = 0 ]; then rows+=("checked-out ${b} ${wt}"); continue; fi
             if [ "${wlock[$i]}" = 1 ]; then rows+=("locked ${wt}"); continue; fi
             if [ "${wgone[$i]}" = 0 ]; then
+                if ! removable "$wt"; then
+                    rows+=("cannot-delete ${wt} not a folder tidy removes (outside the user's disk, through a symlink, the git container's, or holding the working copy)")
+                    continue
+                fi
                 ex=()
                 for j in "${!wts[@]}"; do
                     rel="${wts[$j]#"$wt"/}"
@@ -828,6 +876,13 @@ agent_push() {
         || ag -C "$WC" bundle create -q "$BUNDLE" "refs/heads/${branch}" --not "refs/heads/${branch}^@" 2>/dev/null \
         || ag -C "$WC" bundle create -q "$BUNDLE" "refs/heads/${branch}" 2>/dev/null \
         || die "cannot bundle ${branch}"
+    # What gitrun pushes is the bundle's branch: checked here, after the bundle is made, so a
+    # branch moved at any time before is caught.
+    if [ -n "$EXPECT_SHA" ]; then
+        b=$(ag -C "$WC" bundle list-heads "$BUNDLE" 2>/dev/null | awk -v r="refs/heads/${branch}" '$2 == r { print $1; exit }')
+        [ "$b" = "$EXPECT_SHA" ] \
+            || die "${branch} moved since it was approved (approved ${EXPECT_SHA:0:12}, now ${b:0:12}): nothing pushed; ask again"
+    fi
     as_run push "$SLUG" "$branch" < "$BUNDLE"
 }
 
@@ -854,7 +909,8 @@ agent_side() {
         push) agent_push "$@" ;;
         unpushed) agent_unpushed "$@" ;;
         storage) agent_storage "$@" ;;
-        remove-copy) nargs $# 1; no_options "$@"; switch_to run remove-copy "$1" ;;
+        remove-copy|has-copy) nargs $# 1; no_options "$@"; switch_to run "$verb" "$1" ;;
+        add-copy) die "add-copy is gitrun's own step of gitctl clone (aidc repo add)" ;;
         status|login|logout) switch_to cred "$verb" "$@" ;;
         pr-list|protection|protect) nargs $# 1; agent_slug "$1"; switch_to cred "$verb" "$SLUG" ;;
         pr-view|pr-merge|pr-view-json) nargs $# 2; agent_slug "$1"; switch_to cred "$verb" "$SLUG" "$2" ;;
@@ -892,13 +948,38 @@ agent_side() {
     esac
 }
 
+# --expect-repo <owner/name> [--expect-commit <sha>], at the end of a verb on a working copy:
+# what the caller (the request watcher) recorded and the user approved. Taken off here, checked
+# against what the verb reads (agent_slug, agent_push); never passed on.
+EXPECT_SLUG="" EXPECT_SHA=""
+expect_args() {
+    ARGS=("$@")
+    while [ ${#ARGS[@]} -ge 2 ]; do
+        case "${ARGS[-2]}" in
+            --expect-repo) [ -z "$EXPECT_SLUG" ] || die "--expect-repo given twice"; EXPECT_SLUG="${ARGS[-1]}"
+                gitctl_slug_ok "$EXPECT_SLUG" || die "$GITCTL_REASON" ;;
+            --expect-commit) [ -z "$EXPECT_SHA" ] || die "--expect-commit given twice"; EXPECT_SHA="${ARGS[-1]}"
+                [[ "$EXPECT_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || die "${EXPECT_SHA}: not a full commit id" ;;
+            *) break ;;
+        esac
+        unset 'ARGS[-1]'; unset 'ARGS[-1]'
+    done
+    if [ -n "$EXPECT_SLUG" ]; then
+        case "$verb" in
+            fetch|push|unpushed|tidy|delete-branch|pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|protection|protect) ;;
+            *) die "${verb} takes no --expect-repo" ;;
+        esac
+    fi
+    [ -z "$EXPECT_SHA" ] || [ "$verb" = push ] || die "only push takes --expect-commit"
+}
+
 case "$ROLE" in
-    agent) agent_side "$@" ;;
+    agent) expect_args "$@"; agent_side ${ARGS[@]+"${ARGS[@]}"} ;;
     run)
         sweep_store
         case "$verb" in
-            fetch) run_fetch "$@" ;; push) run_push "$@" ;; delete-branch) run_delete_branch "$@" ;;
-            storage) run_storage "$@" ;; remove-copy) run_remove_copy "$@" ;;
+            fetch|add-copy) run_fetch "$@" ;; push) run_push "$@" ;; delete-branch) run_delete_branch "$@" ;;
+            storage) run_storage "$@" ;; remove-copy) run_remove_copy "$@" ;; has-copy) run_has_copy "$@" ;;
             *) die "${verb} does not run as gitrun" ;;
         esac ;;
     cred)

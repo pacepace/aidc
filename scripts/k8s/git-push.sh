@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # aidc git push <repo> <branch>: the git container pushes a branch of a working copy on the
-# user's disk (gitctl push: fast-forward only, never main/master/develop, attribution refused).
+# user's disk (gitctl push: fast-forward only, never main/master/develop or
+# origin's default branch, attribution refused; only a repo the user added).
 # The user running the command is the approval. The first push to a repo also reports GitHub's
 # protections of it (aidc git protect turns missing ones on).
 

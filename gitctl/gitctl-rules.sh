@@ -76,6 +76,38 @@ gitctl_branch_ok() {
     fi
 }
 
+# gitctl_agent_git GIT ARGS...: the agent's own git, in a working copy anyone in the session
+# group may have written (gitctl's `ag`, and the request watcher's reads). It runs as the agent,
+# never as gitrun, so the copy's config cannot reach the login; still, the settings that run a
+# program on the steps gitctl takes (hooks, fsmonitor, auto gc) are pinned off, and no
+# transport is allowed: bundles are imported with `bundle unbundle`, never fetched. A filter
+# driver the copy's config names runs its clean or smudge command on files git reads or writes
+# (status, worktree remove, reset), so every driver named there is overridden for the call
+# (clean and smudge `cat`, no process). The names are read from the config just before the
+# call, through GIT_CONFIG_COUNT, which takes a driver name of any spelling where `-c` would
+# split it at an `=`. Residual: a driver a session adds between that read and the call.
+# The system config is kept (no GIT_CONFIG_NOSYSTEM): its safe.directory is what lets the agent
+# read a working copy the session user owns.
+gitctl_agent_git() {
+    local git="$1" dir=. key d n=0 envs=()
+    local -A seen=()
+    shift
+    [ "${1:-}" = -C ] && dir="$2"
+    while IFS= read -r key; do
+        d="${key#filter.}"; d="${d%.*}"
+        { [ -n "$d" ] && [ -z "${seen[$d]:-}" ]; } || continue
+        seen[$d]=1
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.clean" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.smudge" "GIT_CONFIG_VALUE_${n}=cat"); n=$((n + 1))
+        envs+=("GIT_CONFIG_KEY_${n}=filter.${d}.process" "GIT_CONFIG_VALUE_${n}="); n=$((n + 1))
+    done < <(env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null \
+        "$git" -C "$dir" config --name-only --get-regexp '^filter\..*\.(clean|smudge|process)$' 2>/dev/null)
+    env -i HOME="${HOME:-/}" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_COUNT="$n" ${envs[@]+"${envs[@]}"} \
+        "$git" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c gc.auto=0 \
+        -c maintenance.auto=false -c protocol.allow=never -c credential.helper= "$@"
+}
+
 # --- the PreToolUse hook: a courtesy, not the enforcement ----------------------------------
 
 # gitctl_hook_command STRING: a Bash command Claude is about to run.

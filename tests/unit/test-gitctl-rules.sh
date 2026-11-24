@@ -106,6 +106,10 @@ G init -q --bare "$R"
 G clone -q "$R" "$W" 2>/dev/null
 G -C "$W" commit -q --allow-empty -m "first"
 G -C "$W" push -q origin HEAD:main 2>/dev/null
+# The user adds the repo (aidc repo add: gitctl clone), which gives gitrun its private copy;
+# gitctl reaches GitHub for no repo the user has not added.
+mkdir -p "$S/added"; ctl clone o/r "$S/added"
+assert_eq "the user adds o/r: gitrun now holds its private copy" "0 yes" "$RC $([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
 G -C "$W" switch -q -c feature
 G -C "$W" commit -q --allow-empty -m "Add the thing"
 remote_sha() { git -C "$R" rev-parse -q --verify "refs/heads/$1" 2>/dev/null || echo none; }
@@ -290,7 +294,10 @@ assert_eq "storage says what the private copies and the bundles hold" yes \
     "$(printf '%s\n' "$OUT" | grep -Eq '^copies [0-9]+$' && printf '%s\n' "$OUT" | grep -Eq '^bundles [0-9]+$' && echo yes || echo "no: $OUT")"
 ctl remove-copy o/r
 assert_eq "remove-copy deletes gitrun's private copy" "0 no" "$RC $([ -e "$STORE/o/r.git" ] && echo yes || echo no)"
-ctl fetch "$W"; assert_eq "and the next fetch makes it again" "0 yes" "$RC $([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
+ctl fetch "$W"; refused "after it, the repo is no longer the user's: a fetch is refused"
+assert_eq "and makes no copy" no "$([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
+rm -rf "$S/added"; mkdir -p "$S/added"; ctl clone o/r "$S/added"
+ctl fetch "$W"; assert_eq "adding it again (gitctl clone) makes the copy, and fetch works again" "0 yes" "$RC $([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
 for a in ../x "o/r/../../x" -f "o/.."; do ctl remove-copy "$a"; refused "remove-copy '$a' is refused"; done
 
 echo ""
@@ -445,6 +452,7 @@ for src in "$R" -u "--upload-pack=touch $S/PWNED3" "o/r/x" "ext::sh -c x" "o/.."
 done
 ctl clone o/nothere "$E"; refused "a repo origin does not have is refused"
 assert_eq "and the folder is left empty" "" "$(ls -A "$E")"
+assert_eq "and gitrun keeps no copy of it (a failed add leaves no repo looking added)" no "$([ -e "$STORE/o/nothere.git" ] && echo yes || echo no)"
 ctl clone o/r "$E" extra; refused "clone takes exactly two arguments"
 AIDC_GITCTL_ROLE=run ctl clone o/r "$E"; refused "gitrun has no clone: it never writes a working copy"
 AIDC_GITCTL_ROLE=cred ctl clone o/r "$E"; refused "gitcred runs no clone"
@@ -591,6 +599,30 @@ assert_eq "main is never touched" yes "$(git -C "$T" rev-parse -q --verify main 
 rm -rf "$T/wt-merged-gone"; G -C "$T" worktree add -q -b t-gone "$T/wt-gone" origin/main 2>/dev/null; rm -rf "$T/wt-gone"
 ctl tidy "$T"
 assert_eq "a worktree whose folder is gone has its record pruned" yes "$(row 'pruned wt-gone')"
+# A worktree's path comes from its admin folder, which sessions write. Three merged worktrees
+# whose records a session pointed elsewhere: into the git container's request folder, off the
+# user's disk, and through a symlink. tidy removes none of them and names each.
+umask 002
+for w in plant out sym; do
+    G -C "$T" worktree add -q -b "t-$w" "$T/wt-$w" origin/main 2>/dev/null
+    G -C "$T/wt-$w" commit -q --allow-empty -m "Merged $w"
+done
+umask 022
+for w in plant out sym; do ctl push "$T" "t-$w"; done
+G -C "$D" fetch -q origin 2>/dev/null; G -C "$D" switch -q main; G -C "$D" reset -q --hard origin/main
+for w in plant out sym; do G -C "$D" merge -q --no-ff -m "Merge t-$w" "origin/t-$w"; done
+G -C "$D" push -q origin main 2>/dev/null
+REQS="$S/disk/.aidc/git-requests"; mkdir -p "$S/disk/.aidc"
+mv "$T/wt-plant" "$REQS"; printf '%s/.git\n' "$REQS" > "$T/.git/worktrees/wt-plant/gitdir"
+mv "$T/wt-out" "$S/outside-wt"; printf '%s/.git\n' "$S/outside-wt" > "$T/.git/worktrees/wt-out/gitdir"
+mv "$T/wt-sym" "$S/disk/sym-real"; ln -s "$S/disk/sym-real" "$T/wt-sym-link"
+printf '%s/.git\n' "$T/wt-sym-link" > "$T/.git/worktrees/wt-sym/gitdir"
+ctl tidy "$T"
+assert_has "a record pointing at the request folder: named as a leftover" "cannot-delete $REQS not a folder tidy removes" "$OUT"
+assert_has "a record pointing off the user's disk: the same" "cannot-delete $S/outside-wt not a folder tidy removes" "$OUT"
+assert_has "a record reached through a symlink: the same" "cannot-delete $T/wt-sym-link not a folder tidy removes" "$OUT"
+assert_eq "and none of the three folders is deleted" "yes yes yes" \
+    "$([ -d "$REQS" ] && echo yes) $([ -d "$S/outside-wt" ] && echo yes) $([ -d "$S/disk/sym-real" ] && echo yes)"
 AIDC_GITCTL_ROLE=run ctl tidy "$T"; refused "gitrun has no tidy: it never works in a working copy"
 ctl tidy "$T" extra; refused "tidy takes one argument"
 
@@ -675,24 +707,88 @@ ctl pr-view-json "$H" "--web"; refused "a PR that reads as an option is refused"
 ctl pr-list-json "$H" all "--jq=.x"; refused "a head that reads as an option is refused"
 
 echo ""
+echo "=== only repos the user added: every verb that reaches GitHub, reads included ==="
+U="$S/disk/unadded"; G init -q "$U"; git -C "$U" remote add origin https://github.com/o/other
+ctl pr-view-json "$U" 7; refused "a PR read of a repo the user did not add is refused, and gh never runs"
+assert_has "with the reason" "not one of the user's repos" "$OUT"
+for v in "pr-list-json $U open" "pr-view $U 7" "pr-list $U" "pr-merge $U 7" "protection $U"; do
+    # shellcheck disable=SC2086  # the verb and its words, split on purpose
+    ctl $v; refused "'${v%% *}' on a repo the user did not add is refused"
+done
+G init -q --bare "$F/o/other.git"; G -C "$W" push -q "$F/o/other.git" main 2>/dev/null
+git -C "$U" remote set-url origin "$F/o/other.git"; G -C "$U" fetch -q origin 2>/dev/null
+G -C "$U" switch -q -c sneak origin/main 2>/dev/null; G -C "$U" commit -q --allow-empty -m "Sneak"
+ctl push "$U" sneak; refused "a push to a repo the user did not add is refused"
+assert_eq "nothing reached it, and gitrun made no copy of it" "none no" \
+    "$(git -C "$F/o/other.git" rev-parse -q --verify refs/heads/sneak || echo none) $([ -e "$STORE/o/other.git" ] && echo yes || echo no)"
+ctl has-copy o/r; assert_eq "has-copy: yes for an added repo" "0 yes" "$RC $OUT"
+ctl has-copy o/other; refused "has-copy: refused for one not added"
+AIDC_GITCTL_ROLE=run ctl fetch o/other; refused "called as gitrun directly, fetch makes no copy of a repo not added"
+assert_eq "none made" no "$([ -e "$STORE/o/other.git" ] && echo yes || echo no)"
+
+echo ""
+echo "=== an approved request acts on the repo and commit it was approved for ==="
+ctl pr-view-json "$H" 7 --expect-repo o/r
+assert_has "--expect-repo naming the working copy's repo: the verb runs" "pr view 7 --repo o/r --json" "$CALLS"
+ctl pr-merge "$H" 5 --expect-repo o/elsewhere; refused "a working copy whose origin is not the approved repo: refused before gh runs"
+assert_has "saying what changed" "origin is now o/r, not o/elsewhere as approved" "$OUT"
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "Approved"
+approved=$(git -C "$W" rev-parse feature); before=$(remote_sha feature)
+ctl push "$W" feature --expect-repo o/other; refused "a push whose working copy is not the approved repo is refused"
+assert_eq "and nothing is pushed" "$before" "$(remote_sha feature)"
+G -C "$W" commit -q --allow-empty -m "Added after approval"
+ctl push "$W" feature --expect-repo o/r --expect-commit "$approved"; refused "a push whose branch moved since approval is refused"
+assert_has "saying so" "moved since it was approved" "$OUT"
+assert_eq "and nothing is pushed" "$before" "$(remote_sha feature)"
+G -C "$W" reset -q --hard "$approved"
+ctl push "$W" feature --expect-repo o/r --expect-commit "$approved"
+assert_eq "the approved commit, unchanged, is pushed" "0 $approved" "$RC $(remote_sha feature)"
+ctl push "$W" feature --expect-commit "abc"; refused "--expect-commit takes a full commit id"
+ctl pr-view-json "$H" 7 --expect-commit "$approved"; refused "only push takes --expect-commit"
+ctl storage --expect-repo o/r; refused "a verb on no working copy takes no --expect-repo"
+ctl pr-view-json "$H" 7 --expect-repo "o/r;x"; refused "--expect-repo must be an owner/name"
+
+echo ""
+echo "=== push never moves origin's default branch, whatever its name ==="
+G init -q --bare "$F/o/t.git"; git --git-dir="$F/o/t.git" symbolic-ref HEAD refs/heads/trunk
+TT="$S/t-seed"; G clone -q "$F/o/t.git" "$TT" 2>/dev/null
+G -C "$TT" switch -q -c trunk 2>/dev/null; G -C "$TT" commit -q --allow-empty -m "first"; G -C "$TT" push -q origin trunk 2>/dev/null
+TC="$S/disk/trunked"; mkdir -p "$TC"; ctl clone o/t "$TC"
+assert_eq "a repo whose default branch is trunk is added, on trunk" "0 trunk" "$RC $(git -C "$TC" branch --show-current)"
+G -C "$TC" commit -q --allow-empty -m "Straight to trunk"
+tbefore=$(git --git-dir="$F/o/t.git" rev-parse trunk)
+ctl push "$TC" trunk; refused "pushing to the default branch trunk directly is refused"
+assert_has "with the reason" "origin's default branch" "$OUT"
+assert_eq "and trunk on GitHub is unchanged" "$tbefore" "$(git --git-dir="$F/o/t.git" rev-parse trunk)"
+G -C "$TC" switch -q -c topic; ctl push "$TC" topic
+assert_eq "another branch of that repo still pushes" 0 "$RC"
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
-mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh"; }
+mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh" "$S/mut/gitctl-rules.sh"; }
 mut 's/gitctl_check_text "$raw" "commit ${sha:0:12}" || die/: || die/'
 G -C "$W" switch -q feature
 G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
 assert_eq "with the push scan removed, the attributed commit reaches the remote (so the test above would fail)" \
     "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
-mut 's/\[ "$branch" = "$b" \] && die/[ "$branch" = "$b" ] \&\& :/'
+mut 's/\[ "$branch" = "$b" \] && die/[ "$branch" = "$b" ] \&\& :/; s/\[ "$branch" != "$ORIGIN_HEAD" \]/true/'
 G -C "$W" switch -q main
 ctl fetch "$W"
 G -C "$W" reset -q --hard origin/main
 G -C "$W" commit -q --allow-empty -m "Straight to main"
 bash "$S/mut/gitctl.sh" push "$W" main >/dev/null 2>&1
-assert_eq "with the protected-branch guard removed, a push to main goes through" \
+assert_eq "with the protected-branch guards removed (the fixed names and origin's default), a push to main goes through" \
     "$(git -C "$W" rev-parse main)" "$(remote_sha main)"
+mut 's/\[ "$branch" = "$b" \] && die/[ "$branch" = "$b" ] \&\& :/'
+G -C "$W" switch -q -c develop main; G -C "$W" commit -q --allow-empty -m "Straight to develop"
+ctl push "$W" develop; refused "pushing to develop (not origin's default) directly is refused"
+bash "$S/mut/gitctl.sh" push "$W" develop >/dev/null 2>&1
+assert_eq "with only the fixed-name guard removed, a push to develop goes through (so that guard is not covered by the default-branch one)" \
+    "$(git -C "$W" rev-parse develop)" "$(remote_sha develop)"
+G -C "$W" switch -q main
 
-mut 's/"$REAL_GIT" -c core.hooksPath=\/dev\/null -c core.fsmonitor=false -c gc.auto=0/"$REAL_GIT" -c gc.auto=0/'
+mut 's/"$git" -c core.hooksPath=\/dev\/null -c core.fsmonitor=false -c gc.auto=0/"$git" -c gc.auto=0/'
 git -C "$W" config core.hooksPath "$S/evil-hooks"
 bash "$S/mut/gitctl.sh" fetch "$W" >/dev/null 2>&1
 git -C "$W" config --unset core.hooksPath
@@ -711,6 +807,19 @@ bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
 assert_eq "with gitrun's bundle cleanup removed, the bundle stays (so the cleanup test would fail)" yes \
     "$([ -n "$(find "$STORE" -name 'incoming.*')" ] && echo yes || echo no)"
 find "$STORE" -name 'incoming.*' -delete
+mut 's/\[ "${SLUG,,}" != "${EXPECT_SLUG,,}" \]/false/'
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "Elsewhere?"
+bash "$S/mut/gitctl.sh" push "$W" feature --expect-repo o/other >/dev/null 2>&1
+assert_eq "with the approved-repo check removed, the push goes through (so the binding test would fail)" \
+    "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+mut 's/\[ "$branch" != "$ORIGIN_HEAD" \]/true/'
+bash "$S/mut/gitctl.sh" push "$TC" trunk >/dev/null 2>&1
+assert_eq "with the default-branch guard removed, trunk is pushed (so the trunk test would fail)" \
+    "$(git -C "$TC" rev-parse trunk)" "$(git --git-dir="$F/o/t.git" rev-parse trunk)"
+mut 's/if ! removable "$wt"; then/if false; then/'
+bash "$S/mut/gitctl.sh" tidy "$T" >/dev/null 2>&1
+assert_eq "with tidy's folder check removed, the planted request folder is deleted (so the tidy test would fail)" no \
+    "$([ -d "$REQS" ] && echo yes || echo no)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

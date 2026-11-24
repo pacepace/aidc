@@ -117,7 +117,8 @@ proxies and other protocols pinned off and replace refs ignored. Bundles are tem
 sides: each is deleted when its verb ends, whatever the outcome, and one over an hour old (a
 killed verb's) is swept at the start of the next verb.
 `push` sends the one branch by the exact commit it checked, never forced, never tags, never to
-`main`, `master` or `develop` (they change by PR merges); it asks origin what it has
+`main`, `master`, `develop` or origin's default branch under any name, as GitHub reports it
+(they change by PR merges); it asks origin what it has
 (`ls-remote`) rather than trusting `refs/remotes/*`, reads each commit it would send whole, and
 refuses one that carries AI attribution anywhere or whose author is an AI tool. `pr-create` and `pr-comment` refuse
 attribution in their text; `pr-merge` always merges with a merge commit, after checking the
@@ -141,7 +142,8 @@ uncommitted changes, stashes, and every worktree), and any of it refuses the del
 `--even-unpushed` is given too; the root pod then empties the folder it checked from inside
 and removes it by name with `rmdir`, so a folder swapped in at that name is never deleted.
 `aidc repo list` strips control characters from the names and URLs it prints, which sessions
-write. `aidc git status` reports the private copies' and
+write. gitctl reaches GitHub only for repos the user added (gitrun holds a private copy): only
+`clone` makes a copy, and every other verb, pull request reads included, refuses another repo. `aidc git status` reports the private copies' and
 bundles' size and warns above `kubernetes.git_storage_warn` (default 1Gi).
 
 Sessions make their own worktrees (owner ruling 2026-11-24): a session sees the whole disk and
@@ -162,7 +164,9 @@ both). `gitctl tidy <repo>` fetches, then for each local branch already in a bas
 only a branch merged there, never a base, leased on the tip it checked), the clean worktree
 removed with its admin folder (`git worktree remove`, after checking every folder in it is
 writable by the agent, so nothing is half-deleted), the local branch deleted; prune; and every
-leftover reported, never deleted: unpushed and unmerged branches, a merged branch's worktree with
+leftover reported, never deleted (a worktree is removed only where its recorded path, which
+sessions can write, resolves with no symlink inside the user's disk, outside `.aidc` and not
+holding the working copy): unpushed and unmerged branches, a merged branch's worktree with
 changes, detached and locked worktrees, folders that were worktrees whose admin folder is gone,
 and what the agent may not delete. Only branches the working copy has are deleted on GitHub.
 Sessions make files group-writable (umask 002 on this backend) so the agent, in their group,
@@ -184,7 +188,11 @@ as the agent, kept running by the container's main process) moves each request o
 refuses anything but a plain file, checks every field (known fields only, a working copy on the
 disk with a GitHub origin, branch names, no protected branch, title and body without
 attribution or control characters), and then, by `kubernetes.git_mode`: rules runs it through
-gitctl at once; ask holds it as pending for `aidc git approve|deny` (reads run at once in both).
+gitctl at once; ask holds it as pending for `aidc git approve|deny` (reads run at once in both). A request
+records the GitHub repo its working copy named when taken and, for a push, the branch's commit;
+the user is shown both, and the run refuses (nothing done) if the working copy has since
+changed either: gitctl is given them (`--expect-repo`, `--expect-commit`) and checks them
+against what it acts on.
 A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
 nothing and says to use `gh pr create`. Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
 restart is reported as interrupted, never retried. Requests and results are deleted after 30

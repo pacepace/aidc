@@ -142,6 +142,7 @@ case "$1" in
 esac
 exit 0
 STUB
+# shellcheck disable=SC2034  # read inside the assert strings below (evaluated)
 out=$(env -i PATH="$SCRATCH/bin:/usr/bin:/bin" HOME="$SCRATCH/home" \
     AIDC_HOST_HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" AIDC_ROOT="$AIDC_ROOT" \
     bash "$AIDC_ROOT/scripts/cmd-upgrade.sh" "$N3" --yes 2>&1); rc=$?

@@ -398,3 +398,7 @@ first. No separate approval system.
 ## 2026-11-24 — One extra review round for the git container wave
 
 The owner approved one cumulative Critic round beyond the branch's review round budget (6/6 used) so Chunk 06 and the whole wave are reviewed before the live GitHub test.
+
+## 2026-11-24 — aidc 2.0 is the Kubernetes work and the 3tears adoption, released together
+
+On Kubernetes the git agent's ask-mode question reaches no orchestrator until the per-user MCP server, which is part of the 3tears adoption. So the owner ruled that the Kubernetes backend and the 3tears adoption ship as one release, 2.0: the Kubernetes work rolls straight into the 3tears work rather than releasing on its own. Until then, Kubernetes approvals are answered with `aidc attach git` or `aidc git approve|deny`; 2.0 must route them through the orchestrator before it ships.

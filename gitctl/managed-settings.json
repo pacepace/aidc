@@ -1,0 +1,13 @@
+{
+  "allowManagedHooksOnly": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/aidc/lib/gitctl/claude-hook.sh" }
+        ]
+      }
+    ]
+  }
+}

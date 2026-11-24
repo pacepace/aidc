@@ -1,0 +1,25 @@
+# /etc/gitconfig in the git container (root-owned). git runs here as gitrun, and only through
+# /opt/aidc/bin/git (gitctl/git-wrapper.sh), which also passes these on the command line.
+[core]
+	hooksPath = /dev/null
+	fsmonitor = false
+	pager = cat
+[protocol "ext"]
+	allow = never
+[commit]
+	gpgSign = false
+[tag]
+	gpgSign = false
+[init]
+	defaultBranch = main
+# The GitHub token is gitcred's; gitrun asks for it through the one sudo rule it has. The empty
+# value clears any helper set before this one.
+[credential "https://github.com"]
+	helper =
+	helper = !sudo -n -u gitcred /opt/aidc/lib/gitctl/cred-helper.sh
+	useHttpPath = false
+# The author and committer: the user's own name and email, written by the login step as
+# gitcred (a later chunk). Commits show as the user; nothing is signed. A missing file is
+# skipped.
+[include]
+	path = /var/lib/gitctl/gitcred/git-identity

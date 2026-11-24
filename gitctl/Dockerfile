@@ -14,7 +14,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8
 
 # git and ssh for the pushes, tmux for the user's terminal, tini to reap what tmux leaves.
-# curl only for the downloads below and Claude Code's own updates.
+# curl only for the downloads below and Claude Code's own updates. sudo is how the wrapped git
+# and gh switch to the users that run the real ones; jq reads Claude Code's hook input.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
@@ -26,6 +27,8 @@ RUN apt-get update \
         less \
         vim-tiny \
         procps \
+        sudo \
+        jq \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub's gh CLI, pinned and checksum-verified: it holds the user's GitHub token, so the build
@@ -59,6 +62,44 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && groupadd -g 2000 git \
     && useradd -m -u 2000 -g 2000 -G session -s /bin/bash git
 
+# The hard rules in code (docs/design-12-kubernetes.md, "Git", K8S-24), and the GitHub login
+# out of the agent's reach. Three users:
+#   git     (2000) the agent and the user's terminal; holds no secret;
+#   gitrun  (2002) runs the real git (its own group, plus the session group the shared parts of
+#                  a repo belong to); holds no secret, and its home is root's and empty, so git
+#                  run as it cannot plant config for itself;
+#   gitcred (2001) runs the real gh and git's credential helper; the only user that can read
+#                  the GitHub login, in its home on the git-cred claim (/var/lib/gitctl/gitcred).
+# git reaches the other two only through sudo rules naming the wrappers (gitctl/sudoers), which
+# check every command before the real git or gh runs; they come first on PATH. The real
+# binaries stay where they are: called by path they run as the agent, without the login.
+RUN groupadd -g 2001 gitcred \
+    && useradd -M -u 2001 -g 2001 -d /var/lib/gitctl/gitcred -s /usr/sbin/nologin gitcred \
+    && groupadd -g 2002 gitrun \
+    && useradd -M -u 2002 -g 2002 -G session -d /home/gitrun -s /usr/sbin/nologin gitrun \
+    && install -d -o root -g root -m 0755 /home/gitrun /var/lib/gitctl \
+    && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred
+COPY gitctl-rules.sh git-wrapper.sh gh-wrapper.sh msg-check.sh cred-helper.sh claude-hook.sh install-guards.sh /opt/aidc/lib/gitctl/
+COPY gitconfig /etc/gitconfig
+COPY sudoers /etc/sudoers.d/aidc-gitctl
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/aidc-gitctl \
+    && chmod 0755 /opt/aidc /opt/aidc/lib /opt/aidc/lib/gitctl /etc/claude-code \
+    && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
+    && chmod 0755 /opt/aidc/lib/gitctl/*-wrapper.sh /opt/aidc/lib/gitctl/msg-check.sh \
+                  /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \
+                  /opt/aidc/lib/gitctl/install-guards.sh \
+    && chmod 0440 /etc/sudoers.d/aidc-gitctl \
+    && visudo -c -f /etc/sudoers.d/aidc-gitctl \
+    && install -d -m 0755 /opt/aidc/bin \
+    && ln -s /opt/aidc/lib/gitctl/git-wrapper.sh /opt/aidc/bin/git \
+    && ln -s /opt/aidc/lib/gitctl/gh-wrapper.sh /opt/aidc/bin/gh \
+    && /opt/aidc/lib/gitctl/install-guards.sh /usr/lib/git-core /opt/aidc/git-core /opt/aidc/lib/gitctl/git-wrapper.sh \
+    && printf '%s\n' 'case ":$PATH:" in *:/opt/aidc/bin:*) ;; *) PATH="/opt/aidc/bin:$PATH" ;; esac' \
+        > /etc/profile.d/aidc-gitctl.sh \
+    # ~/.profile puts ~/.local/bin first; the wrappers go before it.
+    && printf '\n%s\n' 'PATH="/opt/aidc/bin:$PATH"' >> /home/git/.profile
+
 COPY gitctl-main.sh /usr/local/bin/gitctl-main.sh
 RUN chmod 0755 /usr/local/bin/gitctl-main.sh
 
@@ -67,7 +108,7 @@ RUN chmod 0755 /usr/local/bin/gitctl-main.sh
 # (it keeps the user's secrets); the Deployment seeds a new one from this image's /home/git.
 # CLAUDE_CODE_REFRESH only busts the layer cache (`aidc k8s build --force` passes a fresh one).
 ARG CLAUDE_CODE_REFRESH=0
-ENV PATH="/home/git/.local/bin:${PATH}"
+ENV PATH="/opt/aidc/bin:/home/git/.local/bin:${PATH}"
 USER git
 WORKDIR /home/git
 RUN echo "claude-code refresh: ${CLAUDE_CODE_REFRESH}" \

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# desc: Your git container on the Kubernetes backend (holds your GitHub login).
+# desc: Your git container (holds your GitHub login; pushes and opens PRs for sessions).
 #
 # Usage: aidc git <setup|login|logout|attach|status|push|pr|merge|tidy|protect|requests|approve|deny|mode>
 #
-# Sessions in the cluster cannot push; one git container per user does (docs/design-12-kubernetes.md,
-# "Git"). Each subcommand is scripts/k8s/git-<name>.sh.
+# Sessions cannot push; one git container per user does, on either backend, with one design
+# (docs/design-12-kubernetes.md, "Git"). Each subcommand is scripts/k8s/git-<name>.sh in a
+# cluster and scripts/docker/git-<name>.sh on Docker (lib/git-common.sh picks: --backend, the
+# config's backend:, a kubernetes: block, else Docker).
 
 set -euo pipefail
 
@@ -14,10 +16,12 @@ usage() {
     cat <<'USAGE'
 aidc git <subcommand>
 
-  setup    Start your git container in your namespace of the `kubernetes:` config (after
-           `aidc user add`), and its request folder on your disk. It is the only thing that
+  setup    Start your git container: in a cluster, in your namespace of the `kubernetes:`
+           config (after `aidc user add`); on Docker, beside your sessions (container
+           aidc-git-dev, behind its own proxy that reaches public addresses only). Also its
+           request folder, which sessions hand requests to. It is the only thing that
            pushes, and it keeps your GitHub login where its agent cannot read it. Safe to run
-           again; it restarts the container so it runs the image now in the registry.
+           again; it restarts the container so it runs the current image.
   login    Log it in to GitHub as you: a one-time code you approve in your browser. Its
            commits then show as you (your GitHub name; your public email, else GitHub's
            noreply address for your account). logout removes both.
@@ -50,8 +54,10 @@ aidc git <subcommand>
            requests); `default` takes it back.
 
 <repo> is a working copy's path, on your disk in the cluster or under your home here (as for
-aidc repo). Sessions ask with `gh pr create` and `gh pr merge` (a stand-in that writes a request
-for the git container); kubernetes.git_mode is ask (default: you approve each) or rules. In
+aidc repo; on Docker, one you added with aidc repo add, or a worktree inside it). Sessions ask
+with `gh pr create` and `gh pr merge` (a stand-in that writes a request for the git container);
+the mode (kubernetes.git_mode in a cluster, git.mode on Docker) is ask (default: you approve
+each) or rules. In
 ask mode your git agent asks you about each request with its question tool, so an
 orchestrator driving it sees the question as it sees any session's; you can also answer here.
 USAGE
@@ -62,7 +68,15 @@ case "${1:-}" in
 esac
 SUB="$1"
 shift
-SCRIPT="$AIDC_SCRIPTS/k8s/git-${SUB}.sh"
+# shellcheck source=lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
+BACKEND_DIR=k8s
+case "$(aidc_git_backend)" in
+    kubernetes) ;;
+    docker) BACKEND_DIR=docker ;;
+    *) exit 2 ;;
+esac
+SCRIPT="$AIDC_SCRIPTS/${BACKEND_DIR}/git-${SUB}.sh"
 if [ ! -f "$SCRIPT" ]; then
     printf '[aidc] error: unknown git subcommand: %s\n' "$SUB" >&2
     usage >&2

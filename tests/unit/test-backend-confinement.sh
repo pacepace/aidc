@@ -10,6 +10,7 @@
 #   - in common.sh and config.sh only the named Docker helper functions may;
 #   - the dispatcher and every other shared library may not.
 # The Kubernetes backend's mirror image: kubectl only in scripts/k8s/, and docker never there.
+# scripts/docker/ (the git container on Docker) is the Docker backend's, so kubectl never there.
 #
 # Hygiene: reads files only.
 
@@ -124,7 +125,7 @@ kubectl_calls() {
     ' "$1"
 }
 outside=""
-for f in "$AIDC_ROOT"/scripts/aidc "$AIDC_ROOT"/scripts/cmd-*.sh "$AIDC_ROOT"/scripts/lib/*.sh; do
+for f in "$AIDC_ROOT"/scripts/aidc "$AIDC_ROOT"/scripts/cmd-*.sh "$AIDC_ROOT"/scripts/lib/*.sh "$AIDC_ROOT"/scripts/docker/*.sh; do
     for n in $(kubectl_calls "$f"); do outside="${outside}${f#"$AIDC_ROOT"/}:${n} "; done
 done
 check "no kubectl outside scripts/k8s/" "$outside"

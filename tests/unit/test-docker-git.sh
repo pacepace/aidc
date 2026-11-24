@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+# Unit tests for the git container on the Docker backend (scripts/docker/, `aidc git` and
+# `aidc repo` there, the git agent as the session named git, and what sessions get).
+#
+# The git container holds the user's GitHub login, so how it is started is a security
+# boundary: a route out other than its public-only proxy, a published port, a capability past
+# the user switch sudo needs, or a mount of anything but the working copies the user added
+# would let the login or the user's machine be reached. Status must never say "no" when docker
+# or the container could not be asked. docker is a PATH stub; HOME holds the config.
+#
+# Hygiene: scratch lives under tests/scratch/ INSIDE the repo (gitignored).
+
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRATCH="$AIDC_ROOT/tests/scratch/docker-git-$$"
+PASS=0
+FAIL=0
+trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+mkdir -p "$SCRATCH/bin" "$SCRATCH/home/.config/aidc"
+
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+assert_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (want '$2', got '$3')"; fi; }
+assert_has() {
+    case "$3" in *"$2"*) pass "$1" ;;
+        *) fail "$1 (no '$2' in:"; printf '%s\n' "$3" | tail -12 | sed 's/^/      /'; echo "    )" ;; esac
+}
+assert_not_has() {
+    case "$3" in *"$2"*) fail "$1 ('$2' present in:"; printf '%s\n' "$3" | tail -12 | sed 's/^/      /'; echo "    )" ;;
+        *) pass "$1" ;; esac
+}
+
+# docker stub: logs each call (one line, words as given) to $D_LOG.
+#   D_DOWN=1          every call fails as an unreachable daemon does
+#   D_STATE=running|stopped|absent|unknown   the git container (default running)
+#   D_VOLS="a b"      volumes that exist (default: none, so setup creates them)
+#   D_NET=0           the git networks do not exist yet (default 1: they do)
+#   D_INTERNAL=false  aidc-git-net is not internal
+#   D_GH=yes|no|unknown  gitctl status (default no); D_WAITING=n requests waiting (default 0)
+#   D_COPIES/D_BUNDLES  bytes in the private copies / bundles (default 1 MiB / 0)
+#   D_ADOPT_RC=1      gitctl adopt fails
+#   D_PROXY_ENV       the proxy's environment (default AIDC_PUBLIC_ONLY=1)
+#   D_TOKEN           AIDC_GIT_TOKEN in session s1's dev container
+#   D_SESSIONS="s1"   sessions that exist (by label)
+cat > "$SCRATCH/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$D_LOG"
+[ "${D_DOWN:-}" = 1 ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2; exit 1; }
+a="$*"
+case "$a" in
+    info*) exit 0 ;;
+    "image inspect "*) exit 0 ;;
+    "volume inspect "*) case " ${D_VOLS:-} " in *" ${a##* } "*) exit 0 ;; esac; echo "Error: no such volume" >&2; exit 1 ;;
+    "volume create "*) exit 0 ;;
+    "network inspect -f {{.Internal}} aidc-git-net") echo "${D_INTERNAL:-true}"; exit 0 ;;
+    "network inspect "*) [ "${D_NET:-1}" = 1 ] && exit 0; echo "Error: network not found" >&2; exit 1 ;;
+    "network create "*|"network connect "*|"rm -f "*) exit 0 ;;
+    "run --rm "*claude-refresh*) echo "claude-refresh: current"; exit 0 ;;
+    "run --rm "*) echo seeded; exit 0 ;;
+    "run -d "*) echo "c0ffee"; exit 0 ;;
+    "inspect -f {{.State.Health.Status}} aidc-git-squid") echo healthy; exit 0 ;;
+    "inspect -f {{.State.Running}} aidc-git-squid") echo true; exit 0 ;;
+    "inspect -f {{range .Config.Env}}{{println .}}{{end}} aidc-git-squid") printf '%b\n' "${D_PROXY_ENV:-PATH=/bin\nAIDC_PUBLIC_ONLY=1}"; exit 0 ;;
+    "inspect -f {{range .Config.Env}}{{println .}}{{end}} aidc-s1-dev") printf 'PATH=/bin\nAIDC_GIT_TOKEN=%s\n' "${D_TOKEN:-}"; exit 0 ;;
+    "inspect -f {{.State.Running}} aidc-git-dev")
+        case "${D_STATE:-running}" in
+            running) echo true ;; stopped) echo false ;;
+            absent) echo "Error: No such object: aidc-git-dev" >&2; exit 1 ;;
+            *) echo "Error response from daemon: i/o timeout" >&2; exit 1 ;;
+        esac; exit 0 ;;
+    "ps -a --filter label=aidc.session="*) n="${a#*label=aidc.session=}"; n="${n%% *}"
+        case " ${D_SESSIONS:-} git " in *" $n "*) echo abc123 ;; esac; exit 0 ;;
+    "ps -a --filter label=aidc.role=dev --format "*) printf 'aidc-git-dev\tUp 2 minutes\naidc-s1-dev\tUp 1 hour\n'; exit 0 ;;
+    "inspect aidc-"*"-dev --format"*"aidc.profile"*) case "$a" in *aidc-git-dev*) echo git-agent ;; *) echo multi ;; esac; exit 0 ;;
+    "inspect aidc-"*"-dev --format"*) echo "2026-11-24T00:00:00Z"; exit 0 ;;
+    "exec aidc-"*"-policy test -f /var/state/tainted") exit 1 ;;
+    "exec -u git aidc-git-dev tmux has-session -t main") exit 0 ;;
+    "exec -u git aidc-git-dev sh -c "*)
+        echo "github=${D_GH:-no}"; echo "waiting=${D_WAITING:-0}"
+        echo "storage-copies ${D_COPIES:-1048576}"; echo "storage-bundles ${D_BUNDLES:-0}"; exit 0 ;;
+    "exec -u git aidc-git-dev gitctl adopt "*) [ "${D_ADOPT_RC:-0}" = 0 ] && { echo "added o/r (${a##* })"; exit 0; }
+        echo "gitctl: refused: cannot fetch https://github.com/o/r" >&2; exit 1 ;;
+    "exec -u git aidc-git-dev gitctl protection "*|"exec -u git aidc-git-dev gitctl protect "*)
+        printf 'repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nend\n'; exit 0 ;;
+    "exec -u git aidc-git-dev gitctl tidy "*) printf 'deleted-remote feat\nunpushed 2 other\nend\n'; exit 0 ;;
+    "exec -u git aidc-git-dev gitctl push "*) echo "pushed ${a##* } 0123456789abcdef"; exit 0 ;;
+    "exec -u git aidc-git-dev gitctl "*) exit 0 ;;
+    "exec -u git aidc-git-dev git-requests list") printf 'ID  RECEIVED\nabc\033[31m  x\n'; exit 0 ;;
+    "exec -u git aidc-git-dev git-requests first-use "*) exit 0 ;;
+    "exec -u git aidc-git-dev git-requests "*) echo "ok"; exit 0 ;;
+    "exec -i -u git aidc-git-dev git-requests mode "*) cat > "$D_STDIN"; echo "mode set"; exit 0 ;;
+    "exec -i -u git aidc-git-dev bash -c "*) cat > "$D_STDIN"; echo "https://github.com/o/r/pull/7"; exit 0 ;;
+    "exec -it "*) exit 0 ;;
+esac
+echo "docker stub: unexpected: $a" >&2
+exit 1
+STUB
+chmod +x "$SCRATCH/bin/docker"
+
+export HOME="$SCRATCH/home" PATH="$SCRATCH/bin:$PATH"
+export D_LOG="$SCRATCH/docker.log" D_STDIN="$SCRATCH/stdin"
+unset XDG_STATE_HOME AIDC_MCP_STATE_HOST AIDC_HOST_HOME AIDC_MCP_MOUNTS
+HOMEP=$(cd "$HOME" && pwd -P)
+run() { : > "$D_LOG"; "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null; }
+calls() { cat "$D_LOG"; }
+line() { grep -F -- "$1" "$D_LOG" | head -n1; }
+
+# A working copy of the user's, under their home, with a GitHub origin.
+WC="$HOMEP/src/proj"
+mkdir -p "$WC"; git -C "$WC" init -q; git -C "$WC" remote add origin https://github.com/o/r.git
+
+echo "=== which backend aidc git talks to ==="
+out=$(run git status)
+assert_has "no config: Docker" "git container: aidc-git-dev (Docker" "$out"
+printf 'kubernetes:\n  user: alice\n  storage_class: x\nbackend: docker\n' > "$HOME/.config/aidc/config.yaml"
+out=$(run git status)
+assert_has "a kubernetes block with backend: docker: Docker" "git container: aidc-git-dev (Docker" "$out"
+printf 'backend: kubernetes\n' > "$HOME/.config/aidc/config.yaml"
+out=$(run git status --backend docker)
+assert_has "--backend docker wins over the config" "git container: aidc-git-dev (Docker" "$out"
+out=$(run git status --backend mars)
+assert_has "an unknown backend is refused" "unknown backend: mars" "$out"
+assert_eq "with an error" 2 "$(run git status --backend mars >/dev/null; echo $?)"
+: > "$HOME/.config/aidc/config.yaml"
+
+echo "=== aidc git setup ==="
+out=$(D_NET=0 run git setup)
+assert_eq "setup succeeds" 0 "$(D_NET=0 run git setup >/dev/null; echo $?)"
+for v in aidc-git-home aidc-git-cred aidc-git-run aidc-git-requests; do
+    assert_has "the volume ${v} is created when missing" "volume create --label aidc.git=volume ${v}" "$(calls)"
+done
+seed=$(calls)
+assert_has "the seed step runs as root with no network" "--network none --user 0:0 --cap-drop ALL" "$seed"
+assert_has "holding only a copy's and a chown's capabilities" "--cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges" "$seed"
+assert_has "it gives the request folder to the agent, setgid in the session group" "chown 2000:1000 /requests" "$seed"
+assert_has "the login's volume is gitcred's (0711)" "chown 2001:2001 /cred && chmod 0711 /cred" "$seed"
+assert_has "gitrun's store is its alone (0700)" "chown 2002:2002 /run-store && chmod 0700 /run-store" "$seed"
+assert_has "a home made earlier gets the image's Claude, as the git user with no capabilities" \
+    "run --rm --network none --user 2000:2000 --cap-drop ALL --security-opt no-new-privileges -v aidc-git-home:/seed --entrypoint /opt/aidc/lib/gitctl/claude-refresh.sh" "$(calls)"
+assert_has "its network is internal: no route out" "network create --internal --label aidc.session=git aidc-git-net" "$(calls)"
+proxy=$(line 'run -d --name aidc-git-squid')
+assert_has "its proxy reaches public addresses only" "-e AIDC_PUBLIC_ONLY=1" "$proxy"
+assert_has "from its own egress network" "--network aidc-git-egress" "$proxy"
+assert_has "and is the git container's aidc-proxy" "network connect --alias aidc-proxy aidc-git-net aidc-git-squid" "$(calls)"
+git_run=$(line 'run -d --name aidc-git-dev')
+assert_has "the git container is on the internal network only" "--network aidc-git-net " "$git_run"
+assert_has "it holds only what sudo's user switch needs" "--cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add AUDIT_WRITE --label" "$git_run"
+for bad in --privileged "-p " --publish docker.sock --pid --ipc "--network host" --cap-add=ALL "--cap-add SYS_ADMIN" "--cap-add DAC_OVERRIDE"; do
+    assert_not_has "and nothing like ${bad}" "$bad" "$git_run"
+done
+assert_has "it is the dev container of the session named git (aidc list, attach and the MCP server find it)" \
+    "--label aidc.session=git --label aidc.role=dev --label aidc.profile=git-agent" "$git_run"
+assert_has "its request folder is the shared volume" "-e AIDC_GIT_REQUESTS=/var/aidc/git-requests" "$git_run"
+assert_has "mounted at that path" "-v aidc-git-requests:/var/aidc/git-requests" "$git_run"
+assert_has "the git mode is the user's (default ask)" "-e AIDC_GIT_MODE=ask" "$git_run"
+assert_has "waiting requests are handed to the git agent's Claude" "-e AIDC_GIT_NOTIFY=/opt/aidc/lib/gitctl/git-notify.sh" "$git_run"
+assert_has "the user's disk is their home here" "-e AIDC_GIT_DISK=${HOMEP} " "$git_run"
+assert_has "its Claude goes out through the proxy" "-e HTTPS_PROXY=http://aidc-proxy:3128" "$git_run"
+assert_has "the agent's home, login and private copies are volumes" \
+    "-v aidc-git-home:/home/git -v aidc-git-cred:/var/lib/gitctl/gitcred -v aidc-git-run:/var/lib/gitctl/gitrun" "$git_run"
+assert_has "its transcript goes where the MCP server reads every session's" \
+    "-v ${HOMEP}/.local/state/aidc-mcp/transcripts/git:/var/aidc/transcript-out:rw" "$git_run"
+assert_has "that folder is given to the agent" "chown 2000:" "$(line '/transcripts/git:/t')"
+assert_not_has "with no working copy added, none of the user's folders is mounted" "-v ${HOMEP}/src" "$git_run"
+assert_has "it says what comes next" "aidc git login" "$out"
+out=$(D_VOLS="aidc-git-home aidc-git-cred aidc-git-run aidc-git-requests" run git setup)
+assert_not_has "run again, the volumes (the login, the private copies) are kept" "volume create" "$(calls)"
+assert_not_has "and the networks" "network create" "$(calls)"
+assert_has "the container is recreated on the current image" "rm -f aidc-git-dev" "$(calls)"
+printf 'git:\n  mode: rules\n' > "$HOME/.config/aidc/config.yaml"
+run git setup >/dev/null
+assert_has "git.mode reaches the git container" "-e AIDC_GIT_MODE=rules" "$(line 'run -d --name aidc-git-dev')"
+printf 'git:\n  mode: yolo\n' > "$HOME/.config/aidc/config.yaml"
+out=$(run git setup)
+assert_has "a git.mode that is not ask or rules is refused" "git.mode 'yolo' is not ask or rules" "$out"
+assert_not_has "before anything is started" "run -d" "$(calls)"
+: > "$HOME/.config/aidc/config.yaml"
+out=$(D_INTERNAL=false run git setup)
+assert_has "an aidc-git-net that is not internal is refused, not used" "is not internal" "$out"
+assert_not_has "and the container is not started on it" "--name aidc-git-dev" "$(calls)"
+
+echo "=== aidc repo add|list|remove: the user's own working copies ==="
+out=$(run repo add https://github.com/o/r)
+assert_has "a URL is refused: the git container does not clone on Docker" "clone it yourself, then aidc repo add" "$out"
+mkdir -p "$HOMEP/notarepo"
+out=$(run repo add "$HOMEP/notarepo")
+assert_has "a folder that is not a working copy is refused" "is not a working copy" "$out"
+S="$HOMEP/src/sshy"; mkdir -p "$S"; git -C "$S" init -q; git -C "$S" remote add origin git@github.com:o/s.git
+out=$(run repo add "$S")
+assert_has "an SSH origin is refused, with how to keep pushing over SSH" "remote set-url --push origin" "$out"
+mkdir -p "$SCRATCH/elsewhere"; git -C "$SCRATCH/elsewhere" init -q
+out=$(run repo add "$SCRATCH/elsewhere")
+assert_has "a working copy outside the user's home is refused" "below your home" "$out"
+out=$(run repo add "$WC")
+assert_eq "a GitHub working copy under the home is added" 0 "$(run repo add "$WC" >/dev/null; echo $?)"
+assert_eq "it is recorded once" 1 "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
+: > "$D_LOG"; rm -f "$HOME/.config/aidc/git-repos"; out=$(run repo add "$WC")
+assert_has "the git container is started again with it mounted at its own path" "-v ${WC}:${WC}:rw" "$(line 'run -d --name aidc-git-dev')"
+assert_has "and gitctl adopts it (gitrun's private copy)" "exec -u git aidc-git-dev gitctl adopt ${WC}" "$(calls)"
+out=$(D_ADOPT_RC=1 run repo add "$HOMEP/src/proj2" 2>&1)
+mkdir -p "$HOMEP/src/proj2"; git -C "$HOMEP/src/proj2" init -q; git -C "$HOMEP/src/proj2" remote add origin https://github.com/o/r2
+out=$(D_ADOPT_RC=1 run repo add "$HOMEP/src/proj2")
+assert_has "when the git container cannot take it, it is forgotten again" "was not added" "$out"
+assert_eq "and not recorded" 0 "$(grep -cxF "$HOMEP/src/proj2" "$HOME/.config/aidc/git-repos")"
+out=$(run repo list)
+assert_has "repo list shows it with its origin" "https://github.com/o/r.git" "$out"
+mkdir -p "$HOMEP/gone"; printf '%s\n' "$HOMEP/gone" >> "$HOME/.config/aidc/git-repos"
+out=$(run repo list)
+assert_has "a working copy that went away is said so" "(gone: aidc repo remove ${HOMEP}/gone)" "$out"
+run git setup >/dev/null
+assert_not_has "and is not mounted (Docker would make an empty folder there)" "-v ${HOMEP}/gone:" "$(line 'run -d --name aidc-git-dev')"
+out=$(run repo remove "$HOMEP/gone")
+assert_has "a working copy that went away can still be forgotten" "its private copy, if any, is left" "$out"
+assert_eq "and is" 0 "$(grep -cxF "$HOMEP/gone" "$HOME/.config/aidc/git-repos")"
+out=$(run repo remove "$WC" --delete-working-copy)
+assert_has "the user's working copy is never deleted" "never deletes it" "$out"
+out=$(run repo remove "$WC")
+assert_has "remove deletes gitrun's private copy" "exec -u git aidc-git-dev gitctl remove-copy o/r" "$(calls)"
+assert_eq "and forgets the working copy" 0 "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
+assert_not_has "which is no longer mounted" "-v ${WC}:" "$(line 'run -d --name aidc-git-dev')"
+assert_eq "and is left on disk" yes "$([ -d "$WC/.git" ] && echo yes)"
+run repo add "$WC" >/dev/null
+out=$(run repo remove o/r)
+assert_has "remove by owner/name finds the working copies of that repo" "gitctl remove-copy o/r" "$(calls)"
+assert_eq "and forgets them" 0 "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
+run repo add "$WC" >/dev/null
+
+echo "=== push, pr, merge, tidy, protect: on a working copy the user added ==="
+out=$(run git push "$HOMEP/notarepo" feat)
+assert_has "a path that is not an added working copy is refused" "aidc repo add <working copy> first" "$out"
+assert_not_has "before the git container is asked" "gitctl" "$(calls)"
+out=$(run git push "$WC" feat)
+assert_has "push runs gitctl push in the git container, as the agent" "exec -u git aidc-git-dev gitctl push ${WC} feat" "$(calls)"
+assert_has "and says what was pushed" "pushed feat" "$out"
+mkdir -p "$WC/wt"
+out=$(run git push "$WC/wt" feat)
+assert_has "a worktree inside the working copy is taken as it is" "gitctl push ${WC}/wt feat" "$(calls)"
+printf 'The body\n' > "$SCRATCH/body"
+out=$(run git pr "$WC" feat --title "Add it" --body-file "$SCRATCH/body")
+assert_has "pr pushes, then opens the pull request with the body on stdin" "https://github.com/o/r/pull/7" "$out"
+assert_eq "the body went in on stdin" "The body" "$(cat "$D_STDIN")"
+out=$(run git merge "$WC" 7)
+assert_has "merge merges, then tidies" "gitctl pr-merge ${WC} 7" "$(calls)"
+assert_has "and reports what is left" "unpushed: other (2 commit(s) on no GitHub branch)" "$out"
+out=$(run git tidy)
+assert_has "tidy with no repo tidies every working copy added" "gitctl tidy ${WC}" "$(calls)"
+out=$(run git protect "$WC")
+assert_has "protect shows the protections" "force pushes:   blocked" "$out"
+out=$(run git requests)
+assert_not_has "control characters from sessions never reach the terminal" $'\033' "$out"
+out=$(run git approve 0123456789abcdef0123456789abcdef)
+assert_has "approve runs git-requests approve" "git-requests approve 0123456789abcdef0123456789abcdef" "$(calls)"
+out=$(run git approve nope)
+assert_has "an id that is not one is refused" "not a request id" "$out"
+
+echo "=== aidc git mode: a session's own mode, by its token ==="
+out=$(D_SESSIONS=s1 D_TOKEN="$(printf 'a%.0s' $(seq 64))" run git mode s1 rules)
+assert_has "the session's token is read from its dev container and handed over on stdin" "exec -i -u git aidc-git-dev git-requests mode s1 rules" "$(calls)"
+assert_eq "the token itself, never on a command line" "$(printf 'a%.0s' $(seq 64))" "$(cat "$D_STDIN")"
+assert_not_has "not in any docker argument" "$(printf 'a%.0s' $(seq 64))" "$(calls)"
+out=$(D_SESSIONS=s1 D_TOKEN="" run git mode s1 rules)
+assert_has "a session made before sessions had tokens is told to be made again" "create it again" "$out"
+out=$(run git mode git rules)
+assert_has "the git agent has no mode of its own" "the git agent sends no requests" "$out"
+
+echo "=== aidc git status ==="
+out=$(D_GH=yes D_WAITING=3 run git status)
+assert_has "running" "container: running" "$out"
+assert_has "logged in" "github:    logged in" "$out"
+assert_has "waiting requests are counted" "requests:  3 waiting for your approval (aidc git requests)" "$out"
+assert_has "storage is reported" "storage:   1.0 MiB" "$out"
+assert_has "egress enforced: internal network, public-only proxy" "egress:    enforced: internal network" "$out"
+assert_has "and the working copies added" "repos:     1 working copy added" "$out"
+out=$(D_PROXY_ENV='PATH=/bin' run git status)
+assert_has "a proxy that is not public-only is NOT ENFORCED" "egress:    NOT ENFORCED" "$out"
+out=$(D_INTERNAL=false run git status)
+assert_has "nor is a network that is not internal" "egress:    NOT ENFORCED" "$out"
+printf 'git:\n  storage_warn: 1Mi\n' > "$HOME/.config/aidc/config.yaml"
+out=$(D_COPIES=2097152 run git status)
+assert_has "storage above git.storage_warn is warned about" "WARNING: over git.storage_warn (1Mi)" "$out"
+: > "$HOME/.config/aidc/config.yaml"
+out=$(D_STATE=absent run git status)
+assert_has "no container: not set up, with the command" "container: not set up (run: aidc git setup)" "$out"
+assert_has "and the login is unknown, never no" "github:    unknown" "$out"
+out=$(D_STATE=unknown run git status)
+assert_has "docker not answering is unknown" "container: unknown (docker did not answer)" "$out"
+out=$(D_STATE=absent run git push "$WC" feat)
+assert_has "a verb with no container says to set it up" "run \`aidc git setup\`" "$out"
+
+echo "=== the git agent is the session named git ==="
+out=$(run attach git)
+assert_has "aidc attach git opens its tmux as the git user" "exec -it -u git -e TERM=" "$(calls)"
+assert_has "..." "aidc-git-dev tmux attach -d -t main" "$(calls)"
+out=$(run git attach)
+assert_has "aidc git attach is the same" "aidc-git-dev tmux attach -d -t main" "$(calls)"
+out=$(run git login)
+assert_has "login runs gitctl login in its terminal" "aidc-git-dev gitctl login" "$(calls)"
+for v in kill restart upgrade proxy network egress refresh; do
+    out=$(run "$v" git)
+    assert_has "aidc ${v} git is refused: aidc git setup manages it" "not a session aidc ${v} manages" "$out"
+done
+assert_eq "with an error" 2 "$(run kill git >/dev/null; echo $?)"
+assert_eq "and no docker call" "" "$(D_LOG="$SCRATCH/kill.log"; : > "$D_LOG"; "$AIDC_ROOT/scripts/aidc" kill git >/dev/null 2>&1; cat "$D_LOG")"
+out=$(run create git)
+assert_has "aidc create git is refused (the name is the git agent's)" "'git' is the name of your git agent" "$out"
+out=$(run status git)
+assert_has "aidc status git is the git container's status" "git container: aidc-git-dev" "$out"
+out=$(run list)
+assert_has "aidc list shows it" "git" "$out"
+assert_eq "as the git agent, with no taint column of its own (no sandbox proxy)" "git-agent -" \
+    "$(printf '%s\n' "$out" | awk '$1 == "git" { print $(NF-2), $NF }')"
+assert_not_has "and never asks a policy sidecar it does not have" "aidc-git-policy" "$(calls)"
+
+echo "=== sessions: their request folder and token ==="
+render() {
+    env SESSION=s1 PROFILE=multi REPO_PATH=/r WORKSPACE_PATH=/r AUDIT_DIR=/a HOST_CLAUDE_PROJECT_DIR=/p \
+        ENCODED_REPO=-r AIDC_VERSION_TAG=v0 "$@" bash "$AIDC_ROOT/proxy/compose-render.sh" < "$AIDC_ROOT/proxy/compose.yaml.template"
+}
+if command -v yq >/dev/null 2>&1; then
+    y=$(render GIT_TOKEN=feed GIT_REQUESTS_PATH=/var/aidc/git-requests GIT_REQUESTS_MOUNT="- git-requests:/var/aidc/git-requests:rw" \
+        GIT_REQUESTS_VOLUME_DECL=$'  git-requests:\n    name: aidc-git-requests\n    external: true')
+    assert_eq "with the git container set up, the request folder is mounted at its path" "git-requests:/var/aidc/git-requests:rw" \
+        "$(printf '%s' "$y" | yq '.services.dev.volumes[] | select(. == "git-requests:*")')"
+    assert_eq "from the shared volume, external (aidc kill never removes it)" "aidc-git-requests true" \
+        "$(printf '%s' "$y" | yq '.volumes["git-requests"] | .name + " " + (.external | tostring)')"
+    assert_eq "and the session knows where it is, its backend and its token" "/var/aidc/git-requests docker feed" \
+        "$(printf '%s' "$y" | yq '.services.dev.environment | .AIDC_GIT_REQUESTS + " " + .AIDC_BACKEND + " " + .AIDC_GIT_TOKEN')"
+    y=$(render GIT_TOKEN=feed)
+    assert_eq "without it, no request folder and no volume" "|null" \
+        "$(printf '%s' "$y" | yq '.services.dev.environment.AIDC_GIT_REQUESTS')|$(printf '%s' "$y" | yq '.volumes["git-requests"]')"
+    assert_eq "and the stand-in says no git container is set up (an empty folder is none)" "" \
+        "$(printf '%s' "$y" | yq '.services.dev.environment.AIDC_GIT_REQUESTS')"
+else
+    echo "  SKIP: yq not installed (compose rendering)"
+fi
+cr=$(cat "$AIDC_ROOT/scripts/cmd-create.sh")
+assert_has "every session gets a random 64-hex token" "GIT_TOKEN=\$(od -An -N32 -tx1 /dev/urandom" "$cr"
+assert_has "the request folder only when the git container's volume exists" "if docker volume inspect aidc-git-requests" "$cr"
+
+echo ""
+echo "passed: $PASS  failed: $FAIL"
+[ "$FAIL" -eq 0 ]

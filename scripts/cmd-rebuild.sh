@@ -24,9 +24,10 @@ if [ $# -gt 0 ]; then
 aidc rebuild
 
 Rebuilds every aidc/* image at the current VERSION (squid, refresher,
-policy, audit, forwarder, mcp, dev-base). Does not touch any running
-session. To swap a session onto a freshly-rebuilt image afterward,
-use `aidc upgrade <session>`.
+policy, audit, forwarder, mcp, dev-base; gitctl where `aidc git setup`
+made a git container here). Does not touch any running session. To swap a
+session onto a freshly-rebuilt image afterward, use `aidc upgrade <session>`;
+the git container, `aidc git setup`.
 
 No flags in v1; rebuild always builds all images.
 EOF
@@ -42,15 +43,16 @@ info "rebuilding all aidc/* images at ${AIDC_VERSION_TAG}"
 count=0
 while IFS='|' read -r tag context dockerfile; do
     [ -z "$tag" ] && continue
-    # The git container runs only on the Kubernetes backend (aidc k8s build builds it there);
-    # building it here would cost every Docker user minutes for an image nothing runs.
-    case "$tag" in aidc/gitctl:*) continue ;; esac
+    # The git container's image only where a Docker git container is set up (its home volume
+    # exists; aidc git setup then runs the new image): building it for every Docker user would
+    # cost minutes for an image nothing runs. A cluster's is built by aidc k8s build.
+    case "$tag" in aidc/gitctl:*) docker volume inspect aidc-git-home >/dev/null 2>&1 || continue ;; esac
     info "==> building ${tag}"
     # dev-base bakes Claude Code from Anthropic's installer; bust that one
     # layer so every rebuild fetches the current release (see Dockerfile).
     build_args=()
     case "$tag" in
-        aidc/dev-base:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
+        aidc/dev-base:*|aidc/gitctl:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
     esac
     # ${arr[@]+"${arr[@]}"}: bash 3.2 (stock macOS) treats an empty array as
     # unbound under `set -u`; this idiom expands to nothing instead of dying.

@@ -115,8 +115,28 @@ if [ -z "$BACKEND" ]; then
             ;;
     esac
 fi
+# `aidc git` and `aidc repo` serve both backends themselves (lib/git-common.sh,
+# aidc_git_backend): the flag, if any, goes with them.
+case "$SUBCOMMAND" in
+    git|repo)
+        AIDC_BACKEND_FLAG="$BACKEND"; export AIDC_BACKEND_FLAG
+        exec bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" "$@" ;;
+esac
 case "${BACKEND:-docker}" in
-    docker) ;;
+    docker)
+        # The git agent is a session named git on Docker too, managed by `aidc git setup`:
+        # attach and status go to its own scripts, and nothing may stop or rebuild it as a
+        # session (logs work as for any session).
+        if [ "${1:-}" = git ]; then
+            case "$SUBCOMMAND" in
+                attach) shift; exec bash "$AIDC_SCRIPTS/docker/git-attach.sh" "$@" ;;
+                status) shift; exec bash "$AIDC_SCRIPTS/docker/git-status.sh" "$@" ;;
+                kill|restart|upgrade|proxy|network|egress|refresh)
+                    err "git is your git agent (the git container), not a session aidc ${SUBCOMMAND} manages: aidc git setup starts or updates it"
+                    exit 2 ;;
+            esac
+        fi
+        ;;
     kubernetes|k8s)
         K8S_SCRIPT="$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh"
         if [ ! -f "$K8S_SCRIPT" ]; then

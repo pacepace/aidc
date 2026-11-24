@@ -216,8 +216,9 @@ require_cmd() {
 #   <image-tag>|<build-context-dir>|<dockerfile-path>
 #
 # Order matters: small images first (fail-fast on the cheap ones), dev-base
-# the slowest. gitctl (the Kubernetes backend's git container) runs only in a
-# cluster, so `aidc rebuild` skips it and `aidc k8s build` builds it. Used by:
+# the slowest. gitctl (the git container) is built by `aidc k8s build` for a
+# cluster, and on Docker by `aidc git setup` when missing; `aidc rebuild` builds it
+# only where a Docker git container is set up. Used by:
 #   - cmd-rebuild.sh (iterates every Docker row; force rebuild of each)
 #   - k8s/k8s-build.sh (builds every row in the cluster)
 #   - ensure_image() below (looks up one row by role, build-if-missing)
@@ -241,7 +242,7 @@ EOF
 
 # Ensure the aidc/<role> image exists locally, building it from the canonical
 # inventory when the tag is absent. Idempotent: a present image short-circuits.
-#   ensure_image <role>   role in: squid|refresher|policy|audit|forwarder|mcp|dev-base
+#   ensure_image <role>   role in: squid|refresher|policy|audit|forwarder|mcp|dev-base|gitctl
 #
 # Single home for the "build if missing" pattern: cmd-create (proxy stack +
 # dev-base, eagerly), cmd-mcp (mcp, lazy), cmd-proxy (forwarder, lazy).
@@ -250,7 +251,7 @@ ensure_image() {
     local role="$1"
     local row tag context dockerfile
     row=$(aidc_image_inventory | grep -E "^aidc/${role}:" || true)
-    [ -n "$row" ] || die "ensure_image: unknown role '${role}' (expected: squid, refresher, policy, audit, forwarder, mcp, dev-base)"
+    [ -n "$row" ] || die "ensure_image: unknown role '${role}' (expected: squid, refresher, policy, audit, forwarder, mcp, dev-base, gitctl)"
     IFS='|' read -r tag context dockerfile <<EOF
 $row
 EOF

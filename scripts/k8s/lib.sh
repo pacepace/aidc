@@ -14,6 +14,14 @@
 . "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}/lib/common.sh"
 # shellcheck source=../lib/config.sh
 . "$AIDC_SCRIPTS/lib/config.sh"
+# shellcheck source=../lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
+
+# The git container's output helpers, shared with the Docker backend (lib/git-common.sh).
+k8s_printable() { aidc_printable; }
+k8s_bytes() { aidc_bytes "$@"; }
+k8s_git_print_protection() { aidc_git_print_protection; }
+k8s_git_print_tidy() { aidc_git_print_tidy; }
 
 # _k8s_cfg <yq-path>: a scalar from the global config's kubernetes block, "" when unset.
 _k8s_cfg() {
@@ -231,12 +239,6 @@ k8s_cluster_repo_path() {
     esac
 }
 
-# k8s_printable: stdin to stdout without control characters other than tab and newline (an
-# escape sequence, a carriage return, a bell). For text a session can write (folder names,
-# branch names, origin URLs) on its way to the user's terminal.
-k8s_printable() {
-    LC_ALL=C tr -d '\000-\010\013-\037\177'
-}
 
 # k8s_repo_path_ok <cluster-path>: a folder below /home/<user> named only with letters,
 # digits, '.', '_' and '-', with no . or .. part: what gitctl clone accepts, and safe to put
@@ -293,16 +295,6 @@ k8s_repo_state() {
     esac
 }
 
-# k8s_bytes <size>: a Kubernetes-style size (512Mi, 1Gi, 2G, 1500) in bytes; returns 1 when unreadable.
-k8s_bytes() {
-    local n="${1%%[!0-9]*}" u="${1##*[0-9]}"
-    [ -n "$n" ] || return 1
-    case "$u" in
-        "") echo "$n" ;; Ki) echo $((n * 1024)) ;; Mi) echo $((n * 1024 ** 2)) ;; Gi) echo $((n * 1024 ** 3)) ;;
-        Ti) echo $((n * 1024 ** 4)) ;; k|K) echo $((n * 1000)) ;; M) echo $((n * 1000 ** 2)) ;;
-        G) echo $((n * 1000 ** 3)) ;; T) echo $((n * 1000 ** 4)) ;; *) return 1 ;;
-    esac
-}
 
 # k8s_repo_dir_step <namespace> <cluster-path> <mode> <node-selector-json>: run the repo folder
 # pod (manifests.sh, k8s_render_repo_dir; sourced by the caller) in <mode> and wait for it,
@@ -359,40 +351,4 @@ k8s_git_repo_arg() {
 # k8s_git_exec <args...>: run in the git container (after k8s_git_target), with no stdin.
 k8s_git_exec() { k8s_kubectl -n "$GIT_NS" exec "$GIT_POD" -c git -- "$@" </dev/null; }
 
-# k8s_git_print_protection: `gitctl protection` lines on stdin, for the user. Returns 1 when
-# something is missing (force pushes or deletion not blocked, merge commits not allowed).
-k8s_git_print_protection() {
-    local k v repo="" def="" f="" d="" m="" sq="" rb=""
-    while read -r k v; do
-        case "$k" in repo) repo="$v" ;; default) def="$v" ;; force-push) f="$v" ;; deletion) d="$v" ;;
-            merge-commit) m="$v" ;; squash) sq="$v" ;; rebase) rb="$v" ;; esac
-    done
-    printf 'GitHub protections of %s (default branch %s):\n' "${repo:-?}" "${def:-?}"
-    printf '  force pushes:   %s\n  deletion:       %s\n  merge commits:  %s (squash %s, rebase %s)\n' \
-        "${f:-unknown}" "${d:-unknown}" "${m:-unknown}" "${sq:-unknown}" "${rb:-unknown}"
-    [ "$f" = blocked ] && [ "$d" = blocked ] && [ "$m" = allowed ]
-}
 
-# k8s_git_print_tidy: `gitctl tidy` lines on stdin, for the user: what went, then every leftover.
-k8s_git_print_tidy() {
-    local k v done_="" left=""
-    while read -r k v; do
-        case "$k" in
-            deleted-remote) done_+=$'\n'"  deleted on GitHub: ${v}" ;;
-            deleted-branch) done_+=$'\n'"  deleted branch: ${v}" ;;
-            removed-worktree) done_+=$'\n'"  removed worktree: ${v}" ;;
-            pruned) done_+=$'\n'"  pruned the record of a deleted worktree: ${v}" ;;
-            kept-remote) left+=$'\n'"  merged, but GitHub kept it: ${v}" ;;
-            unpushed) left+=$'\n'"  unpushed: ${v#* } (${v%% *} commit(s) on no GitHub branch)" ;;
-            unmerged) left+=$'\n'"  pushed, not merged yet: ${v}" ;;
-            uncommitted) left+=$'\n'"  merged, but its worktree has uncommitted changes: ${v}" ;;
-            checked-out) left+=$'\n'"  merged, but the working copy has it checked out: ${v}" ;;
-            detached) left+=$'\n'"  worktree on a detached HEAD: ${v}" ;;
-            locked) left+=$'\n'"  locked worktree: ${v}" ;;
-            orphaned) left+=$'\n'"  orphaned worktree folder (its record is gone): ${v}" ;;
-            cannot-delete) left+=$'\n'"  the git container cannot delete: ${v}" ;;
-        esac
-    done
-    printf 'tidied:%s\n' "${done_:- nothing to delete}"
-    printf 'left for you:%s\n' "${left:- nothing}"
-}

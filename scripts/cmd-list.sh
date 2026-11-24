@@ -65,7 +65,10 @@ while IFS="$(printf '\t')" read -r ct_name status; do
     # state volume. Probe via the policy container.
     policy_ct="aidc-${session}-policy"
     tainted="no"
-    if docker exec "$policy_ct" test -f /var/state/tainted >/dev/null 2>&1; then
+    if [ "$session" = git ]; then
+        # The git agent (aidc git setup): trusted, no sandbox proxy and no policy sidecar.
+        tainted="-"
+    elif docker exec "$policy_ct" test -f /var/state/tainted >/dev/null 2>&1; then
         tainted="YES"
     fi
 

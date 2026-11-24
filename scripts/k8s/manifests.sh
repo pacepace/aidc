@@ -123,7 +123,8 @@ EOF
 # `aidc k8s build`, trusting the in-cluster registry over plain HTTP. Privileged because the
 # squid image's base owns files as UID 584792, beyond any user namespace's range (owner
 # ruling 2026-11-24); it runs only during a build, only aidc's own Dockerfiles, and is deleted
-# after. Its Docker daemon listens on its unix socket only, never the pod network. It lands
+# after. Its Docker daemon listens on its unix socket only, never the pod network, and uses the
+# pod network's MTU. It lands
 # on the session nodes (same selector and tolerations), so images match their CPU
 # architecture. It fetches base images straight from the internet, not through a Squid.
 k8s_render_builder() {
@@ -150,7 +151,10 @@ spec:
   containers:
     - name: docker
       image: ${K8S_BUILDER_IMAGE}
-      args: ["--host=unix:///var/run/docker.sock"]
+      # The inner Docker network gets the pod network's MTU: a cluster overlay (VXLAN and the
+      # like) carries smaller packets than Docker's default 1500, and large transfers inside
+      # a build then stall and reset (seen: a git clone from GitHub, reset after 150 s).
+      command: [sh, -c, 'exec dockerd-entrypoint.sh --host=unix:///var/run/docker.sock --mtu="\$(cat /sys/class/net/eth0/mtu)"']
       securityContext: {privileged: true}
       env: [{name: DOCKER_TLS_CERTDIR, value: ""}]
       volumeMounts: [{name: etc-docker, mountPath: /etc/docker}]

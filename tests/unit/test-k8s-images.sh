@@ -145,8 +145,11 @@ assert_has "the builder pod is deleted when the build ends" "delete pod builder-
 assert_eq "the builder is privileged (the squid base needs UIDs no user namespace has) and has no API token" \
     '[true,false]' \
     "$(yq -N ea 'select(.kind == "Pod") | [.spec.containers[0].securityContext.privileged, .spec.automountServiceAccountToken]' -o=json -I=0 "$K_APPLIED")"
-assert_eq "the builder's Docker listens on its unix socket only, never the pod network" \
-    '["--host=unix:///var/run/docker.sock"]' "$(b '.spec.containers[0].args')"
+assert_has "the builder's Docker listens on its unix socket only, never the pod network" \
+    '--host=unix:///var/run/docker.sock --mtu' "$(b '.spec.containers[0].command')"
+assert_not_has "no TCP listener for the builder's Docker" 'tcp://' "$(b '.spec.containers[0].command')"
+assert_has "the builder's Docker uses the pod network's MTU (an overlay's packets are smaller)" \
+    '--mtu=\"$(cat /sys/class/net/eth0/mtu)\"' "$(b '.spec.containers[0].command')"
 assert_eq "the builder lands on the session nodes, so images match their CPU architecture" \
     '{"kubernetes.io/hostname":"n1","pool":"dev"}' "$(b '.spec.nodeSelector')"
 assert_has "the builder trusts plain HTTP only for aidc's own registry" \

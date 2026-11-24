@@ -80,6 +80,10 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
 **Decisions made mid-build:**
 - Chunk 01: the owner's example config moves to chunk 03, where its storage class exists to name
   in it; one PR to the owner's private repo instead of two (Constraints: generic).
+- Chunk 02: the in-cluster builder is privileged (owner ruling 2026-11-24: the squid image's base
+  owns files as UID 584792, beyond any user namespace), its Docker listens on its socket only and
+  uses the pod network's MTU (an overlay's 1450 stalled a git clone at Docker's default 1500).
+  The same MTU issue awaits Docker inside session pods: chunk 04 must set it there too.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

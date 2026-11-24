@@ -64,40 +64,72 @@ gitctl_number_ok() {
 }
 
 # gitctl_branch_ok GIT NAME: a branch name git accepts, that cannot be read as an option.
+# Asked of git from /, with no config, so neither the caller's folder nor any config file
+# has a say.
 gitctl_branch_ok() {
     case "$2" in
         ""|-*|*:*|+*) gitctl_refuse "${2}: not a branch name"; return 1 ;;
     esac
-    "$1" check-ref-format --branch "$2" >/dev/null 2>&1 || { gitctl_refuse "${2}: not a branch name"; return 1; }
+    if ! (cd / && env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+            "$1" check-ref-format --branch "$2" >/dev/null 2>&1); then
+        gitctl_refuse "${2}: not a branch name"; return 1
+    fi
 }
 
-# gitctl_repo_check PATH: the main checkout of a repo whose git config the caller cannot
-# change. gitrun runs git there with the login's helper; a config the agent could write
-# (core.pager, filters, aliases, includes) would be its code run as gitrun, and so the token.
-# So .git and .git/config must belong to the user running this (gitrun) or root, be no
-# symlinks, and be writable by neither group nor others, and the config may include no other
-# file. Sets GITCTL_REPO to the resolved path.
-gitctl_repo_check() {
-    local r p owner mode me
-    r=$(realpath -e -- "$1" 2>/dev/null) || { gitctl_refuse "${1}: no such folder"; return 1; }
+# The keys a repo's config may hold for gitctl to run git in it. An allowlist: git reads many
+# keys that send it elsewhere, run a program or change what it trusts (url.*.insteadOf,
+# http.*, remote.*.uploadpack, core.sshCommand, credential.*, protocol.*, include.*), and the
+# URL-specific forms of some outrank anything given on the command line.
+gitctl_repo_key_ok() {
+    case "${1,,}" in
+        core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates) return 0 ;;
+        core.ignorecase|core.precomposeunicode|core.symlinks|core.sharedrepository) return 0 ;;
+        core.hookspath|core.fsmonitor) return 0 ;;  # pinned on the command line anyway
+        extensions.refstorage|extensions.objectformat|init.defaultbranch|gc.auto) return 0 ;;
+        remote.origin.url|remote.origin.pushurl|remote.origin.fetch|remote.origin.gh-resolved) return 0 ;;
+        branch.*.remote|branch.*.merge|user.name|user.email) return 0 ;;
+    esac
+    return 1
+}
+
+# gitctl_enter_repo GIT PATH: enter the .git of the main checkout at PATH and check it from
+# inside. The process then stays in that directory and git is run with GIT_DIR=., so what is
+# checked is what git uses: a folder swapped or renamed above it later changes nothing.
+#
+# gitrun runs git here with the login's credential helper, so the checks keep the agent's
+# and sessions' hands off what git reads: the directory itself and its config, hooks, info
+# and objects/info belong to the running user (gitrun) or root, are no symlinks and are
+# writable by no group or other; the config holds only allowed keys (no includes, no URL
+# rewrites, no proxies, no programs). Sets GITCTL_REPO.
+gitctl_enter_repo() {
+    local git="$1" r p owner mode me key
+    r=$(realpath -e -- "$2" 2>/dev/null) || { gitctl_refuse "${2}: no such folder"; return 1; }
+    if [ -L "$r/.git" ] || [ ! -d "$r/.git" ]; then
+        gitctl_refuse "${r}: not the main checkout of a repo (${r}/.git)"; return 1
+    fi
+    cd -P -- "$r/.git" 2>/dev/null || { gitctl_refuse "${r}/.git: cannot enter it"; return 1; }
+    GITCTL_REPO="$r"
     me=$(id -u)
-    for p in "$r/.git" "$r/.git/config"; do
-        if [ ! -e "$p" ] || [ -L "$p" ]; then
-            gitctl_refuse "${r}: not the main checkout of a repo (${p})"; return 1
-        fi
+    for p in . ./config ./hooks ./info ./objects/info; do
+        if [ "$p" = ./config ] && [ ! -e "$p" ]; then gitctl_refuse "${r}: no .git/config"; return 1; fi
+        [ -e "$p" ] || [ -L "$p" ] || continue
+        if [ -L "$p" ]; then gitctl_refuse "${r}/.git/${p#./}: a symlink"; return 1; fi
         owner=$(stat -c %u -- "$p"); mode=$(stat -c %a -- "$p")
         if [ "$owner" != "$me" ] && [ "$owner" != 0 ]; then
-            gitctl_refuse "${p} belongs to uid ${owner}: only a repo the git container owns"; return 1
+            gitctl_refuse "${r}/.git/${p#./} belongs to uid ${owner}: only a repo the git container owns"; return 1
         fi
         if (( 8#$mode & 8#022 )); then
-            gitctl_refuse "${p} is writable by its group or others: its config would run as the git container"; return 1
+            gitctl_refuse "${r}/.git/${p#./} is writable by its group or others: what git reads there would run as the git container"; return 1
         fi
     done
-    [ -d "$r/.git" ] || { gitctl_refuse "${r}: not the main checkout of a repo"; return 1; }
-    if LC_ALL=C grep -qiE '^[[:space:]]*\[[[:space:]]*include' "$r/.git/config"; then
+    if LC_ALL=C grep -qiE '^[[:space:]]*\[[[:space:]]*include' ./config; then
         gitctl_refuse "${r}/.git/config includes another file"; return 1
     fi
-    GITCTL_REPO="$r"
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        gitctl_repo_key_ok "$key" || { gitctl_refuse "${r}/.git/config sets ${key}, which gitctl does not run git with"; return 1; }
+    done < <(env -i PATH=/usr/bin:/bin "$git" config --file ./config --list --name-only 2>/dev/null \
+             || echo "unreadable.config")
 }
 
 # --- the PreToolUse hook: a courtesy, not the enforcement ----------------------------------

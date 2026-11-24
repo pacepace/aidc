@@ -100,13 +100,17 @@ git runs as `gitrun` (no secret; the token comes from the credential helper, for
 `https://github.com` only) and gh as `gitcred`, the only user that can read the login, kept on
 its own claim, `git-cred`. sudo drops the caller's environment, and called through sudo
 directly a verb re-checks everything as that user and opens no file the caller names (texts
-come on stdin). A verb runs only in the main checkout of a repo whose `.git` and `.git/config`
-belong to gitrun or root and are writable by no group or other (a config the agent could write
-would be its code run with the login), with an `https://github.com/<owner>/<name>` origin.
+come on stdin). A git verb enters the repo's `.git` once and checks it from inside: it and its config, hooks,
+info and objects/info belong to gitrun or root and are writable by no group or other (whatever
+git reads there would run with the login), and the config holds only allowed keys (no
+includes, URL rewrites, proxies or programs). Every git then runs with `GIT_DIR=.`, so a folder
+swapped above it changes nothing, and is given origin's URL by value, after checking it is one
+`https://github.com/<owner>/<name>`, with proxies and other protocols pinned off and replace
+refs ignored.
 `push` sends the one branch by the exact commit it checked, never forced, never tags, never to
 `main`, `master` or `develop` (they change by PR merges); it asks origin what it has
-(`ls-remote`) rather than trusting `refs/remotes/*`, and refuses a commit whose message carries AI
-attribution anywhere or whose author is an AI tool. `pr-create` and `pr-comment` refuse
+(`ls-remote`) rather than trusting `refs/remotes/*`, reads each commit it would send whole, and
+refuses one that carries AI attribution anywhere or whose author is an AI tool. `pr-create` and `pr-comment` refuse
 attribution in their text; `pr-merge` always merges with a merge commit, after checking the
 PR's title, body and commits. Claude Code's PreToolUse hook
 (`/etc/claude-code/managed-settings.json`, root's, with `allowManagedHooksOnly`) is a courtesy

@@ -137,12 +137,53 @@ assert_eq "a branch that is not a fast-forward of origin's is not pushed (never 
 assert_has "with the reason" "not a fast-forward" "$OUT"
 G -C "$W" reset -q --hard "$before"
 
-G -C "$W" tag -a v1 -m "A tag" && git -C "$W" config push.followTags true
+G -C "$W" tag -a v1 -m "A tag"
 G -C "$W" commit -q --allow-empty -m "Again"
 ctl push "$W" feature
 assert_eq "the push still works" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
-assert_eq "and never carries tags, whatever the repo's config says" "" "$(git -C "$R" tag)"
-git -C "$W" config --unset push.followTags
+assert_eq "and never carries tags" "" "$(git -C "$R" tag)"
+
+# Config git reads before it sends anything: the allowlist refuses what could send it elsewhere,
+# run a program or carry the token (URL-specific forms outrank the command line).
+for kv in "remote.origin.uploadpack=sh -c x" "remote.origin.receivepack=sh -c x" "http.proxy=http://127.0.0.1:1" \
+          "http.https://github.com/.sslVerify=false" "url.https://example.com/.insteadOf=https://github.com/" \
+          "core.sshCommand=sh -c x" "credential.helper=!cat" "protocol.ext.allow=always" "push.followTags=true" \
+          "core.pager=sh -c x" "remote.evil.url=/tmp/x"; do
+    git -C "$W" config "${kv%%=*}" "${kv#*=}"
+    ctl push "$W" feature
+    if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q "does not run git with"; then pass "a repo config with ${kv%%=*} is refused"
+    else fail "a repo config with ${kv%%=*} was used ($OUT)"; fi
+    git -C "$W" config --unset-all "${kv%%=*}"
+done
+
+# .git swapped after the checks, for one whose config runs a command as soon as git connects:
+# gitctl stays in the .git it checked, so the swap changes nothing.
+cp -a "$W/.git" "$S/evil.git"
+git --git-dir="$S/evil.git" config protocol.ext.allow always
+git --git-dir="$S/evil.git" config "url.ext::sh -c touch% $S/PWNED% >&2.insteadOf" "$R"
+G -C "$W" commit -q --allow-empty -m "After the swap"
+export AIDC_GITCTL_TEST_AFTER_CHECK="mv '$W/.git' '$S/real.git' && mv '$S/evil.git' '$W/.git'"
+ctl push "$W" feature
+unset AIDC_GITCTL_TEST_AFTER_CHECK
+mv "$W/.git" "$S/evil.git" && mv "$S/real.git" "$W/.git"
+assert_eq "a .git swapped after the checks runs nothing" no "$([ -e "$S/PWNED" ] && echo yes || echo no)"
+assert_eq "and the push used the .git that was checked" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+
+# Replace refs change what git log shows, not what a push sends.
+G -C "$W" switch -q -c rp feature
+G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+clean=$(printf 'Fix\n' | G -C "$W" commit-tree "rp^{tree}" -p rp~1)
+git -C "$W" replace rp "$clean"
+ctl push "$W" rp
+assert_eq "a replace ref cannot hide an attributed commit from the scan" none "$(remote_sha rp)"
+git -C "$W" replace -d "$(git --no-replace-objects -C "$W" rev-parse rp)"
+
+# A message carrying the bytes a one-stream log would be split on.
+sep=$(printf 'Fix\036x\037Co-Authored-By: Claude\037clean\n' | G -C "$W" commit-tree "feature^{tree}" -p feature)
+git -C "$W" update-ref refs/heads/sep "$sep"
+ctl push "$W" sep
+assert_eq "record-separator bytes in a message do not hide attribution" none "$(remote_sha sep)"
+G -C "$W" switch -q feature
 
 for b in -f +feature feature:main --force "a..b" "--upload-pa=x" "--templ=x" "--conf=x" "--outp=x" "--exe=x"; do
     ctl push "$W" "$b"
@@ -304,7 +345,7 @@ echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
 export AIDC_GITCTL_ALLOW_LOCAL_ORIGIN=1
 mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh"; }
-mut 's/gitctl_check_text "$body" "commit ${h:0:12}" || die/: || die/'
+mut 's/gitctl_check_text "$raw" "commit ${sha:0:12}" || die/: || die/'
 G -C "$W" switch -q feature
 G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
@@ -317,6 +358,26 @@ G -C "$W" commit -q --allow-empty -m "Straight to main"
 bash "$S/mut/gitctl.sh" push "$W" main >/dev/null 2>&1
 assert_eq "with the protected-branch guard removed, a push to main goes through" \
     "$(git -C "$W" rev-parse main)" "$(remote_sha main)"
+
+mut 's/GIT_DIR=\. GIT_CONFIG_NOSYSTEM/GIT_DIR="$GITCTL_REPO\/.git" GIT_CONFIG_NOSYSTEM/'
+G -C "$W" switch -q feature
+G -C "$W" commit -q --allow-empty -m "Swap again"
+cp -a "$W/.git" "$S/evil2.git"
+git --git-dir="$S/evil2.git" config protocol.ext.allow always
+git --git-dir="$S/evil2.git" config "url.ext::sh -c touch% $S/PWNED2% >&2.insteadOf" "$R"
+AIDC_GITCTL_TEST_AFTER_CHECK="mv '$W/.git' '$S/real.git' && mv '$S/evil2.git' '$W/.git'" \
+    bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
+mv "$W/.git" "$S/evil2.git" && mv "$S/real.git" "$W/.git"
+assert_eq "with git finding .git by path again, the swapped config runs its command (so the swap test would fail)" \
+    yes "$([ -e "$S/PWNED2" ] && echo yes || echo no)"
+mut 's/ GIT_NO_REPLACE_OBJECTS=1//'
+G -C "$W" switch -q -c rp2 feature
+G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+clean=$(printf 'Fix\n' | G -C "$W" commit-tree "rp2^{tree}" -p rp2~1)
+git -C "$W" replace rp2 "$clean"
+bash "$S/mut/gitctl.sh" push "$W" rp2 >/dev/null 2>&1
+assert_eq "with replace refs followed, the attributed commit reaches the remote" \
+    "$(git --no-replace-objects -C "$W" rev-parse rp2)" "$(remote_sha rp2)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

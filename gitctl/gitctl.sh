@@ -19,7 +19,7 @@
 #   gitctl pr-view <repo> <number> | pr-list <repo>
 #   gitctl status | login | logout                       the GitHub login (gitcred's)
 #
-# <repo> is the main checkout of a repo the git container owns (gitctl_repo_check), with
+# <repo> is the main checkout of a repo the git container owns (gitctl_enter_repo), with
 # origin https://github.com/<owner>/<name>.
 set -u
 
@@ -70,26 +70,41 @@ no_options() {
 
 # --- gitrun: git with the login's credential helper ----------------------------------------
 
-# Git as gitrun: no system or global config (the repo's own config is checked; the helper and
-# the backstop come on the command line, last, so they win), a fixed PATH, no prompts.
+# Git as gitrun, inside the repo's .git, which gitctl_enter_repo entered and checked: GIT_DIR=.
+# names the directory this process is in, not a path, so swapping .git or a folder above it
+# after the check changes nothing. No system or global config; the repo's own config passed an
+# allowlist of keys (gitctl_enter_repo); and every setting that could send git elsewhere, run a
+# program or hand the token over is pinned on the command line as well. Replace refs are off:
+# the scan must read the commits a push sends, not their stand-ins.
 g() {
-    local helper=(-c credential.helper=)
+    local helper=(-c credential.helper=) proto=(-c protocol.allow=never -c protocol.https.allow=always)
     [ -n "$HELPER" ] && helper+=(-c "credential.helper=$HELPER")
-    env -i HOME="$RUN_HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_CONFIG_NOSYSTEM=1 \
-        GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-        "$REAL_GIT" -C "$GITCTL_REPO" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-        -c protocol.ext.allow=never -c push.followTags=false \
-        -c push.gpgSign=false -c core.sshCommand=false "${helper[@]}" "$@"
+    [ "$ALLOW_LOCAL_ORIGIN" = 1 ] && proto+=(-c protocol.file.allow=always)
+    env -i HOME="$RUN_HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_DIR=. GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
+        "$REAL_GIT" -c core.hooksPath=/dev/null -c core.fsmonitor=false "${proto[@]}" \
+        -c http.proxy= -c http.sslVerify=true -c core.sshCommand= -c core.gitProxy= \
+        -c core.askPass= -c push.followTags=false -c push.gpgSign=false "${helper[@]}" "$@"
 }
 
-# origin_slug: the repo's origin, fetch and push URLs alike (after any insteadOf), must be one
-# GitHub repo over https.
-origin_slug() {
+# A test-only pause between the checks and the first git call, to swap things under gitctl.
+after_check() {
+    if [ "$INSTALLED" = 0 ] && [ -n "${AIDC_GITCTL_TEST_AFTER_CHECK:-}" ]; then
+        bash -c "$AIDC_GITCTL_TEST_AFTER_CHECK"
+    fi
+}
+
+# origin_url: the one URL git is given (by value, never the remote's name, so no remote.*
+# setting applies): origin's url, and any pushurl, all one GitHub repo over https.
+origin_url() {
     local urls u slug=""
-    urls=$( { g remote get-url --all origin; g remote get-url --push --all origin; } 2>/dev/null) \
-        || die "${GITCTL_REPO}: no origin remote"
+    urls=$(env -i PATH=/usr/bin:/bin "$REAL_GIT" config --file ./config --get-all remote.origin.url 2>/dev/null)
     [ -n "$urls" ] || die "${GITCTL_REPO}: no origin remote"
+    [ "$(printf '%s\n' "$urls" | wc -l)" = 1 ] || die "${GITCTL_REPO}: origin has more than one url"
+    ORIGIN_URL="$urls"
+    urls="$urls"$'\n'$(env -i PATH=/usr/bin:/bin "$REAL_GIT" config --file ./config --get-all remote.origin.pushurl 2>/dev/null)
     while IFS= read -r u; do
+        [ -n "$u" ] || continue
         if [ "$ALLOW_LOCAL_ORIGIN" = 1 ] && [ "${u#/}" != "$u" ]; then GITCTL_SLUG="local/test"
         else gitctl_slug_from_url "$u" || die "$GITCTL_REASON"; fi
         [ -z "$slug" ] || [ "$slug" = "$GITCTL_SLUG" ] || die "origin's URLs name two repos (${slug}, ${GITCTL_SLUG})"
@@ -99,25 +114,28 @@ origin_slug() {
 
 run_fetch() {
     nargs $# 1; no_options "$@"
-    gitctl_repo_check "$1" || die "$GITCTL_REASON"
-    origin_slug
-    g fetch --prune --no-recurse-submodules origin
+    gitctl_enter_repo "$REAL_GIT" "$1" || die "$GITCTL_REASON"
+    origin_url
+    after_check
+    g fetch --prune --no-tags --no-recurse-submodules "$ORIGIN_URL" '+refs/heads/*:refs/remotes/origin/*'
 }
 
 # push: the one branch, by the exact commit that was checked, never forced, never deleting.
 # What a push carries is decided from what origin says it has (ls-remote), never from the
-# repo's refs/remotes/*, which a session can move.
+# repo's refs/remotes/*, which a session can move. Each commit is read whole (cat-file), on
+# its own: author, committer, any other header and the message.
 run_push() {
     nargs $# 2; no_options "$@"
-    local branch="$2" b local_sha heads remote_sha sha ref nots=() rec h ids body
-    gitctl_repo_check "$1" || die "$GITCTL_REASON"
+    local branch="$2" b local_sha heads remote_sha sha ref nots=() raw ids
     gitctl_branch_ok "$REAL_GIT" "$branch" || die "$GITCTL_REASON"
     for b in $PROTECTED_BRANCHES; do
         [ "$branch" = "$b" ] && die "pushing to ${branch} directly is refused: it changes by pull request merges (gitctl pr-merge)"
     done
-    origin_slug
+    gitctl_enter_repo "$REAL_GIT" "$1" || die "$GITCTL_REASON"
+    origin_url
+    after_check
     local_sha=$(g rev-parse -q --verify "refs/heads/${branch}^{commit}") || die "no local branch ${branch}"
-    heads=$(g ls-remote --heads origin) || die "origin did not answer"
+    heads=$(g ls-remote --heads "$ORIGIN_URL") || die "origin did not answer"
     remote_sha=""
     while read -r sha ref; do
         [ -n "$sha" ] || continue
@@ -130,15 +148,14 @@ run_push() {
         g merge-base --is-ancestor "$remote_sha" "$local_sha" \
             || die "${branch} is not a fast-forward of origin's: never force-push; merge origin's first"
     fi
-    while IFS= read -r -d $'\x1e' rec; do
-        rec="${rec#$'\n'}"
-        [ -n "$rec" ] || continue
-        h="${rec%%$'\x1f'*}"; rec="${rec#*$'\x1f'}"
-        ids="${rec%%$'\x1f'*}"; body="${rec#*$'\x1f'}"
-        gitctl_check_text "$body" "commit ${h:0:12}" || die "$GITCTL_REASON; reword it before pushing"
-        gitctl_ai_identity "$ids" && die "commit ${h:0:12} is authored or committed as an AI tool or bot (${ids//$'\n'/, })"
-    done < <(g log --no-color --format='%H%x1f%an <%ae>%n%cn <%ce>%x1f%B%x1e' "$local_sha" "${nots[@]}" --)
-    g push --no-recurse-submodules --no-follow-tags origin "${local_sha}:refs/heads/${branch}"
+    while read -r sha; do
+        [ -n "$sha" ] || continue
+        raw=$(g cat-file commit "$sha") || die "cannot read commit ${sha:0:12}"
+        gitctl_check_text "$raw" "commit ${sha:0:12}" || die "$GITCTL_REASON; reword it before pushing"
+        ids=$(printf '%s\n' "$raw" | sed -n '/^$/q; /^\(author\|committer\) /p')
+        gitctl_ai_identity "$ids" && die "commit ${sha:0:12} is authored or committed as an AI tool or bot"
+    done < <(g rev-list "$local_sha" "${nots[@]}" --)
+    g push --no-recurse-submodules --no-follow-tags "$ORIGIN_URL" "${local_sha}:refs/heads/${branch}"
 }
 
 # --- gitcred: gh with the login --------------------------------------------------------------

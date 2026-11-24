@@ -3,7 +3,8 @@
 #
 # The audit sidecar finishes first, as on Docker: one last sweep, and killed_at stamped into
 # meta.json. Then everything the session made goes (labelled aidc/session=<name>): its dev
-# StatefulSet, proxy, Service, NetworkPolicies, home, state and audit seed. Its audit claim
+# StatefulSet, proxy, Service, NetworkPolicies, home, state and audit seed, its TCP egress relays,
+# its pages (Ingresses, login) and this machine's tunnels to it. Its audit claim
 # (labelled aidc/kept=audit, named for its creation time) stays, with its size, kill time and
 # taint recorded on it as annotations (scripts/k8s/audit.sh), and so does the user's disk.
 # `aidc audit trim` removes kept claims.
@@ -15,6 +16,10 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/lib.sh"
 # shellcheck source=../lib/audit.sh
 . "$AIDC_SCRIPTS/lib/audit.sh"
+# shellcheck source=tunnel.sh
+. "$AIDC_SCRIPTS/k8s/tunnel.sh"
+# shellcheck source=expose.sh
+. "$AIDC_SCRIPTS/k8s/expose.sh"
 
 case "${1:-}" in
     -h|--help) printf 'aidc kill <name>\n\nRemoves the session from the cluster; its audit claim and your disk stay.\n'; exit 0 ;;
@@ -34,7 +39,15 @@ audit=$(k8s_kubectl -n "$ns" get pvc -l "${sel},aidc/kept=audit" -o name) \
     || die "the cluster did not answer while finding the audit claim; nothing was removed"
 proxy=$(k8s_kubectl -n "$ns" get pod -l "${sel},app=proxy" -o name) \
     || die "the cluster did not answer while finding the proxy pod; nothing was removed"
-audit=$(printf '%s\n' "$audit" | head -n1)
+# The session's own claim: the one its StatefulSet names. Earlier sessions of the same name keep
+# theirs (named for their creation times), so the label alone does not tell which; without the
+# StatefulSet (a create that stopped half way), the newest is this session's.
+own=$(k8s_get "$ns" statefulset "${NAME}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null) || own=""
+if [ -n "$own" ] && printf '%s\n' "$audit" | grep -qxF "persistentvolumeclaim/${own}"; then
+    audit="persistentvolumeclaim/${own}"
+else
+    audit=$(printf '%s\n' "$audit" | sort | tail -n1)
+fi
 proxy=$(printf '%s\n' "$proxy" | head -n1)
 measured=""
 if [ -n "$proxy" ]; then
@@ -59,6 +72,9 @@ if [ -n "$audit" ]; then
     aidc_audit_k8s_cache_clear
 fi
 info "removing session ${NAME} from ${ns}"
+stopped=$(k8s_tunnels_stop_all "$ns" "$NAME")
+[ -z "$stopped" ] || info "stopped this machine's tunnels on localhost:$(printf '%s' "$stopped" | paste -sd, -)"
+k8s_expose_remove "$ns" "$NAME" || info "WARNING: the session's pages could not be removed; see kubectl -n ${ns} get ingress -l ${sel}"
 k8s_kubectl -n "$ns" delete statefulset,deployment,service,networkpolicy,configmap -l "$sel" --wait=true >&2
 k8s_kubectl -n "$ns" delete pvc -l "${sel},aidc/kept!=audit" --wait=false >&2
 # The git container forgets the session (its token and any git mode of its own), so a mode never

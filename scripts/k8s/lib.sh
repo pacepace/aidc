@@ -67,6 +67,14 @@ _k8s_cfg_json() {
 #   AIDC_K8S_REGISTRY_PULL  where the node pulls (default localhost:<port>, the registry's
 #                           loopback host port: containerd pulls from localhost over plain HTTP
 #                           with no node configuration)
+#   AIDC_K8S_INGRESS_*      LAN pages (`aidc create --expose`, K8S-15; scripts/k8s/expose.sh):
+#                           _DOMAIN the wildcard domain pages live under (no default: it is the
+#                           user's, never aidc's), _CLASS the IngressClass, _TLS_SECRET a TLS
+#                           Secret in the user's namespace or _CLUSTER_ISSUER a cert-manager
+#                           ClusterIssuer (neither: the controller's default certificate),
+#                           _CONTROLLER traefik | nginx | other (how a login is put in front;
+#                           default from the class name), _CONTROLLER_NS and _CONTROLLER_LABELS
+#                           (JSON) the controller's pods, the only ones let in to an exposed port
 k8s_load_settings() {
     local cfg
     cfg=$(_aidc_global_config_file)
@@ -109,13 +117,39 @@ k8s_load_settings() {
     AIDC_K8S_MEMORY_LIMIT=$(_k8s_cfg '.kubernetes.memory_limit'); AIDC_K8S_MEMORY_LIMIT="${AIDC_K8S_MEMORY_LIMIT:-32Gi}"
     AIDC_K8S_REGISTRY_PULL=$(_k8s_cfg '.kubernetes.registry.pull')
     AIDC_K8S_REGISTRY_PULL="${AIDC_K8S_REGISTRY_PULL:-localhost:${AIDC_K8S_REGISTRY_PORT}}"
+    AIDC_K8S_INGRESS_DOMAIN=$(_k8s_cfg '.kubernetes.ingress.domain')
+    AIDC_K8S_INGRESS_CLASS=$(_k8s_cfg '.kubernetes.ingress.class')
+    AIDC_K8S_INGRESS_TLS_SECRET=$(_k8s_cfg '.kubernetes.ingress.tls_secret')
+    AIDC_K8S_INGRESS_CLUSTER_ISSUER=$(_k8s_cfg '.kubernetes.ingress.cluster_issuer')
+    AIDC_K8S_INGRESS_CONTROLLER=$(_k8s_cfg '.kubernetes.ingress.controller')
+    if [ -z "$AIDC_K8S_INGRESS_CONTROLLER" ]; then
+        case "$AIDC_K8S_INGRESS_CLASS" in
+            *traefik*) AIDC_K8S_INGRESS_CONTROLLER=traefik ;;
+            *nginx*) AIDC_K8S_INGRESS_CONTROLLER=nginx ;;
+            *) AIDC_K8S_INGRESS_CONTROLLER=other ;;
+        esac
+    fi
+    # Where the controller's pods run, by its usual install (k3s puts Traefik in kube-system).
+    AIDC_K8S_INGRESS_CONTROLLER_NS=$(_k8s_cfg '.kubernetes.ingress.controller_namespace')
+    AIDC_K8S_INGRESS_CONTROLLER_LABELS=$(_k8s_cfg_json '.kubernetes.ingress.controller_labels' '')
+    case "$AIDC_K8S_INGRESS_CONTROLLER" in
+        traefik)
+            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-kube-system}"
+            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"traefik\"\}}" ;;
+        nginx)
+            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-ingress-nginx}"
+            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"ingress-nginx\"\}}" ;;
+    esac
     export AIDC_K8S_CONFIGURED AIDC_K8S_CONTEXT AIDC_K8S_KUBECONFIG AIDC_K8S_PREFIX AIDC_K8S_USER \
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
         AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE AIDC_K8S_USER_DISK_SIZE \
         AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN AIDC_K8S_GIT_MODE \
         AIDC_K8S_CPU_REQUEST AIDC_K8S_MEMORY_REQUEST \
-        AIDC_K8S_CPU_LIMIT AIDC_K8S_MEMORY_LIMIT
+        AIDC_K8S_CPU_LIMIT AIDC_K8S_MEMORY_LIMIT \
+        AIDC_K8S_INGRESS_DOMAIN AIDC_K8S_INGRESS_CLASS AIDC_K8S_INGRESS_TLS_SECRET \
+        AIDC_K8S_INGRESS_CLUSTER_ISSUER AIDC_K8S_INGRESS_CONTROLLER AIDC_K8S_INGRESS_CONTROLLER_NS \
+        AIDC_K8S_INGRESS_CONTROLLER_LABELS
 }
 
 # k8s_kubectl <args...>: kubectl against the configured cluster.
@@ -243,7 +277,9 @@ k8s_session_taint() {
 # returns 0, 1 or 2 alike. A cluster that cannot be asked is never "no such session".
 k8s_session_lookup() {
     local ns="$1" s="$2" out
-    if ! out=$(k8s_kubectl -n "$ns" get deployment,statefulset -l "aidc/session=${s}" -o name \
+    # The session's own workloads (dev, proxy; the git agent's): a relay of a half-removed
+    # session is not the session.
+    if ! out=$(k8s_kubectl -n "$ns" get deployment,statefulset -l "aidc/session=${s},app in (dev,proxy,git)" -o name \
             --request-timeout=10s 2>&1); then
         printf 'unknown (%s)\n' "$(printf '%s' "$out" | tail -n1)"
         return 2

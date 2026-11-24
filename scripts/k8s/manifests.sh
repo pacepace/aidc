@@ -263,6 +263,23 @@ k8s_render_session() {
     ns=$(k8s_user_ns "$AIDC_K8S_USER")
     img="${AIDC_K8S_REGISTRY_PULL}/aidc"
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, aidc/session: ${session}"
+    # Per-session DNS (--dns, dns_servers:): squid and the proxy pod resolve through these instead
+    # of Quad9 (squid's entrypoint then resolves through resolv.conf, the pod's dnsConfig), and
+    # the proxy may reach each of them on port 53, private ones included, as on Docker.
+    local dns_list="${AIDC_K8S_DNS_SERVERS:-}" proxy_dns dns_rule="" d
+    if [ -n "$dns_list" ]; then
+        proxy_dns="[$(printf '%s' "$dns_list" | tr ' ' '\n' | awk 'NF' | paste -sd, - | sed 's/,/, /g')]"
+        for d in $dns_list; do
+            dns_rule="${dns_rule}    - to: [{ipBlock: {cidr: ${d}/32}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+"
+        done
+    else
+        proxy_dns="[9.9.9.9, 149.112.112.112]"
+    fi
+    # The GPU only when asked for (K8S-11): the device plugin hands one to the pod.
+    local gpu=""
+    [ "${AIDC_K8S_GPU:-0}" = 1 ] && gpu=", nvidia.com/gpu: 1"
     cat <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -271,8 +288,10 @@ spec:
   podSelector: {matchLabels: {aidc/session: ${session}, app: dev}}
   policyTypes: [Ingress, Egress]
   egress:
+    # Squid, and the session's names responder (relay and --network names only; it forwards
+    # nothing, so a lookup cannot leave around squid).
     - to: [{podSelector: {matchLabels: {aidc/session: ${session}, app: proxy}}}]
-      ports: [{protocol: TCP, port: 3128}]
+      ports: [{protocol: TCP, port: 3128}, {protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -282,11 +301,11 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from: [{podSelector: {matchLabels: {aidc/session: ${session}, app: dev}}}]
-      ports: [{protocol: TCP, port: 3128}]
+      ports: [{protocol: TCP, port: 3128}, {protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
   egress:
     - to: [{ipBlock: {cidr: 9.9.9.9/32}}, {ipBlock: {cidr: 149.112.112.112/32}}]
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-    - to:
+${dns_rule}    - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
@@ -327,7 +346,10 @@ kind: Service
 metadata: {name: ${session}-proxy, namespace: ${ns}, labels: {${labels}}}
 spec:
   selector: {aidc/session: ${session}, app: proxy}
-  ports: [{port: 3128}]
+  ports:
+    - {name: squid, port: 3128, protocol: TCP}
+    - {name: dns, port: 53, protocol: UDP}
+    - {name: dns-tcp, port: 53, protocol: TCP}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -347,7 +369,7 @@ spec:
       # but the refresher's feed downloads resolve through resolv.conf: with cluster DNS they
       # failed, and every session ran with an empty malware blocklist (seen live).
       dnsPolicy: None
-      dnsConfig: {nameservers: [9.9.9.9, 149.112.112.112]}
+      dnsConfig: {nameservers: ${proxy_dns}}
       initContainers:
         # The audit record's first files, as aidc create writes them on Docker: meta.json (the
         # audit sidecar stamps tainted_at and killed_at into it) and the config snapshot. Only
@@ -373,13 +395,25 @@ spec:
           # a request for a private address gets squid's 403, never reaching the policy). The
           # dev pod reaches anything else it is allowed (an --egress-tcp relay) directly, not
           # through squid, so this refuses nothing a session is meant to reach.
-          env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}, {name: AIDC_PUBLIC_ONLY, value: "1"}]
+          env: [{name: AIDC_DNS_SERVERS, value: "${dns_list}"}, {name: AIDC_DNS_USER_CHOSEN, value: "1"}, {name: AIDC_MCP_DENY, value: ""}, {name: AIDC_PUBLIC_ONLY, value: "1"}]
           readinessProbe: {exec: {command: [/usr/local/bin/healthcheck.sh]}, periodSeconds: 10}
           # Requests keep the proxy out of the BestEffort class, first in line for eviction.
           resources: {requests: {cpu: 100m, memory: 256Mi}}
           volumeMounts:
             - {name: blocklist, mountPath: /etc/squid}
             - {name: squid-log, mountPath: /var/log/squid}
+        # The dev pod's only nameserver: dnsmasq with no upstream (--no-resolv, no server), so it
+        # answers the names aidc writes into its hosts folder (k8s/net.sh, k8s_names_sync) and
+        # refuses every other name. The folder is on the state claim, so a new proxy pod keeps it,
+        # and dnsmasq watches it (--hostsdir, inotify): a name added or removed is served within a
+        # second, and nothing restarts. --except-interface turns off dnsmasq's default of answering
+        # only its own subnet: queries come from the dev pod, through the proxy's Service.
+        - name: names
+          image: ${img}/forwarder:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [dnsmasq, -k, --no-resolv, --no-hosts, --no-poll, --hostsdir=/var/aidc/names, --except-interface=lo, --log-facility=-]
+          resources: {requests: {cpu: 10m, memory: 16Mi}}
+          volumeMounts: [{name: state, mountPath: /var/aidc/names, subPath: names}]
         - name: refresher
           image: ${img}/refresher:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
@@ -433,7 +467,7 @@ metadata:
   name: ${session}-dev
   namespace: ${ns}
   labels: {${labels}, app: dev}
-  annotations: {aidc/repo: "${repo}", aidc/profile: "${profile}", aidc/audit: "${audit}"}
+  annotations: {aidc/repo: "${repo}", aidc/profile: "${profile}", aidc/audit: "${audit}", aidc/ports: "${AIDC_K8S_PORTS:-}", aidc/gpu: "${AIDC_K8S_GPU:-0}"}
 spec:
   replicas: 1
   serviceName: ""
@@ -447,9 +481,11 @@ spec:
       enableServiceLinks: false
       nodeSelector: ${sel}
       tolerations: ${AIDC_K8S_TOLERATIONS}
-      # No cluster DNS: names are resolved by Squid, so a lookup cannot leave around it.
+      # No cluster DNS: names are resolved by Squid, so a lookup cannot leave around it. The one
+      # nameserver is the session's names responder in its proxy pod, which knows only its relays
+      # and --network services and forwards nothing.
       dnsPolicy: None
-      dnsConfig: {nameservers: [192.0.2.1]}
+      dnsConfig: {nameservers: ["${proxy_ip}"]}
       hostAliases: [{ip: "${proxy_ip}", hostnames: [aidc-proxy]}]
       initContainers:
         # The session home starts as a copy of the image's /home/vscode, as a Docker named volume
@@ -477,7 +513,7 @@ spec:
           workingDir: "${repo}"
           resources:
             requests: {cpu: "${AIDC_K8S_CPU_REQUEST}", memory: "${AIDC_K8S_MEMORY_REQUEST}"}
-            limits: {cpu: "${AIDC_K8S_CPU_LIMIT}", memory: "${AIDC_K8S_MEMORY_LIMIT}"}
+            limits: {cpu: "${AIDC_K8S_CPU_LIMIT}", memory: "${AIDC_K8S_MEMORY_LIMIT}"${gpu}}
           # The proxy by address, not by name: the dev pod has no DNS, and an inner container
           # handed \$HTTPS_PROXY could not resolve "aidc-proxy" (it is only in this pod's hosts
           # file). On Docker, inner containers resolve the name through Docker's DNS.

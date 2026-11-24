@@ -89,13 +89,15 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
-# No flag: `create` takes the default backend (aidc_default_backend: the config's top-level
+# No flag: `create` (and `clean-env`) takes the default backend (aidc_default_backend: the config's top-level
 # `backend:`, else docker; `aidc git` and `aidc repo` use the same rule); a verb that names
 # a session goes where that session lives, asking the configured cluster first (a quiet no
 # when there is none) and Docker otherwise. `list` shows both.
 if [ -z "$BACKEND" ]; then
     case "$SUBCOMMAND" in
-        create)
+        create|clean-env)
+            # clean-env names a session that is no longer running, so it cannot be found where
+            # it lives: it goes where create would have made it.
             BACKEND=$(AIDC_BACKEND_FLAG="" aidc_default_backend) || exit 2
             ;;
         attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)

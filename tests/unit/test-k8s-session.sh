@@ -73,7 +73,10 @@ case "$*" in
         [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
-    *"get pvc -l"*"aidc/kept=audit"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
+    *"get pvc demo-home demo-state"*) [ "${K_LEFTOVER:-}" = 1 ] && echo "persistentvolumeclaim/demo-home" ;;
+    *"get pvc -l"*"aidc/kept=audit"*) [ "${K_TWO_AUDITS:-}" = 1 ] && echo "persistentvolumeclaim/demo-audit-20261123040000"
+        echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
+    *"get statefulset demo-dev -o jsonpath={.metadata.annotations.aidc/audit}"*) printf '%s' "${K_OWN_AUDIT:-}" ;;
     *"get statefulset demo-dev -o json"*) [ "${K_EXISTS:-}" = 1 ] || exit 1
         if [ "${K_SIZED:-}" = 1 ]; then
             echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj"}},"spec":{"template":{"spec":{"containers":[{"name":"dev","resources":{"requests":{"cpu":"4","memory":"12Gi"},"limits":{"cpu":"16","memory":"32Gi"}}}]}}}}'
@@ -156,7 +159,7 @@ dev() { q "select(.kind == \"StatefulSet\") | $1" | tail -1; }
 assert_eq "the dev pod runs under the runtime class, in a user namespace, with no API token" \
     '["sysbox-runc",false,false]' \
     "$(dev '.spec.template.spec | [.runtimeClassName, .hostUsers, .automountServiceAccountToken]')"
-assert_eq "the dev pod has no cluster DNS" '["None",["192.0.2.1"]]' \
+assert_eq "the dev pod has no cluster DNS: its one nameserver is its own proxy pod's names responder" '["None",["10.45.9.9"]]' \
     "$(dev '.spec.template.spec | [.dnsPolicy, .dnsConfig.nameservers]')"
 assert_has "the proxy settings carry its address, so inner containers can use them without DNS" \
     '{"name":"HTTPS_PROXY","value":"http://10.45.9.9:3128"}' "$(dev '.spec.template.spec.containers[0].env')"
@@ -208,11 +211,11 @@ assert_eq "the repo folder is made as the session user, group-writable (umask 00
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "repo-dir") | [.securityContext, .command]')"
 
 np() { q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"$1\") | .spec" | tail -1; }
-assert_eq "the dev pod may reach only its own session's proxy, on 3128" \
-    '{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"dev"}},"policyTypes":["Ingress","Egress"],"egress":[{"to":[{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"proxy"}}}],"ports":[{"protocol":"TCP","port":3128}]}]}' \
+assert_eq "the dev pod may reach only its own session's proxy: squid on 3128, its names responder on 53" \
+    '{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"dev"}},"policyTypes":["Ingress","Egress"],"egress":[{"to":[{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"proxy"}}}],"ports":[{"protocol":"TCP","port":3128},{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}]}' \
     "$(np demo-dev-only-to-its-proxy)"
-assert_eq "the proxy takes connections only from its own dev pod" \
-    '[{"from":[{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"dev"}}}],"ports":[{"protocol":"TCP","port":3128}]}]' \
+assert_eq "the proxy takes connections only from its own dev pod (squid and the names responder)" \
+    '[{"from":[{"podSelector":{"matchLabels":{"aidc/session":"demo","app":"dev"}}}],"ports":[{"protocol":"TCP","port":3128},{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}]' \
     "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '.ingress')"
 assert_eq "the proxy reaches public addresses only (no cluster, node, LAN or VPN range)" \
     '["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","169.254.0.0/16","100.64.0.0/10","127.0.0.0/8"]' \
@@ -314,12 +317,18 @@ assert_eq "nothing applied" "" "$(cat "$K_APPLIED")"
 mv "$SCRATCH/bin/kubectl.real" "$SCRATCH/bin/kubectl"
 out=$(K_EXISTS=1 run create demo --backend kubernetes)
 assert_has "an existing session is refused" "session 'demo' already exists" "$out"
+# Claims of a session of the same name, still being deleted after a kill: the new session's
+# claims would bind to nothing new and its pods would wait for claims that go away (seen live).
+out=$(K_LEFTOVER=1 run create demo --backend kubernetes)
+assert_has "a create while an earlier session's claims are still there is refused, saying why" \
+    "the claims of an earlier session 'demo' are still there" "$out"
+assert_eq "  and applies nothing" "" "$(cat "$K_APPLIED")"
 out=$(: > "$K_APPLIED"; cd / && "$AIDC_ROOT/scripts/aidc" create demo --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
 assert_has "a create run outside the home directory is refused (the session starts at the same place on the disk)" \
     "run aidc create from under your home directory" "$out"
 assert_eq "and applies nothing" "" "$(cat "$K_APPLIED")"
-out=$(run create demo --backend kubernetes --port 3000:3000)
-assert_has "an option the backend does not have yet is refused by name" "not supported on the kubernetes backend yet: --port" "$out"
+out=$(run create demo --backend kubernetes --workspace /tmp)
+assert_has "an option the backend does not have is refused by name" "not supported on the kubernetes backend yet: --workspace" "$out"
 
 echo "=== aidc kill --backend kubernetes ==="
 out=$(K_EXISTS=1 run kill demo --backend kubernetes)
@@ -338,6 +347,15 @@ assert_has "and whether the session was tainted" "aidc/tainted=yes" "$annotate"
 assert_has "and when it was killed" "aidc/killed-at=20" "$annotate"
 annotate_line=$(grep -n 'annotate persistentvolumeclaim' "$K_LOG" | head -n1 | cut -d: -f1)
 assert_eq "the size is measured after the final sweep" "yes" "$([ "${finalize_line:-99}" -lt "${annotate_line:-0}" ] && echo yes)"
+# An earlier session of the same name kept its claim too: kill records size and time on this
+# session's own claim (the one its StatefulSet names), never on the older one.
+out=$(K_EXISTS=1 K_TWO_AUDITS=1 K_OWN_AUDIT=demo-audit-20261124050000 run kill demo --backend kubernetes)
+assert_has "kill annotates the session's own audit claim when an older one shares its name" \
+    "annotate persistentvolumeclaim/demo-audit-20261124050000" "$(cat "$K_LOG")"
+assert_not_has "  and leaves the older claim's record alone" "annotate persistentvolumeclaim/demo-audit-20261123040000" "$(cat "$K_LOG")"
+out=$(K_EXISTS=1 K_TWO_AUDITS=1 run kill demo --backend kubernetes)
+assert_has "with no StatefulSet to name it, the newest claim is the session's" \
+    "annotate persistentvolumeclaim/demo-audit-20261124050000" "$(cat "$K_LOG")"
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 
@@ -424,7 +442,7 @@ out=$(K_GIT=1 run refresh git --backend kubernetes)
 assert_has "the git agent has no blocklist to refresh" "no proxy and no blocklist" "$out"
 
 echo "=== the dispatcher's --backend switch ==="
-out=$(run network demo --backend kubernetes)
+out=$(run claude-token demo --backend kubernetes)
 assert_has "a verb the backend does not have yet is refused" "not available on the kubernetes backend yet" "$out"
 # A Docker verb must get exactly the arguments it would get without the flag.
 cat > "$SCRATCH/bin/docker" <<'DSTUB'
@@ -449,8 +467,9 @@ assert_has "a session in the cluster gets the Kubernetes verb" "logs deployment/
 assert_eq "and Docker is not asked" "" "$(cat "$D_LOG")"
 : > "$D_LOG"; out=$(run logs demo --component squid)
 assert_has "a session not in the cluster goes to Docker" "docker " "$(cat "$D_LOG")"
-out=$(K_EXISTS=1 run network demo)
-assert_has "a cluster session's verb the backend lacks says so" "not available on the kubernetes backend yet" "$out"
+: > "$D_LOG"; out=$(K_EXISTS=1 run network demo ls)
+assert_has "a cluster session's network verb goes to its cluster form" "no networks for session demo" "$out"
+assert_eq "  (and Docker is not asked)" "" "$(cat "$D_LOG")"
 out=$(K_EXISTS=1 run kill demo)
 assert_has "kill finds a cluster session without the flag" "session demo removed" "$out"
 

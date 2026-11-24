@@ -140,6 +140,15 @@ assert "no ::ffff:0:0/96 range (it would match every IPv4 address)" "! grep '^ac
 assert "resolves through Quad9 (the baked dns_nameservers kept)" "grep -qx 'dns_nameservers 9.9.9.9 149.112.112.112' '$D'"
 run_entry public-dns AIDC_PUBLIC_ONLY=1 AIDC_DNS_SERVERS=192.0.2.53
 assert "a DNS override is refused for the public-only proxy" "[ $RC -ne 0 ] && [ ! -e '$SCRATCH/public-dns/used' ]"
+# A Kubernetes session whose user named resolvers (aidc create --dns): taken, with the address
+# check still in place, so an internal name a resolver answers is refused, never reached.
+run_entry public-userdns AIDC_PUBLIC_ONLY=1 AIDC_DNS_SERVERS=192.0.2.53 AIDC_DNS_USER_CHOSEN=1
+D="$SCRATCH/public-userdns/derived.conf"
+assert "the user's resolvers are taken when the session's user chose them" "[ $RC -eq 0 ] && [ '$CONF_USED' = '$D' ]"
+assert "  squid resolves through the pod's resolv.conf (the Quad9 line dropped)" "! grep -q '^dns_nameservers' '$D'"
+assert "  and still refuses private destinations" "grep '^acl aidc_not_public dst' '$D' | grep -qF ' 10.0.0.0/8'"
+run_entry public-userdns-0 AIDC_PUBLIC_ONLY=1 AIDC_DNS_SERVERS=192.0.2.53 AIDC_DNS_USER_CHOSEN=0
+assert "the exception needs exactly 1" "[ $RC -ne 0 ] && [ ! -e '$SCRATCH/public-userdns-0/used' ]"
 mkdir -p "$SCRATCH/public-nodns"
 grep -v '^dns_nameservers ' "$AIDC_ROOT/proxy/squid/squid.conf" > "$SCRATCH/public-nodns/squid.conf"
 env AIDC_SQUID_CONF="$SCRATCH/public-nodns/squid.conf" AIDC_SQUID_DERIVED="$SCRATCH/public-nodns/derived.conf" \

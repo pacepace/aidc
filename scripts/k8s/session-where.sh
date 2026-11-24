@@ -18,5 +18,5 @@ name="${1:-}"
 [ "$name" = "--configured" ] && exit 0
 [ -n "$name" ] || exit 1
 found=$(k8s_kubectl -n "$(k8s_user_ns "$AIDC_K8S_USER")" get deployment,statefulset \
-    -l "aidc/session=${name}" -o name --request-timeout=5s 2>/dev/null) || exit 2
+    -l "aidc/session=${name},app in (dev,proxy,git)" -o name --request-timeout=5s 2>/dev/null) || exit 2
 [ -n "$found" ]

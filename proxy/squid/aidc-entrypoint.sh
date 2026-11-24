@@ -141,14 +141,17 @@ fi
 # NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16); the git proxy's network is IPv4.
 # It resolves through Quad9 only, as squid.conf's dns_nameservers says (the git pod's
 # NetworkPolicy intent): never the host's or Docker's resolvers, which may answer internal
-# names, so AIDC_DNS_SERVERS (which drops that line) is refused here.
+# names, so AIDC_DNS_SERVERS (which drops that line) is refused here. The one exception is a
+# Kubernetes session whose user named their own resolvers (aidc create --dns): its proxy sets
+# AIDC_DNS_USER_CHOSEN=1 with them. The address check above still applies to every answer, so a
+# resolver that answers internal names gets those names refused, never reached.
 if [ "${AIDC_PUBLIC_ONLY:-}" = 1 ]; then
-    if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
+    if [ -n "${AIDC_DNS_SERVERS:-}" ] && [ "${AIDC_DNS_USER_CHOSEN:-}" != 1 ]; then
         echo "[aidc-squid] FATAL: the public-only proxy resolves through Quad9 only; AIDC_DNS_SERVERS is not taken" >&2
         exit 1
     fi
     derive_from_conf
-    if ! grep -qx 'dns_nameservers 9\.9\.9\.9 149\.112\.112\.112' "$DERIVED"; then
+    if [ -z "${AIDC_DNS_SERVERS:-}" ] && ! grep -qx 'dns_nameservers 9\.9\.9\.9 149\.112\.112\.112' "$DERIVED"; then
         echo "[aidc-squid] FATAL: the public-only proxy needs 'dns_nameservers 9.9.9.9 149.112.112.112' in ${CONF}" >&2
         exit 1
     fi

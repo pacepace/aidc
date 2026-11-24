@@ -20,11 +20,20 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/lib.sh"
 # shellcheck source=manifests.sh
 . "$AIDC_SCRIPTS/k8s/manifests.sh"
+# shellcheck source=net.sh
+. "$AIDC_SCRIPTS/k8s/net.sh"
+# shellcheck source=tunnel.sh
+. "$AIDC_SCRIPTS/k8s/tunnel.sh"
+# shellcheck source=expose.sh
+. "$AIDC_SCRIPTS/k8s/expose.sh"
 
 usage() {
     cat <<'USAGE'
 aidc create <name> --backend kubernetes [--profile P] [--cpu N] [--memory Q]
-                                         [--cpu-limit N] [--memory-limit Q]
+                                         [--cpu-limit N] [--memory-limit Q] [--gpu]
+                                         [--port H:C ...] [--expose PORT ... [--login]]
+                                         [--egress-tcp HOST:PORT ...] [--dns IP ...]
+                                         [--network NAMESPACE ...]
 
 Starts a session in the cluster of the `kubernetes:` config, on your disk there
 (`aidc user add` makes it). The session sees your whole disk and starts in the current
@@ -36,11 +45,29 @@ Size: --cpu and --memory are what the session is guaranteed (default: the config
 kubernetes.cpu and .memory, else 2 and 8Gi); --cpu-limit and --memory-limit what it may
 use when the node has room (kubernetes.cpu_limit and .memory_limit, else 16 and 32Gi).
 CPU as 2, 1.5 or 500m; memory as 8Gi or 512Mi. A request above the configured limit
-raises the limit to it, unless a limit is given too.
+raises the limit to it, unless a limit is given too. --gpu gives the session one GPU.
+
+Ports (merged with the config's ports:):
+  --port H:C       a tunnel from localhost:H on this machine to the session's port C (N for
+                   N:N), kept up by a local process (aidc proxy <name> ls|rm|up).
+  --expose PORT    the port as a page on your network at <name>-<user>.<domain> (further
+                   ports: <name>-<port>-<user>.<domain>); the domain, ingress class and
+                   certificate come from kubernetes.ingress in your config.
+  --login          put a generated username and password (printed once) in front of the
+                   exposed pages. Without it they have no login.
+Ways out besides squid:
+  --egress-tcp HOST:PORT  a relay to one TCP destination (merged with egress_tcp:); the
+                   session connects to HOST:PORT by its real name. Live: aidc egress.
+  --dns IP         squid resolves through these servers instead of Quad9 (at most 3;
+                   overrides dns_servers:).
+  --network NS     the session may reach every pod of namespace NS on any port, and its
+                   Services by name (<svc>.NS); merged with networks:. This widens the
+                   sandbox: that traffic does not pass squid. Live: aidc network.
 USAGE
 }
 
-NAME="" PROFILE_OVERRIDE="" CPU="" MEMORY="" CPU_LIMIT="" MEMORY_LIMIT=""
+NAME="" PROFILE_OVERRIDE="" CPU="" MEMORY="" CPU_LIMIT="" MEMORY_LIMIT="" GPU=0 LOGIN=0
+PORT_FLAGS=() EXPOSE_FLAGS=() EGRESS_TCP_FLAGS=() DNS_FLAGS=() NETWORK_FLAGS=()
 # need_value <flag> <value>: a flag's value, not missing and not the next flag.
 need_value() { case "${2:-}" in ""|-*) die "$1 needs a value" ;; esac; }
 while [ $# -gt 0 ]; do
@@ -56,6 +83,21 @@ while [ $# -gt 0 ]; do
         --memory-limit=*) MEMORY_LIMIT="${1#*=}"; shift ;;
         --repo|--repo=*)
             die "--repo is not used on the kubernetes backend: the session sees your whole disk. Add the repo with \`aidc repo add <owner/name>\`; the session makes its own worktree and branch in it (git worktree add)" ;;
+        --port|--expose|--egress-tcp|--dns|--network)
+            need_value "$1" "${2:-}"
+            case "$1" in
+                --port) PORT_FLAGS+=("$2") ;; --expose) EXPOSE_FLAGS+=("$2") ;;
+                --egress-tcp) EGRESS_TCP_FLAGS+=("$2") ;; --dns) DNS_FLAGS+=("$2") ;;
+                --network) NETWORK_FLAGS+=("$2") ;;
+            esac
+            shift 2 ;;
+        --port=*) PORT_FLAGS+=("${1#*=}"); shift ;;
+        --expose=*) EXPOSE_FLAGS+=("${1#*=}"); shift ;;
+        --egress-tcp=*) EGRESS_TCP_FLAGS+=("${1#*=}"); shift ;;
+        --dns=*) DNS_FLAGS+=("${1#*=}"); shift ;;
+        --network=*) NETWORK_FLAGS+=("${1#*=}"); shift ;;
+        --gpu) GPU=1; shift ;;
+        --login) LOGIN=1; shift ;;
         --profile) PROFILE_OVERRIDE="${2:-}"; shift 2 ;;
         --profile=*) PROFILE_OVERRIDE="${1#--profile=}"; shift ;;
         -*) die "not supported on the kubernetes backend yet: $1" ;;
@@ -94,6 +136,57 @@ size_flag --cpu "$CPU" AIDC_K8S_CPU_REQUEST AIDC_K8S_CPU_LIMIT "$CPU_LIMIT" k8s_
 size_flag --memory "$MEMORY" AIDC_K8S_MEMORY_REQUEST AIDC_K8S_MEMORY_LIMIT "$MEMORY_LIMIT" k8s_memory_bytes
 k8s_check_size || exit 1
 
+# Everything below is checked before anything is made: a typo costs a message, not a half-made
+# session.
+# Ports: the flags, then the config's ports: (first wins on a host port), as on Docker.
+AIDC_K8S_PORTS=""
+_seen=" "
+for _spec in ${PORT_FLAGS[@]+"${PORT_FLAGS[@]}"} ${AIDC_PORTS:-}; do
+    _hc=$(k8s_port_spec "$_spec") || die "invalid --port/ports: entry: ${_spec}"
+    case "$_seen" in *" ${_hc%% *} "*) continue ;; esac
+    _seen="${_seen}${_hc%% *} "
+    AIDC_K8S_PORTS="${AIDC_K8S_PORTS:+${AIDC_K8S_PORTS},}${_hc% *}:${_hc#* }"
+done
+# Pages (K8S-15): ports, deduped in order; the config must name the domain and the ingress.
+EXPOSE_PORTS=""
+for _p in ${EXPOSE_FLAGS[@]+"${EXPOSE_FLAGS[@]}"}; do
+    k8s_port_ok "$_p" || die "invalid --expose port: ${_p} (1-65535)"
+    case " ${EXPOSE_PORTS} " in *" ${_p} "*) ;; *) EXPOSE_PORTS="${EXPOSE_PORTS:+${EXPOSE_PORTS} }${_p}" ;; esac
+done
+if [ "$LOGIN" = 1 ] && [ -z "$EXPOSE_PORTS" ]; then die "--login puts a login in front of an exposed page: give --expose <port> too"; fi
+if [ -n "$EXPOSE_PORTS" ]; then
+    # shellcheck disable=SC2086  # one port per word
+    k8s_expose_check "$NAME" "$LOGIN" $EXPOSE_PORTS || exit 2
+fi
+# DNS: the flags override the config's dns_servers:, as on Docker. A Kubernetes pod takes at most
+# three nameservers, and each needs a /32 egress rule, so IPv4 addresses only.
+AIDC_K8S_DNS_SERVERS=""
+if [ "${#DNS_FLAGS[@]}" -gt 0 ]; then _dns="${DNS_FLAGS[*]}"; else _dns=$(printf '%s' "${AIDC_DNS_SERVERS:-}" | tr '\n' ' '); fi
+for _d in $_dns; do
+    aidc_egress_is_ipv4 "$_d" || die "invalid DNS server: ${_d} (an IPv4 address on the kubernetes backend)"
+    case " ${AIDC_K8S_DNS_SERVERS} " in *" ${_d} "*) ;; *) AIDC_K8S_DNS_SERVERS="${AIDC_K8S_DNS_SERVERS:+${AIDC_K8S_DNS_SERVERS} }${_d}" ;; esac
+done
+[ "$(printf '%s' "$AIDC_K8S_DNS_SERVERS" | wc -w)" -le 3 ] || die "at most 3 DNS servers on the kubernetes backend (a pod takes three): ${AIDC_K8S_DNS_SERVERS}"
+# Networks (NET-13's cluster form): namespaces, flags then networks:.
+NETWORKS=""
+for _n in ${NETWORK_FLAGS[@]+"${NETWORK_FLAGS[@]}"} ${AIDC_NETWORKS:-}; do
+    if _why=$(k8s_network_refusal "$_n"); then die "refusing --network ${_n}: ${_why}"; fi
+    case " ${NETWORKS} " in *" ${_n} "*) ;; *) NETWORKS="${NETWORKS:+${NETWORKS} }${_n}" ;; esac
+done
+# TCP egress (NET-15): flags then egress_tcp:, resolved here on this machine, as on Docker.
+EGRESS_LINES=""
+for _spec in ${EGRESS_TCP_FLAGS[@]+"${EGRESS_TCP_FLAGS[@]}"} ${AIDC_EGRESS_TCP:-}; do
+    aidc_egress_parse "$_spec" || die "invalid --egress-tcp/egress_tcp entry: ${_spec}"
+    _ip=$(aidc_egress_resolve_explained "$AIDC_EGRESS_HOST") || die "egress: ${AIDC_EGRESS_HOST} has no address to relay to"
+    if _why=$(aidc_egress_refusal "$_ip" "$AIDC_EGRESS_PORT" ""); then die "refusing ${_spec}: ${_why}"; fi
+    EGRESS_LINES="${EGRESS_LINES}${AIDC_EGRESS_HOST} ${AIDC_EGRESS_PORT} ${_ip}
+"
+done
+[ -z "$EGRESS_LINES" ] || EGRESS_LINES=$(printf '%s' "$EGRESS_LINES" | aidc_egress_group)
+AIDC_K8S_GPU="$GPU"
+export AIDC_K8S_PORTS AIDC_K8S_DNS_SERVERS AIDC_K8S_GPU
+unset _seen _spec _hc _p _dns _d _n _why _ip
+
 REPO_PATH=$(k8s_cluster_repo_path "$PWD") \
     || die "run aidc create from under your home directory (${HOME}) or /home/${AIDC_K8S_USER}: the session starts at the same place on your disk (got ${PWD})"
 case "$REPO_PATH" in *[\"\\]*|*$'\n'*) die "the repo path may not contain quotes, backslashes or newlines" ;; esac
@@ -127,6 +220,20 @@ if [ -n "$existing" ]; then
     die "session '${NAME}' already exists (aidc kill ${NAME} --backend kubernetes)"
 fi
 
+# A session of this name killed moments ago may still have its claims, being deleted: applying
+# the new session's claims then changes nothing, and its pods wait for claims that go away.
+leftover=$(k8s_read "session '${NAME}''s claims" pvc "${NAME}-home" "${NAME}-state" -o name)
+[ -z "$leftover" ] \
+    || die "the claims of an earlier session '${NAME}' are still there (being removed after aidc kill, or left by one that stopped half way): wait a minute, or aidc clean-env ${NAME}"
+# A page name another Ingress already serves would be shared with it.
+first=1
+for _p in $EXPOSE_PORTS; do
+    _h=$(k8s_expose_host "$NAME" "$_p" "$first"); first=0
+    if taken=$(k8s_expose_taken "$ns" "$_h"); then
+        die "the page name ${_h} is already served by ingress ${taken}: pick another session name"
+    fi
+done
+
 sel=$(k8s_node_selector) || exit 1
 # The session's own token (gh stand-in requests carry it; aidc git mode keys on it), made once
 # here: the session is rendered twice below and both must carry the same one.
@@ -151,6 +258,8 @@ info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, 
 info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"
 info "  profile=${PROFILE} taint_response=${AIDC_TAINT_RESPONSE} claude_mode=${AIDC_CLAUDE_MODE}"
 info "  size: ${AIDC_K8S_CPU_REQUEST} CPU / ${AIDC_K8S_MEMORY_REQUEST} guaranteed, up to ${AIDC_K8S_CPU_LIMIT} / ${AIDC_K8S_MEMORY_LIMIT}"
+[ "$GPU" = 1 ] && info "  gpu: one (nvidia.com/gpu)"
+[ -z "$AIDC_K8S_DNS_SERVERS" ] || info "  dns: ${AIDC_K8S_DNS_SERVERS} (squid resolves through these instead of Quad9)"
 
 # The audit record's first files, as cmd-create.sh writes them on Docker; the proxy pod copies
 # them onto the audit claim before anything else runs.
@@ -178,6 +287,24 @@ done
 info "waiting for the proxy (squid, blocklist, policy, audit)"
 k8s_kubectl -n "$ns" rollout status "deployment/${NAME}-proxy" --timeout=300s >&2 \
     || die "the proxy did not become ready; see: kubectl -n ${ns} describe pod -l aidc/session=${NAME},app=proxy"
+# The ways out besides squid, before the dev pod starts: relays (NET-15), namespaces
+# (--network), and their names in the session's names responder.
+if [ -n "$EGRESS_LINES" ]; then
+    while read -r _host _ip _ports; do
+        [ -n "$_host" ] || continue
+        # shellcheck disable=SC2086  # one port per word
+        k8s_render_relay "$NAME" "$_host" "$_ip" declared "$AUDIT_CLAIM" "$sel" $_ports | k8s_kubectl apply -f - >&2
+        info "egress_tcp: $(k8s_relay_reach_as "$NAME" "$_host") port(s) ${_ports} -> ${_ip} (each connection logged to the audit trail)"
+    done <<<"$EGRESS_LINES"
+fi
+for _n in $NETWORKS; do
+    k8s_render_network "$NAME" "$_n" | k8s_kubectl apply -f - >&2
+    info "network: ${_n}: every pod there, any port, and its Services by name (<svc>.${_n})"
+    info "  NOT proxied by squid and NOT visible to taint detection: a deliberate widening"
+done
+if [ -n "$EGRESS_LINES" ] || [ -n "$NETWORKS" ]; then
+    k8s_names_sync "$ns" "$NAME" || die "the session's names could not be written; aidc kill ${NAME} and create it again"
+fi
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" "$proxy_ip" | k8s_kubectl apply -f - >&2
 info "waiting for the dev pod to be ready"
 pod="${NAME}-dev-0"
@@ -186,6 +313,36 @@ pod="${NAME}-dev-0"
 k8s_wait_dev_ready "$ns" "$NAME" "" "${AIDC_K8S_READY_WAIT:-600}" \
     || die "the dev pod did not report ready; its log: kubectl -n ${ns} logs ${pod} -c dev"
 info "session ${NAME} is ready"
+# Pages on the network (K8S-15): the login, when asked for, is made here and printed once.
+if [ -n "$EXPOSE_PORTS" ]; then
+    htpasswd="" login_user="" login_pw=""
+    if [ "$LOGIN" = 1 ]; then
+        login_user="u$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+        login_pw=$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')
+        htpasswd=$(k8s_htpasswd_line "$login_user" "$login_pw") || die "cannot hash the login's password"
+    fi
+    # shellcheck disable=SC2086  # one port per word
+    k8s_render_expose "$NAME" "$htpasswd" $EXPOSE_PORTS | k8s_kubectl apply -f - >&2
+    first=1
+    for _p in $EXPOSE_PORTS; do
+        info "page: https://$(k8s_expose_host "$NAME" "$_p" "$first")/ -> ${NAME}:${_p}"; first=0
+    done
+    if [ "$LOGIN" = 1 ]; then
+        info "login for these pages (shown once, kept only as a hash): user ${login_user}  password ${login_pw}"
+    else
+        info "  no login: anyone on your network can open these pages"
+    fi
+fi
+# Tunnels (K8S-14) to this machine.
+if [ -n "$AIDC_K8S_PORTS" ]; then
+    for _spec in $(printf '%s' "$AIDC_K8S_PORTS" | tr ',' ' '); do
+        if k8s_tunnel_start "$ns" "$NAME" "${_spec%%:*}" "${_spec##*:}"; then
+            info "tunnel: localhost:${_spec%%:*} -> ${NAME}:${_spec##*:} (aidc proxy ${NAME} ls)"
+        else
+            info "WARNING: the tunnel on localhost:${_spec%%:*} did not start; aidc proxy ${NAME} add ${_spec}"
+        fi
+    done
+fi
 # The git container keys this session's git mode on its token (the user's mode until
 # aidc git mode gives it its own; a session made again under an old name starts afresh).
 if gpod=$(k8s_git_pod "$ns" 2>/dev/null) \

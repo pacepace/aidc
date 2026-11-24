@@ -75,6 +75,20 @@ into breaking a rule. So: GitHub branch protection where available; a PreToolUse
 read-only managed settings file; and wrapped `git` and `gh` binaries that refuse `--force`,
 `--force-with-lease`, `+refspec`, squash/rebase merges and attribution trailers.
 
+As built so far: `aidc git setup` runs it as a one-replica Deployment `git` in the user's
+namespace, from the `aidc/gitctl` image (git, a pinned and checksum-checked `gh`, Claude Code,
+openssh, tmux), built in the cluster with the others. It runs as uid 2000 (its own group 2000,
+so the files that lock a repo are not group-writable by sessions; supplementary group 1000, the
+sessions'), unprivileged with no capabilities, no service-account token, no service links. It
+mounts the user's disk at `/home/<user>` and its own home claim `git-home` (on the retained
+`storage_class`: it holds the user's secrets) at `/home/git`, seeded once from the image as a
+session's home is. Its NetworkPolicy `git-egress` allows no ingress and egress to Quad9 DNS and
+public addresses only, the proxy's rule, and it resolves through Quad9 only. The user adds
+their own GitHub login and SSH key through `aidc git attach` (its tmux). Measured 2026-11-24 on
+the reference cluster: GitHub reachable over HTTPS and SSH; the API service, every node's API
+server, kubelet and ssh, the registry pod, cluster DNS and a listening pod in a namespace with
+no policies all refused; the user's disk visible.
+
 **Cleanup is the git container's job** (K8S-08). Merged branches and their worktrees are deleted.
 Anything else left behind (unmerged, unpushed, orphaned worktrees) is flagged to the user at
 once, not left to rot.

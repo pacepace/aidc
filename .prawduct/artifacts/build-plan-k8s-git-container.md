@@ -60,6 +60,14 @@ user's running the command is the approval in "ask" mode); the git container's o
 driving git by the rules, and orchestrator approval over MCP, come after (chunk 05). GitHub only.
 
 **Decisions made mid-build:** (append here)
+- (01) git user's primary group is its own (2000), 1000 supplementary: with `core.sharedRepository=group`, files the git container writes to lock a repo would otherwise be group-writable by sessions.
+- (01) `git-home` is 1Gi on `storage_class`; a new one is seeded from the image's `/home/git` by a root init step holding only CHOWN, FOWNER, DAC_OVERRIDE (a new claim is root-owned), as session homes are seeded.
+- (01) The git pod runs under the default runtime, not Sysbox: it runs no Docker, and its uid must be 2000 on the shared disk as in the measured lock.
+- (01) `aidc rebuild` (Docker) skips `aidc/gitctl`: the image runs only in a cluster, so Docker users are not charged its build.
+- (01) `gh` 2.103.3 (published 2026-10-26), sha256 for amd64 and arm64 from the release's checksums file, the amd64 one recomputed from the download.
+- (01) `aidc git status` reports a stored `gh` login that `gh auth status` cannot confirm as unknown, not "not logged in" (GitHub may only have been unreachable).
+- (01) `aidc git setup` refuses `kubernetes.user: git`: the user's disk would be mounted over the git user's home.
+- (01) Live "cannot reach a session" checked against a listening stand-in pod in a policy-free scratch namespace (no session was running), a stricter test of the egress policy alone; the stand-in was reachable from its own namespace.
 
 **Level:** Medium. The repo lock is measured (design-12). Not yet: `gh` and SSH inside a pod
 behind NetworkPolicy, Claude Code with a managed read-only hook in the git container.

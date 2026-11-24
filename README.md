@@ -645,6 +645,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 | `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
 | `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
+| `aidc git {setup\|attach\|status}` | Kubernetes backend: your git container, which holds your SSH key and GitHub login (see "Kubernetes backend"). |
 
 ### Profiles
 
@@ -673,6 +674,15 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
   privileged pods.
 - `aidc user add <name>`: the user's namespace and disk.
+- `aidc git setup | attach | status`: the user's git container, the one thing in the cluster
+  that will push and open PRs (sessions cannot). `setup` starts it in your namespace (safe to
+  run again); `attach` opens its terminal, where you run `gh auth login` and add your SSH key
+  yourself, so the admin never handles them; `status` says whether it runs, is logged in to
+  GitHub and has a key ("unknown" when the cluster or the container does not answer). It runs
+  as its own user (uid 2000, in the sessions' group), unprivileged, with no API token; it
+  reaches public addresses and Quad9 DNS only, and nothing may connect to it. Its home, holding
+  your login and key, is a volume on `storage_class`, kept when the container is replaced.
+  Pushing through it comes next.
 - `aidc create <name> --backend kubernetes [--repo PATH] [--profile P]`: a session in the
   cluster, in your namespace, on your disk. PATH is given as on your own machine; a path under
   your home directory is the same path under `/home/<user>` on the disk, so a repo's Claude

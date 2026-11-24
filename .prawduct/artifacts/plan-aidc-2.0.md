@@ -334,6 +334,8 @@ W-K7 ops (any time, owner) ; W-R release last
 
 Q-M1 answered by the owner (owner-rulings 2026-11-24): both, the in-cluster Service always and VPN/LAN exposure on request, behind the bearer token.
 
+Q-K7 answered (owner-rulings 2026-11-24): GitHub releases, latest not pinned, kept current like Claude Code; amend K8S-25 in W-K1-05. Still needed: the repo's owner/name.
+
 Q-K5 answered (owner-rulings 2026-11-24): the developer chooses per expose, login or none; the domain comes from the user's config.
 
-Asked of the owner one at a time, each only when its wave is about to be built: Q-K7 (testament's release source), Q-K1 (account add flow), design-13 Q1-Q5.
+Asked of the owner one at a time, each only when its wave is about to be built: Q-K1 (account add flow), design-13 Q1-Q5.

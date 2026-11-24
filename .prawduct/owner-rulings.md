@@ -414,3 +414,7 @@ The orchestrator runs somewhere inside the owner's VPN: maybe in the cluster, ma
 ## 2026-11-24 — The developer decides whether an exposed page has a login (Q-K5)
 
 Exposing a session port on the LAN is per use: sometimes with no password (testing), sometimes with one. The developer chooses at expose time (`--expose <port>` with or without a login option); aidc does not impose one. The wildcard domain the pages live under comes from the user's config, never the repo. Ask the owner questions only when the wave that needs the answer is about to be built.
+
+## 2026-11-24 — testament tracks its latest release, like Claude Code (Q-K7)
+
+testament is released on GitHub and moves fast. Sessions get its latest release, not a pinned version, and it is kept current the way Claude Code is: a new image or a running session's upgrade picks up the newest release. K8S-25's "at a pinned version" is amended to "at its latest release, kept current"; downloads are still verified against the release's own checksums where it publishes them.

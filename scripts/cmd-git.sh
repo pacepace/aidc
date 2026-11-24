@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# desc: Your git container on the Kubernetes backend (holds your SSH key and GitHub login).
+# desc: Your git container on the Kubernetes backend (holds your GitHub login).
 #
 # Usage: aidc git <setup|attach|status>
 #
@@ -15,11 +15,10 @@ usage() {
 aidc git <subcommand>
 
   setup    Start your git container in your namespace of the `kubernetes:` config (after
-           `aidc user add`). It is the only thing that pushes, and it keeps your SSH key and
-           GitHub login on its own volume. Safe to run again.
-  attach   Open its terminal (tmux). Log in to GitHub there with `gh auth login` and add your
-           SSH key (ssh-keygen, or copy one into ~/.ssh): you add your own secrets, the admin
-           never handles them. Detach with Ctrl-b d.
+           `aidc user add`). It is the only thing that pushes, and it keeps your GitHub login
+           on its own volume, where its agent cannot read it. Safe to run again.
+  attach   Open its terminal (tmux). Log in to GitHub there with `gh auth login` (HTTPS):
+           you add your own login, the admin never handles it. Detach with Ctrl-b d.
   status   Whether it is running, logged in to GitHub, and has an SSH key. Says "unknown"
            when the cluster or the container cannot be asked.
 USAGE

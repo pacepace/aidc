@@ -457,7 +457,7 @@ spec:
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
           command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/vscode/. /seed/; chown 1000:1000 /seed && chmod 0755 /seed']
-          volumeMounts: [{name: home, mountPath: /seed}]
+          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}]
         # The repo folder, made as the session user when it is not on the disk yet.
         - name: repo-dir
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
@@ -510,6 +510,12 @@ EOF
 #
 # It runs as the git user (uid 2000; its own group 2000, plus the session group 1000 that the
 # shared parts of a repo belong to), unprivileged, with no API token and no service links.
+# The agent and the user's terminal run as that user, which holds no secret: the real git runs
+# as gitrun and the real gh as gitcred, reached only through sudo rules naming the wrappers
+# that apply the hard rules (gitctl/sudoers). sudo is a setuid program, so this container
+# alone may escalate, holding only the capabilities a user switch needs (SETUID, SETGID, and
+# AUDIT_WRITE for sudo's audit record); it can become those two users and nothing else. The
+# GitHub login lives on its own claim, git-cred, readable by gitcred only.
 # Egress is Quad9 and public addresses only, as the session proxy's, so a key held here cannot
 # be walked to the API server, a node, a session or the LAN; nothing may connect to it (the
 # namespace's default-deny covers ingress, and the policy names it again for this pod). Like
@@ -545,6 +551,14 @@ spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: git-cred, namespace: ${ns}, labels: {${labels}, app: git}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: git, namespace: ${ns}, labels: {${labels}, app: git}}
@@ -573,13 +587,15 @@ spec:
         - name: seed-home
           image: ${img}
           imagePullPolicy: Always
-          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed']
+          # The login's home is gitcred's: 0711, so git can read the identity file a login
+          # writes there but cannot list it; gh's own files in it are 0600.
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred']
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
-          volumeMounts: [{name: home, mountPath: /seed}]
+          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}]
       containers:
         - name: git
           image: ${img}
@@ -593,15 +609,17 @@ spec:
             runAsGroup: 2000
             runAsNonRoot: true
             privileged: false
-            allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL]}
+            allowPrivilegeEscalation: true
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, AUDIT_WRITE]}
           readinessProbe: {exec: {command: [tmux, has-session, -t, main]}, periodSeconds: 10}
           resources: {requests: {cpu: 100m, memory: 512Mi}}
           volumeMounts:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/git}
+            - {name: cred, mountPath: /var/lib/gitctl/gitcred}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: git-home}}
+        - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
 EOF2
 }

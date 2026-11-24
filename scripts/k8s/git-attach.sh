@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# aidc git attach: the git container's tmux, where the user logs in to GitHub and adds their
-# SSH key themselves. The container runs as the git user, so `kubectl exec` is already that
+# aidc git attach: the git container's tmux, where the user logs in to GitHub themselves
+# (`gh auth login`, which the wrapped gh runs as gitcred, the login's only reader). The container runs as the git user, so `kubectl exec` is already that
 # user and reaches its tmux socket.
 
 set -euo pipefail

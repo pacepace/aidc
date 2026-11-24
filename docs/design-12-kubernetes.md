@@ -89,6 +89,31 @@ the reference cluster: GitHub reachable over HTTPS and SSH; the API service, eve
 server, kubelet and ssh, the registry pod, cluster DNS and a listening pod in a namespace with
 no policies all refused; the user's disk visible.
 
+The hard rules as built: the agent and the user's terminal run as `git` (uid 2000), which holds
+no secret. `git` and `gh` on its PATH are wrappers (`gitctl/git-wrapper.sh`, `gh-wrapper.sh`,
+sharing `gitctl-rules.sh`) that switch through sudo, which drops the caller's environment, to
+`gitrun` (2002, runs the real git, no secret) or `gitcred` (2001, runs the real gh and git's
+credential helper, alone able to read the GitHub login on its own claim, `git-cred`). There
+they refuse: force pushes in every spelling (`-f`, `--force-with-lease`, `+refspec`, `--mirror`,
+forced or mirror remotes in config), deleting `main`, `master` or `develop`; AI attribution in
+commit messages (checked as git's editor on every commit), in the commits a push carries, and
+in PR, issue and comment titles and bodies; `gh pr merge` without `--merge`, and squash or
+rebase merges or loosened branch protection through `gh api`; and anything that would print the
+token or run code as either user (`gh auth token`, `git credential`, extensions, aliases, config
+keys that run a command, editors, pagers, `--upload-pack`, `ext::`). Commands, config keys and gh
+commands are allowlists. git always runs with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`,
+and with an exec path in which every git builtin is the wrapper, so a git that git starts is
+checked too. Claude Code's PreToolUse hook (`/etc/claude-code/managed-settings.json`, root's,
+with `allowManagedHooksOnly`) applies the same rules to Claude's shell commands and also refuses
+the real binaries by path, a changed PATH, sudo, and edits to the wrappers, the settings or the
+token's home. The real binaries called by path run as `git`, without the login, so they cannot
+write to GitHub. sudo is setuid, so this one container may escalate, holding only SETUID, SETGID
+and AUDIT_WRITE. Measured in a Docker run of the image (the pod's capabilities, a dummy token):
+the agent cannot read the token by `cat`, `grep`, `git diff --no-index`, `gh api --input`,
+`git credential fill` or `gh auth token`; `sudo -l` lists only the two wrappers; the helper gives
+gitrun the token for `https://github.com` only. The bypasses that remain are listed in the
+build plan (`build-plan-k8s-git-container.md`, Chunk 02 decisions).
+
 **Cleanup is the git container's job** (K8S-08). Merged branches and their worktrees are deleted.
 Anything else left behind (unmerged, unpushed, orphaned worktrees) is flagged to the user at
 once, not left to rot.

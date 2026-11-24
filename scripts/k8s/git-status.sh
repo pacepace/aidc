@@ -35,12 +35,16 @@ ssh="unknown (the container cannot be asked)"
 if [ "$rc" = 0 ]; then
     # One exec for both answers. Only a line the script printed counts: an exec that fails
     # before running it leaves both unknown. `gh auth status` asks GitHub; when it fails but a
-    # login is stored, GitHub may only have been unreachable, so that is unknown too.
+    # login is stored, GitHub may only have been unreachable, so that is unknown too. Its
+    # words tell the two apart: `gh auth token` would too, but the git container refuses it
+    # (it prints the token). Any other failure (the wrapper or sudo) answers nothing.
     # shellcheck disable=SC2016  # expanded by the container's shell, not this one
     out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- sh -c '
-        if gh auth status >/dev/null 2>&1; then echo "github=yes"
-        elif gh auth token >/dev/null 2>&1; then echo "github=stored"
-        else echo "github=no"; fi
+        if st=$(gh auth status 2>&1); then echo "github=yes"
+        else case "$st" in
+            *"not logged in"*) echo "github=no" ;;
+            *"github.com"*) echo "github=stored" ;;
+        esac; fi
         keys=$(ls "$HOME"/.ssh/id_* 2>/dev/null | grep -v "\.pub$" | xargs -r -n1 basename | paste -sd" " -)
         echo "ssh=${keys:-none}"' </dev/null 2>/dev/null || true)
     case "$(printf '%s\n' "$out" | sed -n 's/^github=//p')" in

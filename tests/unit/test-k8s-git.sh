@@ -102,8 +102,8 @@ out=$(run git setup)
 assert_has "setup reports the container ready" "the git container is ready" "$out"
 assert_has "and exits 0" "exit=0" "$out"
 assert_has "and points the user at attach to add their own secrets" "aidc git attach" "$out"
-assert_eq "it applies the egress policy, the home claim and the Deployment, nothing else" \
-    "NetworkPolicy/git-egress PersistentVolumeClaim/git-home Deployment/git" \
+assert_eq "it applies the egress policy, the home and login claims and the Deployment, nothing else" \
+    "NetworkPolicy/git-egress PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred Deployment/git" \
     "$(yq -N e '[.kind, .metadata.name] | join("/")' "$K_APPLIED" | paste -sd' ' -)"
 assert_eq "everything goes in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_has "it waits for the Deployment to be ready" "rollout status deployment/git" "$(cat "$K_LOG")"
@@ -113,8 +113,10 @@ assert_eq "one replica, replaced not rolled (two would share one home and race o
     "$(dep '[.spec.replicas, .spec.strategy.type]')"
 assert_eq "no API token, no service links, Quad9 DNS only" '[false,false,"None",["9.9.9.9","149.112.112.112"]]' \
     "$(pod '[.automountServiceAccountToken, .enableServiceLinks, .dnsPolicy, .dnsConfig.nameservers]')"
-assert_eq "the git container runs as uid 2000, its own group, unprivileged, no capabilities" \
-    '{"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"privileged":false,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}' \
+# sudo (setuid) is how the wrapped git and gh reach the users that run the real ones; the
+# capabilities are exactly a user switch's, so it can become those users and nothing more.
+assert_eq "the git container runs as uid 2000, its own group, unprivileged, with only a user switch's capabilities" \
+    '{"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"privileged":false,"allowPrivilegeEscalation":true,"capabilities":{"drop":["ALL"],"add":["SETUID","SETGID","AUDIT_WRITE"]}}' \
     "$(pod '.containers[] | select(.name == "git") | .securityContext')"
 assert_eq "the pod adds the session group (1000) and the runtime's seccomp profile" \
     '{"supplementalGroups":[1000],"seccompProfile":{"type":"RuntimeDefault"}}' "$(pod '.securityContext')"
@@ -126,6 +128,9 @@ assert_eq "the root init step keeps only the capabilities a copy and chown need"
 assert_has "a new home is seeded from the image only once, owned by the git user, private" \
     "[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed" \
     "$(pod '.initContainers[] | select(.name == "seed-home") | .command')"
+assert_has "the login's home is gitcred's (2001), not listable by the git user" \
+    "chown 2001:2001 /cred && chmod 0711 /cred" \
+    "$(pod '.initContainers[] | select(.name == "seed-home") | .command')"
 assert_eq "it lands where sessions land, with their tolerations" \
     '[{"kubernetes.io/hostname":"n1"},[{"key":"role","operator":"Equal","value":"dev","effect":"NoSchedule"}]]' \
     "$(pod '[.nodeSelector, .tolerations]')"
@@ -134,14 +139,14 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
     "$(pod '.containers[] | select(.name == "git") | [.image, .imagePullPolicy]')"
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
-assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"}]' \
+assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home" \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
-assert_eq "the volumes are the user's disk claim and the git-home claim" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}}]' \
+assert_eq "the volumes are the user's disk claim, the git-home claim and the git-cred claim" \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}}]' \
     "$(pod '.volumes')"
-assert_eq "the home claim (the user's secrets) is on the user's retained class, not the session one" \
-    '"shared-disk"' "$(q 'select(.kind == "PersistentVolumeClaim") | .spec.storageClassName')"
+assert_eq "the home and login claims (the user's secrets) are on the user's retained class, not the session one" \
+    '"shared-disk"' "$(q 'select(.kind == "PersistentVolumeClaim") | .spec.storageClassName' | sort -u)"
 assert_eq "it is ready only when its tmux session is up" '["tmux","has-session","-t","main"]' \
     "$(pod '.containers[] | select(.name == "git") | .readinessProbe.exec.command')"
 assert_eq "the egress policy, exactly: no ingress; Quad9 DNS; public addresses only" \

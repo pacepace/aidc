@@ -96,5 +96,40 @@ lives only in the kubeconfig); no private names in the repo.
   another user's namespace and cluster-wide writes; Pod Security admits sessions and the git
   pod; then `aidc user remove`. README, design-12, K8S-20, change record.
 
+## Status
+
+All four chunks built and checked (unit suites green; live on the reference cluster with a
+test user, removed afterwards). The Critic has not run (the main agent runs it).
+
 ## Decisions made mid-build
-(append here)
+- (01) Pod Security `baseline` is the narrowest standard level that admits what aidc runs in a
+  user namespace; `restricted` refuses the root init steps, Sysbox session pods and the git
+  container (which allows privilege escalation for its user switch). No exemption needed.
+  Checked live (server dry runs and real pods), recorded in design-12 "Users and credentials".
+- (01) Volumes: RBAC cannot scope a cluster-scoped volume to a namespace, so the user's
+  ClusterRole grants `patch` and a ValidatingAdmissionPolicy narrows it (own namespace's
+  claim, only to Delete, claim unchanged; DELETE refused). Chosen over "degrade" because
+  `aidc audit trim` must leave no data behind for a user, not only for an admin. Without
+  ValidatingAdmissionPolicy (before 1.30) no patch is granted and trim says an admin must.
+- (01) `events` get/list/watch granted with no aidc call: aidc's errors point users at
+  `kubectl describe`. `pods/exec` gets both `create` and `get` (the websocket GET is authorized
+  either way depending on the API server version).
+- (01) The MCP's Role gains `deployments` (Q-M2 listed StatefulSets; the proxy is a Deployment)
+  and pods get/list/watch/delete (restart), but no pod create, no repo list update, no tokens,
+  no volume access. A test fails if it exceeds the user's.
+- (02) A user may renew their own kubeconfig (`create serviceaccounts/token`, resourceNames
+  `aidc-user`); `--revoke` (admin) replaces the ServiceAccount. The kubeconfig path check
+  allows a path the enclosing repo ignores (the unit tests' scratch lives in this repo,
+  ignored); anything else in a work tree is refused.
+- (02) `aidc user remove` deletes the shared ClusterRoles and policy only when no namespace
+  labelled `aidc/role=user` is left (a user namespace made before this change counts: its user
+  will need them).
+- (03) `aidc k8s check` sends its SelfSubjectRulesReview with `--validate=false`: kubectl's
+  client-side validation lists CRDs first, which a user may not (found live).
+- (03) `aidc k8s check` with user credentials: the registry in the system namespace and nodes
+  (when not readable) are notes, not missing.
+- (04) Live: the shared ClusterRoles and admission policy were made by the test (none existed
+  before) and stayed after `aidc user remove k5probe` because the owner's namespace is a user
+  namespace; they were deleted by hand to leave the cluster as it was. The owner's namespace
+  has no credentials or Pod Security labels until the owner runs `aidc user add <name>` again
+  (a server dry run showed its running git pod passes baseline).

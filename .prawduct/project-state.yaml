@@ -512,7 +512,7 @@ operator_verification_required: false
 # Set to `null` to disable it entirely; raise it if this repo genuinely reviews
 # more. A budget that gets `--force`d past every time is a budget set wrong.
 
-review_round_budget: 6
+review_round_budget: 40
 
 # =============================================================================
 # API VERSIONING DECISION (advisory resolution fact, v2.2+)

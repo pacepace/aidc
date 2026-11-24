@@ -236,7 +236,18 @@ Accounts run out of usage quota during work, so a running session must switch ac
 losing its conversation (K8S-17). Whether it switches on its own or waits for the user is a
 setting, and each user sets the order accounts are used in.
 
-Signals: the statusline's weekly `rate_limits.seven_day` (proactive, e.g. 90 %), and the
+The order is a cycle: after the last account, switching goes back to the first. Each account
+has its own threshold, the weekly usage at which aidc switches away from it (ruled 2026-11-24),
+for example:
+
+```yaml
+claude_accounts:            # in the order they are used
+  - {name: work,     switch_at: 90}
+  - {name: personal, switch_at: 70}
+```
+
+Signals: the statusline's weekly `rate_limits.seven_day` (proactive, against that account's
+threshold), and the
 `StopFailure` hook with `rate_limit` (reactive). There is no 5-hour window any more (owner,
 2026-11-24).
 

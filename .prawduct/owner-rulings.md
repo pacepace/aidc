@@ -274,3 +274,9 @@ and docs call that role "the orchestrator", the name aidc already used for it. N
 "coordinator": Claude Code already uses that word for a message from another Claude session
 (transcript SESSION_MESSAGE_KINDS), and one word for two roles would let an orchestrator read
 such a message as its own prompt. Owner: "yes" (2026-11-24) to `orchestrator:`.
+
+## 2026-11-24: The account order wraps around, and each account has its own switch threshold
+
+The user's ordered list of Claude accounts is a cycle: after the last account, switching goes
+back to the first. Each account has its own setting for the weekly usage at which aidc switches
+away from it (for example one account switched at 90 %, another at 70 %).

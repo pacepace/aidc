@@ -263,7 +263,7 @@ Design: `docs/design-12-kubernetes.md`. Source for all rows: owner rulings of 20
 | K8S-14 | A session's published port MUST be reachable through a tunnel aidc opens to the user's current machine, using the user's own cluster credentials. | P0 | rulings-2026-11-23 |
 | K8S-15 | On request at create, a session port MAY be exposed on the home network at a stable name, removed at kill; a login in front of it is optional, chosen at create. | P1 | rulings-2026-11-23 |
 | K8S-16 | Each user's Claude logins SHOULD be set up once in their area and used by every session (fallback: per-session login). | P0 | rulings-2026-11-23 |
-| K8S-17 | A running session MUST be able to switch Claude account without losing its conversation; automatic vs wait-for-user is a setting, and each user sets the order accounts are used in. | P0 | rulings-2026-11-23 |
+| K8S-17 | A running session MUST be able to switch Claude account without losing its conversation; automatic vs wait-for-user is a setting, and each user sets the order accounts are used in. The order is a cycle (after the last account comes the first again), and each account has its own threshold, the weekly usage at which aidc switches away from it. | P0 | rulings-2026-11-23 |
 | K8S-18 | A repo's Claude conversations and memory MUST be one history across the cluster and the user's Mac, Linux and WSL machines, synced with Syncthing; credentials and `.claude.json` are never synced. | P0 | rulings-2026-11-23 |
 | K8S-19 | Session size MUST default to 2 CPU / 8 GB guaranteed with burst to 16 CPU / 32 GB, settable at create. | P1 | rulings-2026-11-23 |
 | K8S-20 | `aidc user add <name>` MUST create a new user's area; the new user adds their own SSH key, GitHub login and Claude accounts. | P0 | rulings-2026-11-23 |

@@ -238,3 +238,12 @@ Nothing is pushed to a public registry. REL-08 is amended accordingly: images ar
 and never pushed to a public registry (the Docker backend still builds on the user's machine).
 Rejected: building on the node over SSH and importing into k3s (couples aidc to node logins), and
 GitHub's registry (a public registry, against REL-08).
+
+## 2026-11-24: The Kubernetes backend is generic and driven by configuration
+
+aidc is public (MIT), so nothing in the Kubernetes backend is specific to the ranch. Everything
+cluster-specific is configuration: the cluster context, the node selector and tolerations, the
+Sysbox runtime class, the storage class, the in-cluster registry and the like. Building aidc's
+images for a cluster is an aidc command that reads that configuration ("there should be an aidc
+command that has config that builds this repo"). The ranch is one configuration, kept outside
+aidc's code (e.g. in agent-cluster or the user's config).

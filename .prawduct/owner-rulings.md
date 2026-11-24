@@ -359,3 +359,11 @@ session is: listed by `aidc list`/`status` (marked as the user's git session, a 
 mode per K8S-06). It stays trusted (no proxy sandbox, holds the gitctl route to the login), is
 managed by `aidc git setup`, and `aidc kill` refuses it. Sandboxed sessions still reach it only
 through request files.
+
+## 2026-11-24: The git container works on Docker too
+
+"this should work on docker as well as on k8s." The git container, gitctl, session requests,
+the git agent's instructions and its being an aidc session all apply on the Docker backend as
+well. Open design question for that work: on Docker the user also uses the repos directly on
+their machine, so a repo lock owned by the gitrun uid would get in their way; settle whose repos
+the Docker git container works on before building it.

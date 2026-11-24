@@ -147,8 +147,17 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   session's branch and open a PR; tidy and report leftovers; check and offer GitHub
   protections; after every merge, tidy that branch and worktree and report leftovers). No skills: one locked file (owner, 2026-11-24: "CLAUDE.md is fine").
 
+### Chunk 07: The git container on Docker
+
+- **Deliverables:** the same git container, gitctl, request folder, instructions and
+  session-ness on the Docker backend (owner ruling 2026-11-24): `aidc git setup|attach|status`
+  start and use a `git` container with its own login volumes and a network that reaches only
+  public addresses. First settle with the owner whose repos it works on, since on Docker the user
+  also uses their repos directly and a gitrun-owned lock would get in their way. Live: the Docker
+  smoke extended.
+
 ### Chunk 06: End to end and docs
 
-- **Deliverables:** the Kubernetes smoke extended (add a repo, session on a worktree, push, PR on a
+- **Deliverables:** the Kubernetes and Docker smokes extended (add a repo, session on a worktree, push, PR on a
   scratch GitHub repo if one is configured, tidy); README and design-12 updated; change record.
 - **Type:** cumulative-final

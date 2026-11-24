@@ -305,3 +305,12 @@ is used now (its own MCP endpoint, no 3tears infrastructure needed), or it joins
 ("then it can serve itself locally the way it is used now or it can join a 3tears mesh").
 Refined (2026-11-24): the rebuilt server uses 3tears-observe for its observability ("we should use
 3tears observe then while we're at it").
+
+## 2026-11-24: aidc 2.0 is 3tears adoption, improving 3tears where it falls short
+
+aidc 2.0 rebuilds the control plane on 3tears and uses the family properly, not only for tools
+("2.0 is 3tears adoption"). Where 3tears lacks what aidc needs, 3tears is enhanced rather than
+worked around: `3tears-mcp` gains progress, resources, tools/list_changed, cancellation and a
+richer error model ("enhance 3tears mcp to support these things properly and give it more error
+codes"), taken as the chance to really improve the MCP server. Plan the adoption across the
+other 3tears packages before building. Still after the Kubernetes work.

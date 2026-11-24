@@ -139,16 +139,14 @@ unprivileged host uid:
 | testcontainers (Python, postgres) | pass |
 | `nvidia-smi -L` | RTX 3080 visible |
 
-Node setup this needs (today done by hand on ranch-dev01, logged in
-`/root/aidc-probe-backup/CHANGES.txt`):
+Node setup this needs, done by agent-cluster `make dev-node NODE=ranch-dev01 STEPS=sysbox`
+(agent-cluster #39) and the.ranch `apps/platform/sysbox` (#248):
 
 1. `sysbox-ce` 0.7.2 package.
 2. A `sysbox-runc` runtime in k3s's containerd template
    (`/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl`), then a k3s-agent restart.
 3. AppArmor local rule letting `fusermount3` mount under `/var/lib/sysboxfs`.
 4. RuntimeClass `sysbox-runc` pinned to ranch-dev01 with the dev toleration.
-
-**Proposal:** move these into agent-cluster's node scripts so a rebuilt node gets them.
 
 The GPU is given only when asked for at create (`--gpu`, K8S-11). The cluster's NVIDIA device
 plugin hands GPUs to pods through CDI (the.ranch #246), so it works under any runtime,
@@ -282,5 +280,4 @@ Kubernetes code lands.
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |
-| Sysbox node setup in agent-cluster scripts | owner proposal |
 | LAN name, wildcard cert, DNS | owner proposal |

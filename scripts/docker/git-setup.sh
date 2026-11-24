@@ -47,7 +47,10 @@ fi
 
 info "starting the git container's proxy (public addresses only)"
 docker rm -f "$DK_GIT_PROXY" >/dev/null 2>&1 || true
+# squid resolves through Quad9 itself (squid.conf; the entrypoint refuses to start public-only
+# otherwise); --dns makes anything else in the proxy container resolve there too.
 docker run -d --name "$DK_GIT_PROXY" --restart unless-stopped --network "$DK_GIT_EGRESS" \
+    --dns 9.9.9.9 --dns 149.112.112.112 \
     --label "aidc.session=${DK_GIT_SESSION}" --label aidc.role=squid --label aidc.git=proxy \
     -e AIDC_PUBLIC_ONLY=1 \
     --health-cmd /usr/local/bin/healthcheck.sh --health-interval 5s --health-timeout 3s \

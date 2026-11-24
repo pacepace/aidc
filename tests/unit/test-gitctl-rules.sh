@@ -14,8 +14,9 @@
 # these tests notice.
 #
 # Run from a checkout, gitctl skips sudo (the role is named in AIDC_GITCTL_ROLE) and takes the
-# stand-in forge, gitrun's store and the bundle folder from AIDC_GITCTL_TEST_FORGE,
-# AIDC_GITCTL_RUN_STORE and AIDC_GITCTL_BUNDLE_DIR; installed, it ignores them. Needs jq.
+# stand-in forge, gitrun's store, the bundle folder and the mount list from
+# AIDC_GITCTL_TEST_FORGE, AIDC_GITCTL_RUN_STORE, AIDC_GITCTL_BUNDLE_DIR and
+# AIDC_GITCTL_MOUNTINFO; installed, it ignores them. Needs jq.
 #
 # Hygiene: scratch lives under tests/scratch/ INSIDE the repo (gitignored).
 #
@@ -642,6 +643,12 @@ ctl tidy "$T" extra; refused "tidy takes one argument"
 
 echo ""
 echo "=== Docker: the user's own working copies (AIDC_GITCTL_DOCKER stands for /.dockerenv) ==="
+# The git container's mount list (AIDC_GITCTL_MOUNTINFO stands for /proc/self/mountinfo, run
+# from a checkout only): / and each working copy Docker mounted. mount_line PATH: one entry.
+MI="$S/mountinfo"
+mount_line() { printf '%s 1 0:1 / %s rw,relatime - ext4 /dev/x rw\n' "$((RANDOM + 100))" "$1"; }
+{ mount_line /; mount_line "$T"; } > "$MI"
+export AIDC_GITCTL_MOUNTINFO="$MI"
 # On Docker only the repos the user added are mounted in the git container: tidy removes a
 # merged worktree inside its working copy and names one anywhere else, even on the same disk.
 umask 002
@@ -689,6 +696,38 @@ ctl fetch "$AW"; assert_eq "after it, fetch works" 0 "$RC"
 H2="$S/disk/notgh"; G init -q "$H2"; git -C "$H2" remote add origin git@github.com:o/x.git
 ctl adopt "$H2"; refused "adopt refuses an origin that is not https://github.com/<owner>/<name>"
 ctl adopt "$AW" extra; refused "adopt takes one argument"
+# On Docker fetch, tidy and unpushed run as gitwc, the user's uid, which writes every mounted
+# working copy: they take only a working copy Docker mounted. A repo the agent made itself
+# (here outside any mount, with an added repo as origin and a filter of its own) is refused
+# before any git runs in it; a mounted one works.
+AR="$S/agent-made"; G clone -q "$A" "$AR" 2>/dev/null
+git -C "$AR" config filter.x.clean "sh -c 'touch $S/PWNED-gitwc; cat'"; printf '* filter=x\n' > "$AR/.gitattributes"
+touch -d '3 hours ago' "$AR/.gitattributes"
+git -C "$AR" update-ref -d refs/remotes/origin/HEAD; git -C "$AR" update-ref -d refs/remotes/origin/main
+ar_fetched() { git -C "$AR" rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo yes || echo no; }
+for v in fetch tidy unpushed; do
+    AIDC_GITCTL_DOCKER=1 ctl "$v" "$AR"; refused "Docker: ${v} refuses a repo that is not a mounted working copy"
+    assert_has "and says so" "not one of the working copies mounted here" "$OUT"
+done
+assert_eq "and nothing of that repo ran, nothing was fetched into it" "no no" "$([ -e "$S/PWNED-gitwc" ] && echo yes || echo no) $(ar_fetched)"
+for v in fetch tidy unpushed; do
+    AIDC_GITCTL_DOCKER=1 ctl "$v" "$AW"; refused "Docker: ${v} refuses an added repo's working copy that is not mounted"
+done
+mount_line "$AW" >> "$MI"
+for v in fetch unpushed tidy; do
+    AIDC_GITCTL_DOCKER=1 ctl "$v" "$AW"; assert_eq "Docker: ${v} works on a mounted working copy" "0 end" "$RC $([ "$v" = fetch ] && echo end || printf '%s\n' "$OUT" | tail -n1)"
+done
+G -C "$AW" worktree add -q -b d-wt "$AW/wt" main 2>/dev/null
+AIDC_GITCTL_DOCKER=1 ctl unpushed "$AW/wt"; assert_eq "Docker: and on a worktree inside it" 0 "$RC"
+G clone -q "$A" "$AW/nested" 2>/dev/null
+AIDC_GITCTL_DOCKER=1 ctl fetch "$AW/nested"; refused "Docker: a repo of its own inside a mounted working copy is refused"
+assert_has "and says why" "is not the mounted working copy" "$OUT"
+rm -rf "$AW/nested" "$AW/wt"; G -C "$AW" worktree prune
+mkdir -p "$S/disk/linked"; ln -s "$AW/.git" "$S/disk/linked/.git"; mount_line "$S/disk/linked" >> "$MI"
+AIDC_GITCTL_DOCKER=1 ctl fetch "$S/disk/linked"; refused "Docker: a mount whose .git is a symlink is refused"
+SP="$S/disk/with space"; G clone -q "$A" "$SP" 2>/dev/null; mount_line "$(printf '%s' "$SP" | sed 's/ /\\040/g')" >> "$MI"
+AIDC_GITCTL_DOCKER=1 ctl fetch "$SP"; assert_eq "Docker: a mount point with a space (escaped in the mount list) is found" 0 "$RC"
+AIDC_GITCTL_DOCKER=1 AIDC_GITCTL_MOUNTINFO="$S/no-such-file" ctl fetch "$AW"; refused "Docker: no mount list, no gitwc verb"
 # On Docker gitrun's git and gitcred's gh go through the git container's proxy, a fixed value.
 cat > "$S/bin/git-logged" <<STUB
 #!/bin/sh
@@ -903,6 +942,10 @@ mut 's/\[ "$branch" != "$ORIGIN_HEAD" \]/true/'
 bash "$S/mut/gitctl.sh" push "$TC" trunk >/dev/null 2>&1
 assert_eq "with the default-branch guard removed, trunk is pushed (so the trunk test would fail)" \
     "$(git -C "$TC" rev-parse trunk)" "$(git --git-dir="$F/o/t.git" rev-parse trunk)"
+mut 's/fetch|tidy|unpushed) docker_wc_ok "$WC" ;;/fetch|tidy|unpushed) : ;;/'
+AIDC_GITCTL_DOCKER=1 bash "$S/mut/gitctl.sh" fetch "$AR" >/dev/null 2>&1
+assert_eq "with the mounted-working-copy check removed, Docker's fetch takes a repo the agent made (so the gitwc test would fail)" \
+    yes "$(ar_fetched)"
 mut 's/if ! removable "$wt"; then/if false; then/'
 bash "$S/mut/gitctl.sh" tidy "$T" >/dev/null 2>&1
 assert_eq "with tidy's folder check removed, the planted request folder is deleted (so the tidy test would fail)" no \

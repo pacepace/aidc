@@ -15,8 +15,10 @@
 #     container works on the user's own working copies"): only those the user added (aidc repo
 #     add), each mounted at its own path, the one sessions see; never cloned, locked or re-owned;
 #   - its network is internal (no route out), with one proxy beside it (aidc-git-squid, alias
-#     aidc-proxy) that reaches public addresses only and resolves through Quad9: the intent of
-#     the git pod's NetworkPolicy. Nothing connects in.
+#     aidc-proxy) that reaches public addresses only and resolves through Quad9 (squid's own
+#     dns_nameservers, which its entrypoint requires there): the intent of the git pod's
+#     NetworkPolicy. Nothing connects in. The git container itself resolves only aidc-proxy
+#     (Docker's DNS on the internal network); its --dns is Quad9 so nothing else is asked.
 #
 # Sourced by scripts/docker/*.sh. Sources the shared libraries itself.
 
@@ -205,12 +207,46 @@ dk_git_wait_ready() {
     return 1
 }
 
+# dk_git_mount_ok <path>: the recorded working copy is still there as recorded: no symlink at
+# it or on the way (the recorded form is fully resolved, so its realpath must be itself), with
+# a .git folder that is not a symlink. Docker's bind mount follows symlinks: a session that
+# replaced a working copy in its workspace with a symlink to another folder of the user's would
+# otherwise have that folder mounted read-write at the trusted path.
+dk_git_mount_ok() {
+    local p="$1" r
+    [ -d "$p" ] && [ ! -L "$p" ] || return 1
+    r=$(realpath_portable "$p" 2>/dev/null) || return 1
+    [ "$r" = "$p" ] || return 1
+    [ -d "$p/.git" ] && [ ! -L "$p/.git" ]
+}
+
+# dk_git_inode <path>: the folder's inode on this machine (no symlink followed), or nothing.
+dk_git_inode() { stat -c %i -- "$1" 2>/dev/null || stat -f %i -- "$1" 2>/dev/null || true; }
+
+# dk_git_check_mounts <path>...: after the start, each working copy the container sees at its
+# path is the folder this machine has there (the same inode, and still as recorded), so a
+# symlink swapped in between dk_git_mount_ok and Docker's mount, then swapped back, is caught.
+# On Linux only: there a bind mount shows the source folder's own inode; Docker Desktop's file
+# sharing (macOS) need not. Returns 1, naming the path, on a mismatch.
+dk_git_check_mounts() {
+    local p seen want
+    [ $# -gt 0 ] && [ "$(uname -s)" = Linux ] || return 0
+    for p in "$@"; do
+        want=$(dk_git_inode "$p")
+        seen=$(docker exec -u git "$DK_GIT_CT" stat -c %i -- "$p" </dev/null 2>/dev/null) || seen=""
+        if [ -z "$want" ] || [ "$seen" != "$want" ] || ! dk_git_mount_ok "$p"; then
+            printf '%s\n' "$p"; return 1
+        fi
+    done
+}
+
 # dk_git_start: (re)create the git container with the current settings and the added working
 # copies mounted, and wait for it. The volumes, networks and proxy must exist (aidc git setup).
-# A working copy that is gone is left out (Docker would make an empty root-owned folder in its
-# place), with a warning.
+# A working copy that is gone, or is no longer at its recorded path as recorded (a symlink at
+# it or on the way: dk_git_mount_ok), is left out with a warning (Docker would make an empty
+# root-owned folder in place of a gone one, and follow a symlink to another folder).
 dk_git_start() {
-    local disk transcripts token="" tokfile mounts=() p
+    local disk transcripts token="" tokfile mounts=() mounted=() p bad
     dk_git_settings
     disk=$(dk_git_disk)
     transcripts=$(dk_git_transcripts_dir)
@@ -221,8 +257,8 @@ dk_git_start() {
     fi
     while IFS= read -r p; do
         [ -n "$p" ] || continue
-        if [ -d "$p/.git" ]; then mounts+=(-v "${p}:${p}:rw")
-        else info "warning: ${p} is gone or not a working copy; not mounted (aidc repo remove ${p})"; fi
+        if dk_git_mount_ok "$p"; then mounts+=(-v "${p}:${p}:rw"); mounted+=("$p")
+        else info "warning: ${p} is gone, not a working copy, or reached through a symlink; not mounted (aidc repo remove ${p})"; fi
     done < <(dk_git_repos)
     docker rm -f "$DK_GIT_CT" >/dev/null 2>&1 || true
     docker run -d --name "$DK_GIT_CT" --hostname git --restart unless-stopped \
@@ -242,5 +278,9 @@ dk_git_start() {
         -v "${transcripts}:/var/aidc/transcript-out:rw" \
         ${mounts[@]+"${mounts[@]}"} \
         "aidc/gitctl:${AIDC_VERSION_TAG}" >/dev/null || die "could not start the git container"
+    if ! bad=$(dk_git_check_mounts ${mounted[@]+"${mounted[@]}"}); then
+        docker rm -f "$DK_GIT_CT" >/dev/null 2>&1 || true
+        die "${bad} changed while the git container started (the folder it mounted is not the one there now): the git container is removed; check ${bad}, then aidc git setup"
+    fi
     dk_git_wait_ready || die "the git container did not become ready; see: docker logs ${DK_GIT_CT}"
 }

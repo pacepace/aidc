@@ -43,6 +43,7 @@ assert_not_has() {
 #   D_PROXY_ENV       the proxy's environment (default AIDC_PUBLIC_ONLY=1)
 #   D_TOKEN           AIDC_GIT_TOKEN in session s1's dev container
 #   D_SESSIONS="s1"   sessions that exist (by label)
+#   D_SEEN_INODE=n    the inode the git container sees at a mounted path (default: the host's)
 cat > "$SCRATCH/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$D_LOG"
@@ -76,6 +77,9 @@ case "$a" in
     "inspect aidc-"*"-dev --format"*) echo "2026-11-24T00:00:00Z"; exit 0 ;;
     "exec aidc-"*"-policy test -f /var/state/tainted") exit 1 ;;
     "exec -u git aidc-git-dev tmux has-session -t main") exit 0 ;;
+    "exec -u git aidc-git-dev stat -c %i -- "*) # what the container sees at a mounted path
+        [ -n "${D_SEEN_INODE:-}" ] && { echo "$D_SEEN_INODE"; exit 0; }
+        stat -c %i -- "${a##* }"; exit 0 ;;
     "exec -u git aidc-git-dev sh -c "*)
         echo "github=${D_GH:-no}"; echo "waiting=${D_WAITING:-0}"
         echo "storage-copies ${D_COPIES:-1048576}"; echo "storage-bundles ${D_BUNDLES:-0}"; exit 0 ;;
@@ -142,6 +146,7 @@ assert_has "its network is internal: no route out" "network create --internal --
 proxy=$(line 'run -d --name aidc-git-squid')
 assert_has "its proxy reaches public addresses only" "-e AIDC_PUBLIC_ONLY=1" "$proxy"
 assert_has "from its own egress network" "--network aidc-git-egress" "$proxy"
+assert_has "the proxy container resolves through Quad9 (squid itself: its entrypoint, test-squid-entrypoint.sh)" "--dns 9.9.9.9 --dns 149.112.112.112" "$proxy"
 assert_has "and is the git container's aidc-proxy" "network connect --alias aidc-proxy aidc-git-net aidc-git-squid" "$(calls)"
 git_run=$(line 'run -d --name aidc-git-dev')
 assert_has "the git container is on the internal network only" "--network aidc-git-net " "$git_run"
@@ -210,6 +215,31 @@ out=$(run repo list)
 assert_has "a working copy that went away is said so" "(gone: aidc repo remove ${HOMEP}/gone)" "$out"
 run git setup >/dev/null
 assert_not_has "and is not mounted (Docker would make an empty folder there)" "-v ${HOMEP}/gone:" "$(line 'run -d --name aidc-git-dev')"
+# A session working on a workspace that holds an added working copy can replace it with a
+# symlink to another folder of the user's; Docker's mount would follow it. Not mounted, with
+# the warning, whether the symlink is the recorded folder itself or a folder on the way.
+OTHER="$HOMEP/private/other"; mkdir -p "$OTHER/.git"
+SW="$HOMEP/src/swapped"; ln -s "$OTHER" "$SW"; printf '%s\n' "$SW" >> "$HOME/.config/aidc/git-repos"
+mkdir -p "$HOMEP/real-parent/inner/.git"; ln -s "$HOMEP/real-parent" "$HOMEP/linkparent"
+printf '%s\n' "$HOMEP/linkparent/inner" >> "$HOME/.config/aidc/git-repos"
+mkdir -p "$HOMEP/src/dotgit"; ln -s "$OTHER/.git" "$HOMEP/src/dotgit/.git"; printf '%s\n' "$HOMEP/src/dotgit" >> "$HOME/.config/aidc/git-repos"
+out=$(run git setup)
+for x in "$SW" "$HOMEP/linkparent/inner" "$HOMEP/src/dotgit"; do
+    assert_not_has "a recorded working copy now reached through a symlink is not mounted: ${x#"$HOMEP"/}" "-v ${x}:" "$(line 'run -d --name aidc-git-dev')"
+    assert_has "and the user is told" "warning: ${x} is gone, not a working copy, or reached through a symlink" "$out"
+done
+assert_not_has "nor is the folder the symlink points at" "$OTHER" "$(line 'run -d --name aidc-git-dev')"
+assert_has "the working copy still as recorded is mounted" "-v ${WC}:${WC}:rw" "$(line 'run -d --name aidc-git-dev')"
+assert_has "and checked from inside the container after the start" "exec -u git aidc-git-dev stat -c %i -- ${WC}" "$(calls)"
+assert_not_has "a start whose mounts match keeps the container" "rm -f aidc-git-dev" "$(sed -n '/run -d --name aidc-git-dev/,$p' "$D_LOG")"
+# Swapped between the check and Docker's mount (and back): the container sees another folder.
+out=$(D_SEEN_INODE=1 run git setup); rc=$?
+assert_has "a working copy the container sees as another folder stops the start, named" "${WC} changed while the git container started" "$out"
+assert_eq "it fails" 1 "$([ "$rc" != 0 ] && echo 1 || echo 0)"
+assert_has "and the container is removed" "rm -f aidc-git-dev" "$(sed -n '/run -d --name aidc-git-dev/,$p' "$D_LOG")"
+for x in "$SW" "$HOMEP/linkparent/inner" "$HOMEP/src/dotgit"; do
+    { grep -vxF -- "$x" "$HOME/.config/aidc/git-repos" || true; } > "$SCRATCH/repos.tmp"; mv "$SCRATCH/repos.tmp" "$HOME/.config/aidc/git-repos"
+done
 out=$(run repo remove "$HOMEP/gone")
 assert_has "a working copy that went away can still be forgotten" "its private copy, if any, is left" "$out"
 assert_eq "and is" 0 "$(grep -cxF "$HOMEP/gone" "$HOME/.config/aidc/git-repos")"

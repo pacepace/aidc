@@ -134,9 +134,24 @@ fi
 # link-local, shared and multicast destination keeps a GitHub login held there from being
 # walked to the host, the LAN or another container. squid resolves the name it is asked for and
 # checks every address it gets (dst), so a public name pointing at a private address is refused.
+# IPv4-mapped IPv6 (::ffff:a.b.c.d) needs no range of its own: squid holds every IPv4 address in
+# that form, so the IPv4 ranges match it (and ::ffff:0:0/96 would refuse every IPv4 address:
+# checked live). The IPv6 forms that carry an IPv4 address to a translator are refused whole:
+# NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16); the git proxy's network is IPv4.
+# It resolves through Quad9 only, as squid.conf's dns_nameservers says (the git pod's
+# NetworkPolicy intent): never the host's or Docker's resolvers, which may answer internal
+# names, so AIDC_DNS_SERVERS (which drops that line) is refused here.
 if [ "${AIDC_PUBLIC_ONLY:-}" = 1 ]; then
+    if [ -n "${AIDC_DNS_SERVERS:-}" ]; then
+        echo "[aidc-squid] FATAL: the public-only proxy resolves through Quad9 only; AIDC_DNS_SERVERS is not taken" >&2
+        exit 1
+    fi
     derive_from_conf
-    rules="acl aidc_not_public dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::1 fc00::/7 fe80::/10
+    if ! grep -qx 'dns_nameservers 9\.9\.9\.9 149\.112\.112\.112' "$DERIVED"; then
+        echo "[aidc-squid] FATAL: the public-only proxy needs 'dns_nameservers 9.9.9.9 149.112.112.112' in ${CONF}" >&2
+        exit 1
+    fi
+    rules="acl aidc_not_public dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::1 fc00::/7 fe80::/10 64:ff9b::/96 64:ff9b:1::/48 2002::/16
 http_access deny aidc_not_public"
     AIDC_PUBLIC_RULES="$rules" perl -i -pe 'if (/^http_access allow localnet/ && !$done) { print "$ENV{AIDC_PUBLIC_RULES}\n"; $done = 1 }' "$DERIVED" || {
         echo "[aidc-squid] FATAL: could not add the public-only rule to ${DERIVED}" >&2

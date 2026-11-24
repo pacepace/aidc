@@ -128,12 +128,24 @@ run_entry public AIDC_PUBLIC_ONLY=1
 D="$SCRATCH/public/derived.conf"
 assert "exits 0" "[ $RC -eq 0 ]"
 assert "squid started from the derived config" "[ '$CONF_USED' = '$D' ]"
-for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10 ::1 fc00::/7 fe80::/10; do
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10 ::1 fc00::/7 fe80::/10 64:ff9b::/96 64:ff9b:1::/48 2002::/16; do
     assert "refuses $net" "grep '^acl aidc_not_public dst' '$D' | grep -qF ' $net'"
 done
 assert "deny comes before allow localnet" \
     "[ \$(line_of '$D' '^http_access deny aidc_not_public') -lt \$(line_of '$D' '^http_access allow localnet') ]"
 assert "baked config left untouched" "! grep -q aidc_not_public '$SCRATCH/public/squid.conf'"
+# squid holds IPv4 addresses as ::ffff:a.b.c.d, so the IPv4 ranges already refuse mapped private
+# addresses, and a ::ffff:0:0/96 range would refuse every IPv4 destination (seen live).
+assert "no ::ffff:0:0/96 range (it would match every IPv4 address)" "! grep '^acl aidc_not_public dst' '$D' | grep -qi '::ffff'"
+assert "resolves through Quad9 (the baked dns_nameservers kept)" "grep -qx 'dns_nameservers 9.9.9.9 149.112.112.112' '$D'"
+run_entry public-dns AIDC_PUBLIC_ONLY=1 AIDC_DNS_SERVERS=192.0.2.53
+assert "a DNS override is refused for the public-only proxy" "[ $RC -ne 0 ] && [ ! -e '$SCRATCH/public-dns/used' ]"
+mkdir -p "$SCRATCH/public-nodns"
+grep -v '^dns_nameservers ' "$AIDC_ROOT/proxy/squid/squid.conf" > "$SCRATCH/public-nodns/squid.conf"
+env AIDC_SQUID_CONF="$SCRATCH/public-nodns/squid.conf" AIDC_SQUID_DERIVED="$SCRATCH/public-nodns/derived.conf" \
+    AIDC_SQUID_ENTRYPOINT="$SCRATCH/stub.sh" STUB_OUT="$SCRATCH/public-nodns/used" \
+    AIDC_PUBLIC_ONLY=1 PATH="$IMAGE_BIN" "$IMAGE_BIN/sh" "$ENTRY" >/dev/null 2>&1
+assert "a config without the Quad9 resolvers does not start as the public-only proxy" "[ ! -e '$SCRATCH/public-nodns/used' ]"
 run_entry public-mcp AIDC_PUBLIC_ONLY=1 AIDC_MCP_DENY=192.0.2.10:7878
 assert "with the MCP deny too, both land before the allow" \
     "[ \$(line_of '$SCRATCH/public-mcp/derived.conf' '^http_access deny aidc_not_public') -lt \$(line_of '$SCRATCH/public-mcp/derived.conf' '^http_access allow localnet') ]"

@@ -72,6 +72,9 @@ if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
     if [ "$(id -un)" = gitwc ] && [ "$ON_DOCKER" != 1 ]; then
         printf 'gitctl: refused: gitwc works only in a Docker git container\n' >&2; exit 1
     fi
+    # What Docker mounted here (docker_wc_ok): the kernel's list, nothing the caller names.
+    MOUNTINFO=/proc/self/mountinfo
+    WC_UID=$(id -u gitwc 2>/dev/null || echo 1000)
 else
     # Run from a checkout (the unit tests): no sudo; the role is named, stubs may stand in, and
     # a folder of bare repos (<forge>/<owner>/<name>.git) may stand in for GitHub.
@@ -83,6 +86,12 @@ else
     ROLE="${AIDC_GITCTL_ROLE:-agent}"
     FORGE="${AIDC_GITCTL_TEST_FORGE:-}"
     ON_DOCKER="${AIDC_GITCTL_DOCKER:-0}"
+    # A stand-in for /proc/self/mountinfo, and the tester's uid for gitwc's. Honoured only here,
+    # run from a checkout: INSTALLED comes from this file's own resolved location, sudo runs only
+    # the installed file (and drops the environment), so a copy run with these set runs as its
+    # caller, gaining nothing.
+    MOUNTINFO="${AIDC_GITCTL_MOUNTINFO:-/proc/self/mountinfo}"
+    WC_UID=$(id -u)
 fi
 ulimit -c 0 2>/dev/null || true
 
@@ -581,10 +590,50 @@ agent_slug() {
     as_run has-copy "$SLUG" >/dev/null || exit 1
 }
 
+# docker_wc_ok PATH: on Docker, fetch, tidy and unpushed run as gitwc (the user's uid), which
+# can write every mounted working copy. So they act only on a working copy Docker mounted (one
+# the user added): PATH resolves at or inside a mount point (the kernel's mount list, which the
+# agent cannot change; never /), whose .git is a real folder that gitwc owns, as is its config.
+# Checked before any git runs there; working_copy then requires the repo's git dir to be that
+# .git. Otherwise the agent could name a repo it made itself (its own config, filters included)
+# and have gitwc run it. Sets WC_MOUNT.
+docker_wc_ok() {
+    local p="$1" m line f
+    local -A mounts=()
+    WC_MOUNT=""
+    [ -r "$MOUNTINFO" ] || die "cannot read the mount list (${MOUNTINFO})"
+    while IFS= read -r line; do
+        # mountinfo: "id parent maj:min root mountpoint ...", the mount point octal-escaped.
+        read -r _ _ _ _ m _ <<<"$line"
+        [ -n "$m" ] && mounts["$m"]=1
+    done < "$MOUNTINFO"
+    while [ -n "$p" ] && [ "$p" != / ]; do
+        m="${p//\\/\\134}"; m="${m// /\\040}"; m="${m//$'\t'/\\011}"; m="${m//$'\n'/\\012}"
+        if [ -n "${mounts[$m]:-}" ]; then WC_MOUNT="$p"; break; fi
+        p="${p%/*}"
+    done
+    [ -n "$WC_MOUNT" ] || die "${1}: not one of the working copies mounted here (aidc repo add)"
+    for f in "$WC_MOUNT/.git" "$WC_MOUNT/.git/config"; do
+        if [ -L "$f" ] || [ ! -e "$f" ] || [ "$(stat -c %u -- "$f" 2>/dev/null)" != "$WC_UID" ]; then
+            die "${1}: ${f} is not a mounted working copy's own (owned by uid ${WC_UID}, no symlink)"
+        fi
+    done
+    [ -d "$WC_MOUNT/.git" ] || die "${1}: ${WC_MOUNT}/.git is not a folder"
+}
+
 # working_copy PATH: the working copy (or worktree) at PATH, in WC.
 working_copy() {
+    local common
     WC=$(realpath -e -- "$1" 2>/dev/null) || die "${1}: no such folder"
+    WC_MOUNT=""
+    if [ "$ON_DOCKER" = 1 ]; then case "$verb" in fetch|tidy|unpushed) docker_wc_ok "$WC" ;; esac; fi
     ag -C "$WC" rev-parse --git-dir >/dev/null 2>&1 || die "${WC}: not a git working copy"
+    if [ -n "$WC_MOUNT" ]; then
+        common=$(ag -C "$WC" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=""
+        common=$(realpath -e -- "${common:-/nonexistent}" 2>/dev/null) || common=""
+        [ "$common" = "$WC_MOUNT/.git" ] \
+            || die "${WC}: its repo is not the mounted working copy ${WC_MOUNT}'s (git dir ${common:-unknown})"
+    fi
 }
 
 # import_bundle WC: origin's branches from $BUNDLE into WC's refs/remotes/origin/*, pruning the
@@ -1054,8 +1103,14 @@ case "$ROLE" in
     agent)
         # On Docker the verbs that write a working copy run as gitwc, its owner's uid (sudo: the
         # one rule naming gitctl; the caller's environment is dropped).
+        # The mount check runs here (a plain answer) and again as gitwc (the one that counts).
         if [ "$INSTALLED" = 1 ] && [ "$ON_DOCKER" = 1 ] && [ "$(id -un)" = git ]; then
-            case "$verb" in fetch|tidy|unpushed) exec sudo -n -u gitwc -- "$self" "$verb" "$@" ;; esac
+            case "$verb" in
+                fetch|tidy|unpushed)
+                    p=$(realpath -e -- "${1:-}" 2>/dev/null) || die "${1:-}: no such folder"
+                    docker_wc_ok "$p"
+                    exec sudo -n -u gitwc -- "$self" "$verb" "$@" ;;
+            esac
         fi
         expect_args "$@"; agent_side ${ARGS[@]+"${ARGS[@]}"} ;;
     run)

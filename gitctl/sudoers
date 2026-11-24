@@ -5,7 +5,8 @@
 # pull requests and the login) and re-check every argument as that user. gitrun gets the
 # GitHub token only from the credential helper, as gitcred. env_reset (sudo's default, stated
 # here) drops everything the caller exported.
-# On Docker, the agent's verbs that write a working copy run as gitwc (the user's uid there), and
+# On Docker, the agent's verbs that write a working copy run as gitwc (the user's uid there), only on
+# a working copy Docker mounted (gitctl checks the mount list as gitwc), and
 # from it reach gitrun and gitcred as the agent does; gitctl refuses gitwc anywhere else.
 Defaults:git,gitrun,gitcred,gitwc env_reset, !lecture, !use_pty
 Defaults:git,gitrun,gitcred,gitwc secure_path="/usr/bin:/bin"

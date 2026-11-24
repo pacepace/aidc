@@ -135,7 +135,7 @@ SSH_DENY=1 aidc_testament_stage "$CTX" "$S/stage3" 2>"$S/err"; RC=$?
 assert_eq "no access: the build goes on, with an empty testament folder" "0 " "$RC $(cd "$S/stage3/testament" && ls -- *.whl 2>/dev/null)"
 assert_eq "the source context is never changed" "testament-0.0.1-py3-none-any.whl" "$(cd "$CTX/testament" && ls -- *.whl)"
 assert_eq "aidc's dev context has the folder the Dockerfile copies (empty but for its marker)" ".gitkeep" \
-    "$(ls -A "$AIDC_ROOT/.devcontainer/testament" | grep -v '\.whl$')"
+    "$(find "$AIDC_ROOT/.devcontainer/testament" -mindepth 1 -maxdepth 1 ! -name '*.whl' -printf '%f\n')"
 DF="$AIDC_ROOT/.devcontainer/Dockerfile"
 assert_has "the Dockerfile copies it" "COPY testament/ /opt/aidc/testament/" "$(cat "$DF")"
 assert_has "and a failed install does not fail the image build" 'did not install; the image goes on without it' "$(cat "$DF")"

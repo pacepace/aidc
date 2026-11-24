@@ -29,7 +29,7 @@ import httpx
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from aidc_mcp import headless, repo, scope, session_mcp
+from aidc_mcp import backend, headless, repo, scope, session_mcp
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
@@ -217,7 +217,7 @@ async def _claim_headless(name: str, tool: str, prompt: str
         running = headless.tracked(name)
         # Read the container either way: when one of this server's runs holds the slot,
         # it is what gives the refusal that run's pid.
-        found = await headless.container_runs(f"aidc-{name}-dev")
+        found = await headless.container_runs(backend.target(name))
         if found is None and not running:
             # The run's own docker exec fails the same way if the container is down;
             # if it is only slow to answer, an orphan may go uncounted.
@@ -520,7 +520,7 @@ async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
 async def _tmux_exec(container: str, args: list[str]) -> int:
     """Run a tmux command inside the container as vscode user. Returns exit code."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-u", "vscode", container, "tmux", *args,
+        *backend.exec_argv(container, ["tmux", *args], user="vscode"),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -530,8 +530,8 @@ async def _tmux_exec(container: str, args: list[str]) -> int:
 async def _capture_screen(container: str, window: str) -> str:
     """The visible pane with its escape sequences (-e), wrapped lines joined (-J)."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-u", "vscode", container,
-        "tmux", "capture-pane", "-t", f"main:{window}", "-p", "-e", "-J",
+        *backend.exec_argv(container, ["tmux", "capture-pane", "-t", f"main:{window}", "-p",
+                                       "-e", "-J"], user="vscode"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -542,8 +542,8 @@ async def _capture_screen(container: str, window: str) -> str:
 async def _pane_current_command(container: str, window: str) -> str:
     """Return the current foreground command name running in a tmux pane."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-u", "vscode", container,
-        "tmux", "display-message", "-t", f"main:{window}", "-p", "#{pane_current_command}",
+        *backend.exec_argv(container, ["tmux", "display-message", "-t", f"main:{window}", "-p",
+                                       "#{pane_current_command}"], user="vscode"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -554,8 +554,8 @@ async def _pane_current_command(container: str, window: str) -> str:
 async def _window_exists(container: str, window: str) -> bool:
     """Return True if a tmux window with the given name exists in the main session."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-u", "vscode", container,
-        "tmux", "list-windows", "-t", "main", "-F", "#{window_name}",
+        *backend.exec_argv(container, ["tmux", "list-windows", "-t", "main", "-F",
+                                       "#{window_name}"], user="vscode"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -1084,8 +1084,8 @@ def _reply_from_transcript(name: str, prompt: str, sent_at: float) -> str:
 async def _load_and_paste(container: str, text: str, window: str) -> bool:
     """Load text into a tmux paste buffer and paste it into the window. Returns True on success."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-i", "-u", "vscode", container,
-        "tmux", "load-buffer", "-b", "aidc-send", "-",
+        *backend.exec_argv(container, ["tmux", "load-buffer", "-b", "aidc-send", "-"],
+                           user="vscode", stdin=True),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
@@ -1318,8 +1318,7 @@ async def _session_instance(name: str) -> tuple[str, str]:
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--type", "network", "--format", "{{.Id}}",
-            f"aidc-{name}-net",
+            *backend.instance_argv(name),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1328,12 +1327,7 @@ async def _session_instance(name: str) -> tuple[str, str]:
     stdout, stderr = await proc.communicate()
     if proc.returncode == 0:
         return SESSION_EXISTS, stdout.decode("utf-8", errors="replace").strip()
-    # Measured on Docker 29.8: "Error response from daemon: network <name> not found".
-    # Other versions say "No such network: <name>" or "no such object: <name>". The
-    # message must name this network, so a "not found" about anything else (a docker
-    # context, say) is not taken for a killed session.
-    err = stderr.decode("utf-8", errors="replace").lower()
-    if f"aidc-{name}-net" in err and ("not found" in err or "no such" in err):
+    if backend.instance_gone(name, stderr.decode("utf-8", errors="replace")):
         return SESSION_GONE, ""
     return SESSION_UNKNOWN, ""
 
@@ -1810,7 +1804,7 @@ async def resume_send_queues() -> None:
             continue   # another server's session: leave its queue file alone
         lock = _session_send_locks.setdefault(name, asyncio.Lock())
         async with lock:
-            await _load_persisted_queue(f"aidc-{name}-dev", name)
+            await _load_persisted_queue(backend.target(name), name)
 
 
 _WAITING_EXPLAINED = {
@@ -2333,7 +2327,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
 
 
 async def _screen_for_watcher(session: str) -> scr.ScreenState | None:
-    container = f"aidc-{session}-dev"
+    container = backend.target(session)
     if not await _is_claude_running(container):
         return None
     return await _read_screen(container, session)
@@ -3017,7 +3011,7 @@ async def _hand_session_mcp(name: str, server: str, path: str, bearer: str) -> d
         log_event("tool_call", tool="session_mcp_set", session=name, ok=False,
                   error_code=exc.code)
         return _session_mcp_refusal(exc)
-    running = await _is_claude_running(f"aidc-{name}-dev")
+    running = await _is_claude_running(backend.target(name))
     needs_restart = handed.entry == session_mcp.ENTRY_ADDED and running
     applies = (_MCP_NEEDS_RESTART.format(name=name) if needs_restart
                else _MCP_LIVE if running else _MCP_ON_START)
@@ -3163,7 +3157,7 @@ async def _session_report(name: str) -> dict[str, Any]:
     """What the session is doing, beside what it is: taint, where its audit trail and
     repository are, its branch, and whether its coding agent is working on a turn.
     Container health is not activity; `working` is."""
-    container = f"aidc-{name}-dev"
+    container = backend.target(name)
     state, taint, audit, repo_dir = await asyncio.gather(
         _session_state(container, name), sf.taint_or_none(name), sf.audit_dir(name),
         sf.repo_path(name))
@@ -3381,7 +3375,7 @@ def register(app: Any) -> None:
         if result["exit"] != 0:
             return _envelope_err(result["stderr"] or "status failed", result, code="cli_failed")
         report, found = await asyncio.gather(
-            _session_report(name), headless.container_runs(f"aidc-{name}-dev"))
+            _session_report(name), headless.container_runs(backend.target(name)))
         # Prompts sent to the session and not pasted yet, each with why it waits.
         queue = [{"prompt_id": q.prompt_id, "prompt_preview": q.text[:120],
                   "enqueued_at": q.enqueued_at,
@@ -3429,8 +3423,8 @@ def register(app: Any) -> None:
         context loaded — use session_send, don't reverse-engineer the repo by hand here.
         """
         log_event("tool_call", tool="session_exec", session=name, cmd_redacted=cmd[:50])
-        container = f"aidc-{name}-dev"
-        argv = ["docker", "exec", "-u", "vscode", container, "bash", "-lc", cmd]
+        container = backend.target(name)
+        argv = backend.exec_argv(container, ["bash", "-lc", cmd], user="vscode")
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
@@ -3476,7 +3470,7 @@ def register(app: Any) -> None:
             prompt: the single prompt to run.
         """
         log_event("tool_call", tool="session_invoke", session=name, prompt_len=len(prompt))
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         run, running = await _claim_headless(name, "session_invoke", prompt)
         if run is None:
             return _invoke_busy(name, "session_invoke", running or {})
@@ -3605,7 +3599,7 @@ def register(app: Any) -> None:
             prompt_len=len(prompt),
         )
 
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         # Claimed here, before the call returns, so a second call is refused at once.
         run, running = await _claim_headless(name, "session_invoke_async", prompt)
         if run is None:
@@ -3798,7 +3792,7 @@ def register(app: Any) -> None:
         if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
             return _envelope_err(f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
                                  f"not {deliver!r}", code="invalid_argument")
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         if (await _session_instance(name))[0] == SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
             # neither opens a webhook nor leaves one persisted. Audit every refusal:
@@ -4087,7 +4081,7 @@ def register(app: Any) -> None:
             _session_send_locks[name] = asyncio.Lock()
         lock = _session_send_locks[name]
 
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         transcript: list[dict[str, Any]] = []
 
         async with lock:
@@ -4231,7 +4225,7 @@ def register(app: Any) -> None:
         # it reads a stale reply as the response to its last question (prod
         # 2026-08-22 conv 01a01cf6: a no-uuid resend returned the previous prompt's
         # answer while the real turn had 16 minutes left to run).
-        state = await _session_state(f"aidc-{name}-dev", name)
+        state = await _session_state(backend.target(name), name)
         busy = state.claude_running and state.turn == TURN_RUNNING
         status, turn = await _resend_reply(name, conversation_id, base_url,
                                            turn_uuid=turn_uuid, force=force)
@@ -4485,7 +4479,7 @@ def register(app: Any) -> None:
         carried out), stopped (a list of the runs: run_id, started_at, tool, prompt,
         pid, orphan), pids (the processes stopped) and tree.
         """
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         target = (target or INTERRUPT_AGENT).strip()
         if target not in (INTERRUPT_AGENT, INTERRUPT_HEADLESS):
             return _envelope_err(f'target must be "{INTERRUPT_AGENT}" or "{INTERRUPT_HEADLESS}", '
@@ -4541,7 +4535,7 @@ def register(app: Any) -> None:
         conversation_id), left (how many still wait) and running (whether the agent is
         working, and on what).
         """
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         prompt_id = (prompt_id or "").strip()
         if prompt_id and position is not None:
             return _envelope_err("give position or prompt_id, not both",
@@ -4625,11 +4619,12 @@ def register(app: Any) -> None:
         """
         log_event("tool_call", tool="file_put", session=name, path=path,
                   bytes=len(content), mode=mode)
-        container = f"aidc-{name}-dev"
+        container = backend.target(name)
         # Stream content via stdin to a `tee` inside the container.
         proc = subprocess.run(
-            ["docker", "exec", "-i", "-u", "vscode", container, "bash", "-c",
-             f"install -m {shlex.quote(mode)} /dev/stdin {shlex.quote(path)}"],
+            backend.exec_argv(container, ["bash", "-c",
+                              f"install -m {shlex.quote(mode)} /dev/stdin {shlex.quote(path)}"],
+                              user="vscode", stdin=True),
             input=content.encode("utf-8"), capture_output=True, timeout=30,
         )
         if proc.returncode != 0:

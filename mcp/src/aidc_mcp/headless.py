@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from aidc_mcp import backend
 from aidc_mcp import turns_view as tv
 
 RUN_ENV = "AIDC_HEADLESS_RUN"
@@ -66,9 +67,9 @@ def runs_of(session: str) -> list[Run]:
 
 
 def exec_argv(container: str, run: Run) -> list[str]:
-    """The docker exec that starts `run`: fresh (no --continue), and tagged."""
-    return ["docker", "exec", "-u", "vscode", "-e", "AIDC_CLAUDE_RESUME=false",
-            "-e", f"{RUN_ENV}={run.run_id}", container, "aidc-claude", "--print", run.prompt]
+    """The exec that starts `run`: fresh (no --continue), and tagged."""
+    return backend.exec_argv(container, ["aidc-claude", "--print", run.prompt], user="vscode",
+                             env={"AIDC_CLAUDE_RESUME": "false", RUN_ENV: run.run_id})
 
 
 def _iso(epoch: float) -> str:
@@ -172,7 +173,7 @@ async def _docker(*args: str, timeout: float = 20.0) -> bytes:
     """The command's stdout. :raises DockerFailed: on any failure, with its stderr."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            backend.BIN, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
         raise DockerFailed(f"docker could not be started: {exc}") from exc
     try:
@@ -208,8 +209,8 @@ async def container_runs(container: str) -> list[dict[str, Any]] | None:
     """Every headless claude process in the container, or None when docker could not
     say (the container is down, paused, or docker did not answer)."""
     try:
-        out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
-                            "bash", "-c", _LIST_SCRIPT)
+        out = await _docker(*backend.exec_args(container, ["bash", "-c", _LIST_SCRIPT],
+                                               user="vscode", env={"RUN_ENV": RUN_ENV}))
     except DockerFailed:
         return None
     return parse_listing(out, time.time())
@@ -245,18 +246,18 @@ async def stop(container: str, run: Run) -> list[int]:
 async def stop_tagged(container: str, run_id: str) -> list[int]:
     """Stop every process in the container carrying RUN_ENV=run_id.
     :raises DockerFailed:"""
-    out = await _docker("exec", "-u", "vscode", "-e", f"RUN_ENV={RUN_ENV}", container,
-                        "bash", "-c", _KILL_SCRIPT, "kill-run", run_id,
-                        str(_TERM_GRACE_S), timeout=_TERM_GRACE_S + 20.0)
+    out = await _docker(*backend.exec_args(
+        container, ["bash", "-c", _KILL_SCRIPT, "kill-run", run_id, str(_TERM_GRACE_S)],
+        user="vscode", env={"RUN_ENV": RUN_ENV}), timeout=_TERM_GRACE_S + 20.0)
     return _pids(out)
 
 
 async def stop_tree(container: str, pid: int) -> list[int]:
     """Stop the process `pid` in the container and everything below it.
     :raises DockerFailed:"""
-    out = await _docker("exec", "-u", "vscode", container, "bash", "-c",
-                        _KILL_TREE_SCRIPT, "kill-tree", str(pid), str(_TERM_GRACE_S),
-                        timeout=_TERM_GRACE_S + 20.0)
+    out = await _docker(*backend.exec_args(
+        container, ["bash", "-c", _KILL_TREE_SCRIPT, "kill-tree", str(pid), str(_TERM_GRACE_S)],
+        user="vscode"), timeout=_TERM_GRACE_S + 20.0)
     return _pids(out)
 
 

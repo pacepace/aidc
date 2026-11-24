@@ -40,6 +40,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from aidc_mcp import backend
+
 #: A server's name: also a file name and a key in Claude's state.
 SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 #: A bearer token (RFC 6750's token68), and nothing a header or a shell could misread.
@@ -161,7 +163,8 @@ def check(server: str, path: str, bearer: str, base_url: str) -> str:
 
 def _exec(container: str, payload: str, timeout: float) -> subprocess.CompletedProcess[str]:
     """The install script in the session's container; the settings go in on stdin."""
-    argv = ["docker", "exec", "-i", "-u", "vscode", container, "bash", "-c", INSTALL_SCRIPT]
+    argv = backend.exec_argv(container, ["bash", "-c", INSTALL_SCRIPT], user="vscode",
+                             stdin=True)
     return subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=timeout)
 
 
@@ -181,7 +184,7 @@ def hand(name: str, *, server: str, path: str, bearer: str, base_url: str,
     url = check(server, path, bearer, base_url)
     payload = json.dumps({"server": server, "url": url, "bearer": bearer})
     try:
-        proc = run(f"aidc-{name}-dev", payload, timeout)
+        proc = run(backend.target(name), payload, timeout)
     except subprocess.TimeoutExpired as exc:
         raise SessionMcpError(f"timeout after {timeout}s writing the session's Claude state",
                               "timeout") from exc

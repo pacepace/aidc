@@ -31,6 +31,8 @@ import posixpath
 from dataclasses import dataclass
 from typing import Any
 
+from aidc_mcp import backend
+
 # Bytes read back before the process is stopped.
 DIFF_CAP = 200_000
 READ_CAP = 64_000
@@ -68,11 +70,11 @@ def in_session(name: str, repo: str, inner: list[str]) -> tuple[list[str], str |
     """The argv that runs `inner` in the session's dev container, in its repository, as
     its user, under `timeout`; and the local working dir (None: the container's).
     The seam tests replace to run `inner` against a repository on this machine."""
-    return ([
-        "docker", "exec", "-u", "vscode", "-w", repo,
-        "-e", "GIT_OPTIONAL_LOCKS=0", "-e", "GIT_TERMINAL_PROMPT=0", "-e", "GIT_PAGER=cat",
-        f"aidc-{name}-dev", "timeout", "-k", "5", str(GIT_TIMEOUT_S), *inner,
-    ], None)
+    return (backend.exec_argv(
+        backend.target(name), ["timeout", "-k", "5", str(GIT_TIMEOUT_S), *inner],
+        user="vscode", workdir=repo,
+        env={"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat"},
+    ), None)
 
 
 async def run_capped(argv: list[str], *, cwd: str | None, cap: int,

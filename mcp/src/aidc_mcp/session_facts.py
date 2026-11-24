@@ -6,7 +6,8 @@ printed and failed every call. Each fact here comes from the container that hold
 it: the taint flag from the policy sidecar, the audit dir from the audit sidecar's
 mount, the repository from the dev container's environment.
 
-Every docker call goes through :func:`run_docker`, the one seam tests replace.
+Every call goes through :func:`run_docker`, the one seam tests replace; the commands come
+from :mod:`aidc_mcp.backend`.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from aidc_mcp import backend
 from aidc_mcp.audit import log_event
 
 # Where proxy/policy/policy.sh writes the flag, inside the policy sidecar.
@@ -40,11 +42,12 @@ class DockerResult:
 
 
 async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerResult:
-    """Run `docker <args>` and return its exit, stdout and stderr. A docker that cannot
-    be started, or does not answer in time, is a failed call (exit -1), never a raise."""
+    """Run the backend's program (`docker`) with `args` and return its exit, stdout and
+    stderr. One that cannot be started, or does not answer in time, is a failed call
+    (exit -1), never a raise."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", *args,
+            backend.BIN, *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -55,7 +58,7 @@ async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerRe
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return DockerResult(-1, b"", f"docker {args[0]} timed out after {timeout}s".encode())
+        return DockerResult(-1, b"", f"{backend.BIN} {args[0]} timed out after {timeout}s".encode())
     return DockerResult(proc.returncode if proc.returncode is not None else -1, out, err)
 
 
@@ -74,7 +77,8 @@ async def read_taint(name: str) -> dict[str, str] | None:
 
     :raises TaintUnknown: when the policy sidecar could not be asked
     """
-    res = await run_docker("exec", f"aidc-{name}-policy", "cat", TAINT_FILE)
+    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+                                              ["cat", TAINT_FILE]))
     if res.returncode != 0:
         if _missing_file(res.err):
             return None
@@ -105,9 +109,8 @@ async def taint_or_none(name: str) -> dict[str, str] | None:
 
 async def audit_dir(name: str) -> str | None:
     """The session's audit dir on the HOST: the source of the audit sidecar's mount."""
-    res = await run_docker(
-        "inspect", f"aidc-{name}-audit", "--format",
-        "{{range .Mounts}}{{if eq .Destination \"" + AUDIT_MOUNT + "\"}}{{.Source}}{{end}}{{end}}")
+    res = await run_docker(*backend.mount_source_args(
+        backend.target(name, backend.ROLE_AUDIT), AUDIT_MOUNT))
     path = res.stdout.decode("utf-8", errors="replace").strip()
     return path if res.returncode == 0 and path else None
 
@@ -115,9 +118,7 @@ async def audit_dir(name: str) -> str | None:
 async def repo_path(name: str) -> str | None:
     """The repository the session's dev container works in: AIDC_REPO_PATH, else its
     working dir (compose sets both to the mounted repo)."""
-    res = await run_docker(
-        "inspect", f"aidc-{name}-dev", "--format",
-        "{{range .Config.Env}}{{println .}}{{end}}\x1f{{.Config.WorkingDir}}")
+    res = await run_docker(*backend.env_workdir_args(backend.target(name)))
     if res.returncode != 0:
         return None
     env, _, workdir = res.stdout.decode("utf-8", errors="replace").partition("\x1f")
@@ -134,7 +135,8 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
 
     :raises TaintUnknown: when the policy sidecar could not be asked
     """
-    res = await run_docker("exec", f"aidc-{name}-policy", "cat", POLICY_EVENTS_FILE)
+    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+                                              ["cat", POLICY_EVENTS_FILE]))
     if res.returncode != 0:
         if _missing_file(res.err):
             return []
@@ -153,23 +155,23 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
 async def dev_containers() -> list[dict[str, str]] | None:
     """Every session by its dev container: name, status, profile, started. None when
     docker did not answer."""
-    fmt = "{{.Names}}\t{{.Status}}\t{{.Label \"aidc.profile\"}}\t{{.CreatedAt}}"
-    res = await run_docker("ps", "-a", "--filter", "label=aidc.role=dev", "--format", fmt)
+    res = await run_docker(*backend.dev_list_args())
     if res.returncode != 0:
         return None
     text = res.stdout.decode("utf-8", errors="replace")
     if not text.strip():
         # Sessions made before the labels: their names say what they are.
-        res = await run_docker("ps", "-a", "--filter", "name=^aidc-.*-dev$", "--format", fmt)
+        res = await run_docker(*backend.dev_list_args(by_name=True))
         if res.returncode != 0:
             return None
         text = res.stdout.decode("utf-8", errors="replace")
     rows = []
     for line in text.splitlines():
         parts = line.split("\t")
-        if not parts or not parts[0].startswith("aidc-") or not parts[0].endswith("-dev"):
+        session = backend.session_of_dev(parts[0]) if parts else None
+        if not session:
             continue
         parts += [""] * (4 - len(parts))
-        rows.append({"name": parts[0][len("aidc-"):-len("-dev")], "status": parts[1],
+        rows.append({"name": session, "status": parts[1],
                      "profile": parts[2] or "?", "started": parts[3]})
     return rows

@@ -40,7 +40,21 @@ partition: serial — chunk 01 is Python and could run beside 02, but 02-04 all 
   because the call sites differ in sync/async, stdin, timeouts and stream handling, and keeping
   those in the caller keeps the change mechanical. Inferred: the role names above are the full
   set; chunk 02's inventory confirms.
-- **Decisions made mid-build:** (append here)
+- **Decisions made mid-build:**
+  - [DECISION: chunk 01's interface differs from the forecast above | callers address a
+    container by the string `backend.target(session, role)` and pass it to
+    `exec_argv(tgt, argv, …)`, instead of `exec_argv(session, role, …)`, because the call sites
+    already thread a `container` string through many helpers (tmux, headless, session_mcp) and
+    the tests pin that shape; the Kubernetes backend can encode namespace/pod/container in the
+    same string, and switching to (session, role) stays possible if it cannot | owner can veto]
+  - [DECISION: no `backend.run`; the two existing runners (`session_facts.run_docker`,
+    `headless._docker`) stay where they are and start `backend.BIN` | they differ in error
+    contract (a result vs. a raise) and are the seams the tests replace; merging them would
+    change behaviour and the tests, which this refactor must not | owner can veto]
+  - [DECISION: the two queries are command/parse pairs (`instance_argv` + `instance_gone`,
+    `dev_list_args` + `session_of_dev`) instead of `session_instance()` / `dev_sessions()` |
+    the callers keep their own subprocess handling (Goals, "Inferred"), and the backend owns
+    both the command and the reading of its output | owner can veto]
 - **Level:** Medium-high. The MCP side is well understood (every call site read). The CLI side
   is 139 Docker calls across 20 files; the verb list in chunks 02-04 is a forecast that chunk 02's
   inventory may move.

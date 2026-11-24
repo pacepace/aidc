@@ -251,6 +251,47 @@ one naming the session with another token or none waits. The reverse (one sessio
 while the user's mode is rules) is refused: a session can always send a request without its
 token.
 
+### The git container on Docker
+
+The same image, gitctl, request watcher, managed CLAUDE.md, modes and tokens on the Docker
+backend (owner rulings 2026-11-24, "The git container works on Docker too" and "On Docker the
+git container works on the user's own working copies"). `aidc git` and `aidc repo` pick the
+backend themselves: `--backend`, else the config's `backend:`, else Kubernetes when a
+`kubernetes:` block exists, else Docker (`scripts/lib/git-common.sh`; the Docker side is
+`scripts/docker/`). What differs is only what Docker is:
+
+- The container is `aidc-git-dev`, labelled as the dev container of the session named `git`, so
+  `aidc list|attach|logs|status` and the MCP server find it like any session (the MCP runs a
+  session-user command there as its `git` user; it has no policy sidecar, so it is never
+  tainted). `aidc kill|restart|upgrade|... git` and `aidc create git` are refused.
+- Its homes are volumes (`aidc-git-home`, `aidc-git-cred`, `aidc-git-run`), seeded by a one-shot
+  root container with only CHOWN, FOWNER and DAC_OVERRIDE and no network, as the pod's init steps
+  do; the Claude refresh runs as the git user. The request folder is the `aidc-git-requests`
+  volume at `/var/aidc/git-requests`, the agent's (2755, session group); a session created after
+  setup mounts it (external, never removed with a session) and gets `AIDC_GIT_REQUESTS`;
+  every session gets `AIDC_GIT_TOKEN` and `AIDC_BACKEND=docker`. Sessions keep the host's umask.
+- Working copies are the user's own on their machine, never cloned, locked or re-owned. `aidc
+  repo add <path>` (under the home, origin `https://github.com/<owner>/<name>`) records it in
+  `~/.config/aidc/git-repos`, recreates the container with it mounted at its own path (the one
+  sessions see) and runs `gitctl adopt` (gitrun makes its private copy; the working copy is only
+  read). Only those working copies are mounted. `repo remove` drops the copy and the mount and
+  never deletes the working copy. The watcher's disk is the user's home (`AIDC_GIT_DISK`).
+- The agent (uid 2000) cannot write the user's files, which are not group-writable, so the verbs
+  that write a working copy (`fetch`'s import, `tidy`, `unpushed`) run as `gitwc`, uid 1000 (the
+  sessions' and the user's uid), through one more sudo rule; gitctl refuses `gitwc` unless Docker
+  made the container (`/.dockerenv`, root's). `tidy` removes a worktree only inside its working
+  copy, and one recorded outside it (unseen in the container, so it looks gone) keeps its record
+  and branch: nothing is pruned while one exists. `clone` is refused.
+- Egress: the container is on an internal network (`aidc-git-net`, no route out) whose only
+  other member is its proxy, `aidc-git-squid` (alias `aidc-proxy`), the session Squid image with
+  `AIDC_PUBLIC_ONLY=1`: every private, loopback, link-local, shared and multicast destination is
+  refused, names resolve through Quad9. gitctl gives gitrun's git and gitcred's gh that proxy by
+  value on Docker only. No ports are published. Its Claude takes the user's long-lived token when
+  `aidc claude-token` set one, as sessions do.
+- The agent's transcript is copied (the dev image's `transcript-mirror.sh`, kept identical) into
+  the MCP server's `transcripts/git`, given to the agent, so an orchestrator reads its questions
+  as it reads any session's.
+
 ### Proposal: lock the parts of the repo that can run code
 
 Superseded 2026-11-24 by the owner ruling "One git design on both backends: bundles, no repo

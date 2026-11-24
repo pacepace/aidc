@@ -1,5 +1,20 @@
 {
   "allowManagedHooksOnly": true,
+  "disableBypassPermissionsMode": "disable",
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Bash(gitctl *)",
+      "Bash(git-requests *)",
+      "Bash(git *)",
+      "Bash(ls *)",
+      "Read",
+      "Grep",
+      "Glob",
+      "AskUserQuestion",
+      "Write(//tmp/**)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {

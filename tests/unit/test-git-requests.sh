@@ -505,7 +505,19 @@ ghs aidc request "../x"; assert_eq "an id that is not one is refused" 1 "$RC"
 uid=$(newid); put "$uid" "$(req "$uid" push)"
 ghs aidc request "$uid"
 assert_has "a request still sitting untaken is said so, with where the user sees why" "not taken yet: the git container has not taken request $uid" "$OUT"
+# gh pr status, for a request whose files are gone: the git container's 30-day sweep took
+# both, so it is expired, not "sent, not taken yet" (only a request still in the folder is).
+gst="$S/home/.local/state/aidc-gh"; mkdir -p "$gst"
+printf 'push 2026-10-01T00:00:00Z feat\n' > "$gst/$uid"
+ghs pr status
+assert_has "pr status: a request still in the folder with no result is not taken yet" "$uid  push feat  sent, not taken yet" "$OUT"
 rm -f "$REQ/requests/$uid.json"
+ghs pr status
+assert_has "pr status: one whose request and result are both gone is expired, honestly" "$uid  push feat  expired: no request or result is kept" "$OUT"
+assert_not_has "  (never 'not taken' for it)" "$uid  push feat  sent, not taken yet" "$OUT"
+ghs aidc request "$uid"
+assert_has "gh aidc request says the same" "request $uid: expired" "$OUT"
+rm -f "$gst/$uid"
 mkdir -p "$S/elsewhere"; git init -q "$S/elsewhere"; git -C "$S/elsewhere" remote add origin https://gitlab.com/o/r
 OUT=$(cd "$S/elsewhere" && bash "$GH" pr create --title T --body B 2>&1); RC=$?
 assert_eq "a working copy whose origin is not GitHub is refused here" 1 "$RC"

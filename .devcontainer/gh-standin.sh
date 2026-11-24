@@ -315,7 +315,10 @@ pr_list() {
     printf '%s' "$out" | jq -r '.[] | "#\(.number)\t\(.title)\t\(.headRefName)\t\(.state)"' | printable
 }
 
-# This session's requests, newest first, with their state.
+# This session's requests, newest first, with their state: the result when there is one; "sent,
+# not taken yet" while the request itself still waits in the folder; and "expired" when neither
+# is there any more (the git container deletes requests and results after 30 days), never
+# "not taken" for a request that is simply gone.
 pr_status() {
     local f id s
     need_folder
@@ -324,7 +327,11 @@ pr_status() {
         id="$f"
         [[ "$id" =~ ^[0-9a-f]{32}$ ]] || continue
         s=$(jq -r '"\(.state): \(.message)"' "$REQ/results/${id}.json" 2>/dev/null | printable) || s=""
-        printf '%s  %s  %s\n' "$id" "$(cut -d' ' -f1,3 "$STATE/$f" | printable)" "${s:-sent, not taken yet}"
+        if [ -z "$s" ]; then
+            if untaken "$id"; then s="sent, not taken yet"
+            else s="expired: no request or result is kept for it any more (the git container keeps them 30 days)"; fi
+        fi
+        printf '%s  %s  %s\n' "$id" "$(cut -d' ' -f1,3 "$STATE/$f" | printable)" "$s"
     done < <(find "$STATE" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2)
 }
 
@@ -333,7 +340,7 @@ aidc_request() {
     need_folder
     if [ ! -r "$REQ/results/${1}.json" ]; then
         if untaken "$1"; then echo "request ${1}: sent, not taken yet: $(not_taken_msg "$1")"
-        else echo "request ${1}: no result (taken, or expired)"; fi
+        else echo "request ${1}: expired: no request or result is kept for it any more (the git container keeps them 30 days)"; fi
         return 0
     fi
     RESULT=$(cat -- "$REQ/results/${1}.json")

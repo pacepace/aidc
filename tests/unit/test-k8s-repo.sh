@@ -102,8 +102,8 @@ case "$*" in
         case "$*" in *"repo-dir-${K_FAIL_STEP:-none}-"*) printf Failed ;; *) printf Succeeded ;; esac ;;
     *"logs repo-dir-"*) echo "${K_DIR_LOG:-ready: /home/alice/x}" ;;
     *"get pvc disk"*) printf 'Bound' ;;
-    *"get networkpolicy default-deny"*) : ;;
-    *"get deployment "*"-proxy"*) exit 1 ;;
+    *"get networkpolicy default-deny"*) echo "networkpolicy.networking.k8s.io/default-deny" ;;
+    *"get deployment "*"-proxy"*) case "$*" in *--ignore-not-found*) : ;; *) exit 1 ;; esac ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;

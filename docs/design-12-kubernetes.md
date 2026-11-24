@@ -218,8 +218,8 @@ the image's version file copied in and linked when the home's is older; a newer 
 updated to itself is kept); the managed files are the image's, so they are always current.
 
 In ask mode the watcher hands a waiting request to the agent (`AIDC_GIT_NOTIFY`, `git-notify`):
-one line naming only the id is pasted into window `claude` when Claude runs there (never into a
-shell), and the agent runs `git-requests prompt <id>` (the session's text below a line, marked
+one line naming only the id is pasted into window `claude` when Claude runs there and is set up
+(never into a shell or Claude's first-run screens), and the agent runs `git-requests prompt <id>` (the session's text below a line, marked
 as data) and asks the user with AskUserQuestion, Deny first; aidc delivers that question to an
 orchestrator as any session's, and the user can answer in the terminal too; only then does it
 approve or deny. One request is handed over at a time: while the last one handed over still

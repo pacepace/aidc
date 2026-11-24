@@ -99,7 +99,14 @@ partition: serial — three small chunks, each depending on the last; a delegate
 - `make smoke` on this host; MCP suite; every `tests/unit/*.sh`; record evidence.
 - An MCP round trip against a real session (session_create, session_send, session_status,
   session_exec, file_put, session_kill) through the new backend module.
-- design-12 "Backend seam" updated to what was built; CHANGELOG.
+- design-12 "Backend seam" updated to what was built (done in chunk 02); change record
+  `.prawduct/changes/backend-seam.md` (CHANGELOG is written from it at release).
+- Result 2026-11-24: `make smoke` 121 passed, 0 failed (166 s). Live MCP check against a real
+  session (`seamprobe`, created and killed with this branch's CLI): 14 of 14 — instance id and
+  gone, dev listing, taint, policy events, audit dir, repo path, git in the repo, tmux exec,
+  window list, screen capture, headless listing, stdin, exec user. The orchestrator round trip
+  through a running aidc-mcp was not run: the live aidc-mcp on this host serves real sessions,
+  and every function it would call on these paths was called directly instead.
 
 ## Verification strategy
 

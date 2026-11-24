@@ -135,6 +135,13 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   session storage class exists. The Docker smoke (`make smoke`) passed 121 of 121 on this branch's
   scripts after the cumulative review fixes (2026-11-24): the dispatcher's `--backend` switch and
   session lookup leave Docker as it was.
+- Live, after the review fixes (2026-11-24): `tests/smoke/k8s.sh` passes 33 of 33 on the owner's
+  cluster with the shared, Delete session class. The live runs found three more defects the unit
+  tests could not: a user namespace made before the default-deny existed lacked it (create now
+  refuses such a namespace; `aidc user add` adds it); the session home volume started empty and
+  root-owned, so the session had NO Claude Code (it is installed in the home) and its user could
+  not write the home (a seed step now copies the image's home on first use, as a Docker named
+  volume does); and the smoke's own `status | grep -q` failed under pipefail.
 - Review fix pass, second round: the audit sidecar (both backends) read the taint flag from
   `/var/aidc/state` and the Claude transcripts from `/var/aidc/claude-transcript`, which nothing
   mounts, so neither ever reached an audit trail; it now reads `/var/state` and the session

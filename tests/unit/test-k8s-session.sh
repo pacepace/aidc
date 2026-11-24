@@ -69,6 +69,7 @@ case "$*" in
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
         if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
     *"exec pod/demo-proxy-abc -c audit -- /usr/local/bin/finalize.sh"*) : ;;
+    *"get networkpolicy default-deny"*) [ "${K_NO_DENY:-}" = 1 ] && { echo 'not found' >&2; exit 1; } ;;
     *"get networkpolicy -o name"*) printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
     *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
 esac
@@ -143,8 +144,10 @@ assert_eq "the proxy pod has resource requests (not first in line for eviction)"
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .resources.requests' | tail -1)"
 assert_has "the inner Docker uses overlay2 (Sysbox gives it a real /var/lib/docker)" \
     '{"name":"AIDC_DOCKER_STORAGE_DRIVER","value":"overlay2"}' "$(dev '.spec.template.spec.containers[0].env')"
+assert_has "a new session home starts as a copy of the image's (Claude Code lives there), owned by the session user" \
+    "cp -a /home/vscode/. /seed/; chown 1000:1000 /seed" "$(dev '[.spec.template.spec.initContainers[] | select(.name == "seed-home") | .command]')"
 assert_eq "the repo folder is made as the session user" '[{"runAsUser":1000,"runAsGroup":1000},["mkdir","-p","/home/alice/code/proj"]]' \
-    "$(dev '.spec.template.spec.initContainers[0] | [.securityContext, .command]')"
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "repo-dir") | [.securityContext, .command]')"
 
 np() { q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"$1\") | .spec" | tail -1; }
 assert_eq "the dev pod may reach only its own session's proxy, on 3128" \
@@ -176,6 +179,8 @@ assert_has "and the policy sidecar (taint_response)" '{"name":"AIDC_TAINT_RESPON
 sed -i '/^claude_mode: safe$/d; /^taint_response: notify$/d' "$HOME/.config/aidc/config.yaml"
 
 echo "=== create refusals ==="
+out=$(K_NO_DENY=1 run create demo --backend kubernetes)
+assert_has "a namespace without its default-deny is refused, with the fix" "run \`aidc user add alice\` again" "$out"
 out=$(run create 9lives --backend kubernetes)
 assert_has "a name a Kubernetes Service cannot take is refused" "starts with a letter" "$out"
 assert_eq "and nothing was applied for it" "" "$(cat "$K_APPLIED")"

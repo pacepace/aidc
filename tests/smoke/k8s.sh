@@ -21,6 +21,9 @@ AIDC="$AIDC_ROOT/scripts/aidc"
 export AIDC_SCRIPTS="$AIDC_ROOT/scripts"
 # shellcheck source=../../scripts/k8s/lib.sh
 . "$AIDC_SCRIPTS/k8s/lib.sh"
+# shellcheck source=../../scripts/k8s/manifests.sh
+. "$AIDC_SCRIPTS/k8s/manifests.sh"
+AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r' | tr '+' '_')
 k8s_require || exit 1
 
 SESSION="smoke-$(date +%s | tail -c 7)"
@@ -41,6 +44,9 @@ assert() {
 }
 # in_dev <command>: run as the session user, with the session's proxy environment.
 in_dev() { k8s_kubectl -n "$NS" exec "$POD" -c dev -- sudo -E -u vscode bash -c "$1" </dev/null; }
+# status_has <text>: aidc status for the session contains <text>. The output is captured first:
+# under pipefail, `status | grep -q` fails when grep stops reading before status finishes.
+status_has() { local out; out=$("$AIDC" status "$SESSION" </dev/null 2>&1); case "$out" in *"$1"*) return 0 ;; esac; return 1; }
 proxy_pod() { k8s_kubectl -n "$NS" get pod -l "aidc/session=${SESSION},app=proxy" -o name | head -n1; }
 
 cleanup() {
@@ -58,7 +64,8 @@ assert "aidc create --backend kubernetes makes a ready session" \
     "(cd '$REPO' && '$AIDC' create '$SESSION' --backend kubernetes </dev/null)"
 assert "aidc list shows it, on the kubernetes backend" \
     "'$AIDC' list </dev/null | grep -E '^${SESSION} .*kubernetes'"
-assert "aidc status reports it clean" "'$AIDC' status '$SESSION' </dev/null | grep -q 'taint:    clean'"
+assert "aidc status reports it clean" "status_has 'taint:    clean'"
+assert "aidc status confirms the lockdown's policies are in place" "status_has 'egress:   enforced'"
 
 echo "[3/7] egress: the session's only way out is its own Squid"
 assert "https://example.com through squid" "in_dev 'curl -sf -m 20 -o /dev/null https://example.com'"
@@ -70,6 +77,9 @@ assert "the Kubernetes API is blocked" "! in_dev \"curl -sk -m 8 --noproxy '*' -
 echo "[4/7] Docker inside, unprivileged"
 assert "the dev pod is not privileged and runs in a user namespace" \
     "k8s_kubectl -n '$NS' get pod '$POD' -o json | yq -p=json -e '.spec.hostUsers == false and ([.spec.containers[] | select(.securityContext.privileged == true)] | length == 0)'"
+assert "Claude Code is installed in the session (it lives in the session home)" \
+    "k8s_kubectl -n '$NS' exec '$POD' -c dev -- sudo -u vscode -i claude --version </dev/null"
+assert "the session user owns its home" "in_dev 'test -O /home/vscode && touch /home/vscode/.aidc-smoke-write'"
 assert "docker run hello-world" "in_dev 'timeout 180 docker run --rm hello-world'"
 mtu=$(in_dev "perl -e 'socket(my \$s,2,2,0); my \$r=pack(\"a16 x16\",\"eth0\"); ioctl(\$s,0x8921,\$r) and print unpack(\"x16 i\",\$r)'" 2>/dev/null)
 if [ -n "$mtu" ] && [ "$mtu" -lt 1500 ] 2>/dev/null; then
@@ -103,7 +113,7 @@ assert "a blocklisted domain is refused by squid (403, got ${code:-none})" "[ '$
 sleep 8
 assert "the policy sidecar writes the taint flag" \
     "k8s_kubectl -n '$NS' exec '$(proxy_pod)' -c policy -- cat /var/state/tainted </dev/null | grep -q malware_domains"
-assert "aidc status shows the taint" "'$AIDC' status '$SESSION' </dev/null | grep -q 'taint:    TAINTED'"
+assert "aidc status shows the taint" "status_has 'taint:    TAINTED'"
 # The audit sidecar copies the logs to its volume every 60 s (AIDC_AUDIT_INTERVAL).
 for _ in $(seq 15); do
     k8s_kubectl -n "$NS" exec "$(proxy_pod)" -c audit -- grep -q tainted /var/aidc/audit/policy-events.log </dev/null 2>/dev/null && break
@@ -116,6 +126,9 @@ echo "[7/7] kill"
 REL="${REPO#"$HOME"}"
 DISK_REPO="/home/${AIDC_K8S_USER}${REL}"
 in_dev "echo kept > '${DISK_REPO}/marker'" >/dev/null 2>&1 || true
+# A shell-history line and a transcript file in the session home, where Claude Code keeps them,
+# for the audit sidecar's final sweep to collect (SEC-07).
+in_dev "echo aidc-smoke-history >> /home/vscode/.bash_history; mkdir -p /home/vscode/.claude/projects/aidc-smoke && echo '{\"smoke\":true}' > /home/vscode/.claude/projects/aidc-smoke/t.jsonl" >/dev/null 2>&1 || true
 AUDIT=$(k8s_kubectl -n "$NS" get statefulset "${SESSION}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null)
 assert "aidc kill removes the session" "'$AIDC' kill '$SESSION' </dev/null"
 trap - EXIT INT TERM
@@ -146,6 +159,9 @@ assert "the audit trail has meta.json, stamped killed_at by the final sweep" "rd
 meta_names_it() { [ "$(rd "jq -r '.session + \" \" + .backend' /audit/meta.json")" = "${SESSION} kubernetes" ]; }
 assert "meta.json names the session and its backend" "meta_names_it"
 assert "the audit trail has the config snapshot" "rd 'test -s /audit/config-snapshot.yaml'"
+assert "meta.json records when the session was tainted" "rd 'jq -e .tainted_at /audit/meta.json'"
+assert "the audit trail has the session's shell history" "rd 'grep -q aidc-smoke-history /audit/dev-bash-history'"
+assert "the audit trail has the session's Claude transcripts" "rd 'test -s /audit/claude-transcript/aidc-smoke/t.jsonl'"
 assert "the audit trail has squid's access log" "rd 'test -s /audit/squid-access.log'"
 assert "the user's disk outlives the session (a file written in it is still there)" \
     "rd 'grep -q kept /disk${REL}/marker'"

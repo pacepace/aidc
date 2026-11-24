@@ -72,6 +72,10 @@ case "$REPO_PATH" in *[\"\\]*|*$'\n'*) die "the repo path may not contain quotes
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 [ "$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/null || true)" = "Bound" ] \
     || die "no disk for ${AIDC_K8S_USER} in the cluster: run \`aidc user add ${AIDC_K8S_USER}\` first"
+# The namespace's default-deny is half of every session's lockdown (its pods' own policies are
+# the other half). A namespace made before aidc added it lacks it: say so rather than run there.
+k8s_kubectl -n "$ns" get networkpolicy default-deny >/dev/null \
+    || die "${ns} has no default-deny NetworkPolicy: run \`aidc user add ${AIDC_K8S_USER}\` again (it is safe to repeat)"
 if k8s_kubectl -n "$ns" get deployment "${NAME}-proxy" >/dev/null 2>&1; then
     die "session '${NAME}' already exists (aidc kill ${NAME} --backend kubernetes)"
 fi

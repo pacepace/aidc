@@ -448,6 +448,16 @@ spec:
       dnsConfig: {nameservers: [192.0.2.1]}
       hostAliases: [{ip: "${proxy_ip}", hostnames: [aidc-proxy]}]
       initContainers:
+        # The session home starts as a copy of the image's /home/vscode, as a Docker named volume
+        # does on first use: Claude Code itself lives there (~/.local), with the shell setup. A
+        # new claim starts empty and root-owned, so without this a session had no claude and its
+        # user could not write its own home (no shell history, no transcripts to audit). Only on
+        # first use (.profile is the marker): a restarted session keeps its home.
+        - name: seed-home
+          image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/vscode/. /seed/; chown 1000:1000 /seed && chmod 0755 /seed']
+          volumeMounts: [{name: home, mountPath: /seed}]
         # The repo folder, made as the session user when it is not on the disk yet.
         - name: repo-dir
           image: ${img}/dev-base:${AIDC_VERSION_TAG}

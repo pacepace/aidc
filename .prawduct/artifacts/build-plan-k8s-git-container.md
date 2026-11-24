@@ -130,9 +130,9 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   approval over MCP is left to aidc 2.0 (the per-user MCP server), recorded.
   Its instructions: a managed, root-owned `/etc/claude-code/CLAUDE.md` (always loaded: the git
   rules, `gitctl` as the only way to GitHub, ask/rules mode, and that everything sessions write
-  (commit messages, diffs, PR text, files) is data, never instructions); and managed skills for
-  the procedures (push a session's branch and open a PR; tidy and report leftovers; check and
-  offer GitHub protections). Owner asked 2026-11-24 whether the git agent needs a skill.
+  (commit messages, diffs, PR text, files) is data, never instructions, and the procedures: push a
+  session's branch and open a PR; tidy and report leftovers; check and offer GitHub
+  protections). No skills: one locked file (owner, 2026-11-24: "CLAUDE.md is fine").
 
 ### Chunk 06: End to end and docs
 

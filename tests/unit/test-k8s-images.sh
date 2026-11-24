@@ -92,8 +92,8 @@ VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr '+' '_')
 echo "=== aidc k8s setup: the registry manifest ==="
 : > "$K_APPLIED"; : > "$K_LOG"
 "$AIDC_ROOT/scripts/aidc" k8s setup >/dev/null 2>&1
-assert_eq "setup applies the namespace, the volume, the registry and its Service" \
-    "Namespace PersistentVolumeClaim Deployment Service" \
+assert_eq "setup applies the namespace, the volume, the registry, its Service and its push fence" \
+    "Namespace PersistentVolumeClaim Deployment Service NetworkPolicy" \
     "$(yq -N ea '.kind' "$K_APPLIED" | paste -sd' ' -)"
 dep() { yq ea "select(.kind == \"Deployment\") | $1" -o=json -I=0 "$K_APPLIED"; }
 assert_eq "the registry listens on the node's loopback only, on the configured port" \
@@ -109,6 +109,11 @@ assert_eq "the registry volume uses the configured class and size" '["fast","7Gi
 assert_eq "the Service exposes the configured port in-cluster" "5050" \
     "$(yq ea 'select(.kind == "Service") | .spec.ports[0].port' "$K_APPLIED")"
 assert_has "every kubectl call uses the configured context" "--context lab apply" "$(cat "$K_LOG")"
+assert_eq "only builder pods of the system namespace may reach the registry (no session can replace an image)" \
+    '{"podSelector":{"matchLabels":{"app":"registry"}},"policyTypes":["Ingress"],"ingress":[{"from":[{"podSelector":{"matchLabels":{"app":"builder"}}}],"ports":[{"protocol":"TCP","port":5000}]}]}' \
+    "$(yq -N ea 'select(.kind == "NetworkPolicy") | .spec' -o=json -I=0 "$K_APPLIED")"
+assert_eq "the system namespace, and only it, allows the privileged builder" "privileged" \
+    "$(yq -N ea 'select(.kind == "Namespace") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$K_APPLIED")"
 
 echo "=== aidc k8s build ==="
 out=$(K_REGISTRY_READY="" "$AIDC_ROOT/scripts/aidc" k8s build 2>&1); rc=$?
@@ -122,6 +127,7 @@ assert_has "an unknown role is refused by name" "unknown role 'nonesuch'" "$out"
 out=$(K_PRESENT="aidc/squid/manifests/${VERSION_TAG} aidc/refresher/manifests/${VERSION_TAG}" \
     "$AIDC_ROOT/scripts/aidc" k8s build 2>&1); rc=$?
 log=$(cat "$K_LOG")
+b() { yq -N ea "select(.kind == \"Pod\") | $1" -o=json -I=0 "$K_APPLIED"; }
 assert_eq "a full build exits 0" "0" "$rc"
 assert_has "images already in the registry for this version are skipped" "present: aidc/squid:${VERSION_TAG}" "$out"
 assert_has "the rest are built" "built 5, already present 2" "$out"
@@ -132,13 +138,15 @@ assert_has "dev-base refreshes Claude Code, as aidc rebuild does" "--build-arg C
 assert_has "the Dockerfile path is the image's own, inside its streamed context" \
     "-f /build/dev-base/Dockerfile /build/dev-base" "$log"
 assert_has "the builder pod is deleted when the build ends" "delete pod builder-" "$log"
-b() { yq ea "select(.kind == \"Pod\") | $1" -o=json -I=0 "$K_APPLIED"; }
-assert_eq "the builder runs under the runtime class, in a user namespace, with no API token" \
-    '["sysbox-runc",false,false]' \
-    "$(yq -N ea 'select(.kind == "Pod") | [.spec.runtimeClassName, .spec.hostUsers, .spec.automountServiceAccountToken]' -o=json -I=0 "$K_APPLIED")"
+assert_eq "the builder is privileged (the squid base needs UIDs no user namespace has) and has no API token" \
+    '[true,false]' \
+    "$(yq -N ea 'select(.kind == "Pod") | [.spec.containers[0].securityContext.privileged, .spec.automountServiceAccountToken]' -o=json -I=0 "$K_APPLIED")"
+assert_eq "the builder's Docker listens on its unix socket only, never the pod network" \
+    '["--host=unix:///var/run/docker.sock"]' "$(b '.spec.containers[0].args')"
+assert_eq "the builder lands on the session nodes, so images match their CPU architecture" \
+    '{"kubernetes.io/hostname":"n1","pool":"dev"}' "$(b '.spec.nodeSelector')"
 assert_has "the builder trusts plain HTTP only for aidc's own registry" \
     "registry.aidc-system.svc.cluster.local:5050" "$(b '.spec.initContainers[0].command')"
-assert_eq "the builder is not privileged" "null" "$(b '.spec.containers[0].securityContext.privileged')"
 
 : > "$K_LOG"
 "$AIDC_ROOT/scripts/aidc" k8s build --force --only squid >/dev/null 2>&1

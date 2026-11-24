@@ -16,8 +16,9 @@
 # AIDC_SMOKE_GIT_REPO=<owner/name> naming a scratch repo you own, a real push, PR, merge and
 # tidy there; with AIDC_SMOKE_GIT_CLAUDE=1, the git agent's question (git.sh says what each needs).
 #
-# Leaves behind only the session's audit claim, which aidc keeps by design; the end of the run
-# names it. The repo folders it made on the user's disk are removed. The git container stays.
+# aidc kill keeps the session's audit claim by design; the smoke then lists it and removes it
+# with `aidc audit trim` (AIDC_SMOKE_KEEP_AUDIT=1 keeps it, and the end of the run names it).
+# The repo folders it made on the user's disk are removed. The git container stays.
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,8 +215,22 @@ assert "the audit trail has squid's access log" "rd 'test -s /audit/squid-access
 assert "the user's disk outlives the session (a file written in it is still there)" \
     "rd 'grep -q kept /disk${REL}/marker'"
 rd "rm -rf '/disk${REL}'" >/dev/null 2>&1 || true
-k8s_kubectl -n "$NS" delete pod "$READER" --wait=false >/dev/null 2>&1 || true
+k8s_kubectl -n "$NS" delete pod "$READER" --wait=true --timeout=120s >/dev/null 2>&1 || true
 rmdir "$REPO" "$(dirname "$REPO")" 2>/dev/null || true
+
+# aidc audit: the kept claim is listed with the size aidc kill recorded, and trim removes it with
+# its volume, so smoke runs do not pile up claims (AIDC_SMOKE_KEEP_AUDIT=1 keeps it).
+k8s_kubectl -n "$NS" wait --for=delete pod -l "aidc/session=${SESSION}" --timeout=180s >/dev/null 2>&1 || true
+audit_row() { "$AIDC" audit list --backend kubernetes </dev/null | awk -v c="$AUDIT" '$1 == c'; }
+assert "aidc audit list shows the kept claim, kept, with the size aidc kill recorded" \
+    "audit_row | grep -Eq ' [0-9]+ (B|KB|MB) +kept +kubernetes\$'"
+if [ "${AIDC_SMOKE_KEEP_AUDIT:-}" != 1 ] && [ -n "$AUDIT" ]; then
+    AUDIT_PV=$(k8s_kubectl -n "$NS" get pvc "$AUDIT" -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+    assert "aidc audit trim removes the claim" "'$AIDC' audit trim '$AUDIT' --yes --backend kubernetes </dev/null"
+    assert "and its volume, whatever the class's reclaim policy" \
+        "[ -n '$AUDIT_PV' ] && ! k8s_kubectl get pv '$AUDIT_PV' >/dev/null 2>&1"
+    AUDIT="(trimmed)"
+fi
 
 echo
 echo "=== kubernetes smoke summary ==="

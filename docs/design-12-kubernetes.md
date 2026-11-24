@@ -305,17 +305,23 @@ intact, and Claude resumes where it left off (K8S-22).
 
 ### Backend seam
 
-About 18 CLI scripts call `docker` directly, and the MCP server shells `docker exec` from several
-places (`session_facts.run_docker`, `headless._docker`, `tools.py`, `repo.py`,
-`session_mcp.py`). The change introduces one seam on each side:
+Built first, with no behaviour change (branch `refactor/backend-seam`):
 
-- CLI: `scripts/lib/backend_docker.sh` and `scripts/lib/backend_k8s.sh` with the same function
-  names (create, exec, attach, kill, list, port, logs); the dispatcher picks one per session.
-- MCP: a `Backend` interface (`exec`, `copy_in`, `status`, …) with Docker and Kubernetes
-  implementations; every current `docker exec` call goes through it.
-
-The Docker path is refactored behind the seam first, with no behaviour change, before any
-Kubernetes code lands.
+- **MCP server:** `mcp/src/aidc_mcp/backend.py` is the one module that knows sessions run on
+  Docker. Callers address a container as `backend.target(session, role)` (roles `dev`, `policy`,
+  `audit`) and get commands from it: `exec_argv` (user, workdir, env, stdin), the inspect and list
+  queries with the readers of their output, and the session's instance id. They keep their own
+  process handling (sync or async, timeouts, stdin). `mcp/tests/test_backend.py` fails if any
+  other module starts `docker` or spells a container name. The Kubernetes backend answers the
+  same functions with `kubectl` and namespace/pod names.
+- **CLI:** the switch point is the dispatcher: `scripts/aidc` runs `scripts/cmd-<verb>.sh`, and
+  the Kubernetes verbs go beside those, picked by the session's backend. Wrapping each Docker
+  call in a shell backend library was considered and not done: nearly every call is in a per-verb
+  script whose Kubernetes form shares little with it (namespaces and NetworkPolicy instead of
+  networks and sidecar containers), so the wrapper would have one implementation and guessed
+  signatures. Shared helpers are extracted once the Kubernetes verbs show which are shared.
+  `tests/unit/test-backend-confinement.sh` keeps Docker out of the dispatcher and the shared
+  libraries, except for the named Docker helpers in `common.sh` and `config.sh`.
 
 ## Open items
 

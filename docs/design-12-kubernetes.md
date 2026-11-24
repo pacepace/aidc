@@ -217,17 +217,27 @@ Signals: the statusline's weekly `rate_limits.seven_day` (proactive, e.g. 90 %),
 `StopFailure` hook with `rate_limit` (reactive). There is no 5-hour window any more (owner,
 2026-11-24).
 
-**Proposal**, two mechanisms, to choose by a live test:
+**Mechanism: a per-user credential broker.** One process per user owns every account's login
+(its refresh token) and writes the active account's credentials, with the refresh token left
+out, into each session's `.credentials.json` by atomic rename. Claude re-reads the file, so the
+next message uses the new account with no restart; sessions never refresh, so they never race
+each other over a rotating refresh token. The broker renews each account's access token before
+it expires and rewrites the sessions' files.
 
-- **A. Broker.** One process per user owns every account's refresh token and writes the active
-  account's short-lived credentials into the session's `.credentials.json`. Claude re-reads the
-  file on change, so the next message uses the new account, with no restart and no refresh races.
-  Test first: does a running session pick up an overwritten credentials file, and does it accept
-  one without a refresh token?
-- **B. Restart.** One Claude config directory per account (the way Jean-Claude works); switching
-  restarts Claude under the other directory with `--resume <session>`, which keeps the
-  conversation because history lives in a shared folder (next section). Seconds of downtime, a
-  cold prompt cache, but no unknowns.
+Measured 2026-11-24 (Claude Code 2.1.331, two Max accounts, one running interactive session):
+
+| Step | Next message served by |
+|---|---|
+| start on account A | A (weekly 89 %) |
+| replace the file with account B's (atomic rename) | B (weekly 43 %, different reset), same session id, conversation intact |
+| replace with A's, refresh token removed | A; the session kept working and did not write the file back |
+| same, `expiresAt` set in the past | A; Claude used the access token as is |
+
+Not yet seen: what a session does when the access token really expires and the file has no
+refresh token. The broker must replace it first; it is the broker's main job.
+
+Fallback if the broker breaks: one config directory per account, and switching restarts Claude
+with `--resume <session>` (seconds of downtime, cold prompt cache).
 
 Jean-Claude (profiles `~/.claude-<name>`) was assessed: it shares settings, hooks, agents and
 skills across profiles and syncs settings through git, but does no credential switching, and
@@ -284,7 +294,7 @@ Kubernetes code lands.
 | Item | Settles it |
 |---|---|
 | Egress policy enforcement on k3s | test matrix in a scratch namespace |
-| Account switch: broker vs restart | live test of credentials-file swap in a running session |
+| Session behaviour at real access-token expiry with no refresh token | live test (hours) |
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |

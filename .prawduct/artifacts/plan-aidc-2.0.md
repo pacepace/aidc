@@ -334,7 +334,7 @@ W-K7 ops (any time, owner) ; W-R release last
 
 Q-M1 answered by the owner (owner-rulings 2026-11-24): both, the in-cluster Service always and VPN/LAN exposure on request, behind the bearer token.
 
-Q-K7 answered (owner-rulings 2026-11-24): GitHub releases, latest not pinned, kept current like Claude Code; amend K8S-25 in W-K1-05. Still needed: the repo's owner/name.
+Q-K7 answered (owner-rulings 2026-11-24): GitHub releases, latest not pinned, kept current like Claude Code; amend K8S-25 in W-K1-05. Source: a private GitHub repo whose releases carry a Python wheel and SHA256SUMS (repo name in the user's config, not hard-coded). Because it is private, sessions never fetch it: the laptop's own gh downloads the latest wheel and SHA256SUMS, verifies, and puts the wheel into the image build context (both backends) and into a running session on `aidc upgrade`/refresh (docker cp / kubectl cp, then install). No GitHub token enters a session or the image.
 
 Q-K5 answered (owner-rulings 2026-11-24): the developer chooses per expose, login or none; the domain comes from the user's config.
 

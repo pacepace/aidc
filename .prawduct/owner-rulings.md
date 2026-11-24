@@ -172,3 +172,13 @@ with postgres and NATS, and a testcontainers test all pass, and the RTX 3080 is 
 (the.ranch #246), so any runtime gets the GPU. Rootless Docker was tried and dropped: it needed
 the AppArmor userns restriction lifted, a smaller ID range and a tun device plugin, and still
 did not run.
+
+## 2026-11-24: The git container shares the repo, with its settings and hooks locked
+
+The git container works in the same repo on the user's disk as the sessions, not in a private
+copy. The repo's settings file and hooks folder (and the rest of `.git/` except objects, refs and
+each session's own worktree folder) belong to the git container and are read-only to sessions;
+repos use reftable ref storage; the git container never runs git inside a session's worktree and
+always runs with hooks off. Measured 2026-11-24 on ranch-dev01 (design-12). The owner noted that
+shared volumes for other pods already use NFS from ranch-dev01; that is the expected storage,
+pending a test that Sysbox sessions see correct file owners on it.

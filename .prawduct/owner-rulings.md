@@ -425,7 +425,7 @@ The owner does not use gh for regular git work. aidc fetches testament on the la
 
 ## 2026-11-24 — testament is optional until it is public
 
-aidc users without access to testament's private repo must not be blocked. Installing it is optional: it happens only when the user's config names the repo, and a missing config or a failed fetch leaves the build or upgrade going without it, with a one-line note. Amend K8S-25 from MUST to "when configured" until testament is public. The owner and Brooks both have SSH keys that can fetch it.
+aidc users without access to testament's private repo must not be blocked. Installing it is optional: it happens only when the user's config names the repo, and a missing config or a failed fetch leaves the build or upgrade going without it, with a one-line note. Amend K8S-25 from MUST to "when configured" until testament is public. The people who use it have SSH keys that can fetch it.
 
 ## 2026-11-24 — Review round budget raised for the 2.0 program
 

@@ -192,8 +192,10 @@ API server, to kube-dns, to its own node, to another node, to a pod in another n
   cluster.
 - **Home network** (K8S-15, optional at create): a Traefik Ingress with a stable name such as
   `<session>-<user>.dev.ranch.illuminati.org`, behind an auth middleware, removed at kill. The
-  owner's phone is on ZeroTier and can reach it. **Proposal** needs: a `*.dev.ranch.illuminati.org`
-  wildcard certificate (cert-manager, DNS-01, already wired) and one RouterOS DNS entry.
+  owner's phone is on ZeroTier and can reach it. Needs a `*.dev.ranch.illuminati.org` wildcard
+  certificate (cert-manager, DNS-01, already wired). DNS already works: the RB5009's regexp
+  entry `.*\.ranch\.illuminati\.org` answers these names (checked 2026-11-24), and ZeroTier
+  clients' split DNS for `ranch.illuminati.org` covers them.
 
 ## Claude: logins, account switching, history
 
@@ -285,4 +287,3 @@ Kubernetes code lands.
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |
-| LAN name, wildcard cert, DNS | owner proposal |

@@ -270,6 +270,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Owner's hands: the orchestrator running for the live test; the DNS/ingress name if Q-M1 picks Ingress.
 
 ### W-M3: git approvals through the orchestrator on Kubernetes (K8S-06, ruling)
+- 00 Q-K8 (§5): bind each approval in code to the answer: the question carries a one-time code only the user's or orchestrator's answer returns, and `git-requests approve` refuses without it (both backends). Done when: the agent cannot approve its own request (unit test + mutation), and an orchestrator answer approves.
 - 01 The git agent (`git` session) reached by the in-cluster MCP: watch, status, send. 02 The answer path from W-K0-03's result (paste works, or a dedicated answer, Q-M5). 03 The smoke's Claude part made automatic. Done when: an orchestrator approves a k8s session's PR request end to end.
 
 ### W-M4: the taint webhook path (K8S-13)

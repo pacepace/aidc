@@ -101,7 +101,7 @@ if [ -z "$NEW_DIGEST" ]; then
 fi
 OLD_DIGEST=$(docker inspect "$DEV_CT" --format '{{.Image}}' 2>/dev/null || true)
 if [ -n "$OLD_DIGEST" ] && [ "$OLD_DIGEST" = "$NEW_DIGEST" ]; then
-    info "${DEV_CT} is already on the current dev-base image (${NEW_DIGEST}); nothing to swap"
+    info "${DEV_CT} is already on the current dev-base image (${NEW_DIGEST}); nothing to do"
     info "(use 'aidc restart ${NAME}' for an in-place restart)"
     aidc_testament_install testament_copy testament_exec
     exit 0

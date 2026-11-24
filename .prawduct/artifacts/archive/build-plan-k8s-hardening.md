@@ -18,7 +18,13 @@ governed_by:
       - "no private names in the repo (cluster, nodes, domains, other projects, the testament repo URL) → conforms: every added line is grepped before commit"
       - "supply-chain cooldown (REL-09) → conforms: testament's own release is the owner's ruled exception (latest release); its build backend resolves under the cooldown on the laptop (`uv build --exclude-newer <UTC now - 14 days>`, which governs the isolated build environment; checked live: a cutoff before the backend's release makes the build fail), and its runtime dependencies install under the image's 14-day uv setting"
 partition: serial, one delegate on this branch (shares scripts/k8s/ and the dev image with every chunk); the main agent runs the Critic and integrates
+lifecycle: completed
+archived: 2026-11-24
+unbuilt_at_archive: 7 of 8 chunks not done (Chunk 01, Chunk 02, Chunk 03, …) — the scope shipped, but this plan did not finish with it
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — Kubernetes hardening and parity (W-K1)
 

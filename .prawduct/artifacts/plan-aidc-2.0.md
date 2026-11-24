@@ -121,7 +121,7 @@ Wave codes are defined in §3.
 | P3 | (07) `session_send` may not answer the AskUserQuestion widget by paste+Enter | W-K0 (check). If it fails: W-M3 adds a way to answer (Q-M5) |
 | P4 | (02) Residual: the agent's own git can move refs and write objects | W-K0: owner accepts as residual (R-G1) |
 | P5 | (02) gh holds the token in memory; nothing may run code as gitcred | R-G2, accept (W-K0) |
-| P6 | (02) A commit's diff is not scanned for attribution; the attribution list is a list of names | R-G3: owner decides whether 2.0 adds a diff scan (cheap: `git diff` text through `gitctl_attribution` at push) or accepts. Recommend: add it in W-K1 |
+| P6 | (02) A commit's diff is not scanned for attribution; the attribution list is a list of names | Built in W-K1: gitctl scans each pushed commit's added lines by shape; see the hardening plan's decision "(03, P6, narrowed)" (`archive/build-plan-k8s-hardening.md`) |
 | P7 | (02)/(04) A fine-grained token without admin scope + branch protection as backstop | Documented. W-K0 live protect |
 | P8 | (03) Residual: session-written working-copy config can steer the agent's own git (uid 2000; gitwc on Docker) | R-G4, accept (W-K0) |
 | P9 | (03) `gc --auto` in private copies is not proven to pack in a test | W-K1 (a test with enough loose objects, or a live check) |

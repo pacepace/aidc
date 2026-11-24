@@ -60,14 +60,17 @@ printf '%s\n' "$*" >> "$K_LOG"
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
-    *"get pvc disk"*) [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
+    *"get pvc disk"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ -n "${K_DISK_PHASE:-}" ] && { printf '%s' "$K_DISK_PHASE"; exit 0; }
+        [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
     *"get deployment,statefulset -l aidc/session=git"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_GIT:-}" = 1 ] && echo "deployment.apps/git" ;;
     *"get deployment,statefulset -l"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get deployment -l app=git,aidc/session=git"*) [ "${K_GIT:-}" = 1 ] && printf '1\t2026-11-24T03:00:00Z\n' ;;
     *"get pod -l app=git"*) echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}' ;;
-    *"get deployment "*"-proxy"*) [ "${K_EXISTS:-}" = 1 ] || exit 1 ;;
+    *"get deployment "*"-proxy"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"get pvc -l"*"aidc/kept=audit"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
@@ -82,8 +85,12 @@ case "$*" in
         if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
     *"exec pod/demo-proxy-abc -c audit -- /usr/local/bin/finalize.sh"*) : ;;
     *"exec pod/demo-proxy-abc -c audit -- sh -c du -sk /var/aidc/audit"*) printf '2048\nyes\n' ;;
-    *"get networkpolicy default-deny"*) [ "${K_NO_DENY:-}" = 1 ] && { echo 'not found' >&2; exit 1; } ;;
-    *"get networkpolicy -o name"*) printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
+    *"get networkpolicy default-deny"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_NO_DENY:-}" = 1 ] || echo "networkpolicy.networking.k8s.io/default-deny" ;;
+    *"get pods -l"*) [ "${K_STATUS_READS_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        printf '  NAME   READY   STATUS\n  demo-dev-0   true   Running\n' ;;
+    *"get networkpolicy -o name"*) [ "${K_STATUS_READS_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
     *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
 esac
 exit 0
@@ -207,6 +214,28 @@ assert_has "a name a Kubernetes Service cannot take is refused" "starts with a l
 assert_eq "and nothing was applied for it" "" "$(cat "$K_APPLIED")"
 out=$(K_NO_DISK=1 run create demo --backend kubernetes)
 assert_has "no user disk: says to run aidc user add" "run \`aidc user add alice\` first" "$out"
+out=$(K_DISK_PHASE=Pending run create demo --backend kubernetes)
+assert_has "a disk that is not bound yet is said as such, not as missing" "your disk in aidc-u-alice is Pending" "$out"
+out=$(K_READ_FAIL=1 run create demo --backend kubernetes)
+assert_has "a cluster that does not answer the disk read is said so, never 'no disk'" "cannot read your disk in aidc-u-alice: the cluster did not answer" "$out"
+assert_not_has "and not taken for a missing disk" "aidc user add" "$out"
+assert_has "and create stops" "exit=1" "$out"
+assert_eq "applying nothing" "" "$(cat "$K_APPLIED")"
+# The disk read answers, the next ones do not: each read is checked on its own.
+cat > "$SCRATCH/bin/kubectl-wrap" <<'WRAP'
+#!/bin/sh
+case "$*" in *"get pvc disk"*) printf 'Bound'; exit 0 ;; esac
+case "$*" in *"get ${K_FAIL_WHAT:-none} "*) echo 'Unable to connect to the server' >&2; exit 1 ;; esac
+exec "$(dirname "$0")/kubectl.real" "$@"
+WRAP
+mv "$SCRATCH/bin/kubectl" "$SCRATCH/bin/kubectl.real"; mv "$SCRATCH/bin/kubectl-wrap" "$SCRATCH/bin/kubectl"; chmod +x "$SCRATCH/bin/kubectl"
+out=$(K_FAIL_WHAT="networkpolicy default-deny" run create demo --backend kubernetes)
+assert_has "a failed default-deny read is 'did not answer', never 'has no default-deny'" "cannot read the default-deny NetworkPolicy in aidc-u-alice: the cluster did not answer" "$out"
+assert_not_has "(not the missing-policy advice)" "has no default-deny" "$out"
+out=$(K_FAIL_WHAT="deployment demo-proxy" run create demo --backend kubernetes)
+assert_has "a failed read of the session is 'did not answer', and creates nothing" "cannot read session 'demo' in aidc-u-alice: the cluster did not answer" "$out"
+assert_eq "nothing applied" "" "$(cat "$K_APPLIED")"
+mv "$SCRATCH/bin/kubectl.real" "$SCRATCH/bin/kubectl"
 out=$(K_EXISTS=1 run create demo --backend kubernetes)
 assert_has "an existing session is refused" "session 'demo' already exists" "$out"
 out=$(: > "$K_APPLIED"; cd / && "$AIDC_ROOT/scripts/aidc" create demo --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
@@ -375,6 +404,10 @@ out=$(K_EXISTS=1 K_POLICY_DOWN=1 run status demo)
 assert_has "a policy sidecar that does not answer is unknown, never clean" "taint:    unknown" "$out"
 assert_has "status confirms the lockdown's policies are there" "egress:   enforced" "$(K_EXISTS=1 run status demo)"
 assert_has "status names the kept audit claim" "audit:    volume claim demo-audit-20261124050000" "$out"
+out=$(K_EXISTS=1 K_STATUS_READS_DOWN=1 run status demo)
+assert_has "a failed policy read is unknown, never NOT ENFORCED" "egress:   unknown (the cluster did not answer)" "$out"
+assert_not_has "(no false alarm)" "NOT ENFORCED" "$out"
+assert_has "a failed pods read says so" "  unknown (the cluster did not answer)" "$out"
 out=$(K_EXISTS=1 run logs demo --component nonesuch)
 assert_has "an unknown component is refused by name" "unknown component: nonesuch" "$out"
 

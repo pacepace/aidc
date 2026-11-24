@@ -65,13 +65,37 @@ REPO_PATH=$(k8s_cluster_repo_path "$PWD") \
 case "$REPO_PATH" in *[\"\\]*|*$'\n'*) die "the repo path may not contain quotes, backslashes or newlines" ;; esac
 
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
-[ "$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/null || true)" = "Bound" ] \
-    || die "no disk for ${AIDC_K8S_USER} in the cluster: run \`aidc user add ${AIDC_K8S_USER}\` first"
+# Each read below tells "not there" (an empty answer) from "the cluster did not answer" (kubectl
+# failed): only the first is a fact about the user's namespace.
+# k8s_read <what> <kubectl get args...>: the answer, or dies saying the cluster did not answer.
+# stderr apart from the answer: a kubectl warning must not read as a value.
+k8s_read() {
+    local what="$1" out errf rc=0
+    shift
+    errf=$(mktemp)
+    out=$(k8s_kubectl -n "$ns" get "$@" --ignore-not-found --request-timeout=10s 2>"$errf" </dev/null) || rc=$?
+    if [ "$rc" != 0 ]; then
+        out=$(tail -n1 "$errf"); rm -f "$errf"
+        die "cannot read ${what} in ${ns}: the cluster did not answer (${out})"
+    fi
+    rm -f "$errf"
+    printf '%s' "$out"
+}
+phase=$(k8s_read "your disk" pvc disk -o jsonpath='{.status.phase}')
+case "$phase" in
+    Bound) ;;
+    "") die "no disk for ${AIDC_K8S_USER} in the cluster: run \`aidc user add ${AIDC_K8S_USER}\` first" ;;
+    *) die "your disk in ${ns} is ${phase}, not Bound yet: see kubectl -n ${ns} describe pvc disk" ;;
+esac
 # The namespace's default-deny is half of every session's lockdown (its pods' own policies are
 # the other half). A namespace made before aidc added it lacks it: say so rather than run there.
-k8s_kubectl -n "$ns" get networkpolicy default-deny >/dev/null \
+# Assigned, not tested inline: a die inside $(...) ends only the subshell; set -e ends the
+# script on a failed assignment.
+deny=$(k8s_read "the default-deny NetworkPolicy" networkpolicy default-deny -o name)
+[ -n "$deny" ] \
     || die "${ns} has no default-deny NetworkPolicy: run \`aidc user add ${AIDC_K8S_USER}\` again (it is safe to repeat)"
-if k8s_kubectl -n "$ns" get deployment "${NAME}-proxy" >/dev/null 2>&1; then
+existing=$(k8s_read "session '${NAME}'" deployment "${NAME}-proxy" -o name)
+if [ -n "$existing" ]; then
     die "session '${NAME}' already exists (aidc kill ${NAME} --backend kubernetes)"
 fi
 

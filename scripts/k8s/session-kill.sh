@@ -20,11 +20,13 @@ validate_session_name "$NAME"
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 sel="aidc/session=${NAME}"
-if [ -z "$(k8s_kubectl -n "$ns" get deployment,statefulset -l "$sel" -o name 2>/dev/null)" ]; then
-    die "no session '${NAME}' in ${ns}"
-fi
-audit=$(k8s_kubectl -n "$ns" get pvc -l "${sel},aidc/kept=audit" -o name 2>/dev/null | head -n1)
-proxy=$(k8s_kubectl -n "$ns" get pod -l "${sel},app=proxy" -o name 2>/dev/null | head -n1)
+k8s_require_session "$ns" "$NAME"
+audit=$(k8s_kubectl -n "$ns" get pvc -l "${sel},aidc/kept=audit" -o name) \
+    || die "the cluster did not answer while finding the audit claim; nothing was removed"
+proxy=$(k8s_kubectl -n "$ns" get pod -l "${sel},app=proxy" -o name) \
+    || die "the cluster did not answer while finding the proxy pod; nothing was removed"
+audit=$(printf '%s\n' "$audit" | head -n1)
+proxy=$(printf '%s\n' "$proxy" | head -n1)
 if [ -n "$proxy" ]; then
     k8s_kubectl -n "$ns" exec "$proxy" -c audit -- /usr/local/bin/finalize.sh </dev/null >&2 \
         || info "WARNING: the audit sidecar's final sweep did not run; the audit claim keeps its last sweep"

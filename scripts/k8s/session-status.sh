@@ -10,8 +10,9 @@ NAME="${1:-}"
 validate_session_name "$NAME"
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
-sts=$(k8s_kubectl -n "$ns" get statefulset "${NAME}-dev" -o json 2>/dev/null) \
-    || die "no session '${NAME}' in ${ns}"
+k8s_require_session "$ns" "$NAME"
+sts=$(k8s_kubectl -n "$ns" get statefulset "${NAME}-dev" -o json) \
+    || die "cannot read session '${NAME}': the cluster did not answer"
 printf 'session:  %s (kubernetes, namespace %s)\n' "$NAME" "$ns"
 printf 'repo:     %s\n' "$(printf '%s' "$sts" | yq -p=json '.metadata.annotations["aidc/repo"] // "?"')"
 printf 'profile:  %s\n' "$(printf '%s' "$sts" | yq -p=json '.metadata.annotations["aidc/profile"] // "?"')"

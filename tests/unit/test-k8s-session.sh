@@ -239,6 +239,12 @@ assert_has "and the verb falls back to Docker" "docker " "$(cat "$D_LOG")"
 out=$(K_DOWN=1 run list --backend kubernetes)
 assert_has "list says the cluster did not answer instead of 'no sessions'" "the cluster did not answer" "$out"
 
+for verb in kill status attach; do
+    out=$(K_DOWN=1 run "$verb" demo --backend kubernetes)
+    assert_has "$verb: an unreachable cluster is said as such, never 'no such session'" \
+        "the cluster did not answer" "$out"
+done
+
 echo "=== the config's default backend for create ==="
 printf 'backend: kubernetes\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run create demo)
@@ -254,7 +260,7 @@ echo "=== list, attach, status, logs ==="
 out=$(K_EXISTS=1 run list)
 assert_has "list shows cluster sessions with their backend" "kubernetes" "$out"
 assert_has "the cluster row names the session" "demo" "$out"
-: > "$K_LOG"; run attach demo --backend kubernetes >/dev/null
+: > "$K_LOG"; K_EXISTS=1 run attach demo --backend kubernetes >/dev/null
 assert_has "attach runs tmux as the session user in the dev container" \
     "exec -it demo-dev-0 -c dev -- sudo -u vscode -H env" "$(cat "$K_LOG")"
 out=$(K_EXISTS=1 run status demo)

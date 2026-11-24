@@ -13,8 +13,8 @@
 #   /var/log/squid/          squid access.log
 #   /var/log/aidc/           policy-events.log, refresher.log
 #   /var/aidc/dev-home/      dev container's .bash_history, .zsh_history
-#   /var/aidc/claude-transcript/  Claude transcript dir (optional)
-#   /var/aidc/state/         tainted flag
+#   /var/aidc/dev-home/.claude/projects/  Claude transcript dir (optional)
+#   /var/state/              tainted flag (JSON)
 #
 # Output (read-write):
 #   /var/aidc/audit/         this session's host-visible audit subdirectory
@@ -29,12 +29,17 @@ set -uo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 
-AUDIT_DIR=/var/aidc/audit
-SQUID_DIR=/var/log/squid
-AIDC_LOG_DIR=/var/log/aidc
-DEV_HOME=/var/aidc/dev-home
-CLAUDE_TRANSCRIPT=/var/aidc/claude-transcript
-STATE_DIR=/var/aidc/state
+# Where the session's compose file (Docker) and pod (Kubernetes) mount each source. The
+# AIDC_AUDIT_*_DIR variables exist for tests/unit/test-audit-aggregate.sh.
+AUDIT_DIR="${AIDC_AUDIT_OUT_DIR:-/var/aidc/audit}"
+SQUID_DIR="${AIDC_AUDIT_SQUID_DIR:-/var/log/squid}"
+AIDC_LOG_DIR="${AIDC_AUDIT_LOG_DIR:-/var/log/aidc}"
+DEV_HOME="${AIDC_AUDIT_HOME_DIR:-/var/aidc/dev-home}"
+# Claude Code keeps its transcripts under the session user's config dir
+# (CLAUDE_CONFIG_DIR=/home/vscode/.claude), which is in the dev home this sidecar reads.
+CLAUDE_TRANSCRIPT="${DEV_HOME}/.claude/projects"
+# The policy sidecar's state volume, mounted at /var/state on both backends.
+STATE_DIR="${AIDC_AUDIT_STATE_DIR:-/var/state}"
 
 : "${AIDC_SESSION:=unknown}"
 : "${AIDC_PROFILE:=unknown}"
@@ -156,7 +161,8 @@ sweep() {
     if [ -f "${STATE_DIR}/tainted" ]; then
         atomic_copy "${STATE_DIR}/tainted" "${AUDIT_DIR}/tainted"
         local tainted_at
-        tainted_at=$(cat "${STATE_DIR}/tainted" 2>/dev/null | tr -d '\n\r' || echo "")
+        # The flag is JSON ({"tainted_at": ..., "trigger": ..., "domain": ...}, policy.sh).
+        tainted_at=$(jq -r '.tainted_at // empty' "${STATE_DIR}/tainted" 2>/dev/null || echo "")
         if [ -z "$tainted_at" ]; then
             tainted_at=$(iso8601_now)
         fi

@@ -156,3 +156,29 @@ k8s_session_taint() {
         printf 'unknown (the policy sidecar did not answer)\n'
     fi
 }
+
+# k8s_session_lookup <namespace> <session>: prints "found", "absent" or "unknown <why>", and
+# returns 0, 1 or 2 alike. A cluster that cannot be asked is never "no such session".
+k8s_session_lookup() {
+    local ns="$1" s="$2" out
+    if ! out=$(k8s_kubectl -n "$ns" get deployment,statefulset -l "aidc/session=${s}" -o name \
+            --request-timeout=10s 2>&1); then
+        printf 'unknown (%s)\n' "$(printf '%s' "$out" | tail -n1)"
+        return 2
+    fi
+    if [ -n "$out" ]; then printf 'found\n'; return 0; fi
+    printf 'absent\n'
+    return 1
+}
+
+# k8s_require_session <namespace> <session>: dies unless the session is there, saying which of
+# "no such session" and "the cluster did not answer" it was.
+k8s_require_session() {
+    local where rc=0
+    where=$(k8s_session_lookup "$1" "$2") || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) die "no session '$2' in $1" ;;
+        *) die "cannot tell whether session '$2' exists: the cluster did not answer: ${where#unknown }" ;;
+    esac
+}

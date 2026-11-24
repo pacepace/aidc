@@ -130,6 +130,26 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   a hand-added domain). The proxy pod now resolves through Quad9 (dnsPolicy None); live: the
   refresher loaded 2,172,272 entries from both feeds. Chunk 06's smoke must assert both feeds
   contributed, as the Docker smoke does.
+- Chunk 06: `tests/smoke/k8s.sh` (`make smoke-k8s`) passed 22 of 22 on the owner's cluster
+  (2026-11-24) before the review fixes; it gains the audit and disk checks and runs again once the
+  session storage class exists. The Docker smoke (`make smoke`) passed 121 of 121 on this branch's
+  scripts after the cumulative review fixes (2026-11-24): the dispatcher's `--backend` switch and
+  session lookup leave Docker as it was.
+- Review fix pass, second round: the audit sidecar (both backends) read the taint flag from
+  `/var/aidc/state` and the Claude transcripts from `/var/aidc/claude-transcript`, which nothing
+  mounts, so neither ever reached an audit trail; it now reads `/var/state` and the session
+  home's `.claude/projects`, and takes `tainted_at` from the flag's JSON
+  (`tests/unit/test-audit-aggregate.sh`). kill, status and attach share one lookup that tells "no
+  such session" from "the cluster did not answer".
+- Chunk 05: the dispatcher finds a session's backend by asking the configured cluster first
+  (`scripts/k8s/session-where.sh`, quiet when none is configured) and Docker otherwise; `create`
+  takes the config's top-level `backend:`; `list` shows both. Live: create from the config
+  default, list, status, logs, attach (a tmux client attached) and kill without the flag.
+- Chunk 05 found: the refresher resolved through cluster DNS, which the proxy's policy blocks,
+  so every session ran with an EMPTY malware blocklist (the earlier taint check passed only on
+  a hand-added domain). The proxy pod now resolves through Quad9 (dnsPolicy None); live: the
+  refresher loaded 2,172,272 entries from both feeds. Chunk 06's smoke must assert both feeds
+  contributed, as the Docker smoke does.
 - Chunk 06: `tests/smoke/k8s.sh` (`make smoke-k8s`) passes 22 of 22 on the owner's cluster
   (2026-11-24). The Docker smoke was not rerun for the one Docker-side change (the dev image's
   inner dockerd MTU): rerunning it would rebuild the local `aidc/dev-base` tag the owner's

@@ -126,7 +126,8 @@ killed verb's) is swept at the start of the next verb.
 `main`, `master`, `develop` or origin's default branch under any name, as GitHub reports it
 (they change by PR merges); it asks origin what it has
 (`ls-remote`) rather than trusting `refs/remotes/*`, reads each commit it would send whole, and
-refuses one that carries AI attribution anywhere or whose author or committer is an AI tool (a
+refuses one that carries AI attribution anywhere, in its message or in a line it adds to a file
+(a merge counts only the lines it writes itself; a rename adds none), or whose author or committer is an AI tool (a
 name or email naming one, as a whole word: `Claude <x@example.invalid>` is refused; the user's
 own identity, from the login's identity file, never is). `pr-create` and `pr-comment` refuse
 attribution in their text; `pr-merge` always merges with a merge commit, after checking the

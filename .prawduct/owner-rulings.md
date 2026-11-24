@@ -280,3 +280,10 @@ such a message as its own prompt. Owner: "yes" (2026-11-24) to `orchestrator:`.
 The user's ordered list of Claude accounts is a cycle: after the last account, switching goes
 back to the first. Each account has its own setting for the weekly usage at which aidc switches
 away from it (for example one account switched at 90 %, another at 70 %).
+
+## 2026-11-24: aidc gets an audit trim command
+
+Kept audit trails accumulate (one per session on both backends: folders under the audit dir on
+Docker, kept claims on Kubernetes), so aidc needs a command that lists them and removes old ones
+("we need an audit trim command if they grow to GB that rapidly"). Audit is evidence, so trimming
+is explicit and never touches a running session's trail.

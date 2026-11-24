@@ -272,3 +272,4 @@ Design: `docs/design-12-kubernetes.md`. Source for all rows: owner rulings of 20
 | K8S-23 | The git container SHOULD check a repo's GitHub protections on first use and offer to turn on missing ones, applying them only with the user's OK. | P1 | rulings-2026-11-23 |
 | K8S-24 | The git hard rules (no force-push, merge commits only, no attribution) MUST be enforced by code the git container's Claude cannot override, not only by its instructions. | P0 | rulings-2026-11-23 |
 | K8S-25 | Sessions MUST come with testament (a distributed test runner) installed, at a pinned version, so work in a session can run tests through it. | P1 | rulings-2026-11-24 |
+| K8S-26 | aidc MUST provide a command that lists kept audit trails (Docker: folders under the audit dir; Kubernetes: kept audit claims) with their age and size, and removes those older than a given age or named ones, never a running session's. | P1 | rulings-2026-11-24 |

@@ -107,6 +107,8 @@ assert_eq "it applies the egress policy, the home and login claims and the Deplo
     "$(yq -N e '[.kind, .metadata.name] | join("/")' "$K_APPLIED" | paste -sd' ' -)"
 assert_eq "everything goes in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_has "it waits for the Deployment to be ready" "rollout status deployment/git" "$(cat "$K_LOG")"
+assert_eq "every volume mount in the git pod names a volume the pod declares" "" \
+    "$(yq -N ea 'select(.kind == "Deployment" or .kind == "Pod" or .kind == "StatefulSet") | (.spec.template.spec // .spec) as $p | ([($p.containers[], $p.initContainers[]?) | .volumeMounts[]?.name] - [$p.volumes[]?.name]) | .[]' "$K_APPLIED" | sort -u | paste -sd' ' -)"
 dep() { q "select(.kind == \"Deployment\") | $1" | tail -1; }
 pod() { dep ".spec.template.spec | $1"; }
 assert_eq "one replica, replaced not rolled (two would share one home and race on repos)" '[1,"Recreate"]' \
@@ -204,7 +206,7 @@ assert_has "no login is no, with what to do" "github:   not logged in (aidc git 
 assert_has "no key is none, with what to do" "ssh key:  none (aidc git attach" "$out"
 out=$(K_GH=stored run git status)
 assert_has "a stored login GitHub did not confirm is unknown, not no" \
-    "github:   unknown (a login is stored, but GitHub did not confirm it)" "$out"
+    "github:   unknown (GitHub did not confirm the login)" "$out"
 out=$(K_EXEC_FAIL=1 run git status)
 assert_has "a container that cannot be asked: login unknown" "github:   unknown" "$out"
 assert_has "a container that cannot be asked: key unknown" "ssh key:  unknown" "$out"

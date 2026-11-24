@@ -36,4 +36,4 @@ info "waiting for it to be ready"
 if ! k8s_kubectl -n "$ns" rollout status deployment/git --timeout=300s >&2; then
     die "the git container did not become ready; see: kubectl -n ${ns} describe pod -l app=git (is aidc/gitctl built? aidc k8s build --only gitctl)"
 fi
-info "the git container is ready. Next: \`aidc git attach\`, then \`gh auth login\` there."
+info "the git container is ready. Next: \`aidc git attach\`, then \`gitctl login\` there."

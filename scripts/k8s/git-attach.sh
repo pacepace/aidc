@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # aidc git attach: the git container's tmux, where the user logs in to GitHub themselves
-# (`gh auth login`, which the wrapped gh runs as gitcred, the login's only reader). The container runs as the git user, so `kubectl exec` is already that
-# user and reaches its tmux socket.
+# (`gitctl login`, which runs gh as gitcred, the login's only reader). The container runs as
+# the git user, so `kubectl exec` is already that user and reaches its tmux socket.
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"

@@ -17,8 +17,9 @@ aidc git <subcommand>
   setup    Start your git container in your namespace of the `kubernetes:` config (after
            `aidc user add`). It is the only thing that pushes, and it keeps your GitHub login
            on its own volume, where its agent cannot read it. Safe to run again.
-  attach   Open its terminal (tmux). Log in to GitHub there with `gh auth login` (HTTPS):
-           you add your own login, the admin never handles it. Detach with Ctrl-b d.
+  attach   Open its terminal (tmux). Log in to GitHub there with `gitctl login` (a device
+           code you approve in your browser): you add your own login, the admin never
+           handles it. Detach with Ctrl-b d.
   status   Whether it is running, logged in to GitHub, and has an SSH key. Says "unknown"
            when the cluster or the container cannot be asked.
 USAGE

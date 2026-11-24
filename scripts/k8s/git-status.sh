@@ -34,23 +34,20 @@ github="unknown (the container cannot be asked)"
 ssh="unknown (the container cannot be asked)"
 if [ "$rc" = 0 ]; then
     # One exec for both answers. Only a line the script printed counts: an exec that fails
-    # before running it leaves both unknown. `gh auth status` asks GitHub; when it fails but a
-    # login is stored, GitHub may only have been unreachable, so that is unknown too. Its
-    # words tell the two apart: `gh auth token` would too, but the git container refuses it
-    # (it prints the token). Any other failure (the wrapper or sudo) answers nothing.
+    # before running it leaves both unknown. `gitctl status` asks gh, as the login's user,
+    # whether GitHub accepts the login: yes, no, or unknown when GitHub could not confirm it
+    # (it may only have been unreachable).
     # shellcheck disable=SC2016  # expanded by the container's shell, not this one
     out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- sh -c '
-        if st=$(gh auth status 2>&1); then echo "github=yes"
-        else case "$st" in
-            *"not logged in"*) echo "github=no" ;;
-            *"github.com"*) echo "github=stored" ;;
-        esac; fi
+        case "$(gitctl status 2>/dev/null)" in
+            yes) echo "github=yes" ;; no) echo "github=no" ;; unknown) echo "github=stored" ;;
+        esac
         keys=$(ls "$HOME"/.ssh/id_* 2>/dev/null | grep -v "\.pub$" | xargs -r -n1 basename | paste -sd" " -)
         echo "ssh=${keys:-none}"' </dev/null 2>/dev/null || true)
     case "$(printf '%s\n' "$out" | sed -n 's/^github=//p')" in
         yes) github="logged in" ;;
-        no) github="not logged in (aidc git attach, then: gh auth login)" ;;
-        stored) github="unknown (a login is stored, but GitHub did not confirm it)" ;;
+        no) github="not logged in (aidc git attach, then: gitctl login)" ;;
+        stored) github="unknown (GitHub did not confirm the login)" ;;
     esac
     keys=$(printf '%s\n' "$out" | sed -n 's/^ssh=//p')
     case "$keys" in

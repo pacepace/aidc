@@ -110,6 +110,16 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
 - Chunk 04: the dev image runs unchanged under Sysbox (measured: dockerd on overlay2, tmux,
   ready marker); the one image change is the inner dockerd's MTU, which stalled a large
   download from an inner container on the 1450 pod network.
+- Chunk 04, live on the owner's cluster (2026-11-24): `aidc create --backend kubernetes` made a
+  ready session and `aidc kill` removed it, keeping its audit claim. Inside: example.com through
+  squid OK; a state-actor TLD, a direct connection, a DNS lookup and the Kubernetes API blocked;
+  `docker run` and a compose postgres (`select 42`) work; an inner container downloads through
+  `$HTTPS_PROXY` and cannot get out directly; a blocklisted domain is refused (403), the policy
+  sidecar writes the taint flag and a `tainted` event to the audit claim.
+- Chunk 04 found and fixed: inner containers could not resolve `aidc-proxy` (dev pod has no
+  DNS), so the proxy env carries its address; a forced rebuild under the same tag left the node
+  on its cached image, so aidc images are pulled Always; under Sysbox /sys/class/net shows the
+  node's interfaces, not the pod's, so the inner dockerd reads its MTU by ioctl.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

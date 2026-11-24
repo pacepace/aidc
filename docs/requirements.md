@@ -16,6 +16,7 @@
 | `SEC-NN` | Safety model, taint, threat mitigation |
 | `CI-NN` | Continuous integration |
 | `REL-NN` | Release engineering and distribution |
+| `K8S-NN` | Kubernetes backend |
 
 ## Priority
 
@@ -238,3 +239,35 @@
 | REL-07 | The Homebrew formula MUST install the CLI scripts + image build contexts (`proxy/`, `.devcontainer/`) under `prefix/libexec/` (NO extra `aidc/` nesting; `libexec.install Dir["*"]` drops the tarball's top-level entries directly into libexec) and symlink `scripts/aidc` into `prefix/bin/`. It MUST declare runtime deps: `jq`, `gettext` (for `envsubst`). Docker is documented in `caveats`, not declared as `depends_on`, because Homebrew's `docker` formula does not provide a daemon. | P0 | conversation-2026-05-22 |
 | REL-08 | Docker images MUST NOT be pre-built or pushed to any registry. Every aidc install builds images locally on first `aidc create`. This is a deliberate choice: zero registry maintenance, hermetic builds, and an audience (advanced AI devs with Claude Max subscriptions) that tolerates a 10-15 minute first-run build. | P0 | conversation-2026-05-22 |
 | REL-09 | Supply-chain cooldown: a dependency version MUST NOT be adopted until it has been published for at least 14 days, so a hijacked or malicious release has time to be found and pulled before aidc installs it. Each package manager's own setting enforces it: for the MCP server, `exclude-newer = "14 days"` in `mcp/pyproject.toml` (recorded in `uv.lock`); in the dev image, system defaults for uv (`/etc/uv/uv.toml`), pip (`/etc/pip.conf`, `uploaded-prior-to = P14D`) and npm (`/etc/npmrc`, `min-release-age=14`), which also cover packages installed inside a session while leaving a project's own config in charge of itself. A unit test pins all of them. Exempt: Claude Code (kept current, Pace 2026-09-21), the Go/Rust/CPython toolchains (straight from their makers) and apt packages (holding back distro security updates does more harm). A fix that must land sooner is an explicit exception for that one package, with the reason written beside it; inside a session, one command can override (`uv --exclude-newer false`, `pip --uploaded-prior-to <now>`, `npm --min-release-age=0`). | P0 | conversation-2026-09-21 |
+
+## K8S — Kubernetes backend
+
+Design: `docs/design-12-kubernetes.md`. Source for all rows: owner rulings of 2026-11-23
+(`.prawduct/owner-rulings.md`).
+
+| ID | Requirement | Priority | Source |
+|----|-------------|----------|--------|
+| K8S-01 | aidc MUST be able to run sessions on a Kubernetes cluster as a second backend beside Docker; the same `aidc` commands, MCP server and orchestrator work against both, and the Docker backend stays. | P0 | rulings-2026-11-23 |
+| K8S-02 | Each user's repos MUST live on that user's own persistent volume in the cluster; users never share a volume, and code is never copied in and out of sessions. | P0 | rulings-2026-11-23 |
+| K8S-03 | Each session MUST work in its own git worktree on the user's volume. | P0 | rulings-2026-11-23 |
+| K8S-04 | Sessions MUST NOT be able to push, pull from GitHub or open PRs; one trusted git container per user, holding the SSH key and `gh`, is the only thing that does, under the rules: merge commits only, never force-push, no AI attribution. | P0 | rulings-2026-11-23 |
+| K8S-05 | Git operations MUST follow a per-session mode from "ask" (default; the git container's Claude waits for the user in its terminal) to "rules" (it decides by the rules); each user can change their default. | P0 | rulings-2026-11-23 |
+| K8S-06 | An orchestrator the user drives MAY approve git operations through the user's MCP server; sandboxed sessions MUST NOT reach that server. | P1 | rulings-2026-11-23 |
+| K8S-07 | Each user MUST have one aidc MCP server running in the cluster, so sessions run and replies arrive while the user's machine sleeps. | P0 | rulings-2026-11-23 |
+| K8S-08 | The git container MUST delete merged branches and their worktrees, and flag anything else left behind (unmerged, unpushed, orphaned) to the user at once. | P0 | rulings-2026-11-23 |
+| K8S-09 | The user MUST be able to view and edit their cluster code with VS Code attached to a pod mounting their volume. | P1 | rulings-2026-11-23 |
+| K8S-10 | Sessions MUST be able to run Docker (including compose and testcontainers) without privileged mode or VMs; on ranch-dev01 this is Sysbox (`sysbox-runc`, `hostUsers: false`). | P0 | rulings-2026-11-23 |
+| K8S-11 | A session MUST get the GPU only when requested at create (`--gpu`). | P1 | rulings-2026-11-23 |
+| K8S-12 | A session's only egress MUST be its own Squid proxy, enforced by NetworkPolicy outside the pod; the dev pod has no cluster DNS and no service-account token. | P0 | rulings-2026-11-23, NET-01, NET-14 |
+| K8S-13 | Neither a session nor its Squid MAY reach the MCP server, the git container, other namespaces, the Kubernetes API, nodes, the LAN or ZeroTier, except the policy sidecar's taint webhook to the user's MCP server. | P0 | MCP-12, NET-14 |
+| K8S-14 | A session's published port MUST be reachable through a tunnel aidc opens to the user's current machine, using the user's own cluster credentials. | P0 | rulings-2026-11-23 |
+| K8S-15 | On request at create, a session port MAY be exposed on the home network at a stable, authenticated name, removed at kill. | P1 | rulings-2026-11-23 |
+| K8S-16 | Each user's Claude logins SHOULD be set up once in their area and used by every session (fallback: per-session login). | P0 | rulings-2026-11-23 |
+| K8S-17 | A running session MUST be able to switch Claude account without losing its conversation; automatic vs wait-for-user is a setting, and each user sets the order accounts are used in. | P0 | rulings-2026-11-23 |
+| K8S-18 | A repo's Claude conversations and memory MUST be one history across the cluster and the user's Mac, Linux and WSL machines, synced with Syncthing; credentials and `.claude.json` are never synced. | P0 | rulings-2026-11-23 |
+| K8S-19 | Session size MUST default to 2 CPU / 8 GB guaranteed with burst to 16 CPU / 32 GB, settable at create. | P1 | rulings-2026-11-23 |
+| K8S-20 | `aidc user add <name>` MUST create a new user's area; the new user adds their own SSH key, GitHub login and Claude accounts. | P0 | rulings-2026-11-23 |
+| K8S-21 | A user MUST be able to create and drive cluster sessions from any of their machines; a session created from one can be attached from another. | P0 | rulings-2026-11-23 |
+| K8S-22 | After a node reboot, sessions MUST come back on their own with files, branches and conversation intact, and Claude resumes. | P0 | rulings-2026-11-23 |
+| K8S-23 | The git container SHOULD check a repo's GitHub protections on first use and offer to turn on missing ones, applying them only with the user's OK. | P1 | rulings-2026-11-23 |
+| K8S-24 | The git hard rules (no force-push, merge commits only, no attribution) MUST be enforced by code the git container's Claude cannot override, not only by its instructions. | P0 | rulings-2026-11-23 |

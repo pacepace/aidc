@@ -9,6 +9,7 @@
 # (REL-09) when pinned; bump deliberately.
 K8S_REGISTRY_IMAGE="${K8S_REGISTRY_IMAGE:-docker.io/library/registry:3.0.0}"
 K8S_BUILDER_IMAGE="${K8S_BUILDER_IMAGE:-docker.io/library/docker:29.0.0-dind}"
+K8S_INIT_IMAGE="${K8S_INIT_IMAGE:-docker.io/library/alpine:3.22.2}"
 
 # Labels on everything aidc makes, so `kubectl get -l` finds it and nothing else.
 K8S_MANAGED_BY="app.kubernetes.io/managed-by: aidc"
@@ -173,5 +174,55 @@ spec:
       volumeMounts: [{name: etc-docker, mountPath: /etc/docker}]
   volumes:
     - {name: etc-docker, emptyDir: {}}
+EOF
+}
+
+# k8s_render_user <user> <node-selector-json>: the user's namespace and disk, and a one-shot
+# pod that binds the disk (the claim waits for a first consumer) and gives its top folder to
+# the session user (uid 1000), since sessions write their repos there. The disk is mounted at
+# /home/<user> in sessions, so a repo sits at the same path as on the user's Linux machines and
+# its Claude history folder has the same name everywhere.
+k8s_render_user() {
+    local user="$1" sel="$2" ns
+    ns=$(k8s_user_ns "$user")
+    cat <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ns}
+  labels:
+    ${K8S_MANAGED_BY}
+    aidc/role: user
+    aidc/user: ${user}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: disk
+  namespace: ${ns}
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${user}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_USER_DISK_SIZE}}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: disk-init
+  namespace: ${ns}
+  labels: {${K8S_MANAGED_BY}, app: disk-init}
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  nodeSelector: ${sel}
+  tolerations: ${AIDC_K8S_TOLERATIONS}
+  containers:
+    - name: init
+      image: ${K8S_INIT_IMAGE}
+      command: [sh, -c, 'chown 1000:1000 /disk && chmod 0755 /disk && ls -ldn /disk']
+      volumeMounts: [{name: disk, mountPath: /disk}]
+  volumes:
+    - {name: disk, persistentVolumeClaim: {claimName: disk}}
 EOF
 }

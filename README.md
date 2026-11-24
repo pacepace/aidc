@@ -643,7 +643,8 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
-| `aidc k8s check` | Say whether the cluster in the `kubernetes:` config can run aidc sessions, and what is missing (see "Kubernetes backend"). |
+| `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
+| `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
 
 ### Profiles
 
@@ -661,7 +662,17 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 
 Being built (design: [docs/design-12-kubernetes.md](docs/design-12-kubernetes.md)). Sessions
 will also run on a Kubernetes cluster, with the same commands. What works today:
-`aidc k8s check`.
+
+- `aidc k8s check`: whether the cluster can run sessions, and what is missing (read-only).
+- `aidc k8s setup`: the `<prefix>-system` namespace and a private image registry in it, on the
+  session node(s). Pulls go through the node's loopback (no node configuration); only aidc's
+  builder pods can push.
+- `aidc k8s build [--force] [--only ROLE]`: builds aidc's images in the cluster and pushes them
+  there; nothing goes to a public registry. The builder pod is privileged for the length of a
+  build (the squid image's base owns files as a UID no user namespace has), takes no
+  connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
+  privileged pods.
+- `aidc user add <name>`: the user's namespace and disk.
 
 The cluster needs a runtime that runs Docker inside a pod without privileged mode (Sysbox,
 measured with Sysbox 0.7.2 on k3s 1.35) and a storage class whose volumes several pods on one
@@ -678,10 +689,16 @@ kubernetes:
   storage_class: shared-zfs      # the user's disk (required)
   node_selector: {}              # added to session pods
   tolerations: []                # added to session pods
+  user_disk_size: 100Gi          # each user's disk
   registry:                      # where aidc keeps the images it builds in the cluster
     port: 5000                   # push: registry.<prefix>-system.svc.cluster.local:<port>
                                  # pull: localhost:<port> (the node, through a loopback-only host port)
+    storage_class: ""            # the registry's volume (default: storage_class)
+    size: 50Gi
 ```
+
+With one registry on one node's loopback, only that node pulls: keep sessions on it (the node
+selector and the runtime class's own scheduling do).
 
 `aidc k8s check` reads it and checks, without changing anything, that kubectl reaches the
 cluster, the runtime class and storage class exist, a ready node can take session pods, and you

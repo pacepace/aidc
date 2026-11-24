@@ -49,6 +49,7 @@ _k8s_cfg_json() {
 #   AIDC_K8S_TOLERATIONS    JSON list added to session pods (default [])
 #   AIDC_K8S_REGISTRY_PORT  the registry's port (default 5000)
 #   AIDC_K8S_REGISTRY_PUSH  where the builder pushes (default the registry Service)
+#   AIDC_K8S_USER_DISK_SIZE size of each user's disk (default 100Gi)
 #   AIDC_K8S_REGISTRY_STORAGE_CLASS / _SIZE  the registry's volume (default the user disk's
 #                           class, 50Gi)
 #   AIDC_K8S_REGISTRY_PULL  where the node pulls (default localhost:<port>, the registry's
@@ -82,12 +83,14 @@ k8s_load_settings() {
     AIDC_K8S_REGISTRY_STORAGE_CLASS="${AIDC_K8S_REGISTRY_STORAGE_CLASS:-$AIDC_K8S_STORAGE_CLASS}"
     AIDC_K8S_REGISTRY_SIZE=$(_k8s_cfg '.kubernetes.registry.size')
     AIDC_K8S_REGISTRY_SIZE="${AIDC_K8S_REGISTRY_SIZE:-50Gi}"
+    AIDC_K8S_USER_DISK_SIZE=$(_k8s_cfg '.kubernetes.user_disk_size')
+    AIDC_K8S_USER_DISK_SIZE="${AIDC_K8S_USER_DISK_SIZE:-100Gi}"
     AIDC_K8S_REGISTRY_PULL=$(_k8s_cfg '.kubernetes.registry.pull')
     AIDC_K8S_REGISTRY_PULL="${AIDC_K8S_REGISTRY_PULL:-localhost:${AIDC_K8S_REGISTRY_PORT}}"
     export AIDC_K8S_CONFIGURED AIDC_K8S_CONTEXT AIDC_K8S_KUBECONFIG AIDC_K8S_PREFIX AIDC_K8S_USER \
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
-        AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE
+        AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE AIDC_K8S_USER_DISK_SIZE
 }
 
 # k8s_kubectl <args...>: kubectl against the configured cluster.

@@ -156,9 +156,22 @@ fuse_overlay_works() {
 # 1500. A Kubernetes overlay (VXLAN and the like) carries smaller packets, and large transfers
 # from inner containers then stall and reset (seen on a 1450 pod network: a git clone reset
 # after 150 s). On a plain Docker host the container's MTU is 1500 and nothing is passed.
+# iface_mtu <iface>: the interface's MTU, from sysfs or, when sysfs does not show this network
+# namespace's interfaces (under Sysbox /sys/class/net lists the node's, not the pod's), from the
+# kernel's SIOCGIFMTU ioctl through perl, which every image here has. Empty when unknown.
+iface_mtu() {
+    local iface="$1" sysfs="${AIDC_MTU_SYSFS:-/sys/class/net}"
+    if [ -r "${sysfs}/${iface}/mtu" ]; then
+        cat "${sysfs}/${iface}/mtu"
+        return 0
+    fi
+    perl -e 'socket(my $s, 2, 2, 0) or exit 1; my $r = pack("a16 x16", $ARGV[0]);
+             ioctl($s, 0x8921, $r) or exit 1; print unpack("x16 i", $r), "\n"' "$iface" 2>/dev/null || true
+}
+
 inner_mtu_args() {
     local mtu
-    mtu=$(cat "${AIDC_MTU_FILE:-/sys/class/net/eth0/mtu}" 2>/dev/null || true)
+    mtu=$(iface_mtu "${AIDC_MTU_IFACE:-eth0}")
     case "$mtu" in ''|*[!0-9]*) return 0 ;; esac
     [ "$mtu" -lt 1500 ] && printf -- '--mtu=%s' "$mtu"
     return 0

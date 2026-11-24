@@ -250,6 +250,9 @@ EOF
 # and public addresses only. The rules live in the node's network namespace, which the Sysbox
 # dev pod does not share.
 k8s_render_session() {
+    # aidc's images are pulled every time (imagePullPolicy: Always): `aidc k8s build --force`
+    # replaces an image under the same version tag, and a node keeping its cached copy would run
+    # the old one (it did). The registry is on the node, so a pull is cheap.
     local session="$1" repo="$2" profile="$3" sel="$4" proxy_ip="${5:-}" ns img
     ns=$(k8s_user_ns "$AIDC_K8S_USER")
     img="${AIDC_K8S_REGISTRY_PULL}/aidc"
@@ -315,11 +318,13 @@ spec:
         # A Docker volume starts as a copy of the image's folder; an emptyDir starts empty.
         - name: seed-squid-etc
           image: ${img}/squid:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           command: [perl, -MFile::Copy, -e, 'copy("/etc/squid/\$_", "/seed/\$_") or die "\$_: \$!" for qw(squid.conf blocklist.txt state-actor-tlds.txt); mkdir "/seed/conf.d"']
           volumeMounts: [{name: blocklist, mountPath: /seed}]
       containers:
         - name: squid
           image: ${img}/squid:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}]
           readinessProbe: {exec: {command: [/usr/local/bin/healthcheck.sh]}, periodSeconds: 10}
           volumeMounts:
@@ -327,11 +332,13 @@ spec:
             - {name: squid-log, mountPath: /var/log/squid}
         - name: refresher
           image: ${img}/refresher:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           volumeMounts:
             - {name: blocklist, mountPath: /etc/squid}
             - {name: aidc-log, mountPath: /var/log/aidc}
         - name: policy
           image: ${img}/policy:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           env:
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_TAINT_RESPONSE, value: "${AIDC_TAINT_RESPONSE:-freeze}"}
@@ -345,6 +352,7 @@ spec:
             - {name: audit, mountPath: /var/aidc/audit}
         - name: audit
           image: ${img}/audit:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           env:
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_PROFILE, value: "${profile}"}
@@ -391,22 +399,27 @@ spec:
         # The repo folder, made as the session user when it is not on the disk yet.
         - name: repo-dir
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           command: [mkdir, -p, "${repo}"]
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts: [{name: disk, mountPath: "/home/${AIDC_K8S_USER}"}]
       containers:
         - name: dev
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
           workingDir: "${repo}"
           resources:
             requests: {cpu: "${AIDC_K8S_CPU_REQUEST}", memory: "${AIDC_K8S_MEMORY_REQUEST}"}
             limits: {cpu: "${AIDC_K8S_CPU_LIMIT}", memory: "${AIDC_K8S_MEMORY_LIMIT}"}
+          # The proxy by address, not by name: the dev pod has no DNS, and an inner container
+          # handed \$HTTPS_PROXY could not resolve "aidc-proxy" (it is only in this pod's hosts
+          # file). On Docker, inner containers resolve the name through Docker's DNS.
           env:
-            - {name: HTTP_PROXY, value: "http://aidc-proxy:3128"}
-            - {name: HTTPS_PROXY, value: "http://aidc-proxy:3128"}
+            - {name: HTTP_PROXY, value: "http://${proxy_ip}:3128"}
+            - {name: HTTPS_PROXY, value: "http://${proxy_ip}:3128"}
             - {name: NO_PROXY, value: "localhost,127.0.0.1"}
-            - {name: http_proxy, value: "http://aidc-proxy:3128"}
-            - {name: https_proxy, value: "http://aidc-proxy:3128"}
+            - {name: http_proxy, value: "http://${proxy_ip}:3128"}
+            - {name: https_proxy, value: "http://${proxy_ip}:3128"}
             - {name: no_proxy, value: "localhost,127.0.0.1"}
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_PROFILE, value: "${profile}"}

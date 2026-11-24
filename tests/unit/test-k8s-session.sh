@@ -96,6 +96,10 @@ assert_eq "the dev pod runs under the runtime class, in a user namespace, with n
     "$(dev '.spec.template.spec | [.runtimeClassName, .hostUsers, .automountServiceAccountToken]')"
 assert_eq "the dev pod has no cluster DNS" '["None",["192.0.2.1"]]' \
     "$(dev '.spec.template.spec | [.dnsPolicy, .dnsConfig.nameservers]')"
+assert_has "the proxy settings carry its address, so inner containers can use them without DNS" \
+    '{"name":"HTTPS_PROXY","value":"http://10.45.9.9:3128"}' "$(dev '.spec.template.spec.containers[0].env')"
+assert_eq "every aidc image is pulled every time (a forced rebuild keeps its version tag)" "[]" \
+    "$(q '[.. | select(has("image")) | select(.image | test("/aidc/")) | select(.imagePullPolicy != "Always")]' | sort -u | tail -1)"
 assert_eq "the dev pod reaches its proxy by a fixed address, not by DNS" \
     '[{"ip":"10.45.9.9","hostnames":["aidc-proxy"]}]' "$(dev '.spec.template.spec.hostAliases')"
 assert_eq "no container in the dev pod is privileged" "[]" \

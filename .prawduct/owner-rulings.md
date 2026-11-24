@@ -394,3 +394,7 @@ orchestrator already has, "so these get bubbled up": the git agent asks with Cla
 question tool, which aidc already delivers to the orchestrator as a session's question; the
 answer comes back by session_send, or from the user in the git agent's terminal, whichever is
 first. No separate approval system.
+
+## 2026-11-24 — One extra review round for the git container wave
+
+The owner approved one cumulative Critic round beyond the branch's review round budget (6/6 used) so Chunk 06 and the whole wave are reviewed before the live GitHub test.

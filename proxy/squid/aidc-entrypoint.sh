@@ -128,9 +128,10 @@ http_access deny aidc_mcp_dst aidc_mcp_port" ;;
     echo "[aidc-squid] denying aidc-mcp at ${AIDC_MCP_DENY} to this session (MCP-12)" >&2
 fi
 
-# The git container's proxy (aidc git setup on Docker, AIDC_PUBLIC_ONLY=1): public addresses
-# only, the same intent as the Kubernetes NetworkPolicy of the git pod. The git container sits
-# on an internal network with this proxy as its only way out; denying every private, loopback,
+# Public addresses only (AIDC_PUBLIC_ONLY=1): the git container's proxy (aidc git setup on
+# Docker) and every Kubernetes session's proxy, the same intent as the NetworkPolicy of the git
+# pod and of a session's proxy pod. The git container sits on an internal network with this
+# proxy as its only way out; denying every private, loopback,
 # link-local, shared and multicast destination keeps a GitHub login held there from being
 # walked to the host, the LAN or another container. squid resolves the name it is asked for and
 # checks every address it gets (dst), so a public name pointing at a private address is refused.
@@ -163,7 +164,7 @@ http_access deny aidc_not_public"
         echo "[aidc-squid] FATAL: public-only rule missing or after 'allow localnet' in ${DERIVED}" >&2
         exit 1
     fi
-    echo "[aidc-squid] public addresses only (the git container's proxy)" >&2
+    echo "[aidc-squid] public addresses only: private, loopback, link-local and shared destinations are refused" >&2
 fi
 
 # Chain to the base image's entrypoint, passing the effective config path.

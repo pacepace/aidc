@@ -114,6 +114,22 @@ assert "a state-actor TLD is refused" "! in_dev 'curl -sf -m 20 -o /dev/null htt
 assert "a direct connection, no proxy, is blocked" "! in_dev \"curl -sf -m 8 --noproxy '*' -o /dev/null https://1.1.1.1\""
 assert "a DNS lookup is blocked" "! in_dev 'getent hosts github.com'"
 assert "the Kubernetes API is blocked" "! in_dev \"curl -sk -m 8 --noproxy '*' -o /dev/null https://kubernetes.default.svc\""
+# Squid refuses private destinations itself (AIDC_PUBLIC_ONLY): 403 from squid, before its
+# NetworkPolicy would refuse the connection (503). A public name that resolves to loopback is
+# refused the same way: squid checks the address it resolved.
+for target in http://192.168.1.1/ http://10.0.0.1/ http://localtest.me/; do
+    code=$(in_dev "curl -s -m 20 -o /dev/null -w '%{http_code}' ${target}" 2>/dev/null)
+    assert "squid itself refuses ${target} (403, got ${code:-none})" "[ '$code' = 403 ]"
+done
+# Root in the Sysbox session owns its own network namespace only: rules it adds there change
+# nothing, because NetworkPolicy lives in the node's namespace (docs/design-12, "Egress").
+in_root() { k8s_kubectl -n "$NS" exec "$POD" -c dev -- sh -c "$1" </dev/null; }
+assert "root in the session can change its own namespace's rules (it is root there)" \
+    "in_root 'iptables -I OUTPUT 1 -j ACCEPT && iptables -P OUTPUT ACCEPT'"
+assert "it sees none of the node's NetworkPolicy rules" "! in_root 'iptables-save; nft list ruleset 2>/dev/null' | grep -qiE 'kube-router|KUBE-NWPLCY|KUBE-POD-FW'"
+assert "and a direct connection is still blocked after it opened its own rules" \
+    "! in_root \"curl -sf -m 8 --noproxy '*' -o /dev/null https://1.1.1.1\""
+in_root 'iptables -D OUTPUT -j ACCEPT' >/dev/null 2>&1 || true
 
 echo "[4/7] Docker inside, unprivileged"
 assert "the dev pod is not privileged and runs in a user namespace" \

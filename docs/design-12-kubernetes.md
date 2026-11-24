@@ -544,9 +544,21 @@ every target below open.
 `kubectl port-forward` to the session pod still works under default-deny ingress (HTTP 200), so
 the tunnel needs no ingress rule.
 
-Still to check when built: Squid's own deny of private destinations (defence in depth), and that
-a root process inside a Sysbox session cannot change the node-side rules (the rules live in the
-node's network namespace, which the pod does not share).
+Squid denies private destinations itself as well (defence in depth): every session's squid runs
+public-only (`AIDC_PUBLIC_ONLY=1`, the same rule as the git container's proxy on Docker), so a
+request for a private, loopback, link-local or shared address, or for a public name that resolves
+to one, gets squid's 403 before the NetworkPolicy would refuse the connection. An `--egress-tcp`
+relay (NET-15) is reached by the dev pod directly, by its own egress rule, not through squid, so
+public-only refuses nothing a session is meant to reach.
+
+Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeats both):
+- through the session's squid, `http://192.168.1.1/`, `http://10.0.0.1/` and
+  `http://localtest.me/` (a public name for 127.0.0.1) answer 403; `https://example.com` 200;
+- root inside a Sysbox session (uid 0 in the pod's user namespace) can insert
+  `iptables -I OUTPUT 1 -j ACCEPT` and set the OUTPUT policy to ACCEPT in its own network
+  namespace, sees only its inner Docker's chains there (no NetworkPolicy chain of the node's),
+  and a direct `curl --noproxy '*' https://1.1.1.1` still fails (no connection): the rules that
+  fence it live in the node's network namespace, which the pod does not share.
 
 ## Ports: tunnel by default, home network on request
 

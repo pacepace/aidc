@@ -369,7 +369,11 @@ spec:
         - name: squid
           image: ${img}/squid:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
-          env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}]
+          # Public addresses only, in squid as well as in the NetworkPolicy (defence in depth:
+          # a request for a private address gets squid's 403, never reaching the policy). The
+          # dev pod reaches anything else it is allowed (an --egress-tcp relay) directly, not
+          # through squid, so this refuses nothing a session is meant to reach.
+          env: [{name: AIDC_DNS_SERVERS, value: ""}, {name: AIDC_MCP_DENY, value: ""}, {name: AIDC_PUBLIC_ONLY, value: "1"}]
           readinessProbe: {exec: {command: [/usr/local/bin/healthcheck.sh]}, periodSeconds: 10}
           # Requests keep the proxy out of the BestEffort class, first in line for eviction.
           resources: {requests: {cpu: 100m, memory: 256Mi}}

@@ -164,6 +164,12 @@ case "$audit_claim" in
     demo-audit-[0-9]*) echo "  PASS: the audit claim is named for its creation time ($audit_claim)"; PASS=$((PASS + 1)) ;;
     *) echo "  FAIL: the audit claim is named for its creation time (got '$audit_claim')"; FAIL=$((FAIL + 1)) ;;
 esac
+assert_has "the session's squid refuses private destinations itself, as its NetworkPolicy does" \
+    '{"name":"AIDC_PUBLIC_ONLY","value":"1"}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .env' | tail -1)"
+assert_has "and resolves through squid.conf's Quad9 pair (no DNS override, which public-only refuses)" \
+    '{"name":"AIDC_DNS_SERVERS","value":""}' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .env' | tail -1)"
 assert_eq "the proxy pod has resource requests (not first in line for eviction)" '{"cpu":"100m","memory":"256Mi"}' \
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "squid") | .resources.requests' | tail -1)"
 assert_has "the inner Docker uses overlay2 (Sysbox gives it a real /var/lib/docker)" \

@@ -117,9 +117,9 @@ without it failed to start). Measured 2026-11-24 on ranch-dev01:
 | NFS from the node's ZFS (as the station songs share) | yes | wrong: written as a host uid derived from that pod's own ID range (e.g. 2211906536), and every other pod's files show as `nobody` |
 
 NFS cannot carry Kubernetes' ID remapping, so a session's files would belong to a different
-owner in every other pod, and after the session restarts. **Proposal:** while sessions run only
-on ranch-dev01, the per-user volume is a folder on the node's local ZFS (a dataset per user,
-mounted as a local volume), not NFS. Sessions on other nodes would need a different answer.
+owner in every other pod, and after the session restarts. Sessions run only on ranch-dev01, so
+the per-user volume is a dataset on the node's local ZFS, one per user, mounted as a local volume
+(ruled 2026-11-24).
 
 ## Sessions: Sysbox, Docker inside, GPU on request
 
@@ -282,6 +282,5 @@ Kubernetes code lands.
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |
-| Per-user volume: local ZFS dataset per user | owner proposal |
 | Sysbox node setup in agent-cluster scripts | owner proposal |
 | LAN name, wildcard cert, DNS | owner proposal |

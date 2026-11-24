@@ -182,3 +182,10 @@ repos use reftable ref storage; the git container never runs git inside a sessio
 always runs with hooks off. Measured 2026-11-24 on ranch-dev01 (design-12). The owner noted that
 shared volumes for other pods already use NFS from ranch-dev01; that is the expected storage,
 pending a test that Sysbox sessions see correct file owners on it.
+
+## 2026-11-24: Each user's code lives on ranch-dev01's local ZFS, one dataset per user
+
+Sessions run only on ranch-dev01, so each user's code volume is a dataset on that node's local
+ZFS, mounted into the git container and the user's sessions as a local volume. Not NFS: measured
+2026-11-24, NFS cannot carry the user-ID remapping Sysbox sessions need, so files written by a
+session showed as `nobody` in every other pod (design-12, "Storage").

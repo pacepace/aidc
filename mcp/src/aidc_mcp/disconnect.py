@@ -1,6 +1,6 @@
 """Stop a session_invoke whose client dropped the connection.
 
-On the 2025-era streamable-HTTP wire (the one metallm speaks) the MCP SDK cancels a
+On the 2025-era streamable-HTTP wire (the one the coordinator speaks) the MCP SDK cancels a
 tool call on `notifications/cancelled` and when the session is closed, but not when
 the client simply drops the connection: the handler runs on with nobody to answer
 (measured on SDK 2.3, tests/test_invoke_cancel_wire.py). A blocking session_invoke

@@ -1,6 +1,6 @@
 """Headless `claude --print` runs in a session: session_invoke and session_invoke_async.
 
-2026-10-22, metallm: two such runs were still going 23 and 9 minutes after their
+2026-10-22, the coordinator: two such runs were still going 23 and 9 minutes after their
 callers gave up, both editing the same spec file, and nothing the orchestrator could
 call showed them. So every run the MCP starts is tagged, inside the container, with an
 environment variable naming it (RUN_ENV). Every process the run starts inherits it,

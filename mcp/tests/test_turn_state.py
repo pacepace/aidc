@@ -769,7 +769,7 @@ POINTED = "claude-2.1.30x-idle-agent-row-pointed.ansi"
 
 
 class TestSendWhileABackgroundAgentRuns:
-    """Live 2026-10-21, conv 01a15184: the session `metallm` had finished its reply
+    """Live 2026-10-21, conv 01a15184: the session `coordinator` had finished its reply
     and sat at its prompt while one background agent ran, the mouse resting on that
     agent's row. A session_send queued as screen_unrecognized and was pasted five
     minutes later. Claude Code takes typed input in that state, so the prompt goes in
@@ -1029,7 +1029,7 @@ class TestTheFreeCheckLeavesItsScreen:
 BUSY = "claude-2.1.27x-busy-tool-empty-box.ansi"
 NOTE = ("<task-notification>\n<task-id>a5f3d4d002a7a711d</task-id>\n<status>completed</status>\n"
         "<summary>Agent \"Map the memory code\" finished</summary>\n</task-notification>")
-# A turn a background task's notification opened, Claude mid-tool (metallm, 2026-10-22).
+# A turn a background task's notification opened, Claude mid-tool (the coordinator, 2026-10-22).
 NOTIFIED = [*FINISHED,
             {"type": "user", "uuid": "n1", "timestamp": "2026-09-17T01:40:00.000Z",
              "promptSource": "system", "origin": {"kind": "task-notification"},
@@ -1043,7 +1043,7 @@ JOIN_SENT = ts.frame_prompt(JOIN, conversation_id="c1")   # JOIN as session_send
 
 class TestSendDeliverJoin:
     """session_send(deliver="join"): a prompt for the turn in flight goes in now and is
-    answered inside it, instead of waiting out a 47-minute turn (metallm, 2026-10-22,
+    answered inside it, instead of waiting out a 47-minute turn (the coordinator, 2026-10-22,
     Pace's decision that day). Driven through session_send and the real session state;
     only docker and tmux are patched, and the screens are real captures."""
 

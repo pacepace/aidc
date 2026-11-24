@@ -125,21 +125,21 @@ def _under(parent: str, path: str) -> bool:
     return candidate == root or root in candidate.parents
 
 
-def _metallm_setting(key: str) -> str | None:
-    """The scalar `metallm.<key>` from the aidc config file, or None when unset.
+def _coordinator_setting(key: str) -> str | None:
+    """The scalar `the coordinator.<key>` from the aidc config file, or None when unset.
 
     Inside the container the config lives at /aidc-config/config.yaml
     (mounted from ~/.config/aidc/config.yaml on the host).
     """
     if not _CONFIG_PATH.exists():
         return None
-    in_metallm_section = False
+    in_coordinator_section = False
     for line in _CONFIG_PATH.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped == "metallm:":
-            in_metallm_section = True
+        if stripped == "coordinator:":
+            in_coordinator_section = True
             continue
-        if in_metallm_section:
+        if in_coordinator_section:
             if stripped.startswith(f"{key}:"):
                 return _yaml_scalar(stripped.split(":", 1)[1])
             # A non-empty, non-comment line at column 0 is a new top-level key.
@@ -148,19 +148,19 @@ def _metallm_setting(key: str) -> str | None:
     return None
 
 
-def _metallm_callback_url() -> str:
-    """Read metallm.callback_url from the aidc config file."""
-    return (_metallm_setting("callback_url") or "").rstrip("/")
+def _coordinator_callback_url() -> str:
+    """Read coordinator.callback_url from the aidc config file."""
+    return (_coordinator_setting("callback_url") or "").rstrip("/")
 
 
-def _metallm_send_speaker() -> bool:
-    """Read metallm.send_speaker (default false). Off until the orchestrator records a
+def _coordinator_send_speaker() -> bool:
+    """Read coordinator.send_speaker (default false). Off until the orchestrator records a
     `speaker: "human"` turn instead of dropping it (design 10 D4)."""
-    return (_metallm_setting("send_speaker") or "").lower() == "true"
+    return (_coordinator_setting("send_speaker") or "").lower() == "true"
 
 
-def _metallm_turn_settle_seconds(default: float = 4.0) -> float:
-    """Read metallm.turn_settle_seconds from the aidc config file.
+def _coordinator_turn_settle_seconds(default: float = 4.0) -> float:
+    """Read coordinator.turn_settle_seconds from the aidc config file.
 
     How long the transcript must stay quiet (no new bytes) after an end_turn before
     the turn is delivered. This coalesces a multi-segment response — Claude emitting
@@ -168,7 +168,7 @@ def _metallm_turn_settle_seconds(default: float = 4.0) -> float:
     so the watcher signals "ready" once per exchange instead of mid-stream. <= 0
     disables the wait. Default 4s.
     """
-    value = _metallm_setting("turn_settle_seconds")
+    value = _coordinator_setting("turn_settle_seconds")
     if value is None:
         return default
     try:
@@ -1582,7 +1582,7 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
     resend), so ok is true. Retried, and dead-lettered when it cannot be delivered,
     like a reply."""
     event = f"session_send_{error_code}_notified"
-    base = _metallm_callback_url()
+    base = _coordinator_callback_url()
     for q, note in notices:
         if not q.conversation_id or not base:
             # Sent without a webhook: nobody to tell beyond the log.
@@ -1995,7 +1995,7 @@ async def _post_turn(
                 # off. It is not a failure, so ``ok`` stays true; the content opens
                 # with a note saying so, which is all a receiver that ignores the
                 # field needs. ``speaker`` ("human" | "agent") only when
-                # metallm.send_speaker is on. The whole body is pinned in design-10
+                # coordinator.send_speaker is on. The whole body is pinned in design-10
                 # D5 and agreed with the orchestrator's side before any field changes.
                 json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
                       "session": session, "prompt_origin": turn.prompt_origin,
@@ -2005,7 +2005,7 @@ async def _post_turn(
                       **({"pasted_at": turn.pasted_at} if turn.pasted_at else {}),
                       **({"prompts": list(turn.batch)} if turn.batch else {}),
                       **({"speaker": turn.speaker}
-                         if turn.speaker and _metallm_send_speaker() else {})},
+                         if turn.speaker and _coordinator_send_speaker() else {})},
                 headers={"Authorization": f"Bearer {bearer}"},
             )
         elapsed_s = round(time.monotonic() - start, 3)
@@ -2822,7 +2822,7 @@ async def _run_transcript_watcher(session: str, conversation_id: str, callback_b
     transcript must be quiet before a turn is delivered) is read from config once
     per watcher; pass settle_seconds to override (tests)."""
     if settle_seconds is None:
-        settle_seconds = _metallm_turn_settle_seconds()
+        settle_seconds = _coordinator_turn_settle_seconds()
     while True:
         await asyncio.sleep(poll_interval)
         try:
@@ -3010,7 +3010,7 @@ async def _hand_session_mcp(name: str, server: str, path: str, bearer: str) -> d
     try:
         handed = await asyncio.to_thread(
             session_mcp.hand, name, server=server, path=path, bearer=bearer,
-            base_url=_metallm_callback_url())
+            base_url=_coordinator_callback_url())
     except session_mcp.SessionMcpError as exc:
         # Nothing the caller gave is logged on a refusal: an argument in the wrong
         # place could be the token.
@@ -3231,7 +3231,7 @@ def register(app: Any) -> None:
             # Checked before anything is created: a session made and then refused its
             # server would be a session the caller has to find out about and remove.
             try:
-                session_mcp.check(mcp_server, mcp_path, mcp_bearer, _metallm_callback_url())
+                session_mcp.check(mcp_server, mcp_path, mcp_bearer, _coordinator_callback_url())
             except session_mcp.SessionMcpError as exc:
                 return _session_mcp_refusal(exc)
         if (why := scope.create_refusal()) is not None:
@@ -3590,10 +3590,11 @@ def register(app: Any) -> None:
             conversation_id: this conversation's id (the orchestrator injects it) — where the
                 result is delivered.
         """
-        base_url = _metallm_callback_url()
+        base_url = _coordinator_callback_url()
         if not base_url:
             return _envelope_err(
-                "metallm.callback_url not set in ~/.config/aidc/config.yaml", code="not_configured"
+                "coordinator.callback_url not set in ~/.config/aidc/config.yaml",
+                code="not_configured",
             )
 
         callback_url = f"{base_url}/api/v1/internal/callback/{conversation_id}"
@@ -3817,13 +3818,13 @@ def register(app: Any) -> None:
         # Capture WHY when we can't: both gates fail silently, and a send with no
         # watcher still injects the prompt and reports ok — so the reply is
         # produced and then dropped on the floor with nothing in the audit log
-        # saying which gate closed (prod 2026-07-26: `metallm.callback_url` was
+        # saying which gate closed (prod 2026-07-26: `coordinator.callback_url` was
         # simply absent from config.yaml; every session_send logged
         # `watching:false` and no further clue, and diagnosis meant reading the
         # source). `no_watch_reason` names the gate so the log answers it.
         no_watch_reason = ""
         if name not in _session_watchers:
-            base_url = _metallm_callback_url() if conversation_id else ""
+            base_url = _coordinator_callback_url() if conversation_id else ""
             if not conversation_id:
                 no_watch_reason = (
                     "no conversation_id was supplied — the orchestrator injects it automatically, "
@@ -3831,7 +3832,7 @@ def register(app: Any) -> None:
                 )
             elif not base_url:
                 no_watch_reason = (
-                    "metallm.callback_url is not set in ~/.config/aidc/config.yaml, "
+                    "coordinator.callback_url is not set in ~/.config/aidc/config.yaml, "
                     "so replies have nowhere to be POSTed"
                 )
             else:
@@ -4153,9 +4154,9 @@ def register(app: Any) -> None:
         Args:
             name: the aidc session to watch (see the open-webhook list below).
         """
-        base_url = _metallm_callback_url()
+        base_url = _coordinator_callback_url()
         if not base_url:
-            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml",
+            return _envelope_err("coordinator.callback_url not set in ~/.config/aidc/config.yaml",
                                  code="not_configured")
         if not conversation_id:
             return _envelope_err(
@@ -4220,9 +4221,9 @@ def register(app: Any) -> None:
                 "conversation_id is required (the orchestrator injects it automatically)",
                     code="invalid_argument"
             )
-        base_url = _metallm_callback_url()
+        base_url = _coordinator_callback_url()
         if not base_url:
-            return _envelope_err("metallm.callback_url not set in ~/.config/aidc/config.yaml",
+            return _envelope_err("coordinator.callback_url not set in ~/.config/aidc/config.yaml",
                                  code="not_configured")
         log_event("tool_call", tool="session_resend", session=name,
                   conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)

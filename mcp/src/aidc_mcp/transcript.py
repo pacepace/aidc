@@ -120,7 +120,7 @@ class Turn:
     error_code: str = field(default="", compare=False)
     # Set by the watcher at delivery time: "human" when every prompt the turn answers
     # was typed at the terminal, "agent" otherwise. Sent only when the aidc setting
-    # metallm.send_speaker is on (design 10 D4).
+    # coordinator.send_speaker is on (design 10 D4).
     speaker: str = field(default="", compare=False)
     # Set by the watcher at delivery time from the send record: the time the batch
     # this turn answers was pasted (ISO UTC), and that batch's prompts in paste order
@@ -533,7 +533,7 @@ def _is_local_output(obj: dict) -> bool:
     A prompt Claude Code raised itself also opens with a tag (`<task-notification>`),
     but Claude runs a turn on it, so it is not local output. Read as one, a turn a
     background task opened looked idle until Claude wrote its first line, and a paste
-    in that gap went into the new turn (metallm, 2026-10-22 19:19:35-40)."""
+    in that gap went into the new turn (the coordinator, 2026-10-22 19:19:35-40)."""
     raw_msg = obj.get("message")
     msg = raw_msg if isinstance(raw_msg, dict) else {}
     text = _text_of(msg).strip()

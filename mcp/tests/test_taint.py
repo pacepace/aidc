@@ -68,7 +68,7 @@ def test_exactly_the_tools_that_put_work_in_are_guarded():
 @pytest.mark.parametrize("tool", sorted(tools.TAINT_GUARDED))
 async def test_a_guarded_tool_refuses_a_tainted_session(tool, tainted, nothing_runs, monkeypatch):
     fn = _app()._tool_manager._tools[tool].fn
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_coordinator_callback_url", lambda: "http://cb")
     res = await fn(name="proj", **_args(fn))
     assert res["ok"] is False
     assert res["error_code"] == "tainted"

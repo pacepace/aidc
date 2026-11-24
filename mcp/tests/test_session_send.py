@@ -207,7 +207,7 @@ async def test_sent_warns_when_no_webhook_open(wiring):
 async def test_no_webhook_reason_names_missing_conversation_id(wiring):
     """The warning must say WHICH gate closed. Both gates (no conversation_id,
     no callback_url) used to produce the same opaque message, so a misconfigured
-    deployment looked identical to a non-metallm caller."""
+    deployment looked identical to a non-coordinator caller."""
     app, send = _make_send()
 
     res = await send(name="proj", prompt="hello")
@@ -218,11 +218,11 @@ async def test_no_webhook_reason_names_missing_conversation_id(wiring):
 
 
 async def test_no_webhook_reason_names_missing_callback_url(wiring, monkeypatch):
-    """A conversation_id arrived but metallm.callback_url is unset — the exact
+    """A conversation_id arrived but coordinator.callback_url is unset — the exact
     prod misconfiguration (2026-07-26) that dropped every reply. The reply is
     still lost, but the return now names the config key to fix."""
     app, send = _make_send()
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "")
+    monkeypatch.setattr(tools, "_coordinator_callback_url", lambda: "")
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -247,7 +247,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     async def announce(app_, ctx=None):
         return None
 
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_coordinator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_baseline_watermark", baseline)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
@@ -892,7 +892,7 @@ async def test_reply_goes_elsewhere_when_another_conversation_watches(wiring):
 
 
 async def test_reply_goes_nowhere_without_a_webhook(wiring, monkeypatch):
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "")
+    monkeypatch.setattr(tools, "_coordinator_callback_url", lambda: "")
     app, send = _make_send()
     res = await send(name="proj", prompt="hello", conversation_id="c1")
     assert res["data"]["reply_goes"] == "nowhere"
@@ -945,7 +945,7 @@ async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, m
 
 async def test_a_queued_send_names_a_headless_run_going_in_the_session(wiring):
     """A session_invoke works in the same tree as the agent: a caller deciding whether
-    to wait, join or interrupt is told about it (metallm, 2026-10-22)."""
+    to wait, join or interrupt is told about it (the coordinator, 2026-10-22)."""
     from aidc_mcp import headless
     _, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
@@ -1280,7 +1280,7 @@ async def test_session_send_pastes_a_command_unframed(wiring):
 
 
 async def test_session_send_declares_sender_label():
-    """metallm passes sender_label only when aidc declares it."""
+    """The coordinator passes sender_label only when aidc declares it."""
     app, _ = _make_send()
     props = app._tool_manager._tools["session_send"].parameters["properties"]
     assert "sender_label" in props
@@ -1355,7 +1355,7 @@ async def test_the_header_names_the_calls_conversation_never_the_webhooks(wiring
     not from that conversation: the reply goes there, but it did not send it."""
     app, send = _make_send()
     tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watcher", "http://metallm.local")
+    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watcher", "http://coordinator.local")
     await send(name="proj", prompt="hello")
     assert _pasted(wiring) == [f"{_ORCH} hello"]
     assert tools._watched_conversation("proj") == "c-watcher"

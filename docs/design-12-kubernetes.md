@@ -488,8 +488,17 @@ Sysbox included.
 Rootless Docker and Podman were tried and dropped: they needed the AppArmor user-namespace
 restriction lifted, a smaller ID range and a tun device plugin, and still did not run.
 
-Sessions come with testament installed (K8S-25), so tests can run through that distributed
-test runner.
+Sessions come with testament installed (K8S-25) when the user's config names its repo
+(`testament: {repo: <ssh url>}`), so tests can run through that distributed test runner. It is
+private for now, so it is optional (owner rulings 2026-11-24) and fetched the way the user
+fetches it: on the user's machine, with their own SSH key (never gh, no token), at its newest
+`vX.Y.Z` tag, built into a wheel there (`uv build`) and cached per tag
+(`scripts/lib/testament.sh`). The wheel is the only thing that crosses: into the dev image's
+build context on both backends (`aidc rebuild`, a first `aidc create`, `aidc k8s build`; the
+image installs it like its other uv tools and keeps the wheel in `/opt/aidc/testament`), and
+on `aidc upgrade` into the running session's home (where it survives restarts and a login
+shell finds it first). A missing config, no access or no `uv` is one line, and the build or
+upgrade goes on without it.
 
 Default size: 2 CPU and 8 GB guaranteed, may burst to 16 CPU and 32 GB; both settable at create
 (K8S-19). Expected load is 4–8 sessions per user.

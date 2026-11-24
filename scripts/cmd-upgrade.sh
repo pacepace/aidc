@@ -31,6 +31,15 @@ trap '' PIPE
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/network.sh
 . "$AIDC_SCRIPTS/lib/network.sh"
+# shellcheck source=lib/config.sh
+. "$AIDC_SCRIPTS/lib/config.sh"
+# shellcheck source=lib/testament.sh
+. "$AIDC_SCRIPTS/lib/testament.sh"
+
+# testament's newest release into the session (lib/testament.sh: only when configured; never
+# fails the upgrade), through these two: a file into the dev container, a command as its user.
+testament_copy() { docker cp "$1" "${DEV_CT}:$2" >/dev/null && docker exec -u root "$DEV_CT" chown 1000:1000 "$2"; }
+testament_exec() { docker exec -i -u vscode -e HOME=/home/vscode "$DEV_CT" "$@"; }
 
 NAME=""
 YES=0
@@ -45,6 +54,8 @@ Adhoc port forwards are removed (re-add via 'aidc proxy <session> add ...').
 Adhoc network attachments are removed too (re-add via 'aidc network <session>
 add ...'); declared --network attachments survive.
 In-flight claude conversation is interrupted; claude --continue re-attaches.
+testament's newest release goes into the session too, when your config names its
+repo (testament.repo); without access it says so and the upgrade goes on.
 
 Run 'aidc rebuild' first if you want the latest image content.
 
@@ -90,8 +101,9 @@ if [ -z "$NEW_DIGEST" ]; then
 fi
 OLD_DIGEST=$(docker inspect "$DEV_CT" --format '{{.Image}}' 2>/dev/null || true)
 if [ -n "$OLD_DIGEST" ] && [ "$OLD_DIGEST" = "$NEW_DIGEST" ]; then
-    info "${DEV_CT} is already on the current dev-base image (${NEW_DIGEST}); nothing to do"
+    info "${DEV_CT} is already on the current dev-base image (${NEW_DIGEST}); nothing to swap"
     info "(use 'aidc restart ${NAME}' for an in-place restart)"
+    aidc_testament_install testament_copy testament_exec
     exit 0
 fi
 
@@ -207,4 +219,5 @@ if [ "$GOT_DIGEST" != "$NEW_DIGEST" ]; then
 fi
 
 info "upgraded ${DEV_CT} to ${NEW_TAG}"
+aidc_testament_install testament_copy testament_exec
 info "  attach with: aidc attach ${NAME}"

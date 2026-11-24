@@ -28,7 +28,8 @@ Builds aidc's images (squid, refresher, policy, audit, forwarder, mcp, dev-base,
 git container's gitctl) in the cluster of the `kubernetes:` config and pushes them to the
 registry `aidc k8s setup` made. Images already there for this aidc version are skipped;
 --force builds them again (and fetches the current Claude Code release into dev-base and
-gitctl, as `aidc rebuild` does for dev-base). --only builds one role.
+gitctl, as `aidc rebuild` does for dev-base, and testament's newest release into dev-base
+when the config names its repo). --only builds one role.
 EOF
             exit 0 ;;
         --force) FORCE=1; shift ;;
@@ -45,7 +46,10 @@ if ! ready=$(k8s_kubectl -n "$ns" get deployment registry -o jsonpath='{.status.
 fi
 
 BUILDER="builder-$(date +%s)-$$"
-cleanup() { k8s_kubectl -n "$ns" delete pod "$BUILDER" --wait=false >/dev/null 2>&1 || true; }
+cleanup() {
+    k8s_kubectl -n "$ns" delete pod "$BUILDER" --wait=false >/dev/null 2>&1 || true
+    [ -z "${AIDC_BUILD_STAGE:-}" ] || rm -rf "$AIDC_BUILD_STAGE"
+}
 trap cleanup EXIT INT TERM
 
 # bexec <args...>: run in the builder's docker container, with no stdin. `kubectl exec -i`
@@ -90,9 +94,12 @@ while IFS='|' read -r tag context dockerfile; do
     bexec sh -c "rm -rf '${dir}' && mkdir -p '${dir}'"
     # Local caches and virtualenvs are never part of an image (each .dockerignore drops them
     # too); leaving them out of the stream saves sending them.
-    tar -C "$context" --exclude=.venv --exclude=__pycache__ --exclude=node_modules \
+    # dev-base: its context with testament's newest wheel beside it, when configured.
+    aidc_build_context "$tag" "$context" || die "cannot prepare the build context for ${tag}"
+    tar -C "$AIDC_BUILD_CONTEXT" --exclude=.venv --exclude=__pycache__ --exclude=node_modules \
         --exclude=.pytest_cache --exclude=.mypy_cache --exclude=.ruff_cache -czf - . \
         | bexec_in tar -C "$dir" -xzf -
+    [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
     build_args=()
     case "$tag" in
         aidc/dev-base:*|aidc/gitctl:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;

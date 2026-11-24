@@ -240,6 +240,27 @@ aidc/gitctl:${AIDC_VERSION_TAG}|${AIDC_ROOT}/gitctl|${AIDC_ROOT}/gitctl/Dockerfi
 EOF
 }
 
+# aidc_build_context <tag> <context>: the folder to build <tag> from, in AIDC_BUILD_CONTEXT, and
+# a folder for the caller to remove when the build is done, in AIDC_BUILD_STAGE ("" for none).
+# dev-base builds from a copy of its context with testament's newest wheel beside it when the
+# config names testament's repo (lib/testament.sh: optional, never fails a build); every other
+# image from its own context. One rule for every builder: aidc rebuild, ensure_image and
+# aidc k8s build. Returns 1 only when the copy could not be made.
+aidc_build_context() {
+    local lib
+    AIDC_BUILD_CONTEXT="$2" AIDC_BUILD_STAGE=""
+    case "$1" in aidc/dev-base:*) ;; *) return 0 ;; esac
+    lib="$(dirname "${BASH_SOURCE[0]}")"
+    declare -F _aidc_global_config_file >/dev/null || . "${lib}/config.sh"
+    declare -F aidc_testament_stage >/dev/null || . "${lib}/testament.sh"
+    AIDC_BUILD_STAGE=$(mktemp -d) || return 1
+    if ! aidc_testament_stage "$2" "${AIDC_BUILD_STAGE}/context"; then
+        rm -rf "$AIDC_BUILD_STAGE"; AIDC_BUILD_STAGE=""
+        return 1
+    fi
+    AIDC_BUILD_CONTEXT="${AIDC_BUILD_STAGE}/context"
+}
+
 # Ensure the aidc/<role> image exists locally, building it from the canonical
 # inventory when the tag is absent. Idempotent: a present image short-circuits.
 #   ensure_image <role>   role in: squid|refresher|policy|audit|forwarder|mcp|dev-base|gitctl
@@ -260,7 +281,11 @@ EOF
     fi
     [ -f "$dockerfile" ] || die "ensure_image: Dockerfile not found for ${tag}: ${dockerfile}"
     info "building ${tag} (missing locally)"
-    docker build -t "$tag" -f "$dockerfile" "$context"
+    aidc_build_context "$tag" "$context" || die "cannot prepare the build context for ${tag}"
+    local rc=0
+    docker build -t "$tag" -f "$dockerfile" "$AIDC_BUILD_CONTEXT" || rc=$?
+    [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
+    return "$rc"
 }
 
 # Retire the host-side auth-bridge watcher that aidc < 1.5.0 left running on

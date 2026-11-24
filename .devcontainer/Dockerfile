@@ -478,6 +478,22 @@ RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/git-remote-aidc /usr/local/bin/a
                 /usr/local/bin/aidc-claude-state-install.sh \
                 /usr/local/bin/aidc-dockerd-start.sh
 
+# testament (K8S-25), when the user's config names its repo: aidc builds its newest release
+# into a wheel on the user's machine (scripts/lib/testament.sh) and puts it in testament/ of
+# this build's context; the folder is empty otherwise, and the image has no testament. Installed
+# like poetry above (a uv tool on Ubuntu's Python, on everyone's PATH); the wheel stays in
+# /opt/aidc/testament for a project that wants testament's pytest plugin in its own venv. An
+# install that fails leaves the image without it and says so: testament is optional while it is
+# private, and never fails a build. `aidc upgrade` puts a newer release in a running session.
+COPY testament/ /opt/aidc/testament/
+RUN set -u; \
+    w=$(find /opt/aidc/testament -maxdepth 1 -name 'testament-*.whl' | head -n1); \
+    if [ -z "$w" ]; then echo "testament: not in this image (not configured, or not fetched)"; \
+    elif UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+            uv tool install --python /usr/bin/python3 "$w" && testament --version; then :; \
+    else echo "testament: ${w##*/} did not install; the image goes on without it"; fi; \
+    chmod -R a+rX /opt/aidc/testament
+
 # tini is PID 1 — it reaps zombies (which a plain shell as PID 1 wouldn't)
 # and properly forwards SIGTERM/SIGINT through.
 #

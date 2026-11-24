@@ -56,9 +56,13 @@ while IFS='|' read -r tag context dockerfile; do
     esac
     # ${arr[@]+"${arr[@]}"}: bash 3.2 (stock macOS) treats an empty array as
     # unbound under `set -u`; this idiom expands to nothing instead of dying.
-    if ! docker build ${build_args[@]+"${build_args[@]}"} -t "$tag" -f "$dockerfile" "$context"; then
+    # dev-base: its context with testament's newest wheel beside it, when configured.
+    aidc_build_context "$tag" "$context" || die "cannot prepare the build context for ${tag}"
+    if ! docker build ${build_args[@]+"${build_args[@]}"} -t "$tag" -f "$dockerfile" "$AIDC_BUILD_CONTEXT"; then
+        [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
         die "build failed for ${tag}; aborting rebuild (other images unchanged)"
     fi
+    [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
     count=$((count + 1))
 done <<EOF
 $(aidc_image_inventory)

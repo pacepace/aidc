@@ -76,3 +76,6 @@ mcp/tests/scratch/
 .prawduct/.pr-body.md
 .prawduct/.session-activity.json
 .claude/worktrees/
+
+# testament wheels aidc stages for an image build (scripts/lib/testament.sh)
+/.devcontainer/testament/*.whl

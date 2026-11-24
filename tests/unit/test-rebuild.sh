@@ -46,14 +46,21 @@ cat > "$TMP/bin/docker" <<STUB
 #!/usr/bin/env bash
 case "\$1" in
     info) exit 0 ;;
-    build) printf '%s\n' "\$*" >> "$TMP/builds.log"; exit 0 ;;
+    build) printf '%s\n' "\$*" >> "$TMP/builds.log"
+        # What testament/ holds in the context it was handed (dev-base's alone has one).
+        ctx="\${*: -1}"
+        [ -d "\$ctx/testament" ] && printf 'testament-folder %s %s\n' "\$ctx" "\$(ls "\$ctx/testament" | paste -sd, -)" >> "$TMP/contexts.log"
+        exit 0 ;;
     *) echo "unexpected docker \$*" >&2; exit 1 ;;
 esac
 STUB
 chmod +x "$TMP/bin/docker"
 
+# HOME is the test's: no testament configured (the user's own config is never read here).
+mkdir -p "$TMP/home"
+
 echo "-- aidc rebuild over the full inventory --"
-PATH="$TMP/bin:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out.log" 2>&1
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out.log" 2>&1
 eq "rebuild exits 0 with the stub docker" "0" "$?"
 
 eq "one docker build per inventory image" "7" "$(wc -l < "$TMP/builds.log" | tr -d ' ')"
@@ -66,6 +73,17 @@ eq "no other build carries the refresh arg" "1" \
    "$(grep -c -- 'CLAUDE_CODE_REFRESH' "$TMP/builds.log")"
 eq "every build is tagged at the version" "7" \
    "$(grep -c -- '-t aidc/[a-z-]*:vtest ' "$TMP/builds.log")"
+
+
+echo
+echo "-- dev-base builds from a staged copy of its context (testament, K8S-25) --"
+eq "only dev-base's context has a testament folder, and it is a staged copy, not the install's" "1 no" \
+   "$(grep -c '^testament-folder ' "$TMP/contexts.log" 2>/dev/null) $(grep -q "testament-folder ${AIDC_ROOT}/.devcontainer " "$TMP/contexts.log" && echo yes || echo no)"
+eq "with no testament configured it holds no wheel" "" \
+   "$(grep '^testament-folder ' "$TMP/contexts.log" | awk '{ print $3 }' | tr ',' '\n' | grep '\.whl$')"
+grep -q 'testament: not configured' "$TMP/out.log"; eq "and the rebuild says so in a line" 0 "$?"
+eq "the staged copy is removed after the build" "" \
+   "$(grep '^testament-folder ' "$TMP/contexts.log" | awk '{ print $2 }' | while read -r d; do [ -e "$d" ] && echo "$d"; done)"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

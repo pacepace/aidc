@@ -883,6 +883,19 @@ kubernetes:
 With one registry on one node's loopback, only that node pulls: keep sessions on it (the node
 selector and the runtime class's own scheduling do).
 
+**testament** (optional): when your config names its repo, sessions on both backends come with
+testament (a distributed test runner) at its newest release. The repo is private for now, so this is opt-in and uses
+your own SSH key: aidc reads the newest `vX.Y.Z` tag with `git ls-remote`, clones that tag
+shallowly, builds a wheel with `uv build` (cached in `~/.cache/aidc/testament/<tag>`), and puts
+only the wheel into the dev image (`aidc rebuild`, `aidc k8s build --force`) and into a running
+session (`aidc upgrade`). Without the setting, without access or without `uv`, it says so in one
+line and the build or upgrade goes on.
+
+```yaml
+testament:
+  repo: git@github.com:<owner>/<repo>.git   # an ssh URL your key can fetch
+```
+
 `aidc k8s check` reads it and checks, without changing anything, that kubectl reaches the
 cluster, the runtime class and storage class exist, a ready node can take session pods, and you
 may create pods in your namespace (and, for `setup` and `user add`, namespaces). Needs `kubectl`

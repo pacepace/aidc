@@ -78,4 +78,30 @@ and warns on any command when they total more than 100 MB, without slowing comma
 
 ## Decisions made mid-build
 
-(none yet)
+- (01) Kubernetes state: a claim no session uses is `kept` even without a recorded kill time
+  (only `aidc kill` leaves one behind; claims killed before this change have no annotations).
+  `ended` is a Docker state only.
+- (01) A trim right after `aidc kill` on Kubernetes is refused while the proxy pod terminates
+  (it still mounts the claim): correct, and the refusal says a killed session's pods take a
+  moment. `aidc kill` was left as it is (it does not wait for pods).
+- (01) The Docker trail helpers that call docker (`_aidc_audit_docker_mounts`,
+  `aidc_audit_docker_remove`) are named in test-backend-confinement.sh's allow list, the way
+  common.sh's Docker helpers are.
+- (01) Found on the way: `make lint` and CI's shellcheck did not cover `scripts/docker/` (and
+  `make lint` not `gitctl/`); both clean, now covered. test-k8s-session.sh called an undefined
+  `assert_not_has`, so two of its checks never ran; defined.
+- (01) The Kubernetes smoke now lists its kept claim and trims it (`AIDC_SMOKE_KEEP_AUDIT=1`
+  keeps it), so smoke runs stop piling up claims. Not yet run live as a whole smoke; the same
+  commands were run live by hand (below).
+- (01) Live 2026-11-24, Docker (scratch audit dir only): list; dry run; no answer and `n`
+  remove nothing; `y` and `--yes` remove; an unknown name removes nothing; a scratch trail with
+  the folder name an existing test session's audit container mounts is refused as running; a
+  trail holding a root-owned folder (plain `rm` fails) is removed through the audit image.
+- (01) Live 2026-11-24, cluster: `aidc audit list` showed the six existing test claims (none
+  deleted). A session made for the purpose: listed running, trim refused; after kill, the claim
+  carried size 28 KB, killed-at, tainted=no; trim refused until the proxy pod was gone, then
+  dry run, no answer (nothing removed), `y`: claim, its Retain volume and the provisioner's
+  volume object all gone, in 1.4 s.
+- (01) Timing (20 runs each, scratch audit dir of 70 trails): `aidc list` on Docker 355 → 371 ms;
+  a verb that does nothing 48 → 73 ms (sourcing config.sh, one sed, one du). Kubernetes `aidc list`
+  591 ms before, 580 ms after with the total cached, 831 ms on the once-a-day refresh.

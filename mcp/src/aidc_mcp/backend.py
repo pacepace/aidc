@@ -23,16 +23,36 @@ ROLE_DEV = "dev"
 ROLE_POLICY = "policy"
 ROLE_AUDIT = "audit"
 
+#: The git agent's session name (`aidc git setup`; reserved on both backends). Its container
+#: is the user's git container: trusted, with no sandbox proxy, policy or audit sidecar, and
+#: its Claude runs as the image's git user rather than vscode.
+GIT_SESSION = "git"
+#: The user every session's tmux, Claude and shell run as in its dev container.
+SESSION_USER = "vscode"
+#: The same in the git container (aidc/gitctl).
+GIT_USER = "git"
+
 
 def target(session: str, role: str = ROLE_DEV) -> str:
     """The name that addresses one of the session's containers."""
     return f"aidc-{session}-{role}"
 
 
+def is_git_session(session: str) -> bool:
+    """Whether `session` is the git agent (see GIT_SESSION)."""
+    return session == GIT_SESSION
+
+
 def exec_args(tgt: str, argv: list[str], *, user: str | None = None,
               workdir: str | None = None, env: dict[str, str] | None = None,
               stdin: bool = False) -> list[str]:
-    """`exec_argv` without the leading program, for runners that add it themselves."""
+    """`exec_argv` without the leading program, for runners that add it themselves.
+
+    A command for the session user in the git agent's container runs as its git user: its
+    tmux and Claude are that user's, so the session tools reach them as they reach any
+    session's."""
+    if user == SESSION_USER and tgt == target(GIT_SESSION):
+        user = GIT_USER
     out = ["exec"]
     if stdin:
         out.append("-i")

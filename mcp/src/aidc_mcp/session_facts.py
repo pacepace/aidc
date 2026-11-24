@@ -76,6 +76,9 @@ async def read_taint(name: str) -> dict[str, str] | None:
 
     :raises TaintUnknown: when the policy sidecar could not be asked
     """
+    if backend.is_git_session(name):
+        # The git agent has no sandbox to taint: no proxy sidecar, no policy (it is trusted).
+        return None
     res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
                                               ["cat", TAINT_FILE]))
     if res.returncode != 0:
@@ -128,6 +131,8 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
 
     :raises TaintUnknown: when the policy sidecar could not be asked
     """
+    if backend.is_git_session(name):
+        return []
     res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
                                               ["cat", POLICY_EVENTS_FILE]))
     if res.returncode != 0:

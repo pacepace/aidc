@@ -132,3 +132,13 @@ async def test_read_taint_tells_clean_from_unknown(monkeypatch):
         return sf.DockerResult(0, b"not json", b"")
     monkeypatch.setattr(sf, "run_docker", garbled)
     assert (await sf.read_taint("proj"))["trigger"] == "unknown"  # a flag is a taint
+
+
+async def test_the_git_agent_has_no_sandbox_to_taint(monkeypatch):
+    """The git agent has no policy sidecar (it is trusted): it is never tainted, and no
+    docker call is made to ask (one would fail and be logged on every list)."""
+    async def must_not_run(*args, timeout=20.0):
+        raise AssertionError(f"docker called: {args}")
+    monkeypatch.setattr(sf, "run_docker", must_not_run)
+    assert await sf.read_taint("git") is None
+    assert await sf.policy_events("git") == []

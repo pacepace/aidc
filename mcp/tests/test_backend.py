@@ -146,3 +146,17 @@ def test_the_inspect_readers_turn_output_into_facts():
 ])
 def test_a_missing_container_is_told_from_a_failure_inside_it(stderr, missing):
     assert backend.container_missing(stderr) is missing
+
+
+def test_the_git_agents_session_user_is_its_git_user():
+    """The git agent (`aidc git setup`) is a session named git whose tmux and Claude run as the
+    git container's git user: the session tools, which ask for vscode, reach it as any
+    session's. Any other user, and every other session, is left as asked."""
+    git = backend.target(backend.GIT_SESSION)
+    assert backend.exec_argv(git, ["tmux", "ls"], user="vscode") == [
+        "docker", "exec", "-u", "git", git, "tmux", "ls"]
+    assert backend.exec_argv(git, ["id"], user="root") == ["docker", "exec", "-u", "root", git, "id"]
+    assert backend.exec_argv(git, ["id"]) == ["docker", "exec", git, "id"]
+    assert backend.exec_argv("aidc-proj-dev", ["id"], user="vscode") == [
+        "docker", "exec", "-u", "vscode", "aidc-proj-dev", "id"]
+    assert backend.is_git_session("git") and not backend.is_git_session("gitx")

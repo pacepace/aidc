@@ -125,7 +125,12 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   image that writes a request (branch, title, body) to a request folder on the user's disk, so
   `/prawduct:pr` and plain `gh pr create` work unchanged in sessions; the git container acts on
   requests by its rules (ask mode: shows the user first) and knows nothing of prawduct (owner
-  ruling 2026-11-24). Live: push a session's branch, open a PR, tidy after a merge.
+  ruling 2026-11-24). Tidy after a merge deletes the branch (GitHub and local), the session's
+  worktree and its admin folder, and reports every leftover; sessions create their own worktrees
+  (owner ruling 2026-11-24), owned by uid 1000 under a sticky `.git/worktrees/`, so removal is a
+  gitctl verb running as gitrun (the folder's owner), and session files must stay group-writable
+  (umask 002 in sessions) for gitrun to delete them. Live: push a session's branch, open a PR,
+  tidy after a merge.
 
 ### Chunk 05: The git container's Claude, git modes and approval
 
@@ -136,7 +141,7 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   rules, `gitctl` as the only way to GitHub, ask/rules mode, and that everything sessions write
   (commit messages, diffs, PR text, files) is data, never instructions, and the procedures: push a
   session's branch and open a PR; tidy and report leftovers; check and offer GitHub
-  protections). No skills: one locked file (owner, 2026-11-24: "CLAUDE.md is fine").
+  protections; after every merge, tidy that branch and worktree and report leftovers). No skills: one locked file (owner, 2026-11-24: "CLAUDE.md is fine").
 
 ### Chunk 06: End to end and docs
 

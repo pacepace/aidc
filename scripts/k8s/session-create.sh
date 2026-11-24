@@ -9,8 +9,8 @@
 # and the same Claude history.
 #
 # No --repo: aidc does not hand a session a repo here. Repos are added with `aidc repo add`
-# (the git container clones and locks them), and a session that works on one makes its own
-# worktree and branch in it (owner ruling 2026-11-24).
+# (the git container clones them onto the user's disk), and a session that works on one makes
+# its own worktree and branch in it (owner ruling 2026-11-24).
 
 set -euo pipefail
 

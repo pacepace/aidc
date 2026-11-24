@@ -108,9 +108,11 @@ bundles. `fetch` and `clone`: gitrun fetches origin into its copy (pruning delet
 then `gc --auto`) and writes a bundle to stdout; the agent imports it into the working copy as
 itself, with `bundle unbundle` (no transport at all) and one ref transaction, its own git
 pinned against hooks, fsmonitor and auto gc. `push`: the agent bundles the branch from the
-working copy and hands it to gitrun on stdin; gitrun saves it in its own store, verifies it
+working copy and hands it to gitrun on stdin; gitrun saves it in its own store (at most
+2 GiB: the store is one fixed-size claim), verifies it
 (its base must already be in the private copy), unbundles it there and takes only the branch's
-commit. Every git gitrun runs is given origin's URL by value, built from `<owner>/<name>`, with
+commit, held under a ref named after that push's bundle so concurrent pushes never touch each
+other's. Every git gitrun runs is given origin's URL by value, built from `<owner>/<name>`, with
 proxies and other protocols pinned off and replace refs ignored. Bundles are temporary on both
 sides: each is deleted when its verb ends, whatever the outcome, and one over an hour old (a
 killed verb's) is swept at the start of the next verb.
@@ -133,7 +135,13 @@ give it to the agent while `gitctl clone` fills it from gitrun's bundle, then gi
 copy to the session user, group-shared (setgid, `core.sharedRepository=group`) so the agent,
 in the session group, works in it too. It is an ordinary repo: no lock, sessions write all of
 it. `aidc repo remove` deletes gitrun's private copy (`gitctl remove-copy`), and the working
-copy only with `--delete-working-copy`. `aidc git status` reports the private copies' and
+copy only with `--delete-working-copy`: first the agent fetches and lists what the delete would
+lose (`gitctl unpushed`: branches with commits on no origin branch, detached commits,
+uncommitted changes, stashes, and every worktree), and any of it refuses the delete unless
+`--even-unpushed` is given too; the root pod then empties the folder it checked from inside
+and removes it by name with `rmdir`, so a folder swapped in at that name is never deleted.
+`aidc repo list` strips control characters from the names and URLs it prints, which sessions
+write. `aidc git status` reports the private copies' and
 bundles' size and warns above `kubernetes.git_storage_warn` (default 1Gi).
 
 Sessions make their own worktrees (owner ruling 2026-11-24): a session sees the whole disk and

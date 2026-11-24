@@ -20,6 +20,7 @@
 #   gitctl clone <owner/name> <path>                     a new working copy at <path> (empty)
 #   gitctl fetch <repo>                                  origin's branches into refs/remotes/origin/*
 #   gitctl push <repo> <branch>                          push that branch, fast-forward only
+#   gitctl unpushed <repo>                               after a fetch, the work on no origin branch
 #   gitctl pr-create <repo> <head> <base> --title-file F --body-file F   (F may be -: stdin)
 #   gitctl pr-comment <repo> <number> --body-file F
 #   gitctl pr-merge <repo> <number>                      always a merge commit
@@ -65,7 +66,7 @@ ulimit -c 0 2>/dev/null || true
 verb="${1:-}"
 [ $# -gt 0 ] && shift
 case "$verb" in
-    clone|fetch|push|storage|remove-copy) VERB_ROLE=run ;;
+    clone|fetch|push|unpushed|storage|remove-copy) VERB_ROLE=run ;;
     pr-create|pr-comment|pr-merge|pr-view|pr-list|status|login|logout) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
@@ -170,15 +171,27 @@ run_push() {
     # Deleted when the verb ends, whatever the outcome (RUN_BUNDLE is global: the trap runs
     # after this function has returned).
     RUN_BUNDLE=$(mktemp ./incoming.XXXXXX) || die "cannot save the bundle"
-    trap 'rm -f "$RUN_BUNDLE"; g update-ref -d refs/incoming/push >/dev/null 2>&1' EXIT
-    cat > "$RUN_BUNDLE"
+    # The bundle's branch is held under a ref of this push's own (its bundle's unique name), so
+    # two pushes of one repo never set or delete each other's.
+    RUN_REF="refs/incoming/${RUN_BUNDLE##*/}"
+    trap 'rm -f "$RUN_BUNDLE"; g update-ref -d "$RUN_REF" >/dev/null 2>&1' EXIT
+    # A push that was killed leaves its ref; its bundle is gone (or swept), so drop it. A push
+    # still running has its bundle file, made before its ref.
+    while IFS= read -r ref; do
+        [ -e "./${ref#refs/incoming/}" ] || g update-ref -d "$ref" >/dev/null 2>&1 || true
+    done < <(g for-each-ref --format='%(refname)' refs/incoming/)
+    # Bounded: the store is a fixed-size claim every repo's copy shares, and stdin is the
+    # agent's to fill. One byte past the limit is enough to know it is too big.
+    head -c "$((MAX_BUNDLE_BYTES + 1))" > "$RUN_BUNDLE" || die "cannot save the bundle"
+    [ "$(stat -c %s -- "$RUN_BUNDLE")" -le "$MAX_BUNDLE_BYTES" ] \
+        || die "the bundle is larger than $((MAX_BUNDLE_BYTES / 1024 / 1024)) MiB: push a smaller branch"
     g bundle verify -q "$RUN_BUNDLE" >/dev/null 2>&1 \
         || die "the bundle is not one this copy can take (its base is not on origin: gitctl fetch, merge, then push)"
     listed=$(g bundle unbundle "$RUN_BUNDLE" </dev/null) || die "cannot unbundle it"
     local_sha=$(printf '%s\n' "$listed" | awk -v r="refs/heads/${branch}" '$2 == r { print $1; exit }')
     [ -n "$local_sha" ] || die "the bundle has no branch ${branch}"
-    g update-ref refs/incoming/push "$local_sha" 2>/dev/null || die "the bundle's ${branch} is not a commit"
-    local_sha=$(g rev-parse -q --verify "refs/incoming/push^{commit}") || die "the bundle's ${branch} is not a commit"
+    g update-ref "$RUN_REF" "$local_sha" 2>/dev/null || die "the bundle's ${branch} is not a commit"
+    local_sha=$(g rev-parse -q --verify "${RUN_REF}^{commit}") || die "the bundle's ${branch} is not a commit"
     heads=$(g ls-remote --heads "$ORIGIN_URL") || die "origin did not answer"
     remote_sha=""
     while read -r sha ref; do
@@ -223,6 +236,11 @@ run_remove_copy() {
     { cd -P .. && rm -rf -- "${slug#*/}.git"; } || die "cannot remove the copy of ${1}"
     echo "removed the private copy of ${1}"
 }
+
+# The largest bundle gitrun takes for a push (2 GiB): far beyond a branch's worth of commits,
+# well inside the store. A checkout (the unit tests) may set a smaller one.
+MAX_BUNDLE_BYTES=$((2 * 1024 * 1024 * 1024))
+if [ "$INSTALLED" = 0 ] && [ -n "${AIDC_GITCTL_MAX_BUNDLE_BYTES:-}" ]; then MAX_BUNDLE_BYTES="$AIDC_GITCTL_MAX_BUNDLE_BYTES"; fi
 
 # A bundle older than this many minutes is a leftover (a verb that was killed): swept at the
 # start of every verb, so none piles up.
@@ -438,6 +456,66 @@ agent_fetch() {
     import_bundle "$WC"
 }
 
+# unpushed: after a fetch, the work in a working copy (and its worktrees) that a delete would
+# lose, one line each, then "end" (a report without it is no report):
+#   branch <n> <name>       a local branch with n commits on no origin branch
+#   detached <n> <path>     a worktree on a detached HEAD with n such commits
+#   uncommitted <path>      a worktree with changes not committed (untracked files count)
+#   stash <n>               n stashed changes
+#   worktree <path>         each worktree besides the working copy itself
+# Read with the agent's own git (no login). Submodules are not entered (their config would be
+# read), no lock is taken, and a worktree whose folder is gone (prunable) holds nothing. Any
+# step that fails ends the verb with an error: "cannot tell" is never "nothing unpushed".
+agent_unpushed() {
+    nargs $# 1; no_options "$@"
+    local wt line n b rows=() list
+    working_copy "$1"; agent_slug "$WC"
+    new_bundle
+    as_run fetch "$SLUG" > "$BUNDLE" || exit 1
+    import_bundle "$WC"
+    list=$(ag -C "$WC" for-each-ref --format='%(refname)' refs/heads/) || die "cannot list ${WC}'s branches"
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        n=$(ag -C "$WC" rev-list --count "$b" --not --remotes=origin --) || die "cannot read ${b}"
+        [ "$n" = 0 ] || rows+=("branch ${n} ${b#refs/heads/}")
+    done <<<"$list"
+    list=$(ag -C "$WC" worktree list --porcelain) || die "cannot list ${WC}'s worktrees"
+    # One block per worktree, the main one first, each ended by an empty line.
+    local wts=() heads=() dets=() gone=() i j rel ex
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) wts+=("${line#worktree }"); heads+=(""); dets+=(0); gone+=(0) ;;
+            "HEAD "*) heads[-1]="${line#HEAD }" ;;
+            detached) dets[-1]=1 ;;
+            prunable*) gone[-1]=1 ;;
+        esac
+    done <<<"$list"
+    for i in "${!wts[@]}"; do
+        wt="${wts[$i]}"
+        [ "$i" = 0 ] || rows+=("worktree ${wt}")
+        [ "${gone[$i]}" = 0 ] || continue
+        if [ "${dets[$i]}" = 1 ]; then
+            n=$(ag -C "$wt" rev-list --count "${heads[$i]}" --not --remotes=origin --) || die "cannot read ${wt}'s HEAD"
+            [ "$n" = 0 ] || rows+=("detached ${n} ${wt}")
+        fi
+        # A worktree inside this one is its own: it shows here as an untracked folder.
+        ex=()
+        for j in "${!wts[@]}"; do
+            rel="${wts[$j]#"$wt"/}"
+            [ "$j" != "$i" ] && [ "$rel" != "${wts[$j]}" ] && ex+=(":(exclude,literal)${rel}")
+        done
+        n=$(ag -C "$wt" --no-optional-locks status --porcelain --ignore-submodules=all -- . "${ex[@]}") \
+            || die "cannot read ${wt}'s changes"
+        [ -z "$n" ] || rows+=("uncommitted ${wt}")
+    done
+    if ag -C "$WC" rev-parse -q --verify refs/stash >/dev/null; then
+        n=$(ag -C "$WC" rev-list --walk-reflogs --count refs/stash) || die "cannot read the stashes"
+        rows+=("stash ${n}")
+    fi
+    [ ${#rows[@]} -eq 0 ] || printf '%s\n' "${rows[@]}"
+    echo end
+}
+
 # push: the branch, bundled from the working copy (only what origin lacks, as far as the copy
 # knows: the bundle's base must be in gitrun's copy or gitrun refuses it), handed to gitrun on
 # stdin. gitrun decides; nothing here is trusted by it.
@@ -479,6 +557,7 @@ agent_side() {
         clone) agent_clone "$@" ;;
         fetch) agent_fetch "$@" ;;
         push) agent_push "$@" ;;
+        unpushed) agent_unpushed "$@" ;;
         storage) agent_storage "$@" ;;
         remove-copy) nargs $# 1; no_options "$@"; switch_to run remove-copy "$1" ;;
         status|login|logout) switch_to cred "$verb" "$@" ;;

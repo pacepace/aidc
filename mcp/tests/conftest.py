@@ -47,6 +47,16 @@ def idle_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_operator_config(tmp_path, monkeypatch):
+    """session_create reads the backend from $HOME/.config/aidc/config.yaml, as the CLI
+    does. No test reads the developer's own config: a `backend: kubernetes` there would
+    change every create a test makes."""
+    home = tmp_path / "operator-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_audit_log(tmp_path, monkeypatch):
     """Redirect the MCP audit log to a temp file so tests exercise real
     log_event() without touching /var/log/aidc-mcp (unwritable in CI/dev).

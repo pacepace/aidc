@@ -8,12 +8,14 @@ the tool bodies are pinned without a real Docker session.
 session_send has its own file (test_session_send.py); this covers the rest.
 """
 import asyncio
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import scope, tools
+from aidc_mcp import backend, scope, tools
 
 
 def _tool(name):
@@ -184,6 +186,82 @@ class TestSessionCreate:
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
         res = await _create_tool(monkeypatch)(name="proj", repo="/r", ctx=None)
         assert res["ok"] is False and res["error"] == "boom"
+
+
+def _configure_backend(value):
+    """Write the operator's config with a top-level `backend:` line (value None: no line)."""
+    cfg = Path(os.environ["HOME"]) / ".config" / "aidc" / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["mcp:", "  session_create: true"]
+    if value is not None:
+        lines.insert(0, f"backend: {value}   # where aidc create puts a session")
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class TestSessionCreateBackend:
+    """The Kubernetes create refuses --repo (sessions there see the user's whole disk and
+    make their own worktrees), so session_create must build the arguments for the backend
+    the CLI will create on, read from the same config line the CLI dispatcher reads.
+    Without it every MCP create fails for a user whose config says backend: kubernetes."""
+
+    @pytest.fixture(autouse=True)
+    def _no_host_home(self, monkeypatch):
+        monkeypatch.delenv("AIDC_HOST_HOME", raising=False)
+
+    async def test_docker_by_default_passes_the_repo_and_names_the_backend(self, monkeypatch):
+        _configure_backend(None)
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(
+            name="proj", repo="/host/repo", workspace="/host", ctx=None)
+        assert res["ok"] is True
+        assert rec[0][0] == ["create", "proj", "--profile", "multi", "--repo", "/host/repo",
+                             "--workspace", "/host", "--backend", "docker"]
+
+    async def test_no_config_at_all_is_docker(self, monkeypatch):
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(name="proj", repo="/host/repo", ctx=None)
+        assert res["ok"] is True and rec[0][0][-2:] == ["--backend", "docker"]
+
+    async def test_kubernetes_config_leaves_out_the_repo(self, monkeypatch):
+        _configure_backend("kubernetes")
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "ready", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(name="proj", profile="python", ctx=None)
+        assert res["ok"] is True
+        assert rec[0][0] == ["create", "proj", "--profile", "python", "--backend", "kubernetes"]
+        assert "--repo" not in rec[0][0]
+
+    async def test_the_k8s_spelling_and_quotes_are_read_as_the_cli_reads_them(self, monkeypatch):
+        _configure_backend('"k8s"')
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "ready", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(name="proj", ctx=None)
+        assert res["ok"] is True and rec[0][0][-2:] == ["--backend", "k8s"]
+        assert "--repo" not in rec[0][0]
+
+    async def test_a_repo_given_on_kubernetes_is_refused_naming_repo_add(self, monkeypatch):
+        _configure_backend("kubernetes")
+
+        def boom(*a, **k):
+            raise AssertionError("the CLI must not run for a refused create")
+
+        monkeypatch.setattr(tools, "_run_cli", boom)
+        create = _create_tool(monkeypatch)
+        for kwargs in ({"repo": "/home/u/app"}, {"workspace": "/home/u"}):
+            res = await create(name="proj", ctx=None, **kwargs)
+            assert (res["ok"], res["error_code"]) == (False, "invalid_argument"), kwargs
+            assert "aidc repo add" in res["error"] and "worktree" in res["error"]
+
+    async def test_only_the_first_top_level_backend_line_counts(self, monkeypatch):
+        """The dispatcher takes the first line starting `backend:`; an indented key of
+        another section is not it."""
+        cfg = Path(os.environ["HOME"]) / ".config" / "aidc" / "config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("kubernetes:\n  backend: kubernetes\nbackend: docker\n"
+                       "backend: kubernetes\n", encoding="utf-8")
+        assert backend.create_backend() == "docker"
 
 
 # --- session_list / status / kill (thin _run_cli wrappers) -------------------

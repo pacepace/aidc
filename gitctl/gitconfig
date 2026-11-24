@@ -12,8 +12,8 @@
 	gpgSign = false
 [init]
 	defaultBranch = main
-# The repos belong to the git container's gitrun user, with their config locked; the agent,
-# which holds nothing, reads them as they are.
+# The working copies belong to the sessions' user (uid 1000), group-shared with the agent, which
+# holds nothing and works in them as they are.
 [safe]
 	directory = *
 # The author and committer: the user's own name and email, written by the login step as

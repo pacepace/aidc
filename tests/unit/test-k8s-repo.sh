@@ -45,6 +45,9 @@ assert_not_has() {
 #   K_FAIL_STEP=make|own|delete   that folder step's pod fails (K_DIR_LOG its log)
 #   K_CLONE_FAIL=1 / K_RM_FAIL=1  gitctl clone / remove-copy fail
 #   K_LIST="rows"     repo list rows (tab-separated), K_LIST_CUT=1 drops the end marker
+#   K_LIST_REAL=dir   repo list runs its real scan script over dir (with host git)
+#   K_UNPUSHED="lines" what gitctl unpushed reports before its end line (printf %b);
+#   K_EXEC_FAIL_UNPUSHED=1 gitctl unpushed fails (a fetch that failed)
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$K_LOG"
@@ -55,8 +58,12 @@ case "$*" in
     *"get pod -l app=git"*)
         if [ "${K_NO_POD:-}" = 1 ]; then echo '{"items":[]}'
         else echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}'; fi ;;
-    *"exec git-7d9f-abc -c git -- sh -c"*"find "*)
+    *"exec git-7d9f-abc -c git -- bash -c"*"find "*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'error: unable to upgrade connection' >&2; exit 1; }
+        if [ -n "${K_LIST_REAL:-}" ]; then
+            while [ "$1" != -- ]; do shift; done
+            exec bash -c "$4" bash "$K_LIST_REAL"
+        fi
         [ -n "${K_LIST:-}" ] && printf '%s\n' "$K_LIST" | sed 's/^/repo=/'
         [ "${K_LIST_CUT:-}" = 1 ] || echo end ;;
     *"exec git-7d9f-abc -c git -- sh -c"*"state=repo"*)
@@ -69,6 +76,10 @@ case "$*" in
     *"exec git-7d9f-abc -c git -- gitctl clone"*)
         [ "${K_CLONE_FAIL:-}" = 1 ] && { echo 'gitctl: refused: cannot fetch https://github.com/o/r' >&2; exit 1; }
         echo "cloned" ;;
+    *"exec git-7d9f-abc -c git -- gitctl unpushed"*)
+        [ "${K_EXEC_FAIL_UNPUSHED:-}" = 1 ] && { echo 'gitctl: refused: cannot fetch https://github.com/octo/hello' >&2; exit 1; }
+        [ -n "${K_UNPUSHED:-}" ] && printf '%b\n' "$K_UNPUSHED"
+        echo end ;;
     *"exec git-7d9f-abc -c git -- gitctl remove-copy"*) [ "${K_RM_FAIL:-}" = 1 ] && exit 1; echo "removed" ;;
     *"get pod repo-dir-"*"jsonpath"*)
         case "$*" in *"repo-dir-${K_FAIL_STEP:-none}-"*) printf Failed ;; *) printf Succeeded ;; esac ;;
@@ -177,7 +188,7 @@ out=$(K_LIST=$'/home/alice/hello\thttps://github.com/octo/hello\tmain\n/home/ali
 assert_has "each working copy is listed with its origin and branch" "/home/alice/hello" "$out"
 assert_has "the origin" "https://github.com/octo/hello" "$out"
 assert_has "the branch" "feature" "$out"
-assert_has "the search is under the user's disk" "sh /home/alice" "$(cat "$K_LOG")"
+assert_has "the search is under the user's disk" "bash /home/alice" "$(cat "$K_LOG")"
 out=$(run repo list)
 assert_has "no repos says so, with the command" "no repos yet (aidc repo add" "$out"
 out=$(K_LIST=$'/home/alice/hello\thttps://github.com/octo/hello\tmain' K_LIST_CUT=1 run repo list)
@@ -187,6 +198,19 @@ assert_has "a container that cannot be asked is unknown" "unknown" "$out"
 assert_not_has "never 'no repos'" "no repos yet" "$out"
 out=$(K_NO_POD=1 run repo list)
 assert_has "no git container: repos are unknown until it runs" "repos are unknown until it runs" "$out"
+# Folder names, origins and branches are the sessions' to write: escape sequences, tabs and
+# newlines in them must not reach the terminal, shift a column or forge a row.
+LD="$SCRATCH/listdisk"
+mkrepo() { mkdir -p "$1/.git"; printf '[remote "origin"]\n\turl = %s\n' "$2" > "$1/.git/config"; printf 'ref: refs/heads/%s\n' "$3" > "$1/.git/HEAD"; }
+mkrepo "$LD/plain" https://github.com/octo/hello main
+mkrepo "$LD/red"$'\e'"[31mx" $'https://github.com/octo/\e]0;title\a' $'br\ranch'
+mkrepo "$LD/a"$'\n'"repo=/forged"$'\t'"https://github.com/evil/x"$'\t'"main" https://github.com/octo/nl main
+out=$(K_LIST_REAL="$LD" run repo list)
+assert_eq "no control character reaches the terminal" no "$(printf '%s' "$out" | LC_ALL=C grep -q $'[\x01-\x08\x0b-\x1f\x7f]' && echo yes || echo no)"
+assert_eq "a newline in a folder name cannot forge a row (one row per working copy)" 3 \
+    "$(printf '%s\n' "$out" | grep -c '^/')"
+assert_not_has "and no row starts at the forged path" $'\n/forged' "$out"
+assert_has "the names are still shown, without the control characters" "$LD/red[31mx" "$out"
 out=$(run repo frobnicate); assert_has "an unknown subcommand is refused" "unknown repo subcommand" "$out"
 
 echo "=== aidc repo remove ==="
@@ -199,6 +223,40 @@ assert_has "with --delete-working-copy, the working copy goes too" "deleted the 
 assert_eq "by the folder pod in delete mode, after the copy" "delete" "$(pods)"
 rm_line=$(grep -n "gitctl remove-copy" "$K_LOG" | cut -d: -f1); del_line=$(grep -n "apply -f -" "$K_LOG" | cut -d: -f1)
 assert_eq "the private copy goes first" yes "$([ "$rm_line" -lt "$del_line" ] && echo yes || echo no)"
+# A delete that took a session's unpushed commits or uncommitted changes with it loses work for
+# good: gitctl unpushed is asked first, and anything it names refuses the delete.
+out=$(K_STATE=repo K_UNPUSHED='branch 2 feat-x\nworktree /home/alice/hello/s1\nuncommitted /home/alice/hello/s1\nworktree /home/alice/hello/s2\nstash 1' \
+    run repo remove /home/alice/hello --delete-working-copy)
+assert_has "unpushed work refuses the delete" "holds work that is not on GitHub; nothing was removed" "$out"
+assert_has "naming the unpushed branch" "branch feat-x: 2 commit(s) on no origin branch" "$out"
+assert_has "the uncommitted worktree" "/home/alice/hello/s1: uncommitted changes" "$out"
+assert_has "the stash" "1 stash(es)" "$out"
+assert_has "and every worktree in it" "  /home/alice/hello/s2" "$out"
+assert_has "and how to go ahead" "--even-unpushed" "$out"
+assert_has "exit 1" "exit=1" "$out"
+assert_eq "nothing is removed: no copy, no folder pod" "" "$(grep 'remove-copy' "$K_LOG")$(cat "$K_APPLIED")"
+assert_has "the check is the agent's gitctl unpushed on that path" "gitctl unpushed /home/alice/hello" "$(execs)"
+out=$(K_STATE=repo K_UNPUSHED='detached 1 /home/alice/hello/s3' run repo remove /home/alice/hello --delete-working-copy)
+assert_has "a detached worktree's commits refuse it too" "/home/alice/hello/s3: 1 commit(s) on a detached HEAD" "$out"
+out=$(K_STATE=repo K_UNPUSHED='branch 2 feat-x\nworktree /home/alice/hello/s1' run repo remove /home/alice/hello --delete-working-copy --even-unpushed)
+assert_has "--even-unpushed deletes it anyway" "deleted the working copy /home/alice/hello" "$out"
+assert_has "saying what is lost" "deleting work that is not on GitHub (--even-unpushed)" "$out"
+assert_eq "by the folder pod" "delete" "$(pods)"
+out=$(K_STATE=repo K_UNPUSHED='worktree /home/alice/hello/s1' run repo remove /home/alice/hello --delete-working-copy)
+assert_has "clean worktrees do not refuse it, and are named" "the worktrees in it go too" "$out"
+assert_has "and it is deleted" "deleted the working copy /home/alice/hello" "$out"
+out=$(K_STATE=repo K_EXEC_FAIL_UNPUSHED=1 run repo remove /home/alice/hello --delete-working-copy)
+assert_has "a check that cannot be made refuses it (cannot tell is not nothing)" "cannot tell whether /home/alice/hello holds unpushed work" "$out"
+assert_eq "and nothing is removed" "" "$(grep 'remove-copy' "$K_LOG")$(cat "$K_APPLIED")"
+out=$(K_STATE=repo K_EXEC_FAIL_UNPUSHED=1 run repo remove /home/alice/hello --delete-working-copy --even-unpushed)
+assert_has "unless --even-unpushed is given" "deleted the working copy /home/alice/hello" "$out"
+out=$(K_STATE=repo K_UNPUSHED='branch 1 x\e[2J\e]0;t\a' run repo remove /home/alice/hello --delete-working-copy)
+assert_eq "names in the refusal reach the terminal without control characters" no \
+    "$(printf '%s' "$out" | LC_ALL=C grep -q $'[\x01-\x08\x0b-\x1f\x7f]' && echo yes || echo no)"
+out=$(K_STATE=repo run repo remove /home/alice/hello --even-unpushed)
+assert_has "--even-unpushed alone is refused" "goes with --delete-working-copy" "$out"
+out=$(K_STATE=repo run repo remove /home/alice/hello)
+assert_not_has "without --delete-working-copy nothing is checked (nothing is deleted)" "gitctl unpushed" "$(execs)"
 out=$(run repo remove octo/hello)
 assert_has "owner/name removes just the private copy (no working copy needed)" "gitctl remove-copy octo/hello" "$(execs)"
 out=$(run repo remove octo/hello --delete-working-copy)
@@ -260,11 +318,42 @@ assert_eq "own: the working copy becomes the session user's, symlinks not follow
 chmod 2775 . in $D/a/b/proj" "$OWN"
 rd "$D/a/b/proj" make
 assert_eq "make: a folder that is not empty is refused, and nothing is changed" "3 " "$RRC $OWN"
+mkdir -p "$D/a/b/proj/.git/objects" "$D/a/b/proj/wt/src" "$SCRATCH/outside"
+touch "$D/a/b/proj/.hidden" "$D/a/b/proj/wt/src/x" "$SCRATCH/outside/keep"
+ln -s "$SCRATCH/outside" "$D/a/b/proj/out"
 rd "$D/a/b/proj" delete
-assert_eq "delete: a working copy is deleted from its parent" "0 rm -rf -- proj in $D/a/b" "$RRC $OWN"
-rmdir "$D/a/b/proj/.git"
+assert_eq "delete: a working copy, dotfiles and nested folders included, is deleted (without rm -rf)" \
+    "0  no" "$RRC $OWN $([ -e "$D/a/b/proj" ] && echo yes || echo no)"
+assert_eq "and a symlink in it is removed, never followed" "keep" "$(ls "$SCRATCH/outside")"
+mkdir -p "$D/a/b/proj"; touch "$D/a/b/proj/README"
 rd "$D/a/b/proj" delete
 assert_eq "delete: a folder that is not a git working copy is refused" "3 " "$RRC $OWN"
+
+# A session swaps another folder in at the checked name between the check and the delete: the
+# first delete step (find, or rm in a build that deletes by name) moves the checked folder aside
+# and puts a folder with content at its name, then runs the real command. Root must delete only
+# what it checked; the swapped-in folder survives and the delete reports the change.
+mkdir -p "$SCRATCH/swapbin"
+for c in find rm rmdir; do
+    real=$(command -v "$c")
+    cat > "$SCRATCH/swapbin/$c" <<STUB
+#!/bin/sh
+if [ ! -e "$SCRATCH/swapped" ]; then
+    : > "$SCRATCH/swapped"
+    mv "$D/s/proj" "$D/s/proj.moved"
+    mkdir -p "$D/s/proj/precious"; echo work > "$D/s/proj/precious/file"
+fi
+exec "$real" "\$@"
+STUB
+    chmod +x "$SCRATCH/swapbin/$c"
+done
+mkdir -p "$D/s/proj/.git"; touch "$D/s/proj/tracked"
+rm -f "$SCRATCH/swapped"
+ROUT=$(PATH="$SCRATCH/swapbin:$PATH" sh -c "$RD_SCRIPT" repo-dir "$D/s/proj" "$D" delete 2000 2>&1); RRC=$?
+assert_eq "a folder swapped in at the name after the check is not deleted" "work" "$(cat "$D/s/proj/precious/file" 2>/dev/null)"
+assert_eq "the folder that was checked is the one emptied" "" "$(ls -A "$D/s/proj.moved" 2>/dev/null)"
+assert_eq "and the delete fails, saying the folder changed" "3" "$RRC"
+assert_has "with why" "changed while it was deleted" "$ROUT"
 rd "$D/a/b/missing" delete
 assert_eq "delete or own: a missing folder is refused, never made" "3  no" "$RRC $OWN $([ -e "$D/a/b/missing" ] && echo yes || echo no)"
 mkdir -p "$SCRATCH/elsewhere/proj/.git"; ln -s "$SCRATCH/elsewhere" "$D/link"

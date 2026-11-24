@@ -12,6 +12,10 @@ stdin, timeouts and stream handling, and those stay where they are.
 
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+
 #: The program every command here starts with.
 BIN = "docker"
 
@@ -128,3 +132,31 @@ def instance_gone(session: str, stderr: str) -> bool:
     is not taken for a killed session."""
     err = stderr.lower()
     return f"aidc-{session}-net" in err and ("not found" in err or "no such" in err)
+
+
+_BACKEND_LINE = re.compile(r"""backend:\s*["']?([a-z0-9]*)""")
+
+
+def create_backend() -> str:
+    """The backend `aidc create` would choose with no --backend flag, read as the CLI
+    dispatcher (scripts/aidc) reads it: the first top-level `backend:` line of
+    $HOME/.config/aidc/config.yaml, docker when there is none. The file is the one the CLI
+    this server runs would read (same HOME), not the /aidc-config mount: inside the aidc-mcp
+    container the dispatcher does not see that mount and creates on Docker, and session_create
+    must agree with it, because the two backends take different create arguments (the
+    Kubernetes create refuses --repo)."""
+    path = Path(os.environ.get("HOME", "")) / ".config" / "aidc" / "config.yaml"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "docker"
+    for line in lines:
+        if line.startswith("backend:"):
+            m = _BACKEND_LINE.match(line)
+            return (m.group(1) if m else "") or "docker"
+    return "docker"
+
+
+def is_kubernetes(name: str) -> bool:
+    """Whether a backend name, as the CLI spells it, is the Kubernetes one."""
+    return name in ("kubernetes", "k8s")

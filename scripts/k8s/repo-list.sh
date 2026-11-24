@@ -22,21 +22,25 @@ esac
 
 # One exec. Each repo is a line "repo=<path>\t<origin>\t<branch>": only lines the script
 # printed count, and the list ends with "end", so an exec cut short is not a short list.
-# Worktrees (a .git file, not a folder) are not listed: they belong to their repo.
+# Worktrees (a .git file, not a folder) are not listed: they belong to their repo. Folder names,
+# origins and branches are the sessions' to write: each field loses its control characters
+# (tabs and newlines included) before it is printed, so none can split a row, forge one or reach
+# the terminal; they are stripped here again, in case.
 # shellcheck disable=SC2016  # expanded by the container's shell
-out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- sh -c '
-    find "$1" -maxdepth 6 -type d -name .git -prune -print 2>/dev/null | sort |
-    while IFS= read -r g; do
+out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- bash -c '
+    clean() { printf "%s" "$1" | LC_ALL=C tr -d "\000-\037\177"; }
+    find "$1" -maxdepth 6 -type d -name .git -prune -print0 2>/dev/null | sort -z |
+    while IFS= read -r -d "" g; do
         o=$(git config --file "$g/config" --get remote.origin.url 2>/dev/null) || continue
         case "$o" in https://github.com/*) ;; *) continue ;; esac
         b=$(sed -n "s|^ref: refs/heads/||p" "$g/HEAD" 2>/dev/null)
-        printf "repo=%s\t%s\t%s\n" "${g%/.git}" "$o" "${b:--}"
+        printf "repo=%s\t%s\t%s\n" "$(clean "${g%/.git}")" "$(clean "$o")" "$(clean "${b:--}")"
     done
-    echo end' sh "/home/${AIDC_K8S_USER}" </dev/null 2>/dev/null || true)
+    echo end' bash "/home/${AIDC_K8S_USER}" </dev/null 2>/dev/null || true)
 if ! printf '%s\n' "$out" | grep -qx end; then
     die "unknown: the git container did not answer"
 fi
-rows=$(printf '%s\n' "$out" | sed -n 's/^repo=//p')
+rows=$(printf '%s\n' "$out" | sed -n 's/^repo=//p' | k8s_printable)
 if [ -z "$rows" ]; then
     info "no repos yet (aidc repo add <owner/name>)"
     exit 0

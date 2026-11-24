@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # aidc repo add <github-url|owner/name> [--path P]: the user's git container clones a GitHub
-# repo onto the user's disk and locks it (docs/design-12-kubernetes.md, "Git").
+# repo onto the user's disk (docs/design-12-kubernetes.md, "Git").
 #
 # Three steps. A one-shot root pod makes the repo folder and gives it to the git container's
 # agent (only root can, on the session user's disk; manifests.sh, k8s_render_repo_dir). Then

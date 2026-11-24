@@ -1,12 +1,11 @@
 # aidc git container (aidc/gitctl): the one place a Kubernetes user's work leaves the cluster.
 #
 # One per user, in the user's namespace (docs/design-12-kubernetes.md, "Git"). It holds the
-# user's SSH key and GitHub login, which the user adds themselves by attaching to its tmux; the
-# admin never handles them. Sessions cannot push; this container does.
+# user's GitHub login, which the user adds themselves by attaching to its tmux (gitctl login);
+# the admin never handles it. Sessions cannot push; this container does.
 #
-# Same Ubuntu base as the dev image, so git behaves the same on both sides of the shared repo
-# (the repo lock in design-12 was measured with that git), and one base image is cached on the
-# node instead of two.
+# Same Ubuntu base as the dev image, so git behaves the same on both sides of the shared working
+# copies, and one base image is cached on the node instead of two.
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive \

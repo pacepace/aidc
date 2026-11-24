@@ -22,9 +22,11 @@ aidc repo <subcommand>
            container. Private repos need its GitHub login (aidc git attach). Safe to run
            again.
   list     The GitHub working copies on your disk: path, origin and branch.
-  remove <path|owner/name> [--delete-working-copy]
+  remove <path|owner/name> [--delete-working-copy [--even-unpushed]]
            Deletes the git container's private copy of the repo. The working copy, with
-           your sessions' work, is deleted only with --delete-working-copy.
+           your sessions' work, is deleted only with --delete-working-copy, and not while it
+           or a worktree in it holds commits on no GitHub branch, uncommitted changes or
+           stashes (it lists them) unless --even-unpushed is given too.
 
 Sessions see your whole disk. A session works on a repo in its own worktree, on a branch
 it names: git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD

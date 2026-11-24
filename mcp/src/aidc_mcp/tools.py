@@ -3186,6 +3186,34 @@ async def _session_report(name: str) -> dict[str, Any]:
     }
 
 
+async def _create_session(
+    name: str, args: list[str], ctx: Context | None, wants_mcp: bool, mcp_server: str,
+    mcp_path: str, mcp_bearer: str,
+) -> dict[str, Any]:
+    """Run the CLI create session_create built, then hand the session its MCP server."""
+    phases = {
+        "Container aidc-": "container",
+        "Waiting":         "waiting",
+        "Healthy":         "healthy",
+        "Started":         "started",
+        "waiting for":     "wait",
+    }
+    if ctx is not None:
+        result = await _run_cli_streaming(args, ctx, phases)
+    else:
+        result = _run_cli(args, timeout=300.0)
+    if result["exit"] != 0:
+        return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
+                             code="cli_failed")
+    created: dict[str, Any] = {"name": name, "log": result["stdout"]}
+    if wants_mcp:
+        # After the create, never before: the session's first start installs its
+        # Claude state from a seed with every mcpServers entry stripped, and the
+        # server is written into the installed state.
+        created["mcp"] = await _hand_session_mcp(name, mcp_server, mcp_path, mcp_bearer)
+    return _envelope_ok(created)
+
+
 def register(app: Any) -> None:
     """Attach every tool to the given MCPServer app."""
 
@@ -3213,8 +3241,11 @@ def register(app: Any) -> None:
         Args:
             name: session name (must match `^[a-z0-9][a-z0-9-]{0,30}$`)
             profile: python|node|go|rust|multi (default: multi)
-            repo: absolute host path to mount (required)
-            workspace: optional parent dir for sibling-repo access
+            repo: absolute host path to mount (required on the Docker backend). On the
+                Kubernetes backend leave it and workspace empty: the session sees the
+                user's whole disk, repos are added with `aidc repo add`, and the session
+                makes its own worktree in one.
+            workspace: optional parent dir for sibling-repo access (Docker only)
             mcp_server: optional. With mcp_path and mcp_bearer: an MCP server on your
                 own API for the session's Claude, as session_mcp_set gives one.
             mcp_path: that server's path on your API.
@@ -3231,6 +3262,24 @@ def register(app: Any) -> None:
         if (why := scope.create_refusal()) is not None:
             log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
             return _envelope_err(why, code="create_not_allowed")
+        # The backend the CLI will create on, decided here and passed to it explicitly, so
+        # the arguments built below are the ones that backend takes.
+        create_backend = backend.create_backend()
+        if backend.is_kubernetes(create_backend):
+            if repo or workspace:
+                log_event("tool_call", tool="session_create", session=name,
+                          refused="repo_on_kubernetes")
+                return _envelope_err(
+                    "the configured backend is kubernetes, where a session is not given a "
+                    "repo: it sees the user's whole disk. Add the repo with `aidc repo add "
+                    "<owner/name>` and have the session make its own worktree in it (git "
+                    "worktree add); call session_create again without repo and workspace",
+                    code="invalid_argument")
+            args = ["create", name, "--profile", profile, "--backend", create_backend]
+            log_event("tool_call", tool="session_create", session=name, profile=profile,
+                      backend=create_backend)
+            return await _create_session(name, args, ctx, wants_mcp, mcp_server, mcp_path,
+                                         mcp_bearer)
         if not repo:
             return _envelope_err("repo argument is required (absolute host path)",
                                  code="invalid_argument")
@@ -3252,28 +3301,10 @@ def register(app: Any) -> None:
         args = ["create", name, "--profile", profile, "--repo", repo]
         if workspace:
             args += ["--workspace", workspace]
+        args += ["--backend", create_backend]
         log_event("tool_call", tool="session_create", session=name, profile=profile, repo=repo)
-        phases = {
-            "Container aidc-": "container",
-            "Waiting":         "waiting",
-            "Healthy":         "healthy",
-            "Started":         "started",
-            "waiting for":     "wait",
-        }
-        if ctx is not None:
-            result = await _run_cli_streaming(args, ctx, phases)
-        else:
-            result = _run_cli(args, timeout=300.0)
-        if result["exit"] != 0:
-            return _envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
-                                 code="cli_failed")
-        created: dict[str, Any] = {"name": name, "log": result["stdout"]}
-        if wants_mcp:
-            # After the create, never before: the session's first start installs its
-            # Claude state from a seed with every mcpServers entry stripped, and the
-            # server is written into the installed state.
-            created["mcp"] = await _hand_session_mcp(name, mcp_server, mcp_path, mcp_bearer)
-        return _envelope_ok(created)
+        return await _create_session(name, args, ctx, wants_mcp, mcp_server, mcp_path,
+                                     mcp_bearer)
 
     if scope.session_create_enabled():
         app.tool()(session_create)

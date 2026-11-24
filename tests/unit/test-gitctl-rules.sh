@@ -240,6 +240,33 @@ git -C "$W" bundle create -q "$S/other.bundle" main 2>/dev/null
 : > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r feature < "$S/other.bundle" 2>&1); RC=$?; CALLS=""
 refused "a bundle without the branch is refused"
 assert_has "for that reason" "the bundle has no branch feature" "$OUT"
+# The store is one fixed-size claim: a bundle on stdin is capped, and one past the cap is
+# refused and removed, not saved whole.
+G -C "$W" commit -q --allow-empty -m "Small enough"
+: > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_MAX_BUNDLE_BYTES=64 bash "$GITCTL/gitctl.sh" push "$W" feature 2>&1); RC=$?; CALLS=""
+refused "a bundle larger than the cap is refused"
+assert_has "for that reason" "the bundle is larger than" "$OUT"
+assert_eq "and nothing of it is left in the store" "" "$(find "$STORE" -name 'incoming.*')"
+assert_eq "and nothing reached origin" "$(git -C "$R" rev-parse feature)" "$(git -C "$W" rev-parse feature~1)"
+ctl push "$W" feature
+assert_eq "under the default cap the same push goes through" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+# Each push holds its branch under a ref of its own, named after its bundle; a killed push's
+# ref (its bundle gone) is dropped by the next, a running one's (bundle present) is not.
+assert_eq "a push leaves no ref of its own behind" "" "$(git --git-dir="$STORE/o/r.git" for-each-ref refs/incoming/)"
+git --git-dir="$STORE/o/r.git" update-ref refs/incoming/incoming.dead "$(git -C "$W" rev-parse main)"
+git --git-dir="$STORE/o/r.git" update-ref refs/incoming/incoming.live "$(git -C "$W" rev-parse main)"
+touch "$STORE/o/r.git/incoming.live"
+G -C "$W" commit -q --allow-empty -m "Another"
+ctl push "$W" feature
+assert_eq "a killed push's ref is dropped; a running push's ref and bundle are left alone" "refs/incoming/incoming.live" \
+    "$(git --git-dir="$STORE/o/r.git" for-each-ref --format='%(refname)' refs/incoming/)"
+git --git-dir="$STORE/o/r.git" update-ref -d refs/incoming/incoming.live; rm -f "$STORE/o/r.git/incoming.live"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in refs/incoming/*) echo "$a" >> %s/refs.log ;; esac; done\nexec %s "$@"\n' \
+    "$S" "$AIDC_GITCTL_REAL_GIT" > "$S/bin/git-logged"; chmod +x "$S/bin/git-logged"
+G -C "$W" commit -q --allow-empty -m "Watched"
+: > "$S/refs.log"; AIDC_GITCTL_REAL_GIT="$S/bin/git-logged" bash "$GITCTL/gitctl.sh" push "$W" feature >/dev/null 2>&1
+assert_eq "the push's ref is named after its own bundle (two pushes never share one)" yes \
+    "$(r=$(grep -v '^refs/incoming/$' "$S/refs.log" | sed 's/\^{commit}$//' | sort -u); case "$r" in refs/incoming/incoming.?*) [ "$(printf '%s\n' "$r" | wc -l)" = 1 ] && echo yes || echo "no: $r" ;; *) echo "no: $r" ;; esac)"
 G -C "$W" switch -q -c direct feature
 G -C "$W" commit -q --allow-empty -m "Direct" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 git -C "$W" bundle create -q "$S/direct.bundle" refs/heads/direct --not feature 2>/dev/null
@@ -412,6 +439,48 @@ ctl clone o/r "$E" extra; refused "clone takes exactly two arguments"
 AIDC_GITCTL_ROLE=run ctl clone o/r "$E"; refused "gitrun has no clone: it never writes a working copy"
 AIDC_GITCTL_ROLE=cred ctl clone o/r "$E"; refused "gitcred runs no clone"
 assert_eq "no refused clone ran a command" no "$([ -e "$S/PWNED3" ] && echo yes || echo no)"
+
+echo ""
+echo "=== unpushed: the work a delete of the working copy would lose ==="
+# aidc repo remove --delete-working-copy refuses while this reports anything: a report that
+# missed a kind of work would let the delete take a session's commits or changes with it.
+ctl unpushed "$C"
+assert_eq "a clean clone with a worktree on a branch at origin's commit: only the worktree is named" \
+    "0|worktree $C/s1|end" "$RC|$(printf '%s' "$OUT" | paste -sd'|' -)"
+G -C "$C/s1" commit -q --allow-empty -m "Session work"
+printf 'x\n' > "$C/s1/draft.txt"
+G -C "$C" worktree add -q --detach "$C/s2" origin/main 2>/dev/null
+G -C "$C/s2" commit -q --allow-empty -m "Detached work"
+printf 'y\n' >> "$C/README"; G -C "$C" stash -q; printf 'z\n' >> "$C/README"
+G -C "$C" branch local-only main
+ctl unpushed "$C"
+assert_eq "it names the unpushed branch, the detached commit, the uncommitted worktrees, the stash and every worktree" \
+    "0|branch 1 feat2|uncommitted $C|worktree $C/s1|uncommitted $C/s1|worktree $C/s2|detached 1 $C/s2|stash 1|end" \
+    "$RC|$(printf '%s' "$OUT" | paste -sd'|' -)"
+assert_eq "a branch whose commits are all on origin (local-only, at main) is not unpushed" no \
+    "$(printf '%s\n' "$OUT" | grep -q 'local-only' && echo yes || echo no)"
+ctl unpushed "$C/s1"
+assert_eq "asked from a worktree, it reports the same repo" "$(printf 'branch 1 feat2')" "$(printf '%s\n' "$OUT" | head -1)"
+git -C "$C" push -q "$R" feat2 2>/dev/null
+ctl unpushed "$C"
+assert_eq "once origin has the branch, it is no longer unpushed (the fetch is what tells)" no \
+    "$(printf '%s\n' "$OUT" | grep -q '^branch ' && echo yes || echo no)"
+mv "$C/s2" "$S/s2-moved"
+ctl unpushed "$C"
+assert_has "a worktree whose folder is gone is named but holds nothing to read" "worktree $C/s2" "$OUT"
+assert_eq "and does not fail the report" 0 "$RC"
+mv "$S/s2-moved" "$C/s2"
+git -C "$C" config remote.origin.url "$F/o/nothere.git"
+ctl unpushed "$C"
+assert_eq "a fetch that fails ends with an error and no end line, never an empty report" "1 no" \
+    "$RC $(printf '%s\n' "$OUT" | grep -qx end && echo yes || echo no)"
+git -C "$C" config remote.origin.url "$F/o/r.git"
+git -C "$C" config core.fsmonitor "touch $S/PWNED-fsm"
+ctl unpushed "$C"
+git -C "$C" config --unset core.fsmonitor
+assert_eq "a planted fsmonitor in the working copy's config does not run" no "$([ -e "$S/PWNED-fsm" ] && echo yes || echo no)"
+AIDC_GITCTL_ROLE=run ctl unpushed "$C"; refused "gitrun has no unpushed: it never reads a working copy"
+ctl unpushed "$C" extra; refused "unpushed takes one argument"
 
 echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="

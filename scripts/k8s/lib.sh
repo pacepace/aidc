@@ -227,6 +227,13 @@ k8s_cluster_repo_path() {
     esac
 }
 
+# k8s_printable: stdin to stdout without control characters other than tab and newline (an
+# escape sequence, a carriage return, a bell). For text a session can write (folder names,
+# branch names, origin URLs) on its way to the user's terminal.
+k8s_printable() {
+    LC_ALL=C tr -d '\000-\010\013-\037\177'
+}
+
 # k8s_repo_path_ok <cluster-path>: a folder below /home/<user> named only with letters,
 # digits, '.', '_' and '-', with no . or .. part: what gitctl clone accepts, and safe to put
 # in a manifest.

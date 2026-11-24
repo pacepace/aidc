@@ -645,7 +645,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 | `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
 | `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
-| `aidc git {setup\|attach\|status}` | Kubernetes backend: your git container, which holds your SSH key and GitHub login (see "Kubernetes backend"). |
+| `aidc git {setup\|attach\|status}` | Kubernetes backend: your git container, which holds your GitHub login (see "Kubernetes backend"). |
 
 ### Profiles
 
@@ -676,13 +676,14 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
 - `aidc user add <name>`: the user's namespace and disk.
 - `aidc git setup | attach | status`: the user's git container, the one thing in the cluster
   that will push and open PRs (sessions cannot). `setup` starts it in your namespace (safe to
-  run again); `attach` opens its terminal, where you run `gh auth login` and add your SSH key
-  yourself, so the admin never handles them; `status` says whether it runs, is logged in to
-  GitHub and has a key ("unknown" when the cluster or the container does not answer). It runs
-  as its own user (uid 2000, in the sessions' group), unprivileged, with no API token; it
-  reaches public addresses and Quad9 DNS only, and nothing may connect to it. Its home, holding
-  your login and key, is a volume on `storage_class`, kept when the container is replaced.
-  Pushing through it comes next.
+  run again); `attach` opens its terminal, where you log in to GitHub yourself with
+  `gitctl login` (a device code you approve in your browser), so the admin never handles it;
+  `status` says whether it runs and is logged in to GitHub, and how much its private copies
+  take ("unknown" when the cluster or the container does not answer). Its agent runs as its own
+  user (uid 2000, in the sessions' group), unprivileged, with no API token, and cannot read the
+  login: only gitctl's fixed verbs reach it. The container reaches public addresses and Quad9
+  DNS only, and nothing may connect to it. The login, its home and its private copies are
+  volumes, kept when the container is replaced. Pushing through it comes next.
 - `aidc repo add <github-url|owner/name> [--path P]`: your git container clones the repo onto
   your disk (default `/home/<user>/<name>`) as an ordinary working copy, yours and your
   sessions', shared with the git container. It gets there through the git container's own
@@ -690,7 +691,9 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   a helper) ever runs git in; commits move between the two as git bundles. Private repos need
   the git container's GitHub login. `aidc repo list` shows the working copies on your disk;
   `aidc repo remove <path|owner/name>` deletes the private copy, and the working copy only
-  with `--delete-working-copy`. `aidc git status` reports how much the private copies take,
+  with `--delete-working-copy`; that refuses, listing them, while the working copy or a
+  worktree in it holds commits on no GitHub branch, uncommitted changes or stashes, unless
+  `--even-unpushed` is given too. `aidc git status` reports how much the private copies take,
   with a warning above `git_storage_warn` (default 1Gi).
 - `aidc create <name> --backend kubernetes [--profile P]`: a session in the cluster, in your
   namespace. It sees your whole disk and starts at the current directory's place on it: a path

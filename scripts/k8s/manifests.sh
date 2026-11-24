@@ -651,6 +651,10 @@ EOF2
 #           session made, group-shared (setgid) so the agent, in the session group, can work
 #           in it too; symlinks in it are not followed;
 #   delete  aidc repo remove --delete-working-copy: the folder goes, if it is a git working copy.
+#           It is emptied from inside, from the folder that was checked (find -delete does not
+#           follow symlinks), and only then removed by name with rmdir, which removes nothing
+#           but an empty folder: a session that swaps another folder in at that name after the
+#           check gets an error, not that folder deleted by root.
 # shellcheck disable=SC2016  # run by the pod's shell
 K8S_REPO_DIR_SCRIPT='set -eu
 p="$1" top="$2" mode="$3" agent="$4"
@@ -680,7 +684,9 @@ case "$mode" in
         echo "owned: $p" ;;
     delete)
         if [ ! -d .git ] || [ -L .git ]; then echo "refused: $p is not a git working copy" >&2; exit 3; fi
-        cd -P .. && rm -rf -- "$c"
+        find . -mindepth 1 -delete
+        cd -P ..
+        if ! rmdir -- "$c"; then echo "refused: $p changed while it was deleted; its contents are gone, a folder now at its name is left" >&2; exit 3; fi
         echo "deleted: $p" ;;
     *) echo "refused: unknown mode $mode" >&2; exit 3 ;;
 esac'

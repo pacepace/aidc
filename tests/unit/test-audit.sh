@@ -328,7 +328,7 @@ assert_has "so is a mounted one" "mnt-audit-20260101000000 (kubernetes, running)
 assert_not_has "nothing is deleted" "delete" "$(cat "$K_LOG")"
 assert_has "and it fails" "exit=1" "$out"
 out=$(bash "$AIDC_ROOT/scripts/k8s/audit.sh" trim run-audit-20260101000000 2>&1; echo "exit=$?")
-assert_has "the backend refuses a running claim on its own too" "still running; not removed" "$out"
+assert_has "the backend refuses a running claim on its own too" "still in use by a session or pod; not removed" "$out"
 assert_not_has "and deletes nothing" "delete" "$(cat "$K_LOG")"
 
 out=$(run audit trim pv-orphan --yes)

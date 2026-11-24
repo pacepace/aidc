@@ -176,7 +176,7 @@ REFUSED=$(printf '%s' "$REFUSED" | sed '/^$/d')
 
 rc=0
 if [ -n "$REFUSED" ]; then
-    printf 'Kept, because the session still exists (or Docker could not say it does not):\n'
+    printf 'Kept, because a session still uses it (or Docker could not say none does; a killed\nKubernetes session'\''s pods can take a minute to stop):\n'
     while IFS="$TAB" read -r backend id _ _ _ _ _ state _; do
         printf '  %s (%s, %s)\n' "$id" "$backend" "$state"
     done <<<"$REFUSED"

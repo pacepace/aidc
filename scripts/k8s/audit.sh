@@ -121,7 +121,7 @@ _trim() {
         where=$(printf '%s' "$row" | cut -f9)
         case "$state" in
             running|unknown)
-                err "${id} belongs to a session that is still running; not removed"; rc=1; continue ;;
+                err "${id} is still in use by a session or pod; not removed"; rc=1; continue ;;
             released)
                 _set_delete "$id" || { rc=1; continue; }
                 _wait_gone "$id" "released volume" || rc=1 ;;

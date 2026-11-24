@@ -199,6 +199,16 @@ metadata:
     ${K8S_MANAGED_BY}
     aidc/role: user
     aidc/user: ${user}
+    # Pod Security "baseline" (docs/design-12-kubernetes.md, "Users and credentials"): no
+    # privileged pod, no host namespaces, ports or paths, only the default capabilities. It
+    # admits every pod aidc makes here (Sysbox session pods with hostUsers: false, the proxy,
+    # the git container with SETUID/SETGID/AUDIT_WRITE, the disk and repo folder steps);
+    # "restricted" would refuse them (they start as root). It does not restrict the runtime
+    # class.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -238,6 +248,180 @@ spec:
   volumes:
     - {name: disk, persistentVolumeClaim: {claimName: disk}}
 EOF
+}
+
+# --- Users' credentials (docs/design-12-kubernetes.md, "Users and credentials") ---------------
+#
+# What a user's own credentials may do: exactly what aidc's commands do in the user's namespace
+# (tests/unit/test-k8s-rbac.sh reads every kubectl call in scripts/ and fails on one these rules
+# do not grant). One rule a line: "<apiGroup> <resource> <verbs,...> [<resourceName>]", with
+# "core" for the core group. `aidc user add` renders the Role from it; `aidc k8s check` compares
+# the credentials in use with it.
+#   reads (get, list, watch) on everything aidc reads: `kubectl get` by name or label,
+#     `rollout status` and `wait`, and the `kubectl describe` aidc's errors point to (events)
+#   create and patch: `kubectl apply` (sessions, the git container, the repo folder pods);
+#     create and update: the repo list (configmap git-repos, written at a resourceVersion)
+#   delete: aidc kill (by label), aidc restart (the dev pod), the repo folder pods, audit trim
+#   pods/exec (create and get: kubectl's exec is a websocket GET that newer API servers also
+#     authorize as create), pods/log
+#   serviceaccounts/token on aidc-user only: the user renews their own kubeconfig
+K8S_USER_SA=aidc-user
+K8S_USER_RULES='core pods get,list,watch,create,patch,delete
+core pods/exec create,get
+core pods/log get
+core services get,list,watch,create,patch,delete
+core configmaps get,list,watch,create,patch,update,delete
+core persistentvolumeclaims get,list,watch,create,patch,delete
+core events get,list,watch
+core serviceaccounts/token create aidc-user
+apps deployments get,list,watch,create,patch,delete
+apps statefulsets get,list,watch,create,patch,delete
+networking.k8s.io networkpolicies get,list,watch,create,patch,delete'
+
+# The cluster-wide part, one ClusterRole shared by all users, bound per user:
+#   runtimeclasses, storageclasses (get): aidc create and git setup read the runtime class's node
+#     selector; aidc k8s check reads both
+#   nodes (list): aidc k8s check, the ready nodes sessions can land on
+#   persistentvolumes (get, list, watch, patch): aidc audit lists released audit volumes, and
+#     trim sets a volume to Delete before deleting its claim, so the data goes with it. RBAC
+#     cannot say "volumes claimed in your namespace", so patch is narrowed by an admission
+#     policy (k8s_render_user_shared): only a volume claimed in the user's own namespace, only
+#     to Delete, its claim unchanged.
+K8S_USER_CLUSTER_RULES='node.k8s.io runtimeclasses get
+storage.k8s.io storageclasses get
+core nodes list
+core persistentvolumes get,list,watch,patch'
+
+# The user's MCP server (W-M2; plan-aidc-2.0 Q-M2): its ServiceAccount drives the session
+# lifecycle in its own namespace only (create, kill, status, list, attach and send by exec,
+# logs, restart, upgrade, refresh, audit list) and the git container's request registration by
+# exec. No bare pods (sessions are StatefulSets and Deployments), no repo list, no tokens, no
+# volumes. Pod Security "baseline" bounds what any pod it makes may do.
+K8S_MCP_SA=aidc-mcp
+K8S_MCP_RULES='core pods get,list,watch,delete
+core pods/exec create,get
+core pods/log get
+core services get,list,watch,create,patch,delete
+core configmaps get,list,watch,create,patch,delete
+core persistentvolumeclaims get,list,watch,create,patch,delete
+core events get,list,watch
+apps deployments get,list,watch,create,patch,delete
+apps statefulsets get,list,watch,create,patch,delete
+networking.k8s.io networkpolicies get,list,watch,create,patch,delete'
+K8S_MCP_CLUSTER_RULES='node.k8s.io runtimeclasses get'
+
+# Cluster-scoped names: shared by every user of this prefix, or one user's.
+k8s_user_clusterrole()   { printf '%s-user' "$AIDC_K8S_PREFIX"; }
+k8s_mcp_clusterrole()    { printf '%s-mcp' "$AIDC_K8S_PREFIX"; }
+k8s_user_volume_policy() { printf '%s-user-volumes' "$AIDC_K8S_PREFIX"; }
+k8s_user_crb()           { printf '%s-u-%s' "$AIDC_K8S_PREFIX" "$1"; }
+k8s_mcp_crb()            { printf '%s-u-%s-mcp' "$AIDC_K8S_PREFIX" "$1"; }
+
+# _k8s_rules_yaml <rules>: the rules table as a YAML list of RBAC rules (flow style).
+_k8s_rules_yaml() {
+    printf '%s\n' "$1" | awk 'NF {
+        g = ($1 == "core") ? "\"\"" : "\"" $1 "\""
+        n = split($3, v, ","); verbs = ""
+        for (i = 1; i <= n; i++) verbs = verbs (i > 1 ? ", " : "") v[i]
+        printf "  - {apiGroups: [%s], resources: [%s], verbs: [%s]%s}\n", g, $2, verbs, \
+            (NF >= 4 ? ", resourceNames: [" $4 "]" : "")
+    }'
+}
+
+# k8s_render_user_access <user>: the user's and their MCP's ServiceAccounts, Roles and
+# RoleBindings in the user's namespace, and their ClusterRoleBindings.
+k8s_render_user_access() {
+    local user="$1" ns sa rules crb cr
+    ns=$(k8s_user_ns "$user")
+    for sa in "$K8S_USER_SA" "$K8S_MCP_SA"; do
+        rules="$K8S_USER_RULES" crb=$(k8s_user_crb "$user") cr=$(k8s_user_clusterrole)
+        if [ "$sa" = "$K8S_MCP_SA" ]; then
+            rules="$K8S_MCP_RULES" crb=$(k8s_mcp_crb "$user") cr=$(k8s_mcp_clusterrole)
+        fi
+        cat <<YAML
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ${sa}, namespace: ${ns}, labels: {${K8S_MANAGED_BY}, aidc/user: ${user}}}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ${sa}, namespace: ${ns}, labels: {${K8S_MANAGED_BY}, aidc/user: ${user}}}
+rules:
+$(_k8s_rules_yaml "$rules")
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ${sa}, namespace: ${ns}, labels: {${K8S_MANAGED_BY}, aidc/user: ${user}}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ${sa}}
+subjects: [{kind: ServiceAccount, name: ${sa}, namespace: ${ns}}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: ${crb}, labels: {${K8S_MANAGED_BY}, aidc/user: ${user}}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ${cr}}
+subjects: [{kind: ServiceAccount, name: ${sa}, namespace: ${ns}}]
+YAML
+    done
+}
+
+# k8s_render_user_shared [no-volume-patch]: the ClusterRoles every user's bindings name, and the
+# admission policy that narrows the volume patch. With an argument (a cluster without
+# ValidatingAdmissionPolicy), the user ClusterRole grants no patch on volumes and no policy is
+# rendered: aidc audit trim then leaves a retained volume for an admin, and says so.
+k8s_render_user_shared() {
+    local rules="$K8S_USER_CLUSTER_RULES" sa_prefix
+    [ -z "${1:-}" ] || rules=$(printf '%s\n' "$rules" | sed 's/^core persistentvolumes .*/core persistentvolumes get,list,watch/')
+    sa_prefix="system:serviceaccount:${AIDC_K8S_PREFIX}-u-"
+    cat <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: $(k8s_user_clusterrole), labels: {${K8S_MANAGED_BY}}}
+rules:
+$(_k8s_rules_yaml "$rules")
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: $(k8s_mcp_clusterrole), labels: {${K8S_MANAGED_BY}}}
+rules:
+$(_k8s_rules_yaml "$K8S_MCP_CLUSTER_RULES")
+YAML
+    [ -z "${1:-}" ] || return 0
+    cat <<YAML
+---
+# Every volume change by a user's ServiceAccount (${sa_prefix}<user>:${K8S_USER_SA}) is refused
+# unless the volume is claimed in that user's own namespace, the change sets its reclaim policy
+# to Delete, and its claim reference stays as it was (a volume is never handed to another
+# namespace). RBAC grants the patch; this policy is what makes it narrow.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: $(k8s_user_volume_policy), labels: {${K8S_MANAGED_BY}}}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], operations: [UPDATE, DELETE], resources: [persistentvolumes]}
+  matchConditions:
+    - name: aidc-user
+      expression: "request.userInfo.username.startsWith('${sa_prefix}') && request.userInfo.username.endsWith(':${K8S_USER_SA}')"
+  validations:
+    - expression: "request.operation == 'UPDATE'"
+      message: "an aidc user may not delete volumes"
+    - expression: "has(oldObject.spec.claimRef) && has(oldObject.spec.claimRef.namespace) && request.userInfo.username == 'system:serviceaccount:' + oldObject.spec.claimRef.namespace + ':${K8S_USER_SA}'"
+      message: "an aidc user may change only volumes claimed in their own namespace"
+    - expression: "has(object.spec.claimRef) && object.spec.claimRef == oldObject.spec.claimRef"
+      message: "an aidc user may not change a volume's claim"
+    - expression: "object.spec.persistentVolumeReclaimPolicy == 'Delete'"
+      message: "an aidc user may only set a volume's reclaim policy to Delete"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: $(k8s_user_volume_policy), labels: {${K8S_MANAGED_BY}}}
+spec:
+  policyName: $(k8s_user_volume_policy)
+  validationActions: [Deny]
+YAML
 }
 
 # k8s_render_session <session> <repo-path> <profile> <node-selector-json> <audit-claim>

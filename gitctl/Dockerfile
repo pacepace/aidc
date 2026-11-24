@@ -80,8 +80,18 @@ RUN groupadd -g 2001 gitcred \
     && install -d -o root -g root -m 0755 /home/gitrun /var/lib/gitctl \
     && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred \
     && install -d -o gitrun -g gitrun -m 0700 /var/lib/gitctl/gitrun
+# On the Docker backend only (gitctl refuses it elsewhere): gitwc (1000, the sessions' uid and
+# the user's own on their machine) runs the agent's gitctl verbs that write a working copy
+# (fetch's import, tidy), because there the working copies are the user's own and are not made
+# group-writable for the agent. Its home holds only the bundles of those verbs. The request
+# folder's mount point is the agent's, setgid in the session group, so a new aidc-git-requests
+# volume starts that way.
+RUN useradd -M -u 1000 -g 1000 -d /home/gitwc -s /usr/sbin/nologin gitwc \
+    && install -d -o gitwc -g session -m 0700 /home/gitwc \
+    && install -d -o root -g root -m 0755 /var/aidc \
+    && install -d -o git -g session -m 2755 /var/aidc/git-requests
 COPY gitctl-rules.sh gitctl.sh git-requests.sh gh-shim.sh cred-helper.sh claude-hook.sh \
-     git-claude.sh git-notify.sh claude-refresh.sh /opt/aidc/lib/gitctl/
+     git-claude.sh git-notify.sh transcript-mirror.sh claude-refresh.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
 # The git agent's Claude Code: its managed settings (the hook, its permissions) and its one set
@@ -91,7 +101,7 @@ COPY managed-settings.json /etc/claude-code/managed-settings.json
 COPY CLAUDE.md /etc/claude-code/CLAUDE.md
 RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/aidc-gitctl \
     && chmod 0755 /opt/aidc /opt/aidc/lib /opt/aidc/lib/gitctl /etc/claude-code \
-    && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
+    && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /opt/aidc/lib/gitctl/transcript-mirror.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
                   /etc/claude-code/CLAUDE.md \
     && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/lib/gitctl/gh-shim.sh \
                   /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \

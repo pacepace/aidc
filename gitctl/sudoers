@@ -5,7 +5,10 @@
 # pull requests and the login) and re-check every argument as that user. gitrun gets the
 # GitHub token only from the credential helper, as gitcred. env_reset (sudo's default, stated
 # here) drops everything the caller exported.
-Defaults:git,gitrun,gitcred env_reset, !lecture, !use_pty
-Defaults:git,gitrun,gitcred secure_path="/usr/bin:/bin"
-git     ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
-gitrun  ALL=(gitcred)        NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
+# On Docker, the agent's verbs that write a working copy run as gitwc (the user's uid there), and
+# from it reach gitrun and gitcred as the agent does; gitctl refuses gitwc anywhere else.
+Defaults:git,gitrun,gitcred,gitwc env_reset, !lecture, !use_pty
+Defaults:git,gitrun,gitcred,gitwc secure_path="/usr/bin:/bin"
+git     ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+gitwc   ALL=(gitrun,gitcred)       NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+gitrun  ALL=(gitcred)              NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh

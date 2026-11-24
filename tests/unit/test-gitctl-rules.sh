@@ -409,8 +409,9 @@ assert_has "plain gh points to gitctl (a gh login as the agent would be readable
 assert_has "the sudo rules are root's, 0440" "chmod 0440 /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "and checked at build" "visudo -c -f /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "the managed settings are installed" "COPY managed-settings.json /etc/claude-code/managed-settings.json" "$df"
-assert_eq "the sudo rules are exactly: the agent to gitctl, gitrun to the credential helper" \
-"git ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker), gitrun to the credential helper" \
+"git ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+gitwc ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitrun ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh" \
     "$(grep -vE '^(#|Defaults|$)' "$GITCTL/sudoers" | tr -s ' ')"
 assert_has "sudo resets the environment" "env_reset" "$(cat "$GITCTL/sudoers")"
@@ -638,6 +639,79 @@ assert_eq "and none of the three folders is deleted" "yes yes yes" \
     "$([ -d "$REQS" ] && echo yes) $([ -d "$S/outside-wt" ] && echo yes) $([ -d "$S/disk/sym-real" ] && echo yes)"
 AIDC_GITCTL_ROLE=run ctl tidy "$T"; refused "gitrun has no tidy: it never works in a working copy"
 ctl tidy "$T" extra; refused "tidy takes one argument"
+
+echo ""
+echo "=== Docker: the user's own working copies (AIDC_GITCTL_DOCKER stands for /.dockerenv) ==="
+# On Docker only the repos the user added are mounted in the git container: tidy removes a
+# merged worktree inside its working copy and names one anywhere else, even on the same disk.
+umask 002
+G -C "$T" worktree add -q -b d-in "$T/d-in" origin/main 2>/dev/null
+G -C "$T" worktree add -q -b d-out "$S/disk/d-out" origin/main 2>/dev/null
+G -C "$T/d-in" commit -q --allow-empty -m "Docker in"; G -C "$S/disk/d-out" commit -q --allow-empty -m "Docker out"
+umask 022
+for w in in out; do ctl push "$T" "d-$w"; done
+G -C "$D" fetch -q origin 2>/dev/null; G -C "$D" switch -q main; G -C "$D" reset -q --hard origin/main
+for w in in out; do G -C "$D" merge -q --no-ff -m "Merge d-$w" "origin/d-$w"; done
+G -C "$D" push -q origin main 2>/dev/null
+AIDC_GITCTL_DOCKER=1 ctl tidy "$T"
+assert_eq "a merged worktree inside the working copy is removed" "yes no" "$(row "removed-worktree $T/d-in") $([ -e "$T/d-in" ] && echo yes || echo no)"
+assert_has "one outside it (a sibling folder the git container does not see) is named, not removed" \
+    "cannot-delete $S/disk/d-out not a folder tidy removes" "$OUT"
+assert_eq "and stays" yes "$([ -d "$S/disk/d-out" ] && echo yes || echo no)"
+# A worktree the user keeps beside the working copy is not mounted in the git container: there
+# it looks gone. Its record and its branch must survive tidy (the folder is fine on the host).
+umask 002
+G -C "$T" worktree add -q -b d-hidden "$S/disk/d-hidden" origin/main 2>/dev/null
+G -C "$S/disk/d-hidden" commit -q --allow-empty -m "Docker hidden"
+umask 022
+ctl push "$T" d-hidden
+G -C "$D" fetch -q origin 2>/dev/null; G -C "$D" merge -q --no-ff -m "Merge d-hidden" origin/d-hidden; G -C "$D" push -q origin main 2>/dev/null
+mv "$S/disk/d-hidden" "$S/d-hidden-on-host"
+AIDC_GITCTL_DOCKER=1 ctl tidy "$T"
+assert_has "a worktree outside the working copy that the container cannot see is named" "cannot-delete $S/disk/d-hidden not a folder tidy removes" "$OUT"
+assert_eq "its branch and its record are kept (nothing is pruned)" "yes yes" \
+    "$(git -C "$T" rev-parse -q --verify d-hidden >/dev/null && echo yes || echo no) $(ls "$T/.git/worktrees" | grep -q d-hidden && echo yes || echo no)"
+mv "$S/d-hidden-on-host" "$S/disk/d-hidden"
+mkdir -p "$S/disk/dclone"; AIDC_GITCTL_DOCKER=1 ctl clone o/r "$S/disk/dclone"
+refused "clone is refused on Docker (the git container works on the user's own working copies)"
+assert_has "and says to add the user's own" "aidc repo add <path>" "$OUT"
+# adopt: an existing working copy's repo becomes one the user added; the copy is only read.
+A="$S/forge/o/adopted.git"; G init -q --bare "$A"
+AW="$S/disk/adopted"; G clone -q "$A" "$AW" 2>/dev/null; G -C "$AW" commit -q --allow-empty -m "first"; G -C "$AW" push -q origin HEAD:main 2>/dev/null
+ctl fetch "$AW"; refused "before adopt, the repo is not one the user added: fetch is refused"
+cfg=$(md5sum < "$AW/.git/config")
+ctl adopt "$AW"
+assert_eq "adopt makes gitrun's private copy" "0 yes" "$RC $([ -d "$STORE/o/adopted.git" ] && echo yes || echo no)"
+assert_has "and says which repo" "added o/adopted" "$OUT"
+assert_eq "the working copy's config is not changed" "$cfg" "$(md5sum < "$AW/.git/config")"
+assert_eq "no bundle left behind" "" "$(ls -A "$BUNDLES")"
+ctl fetch "$AW"; assert_eq "after it, fetch works" 0 "$RC"
+H2="$S/disk/notgh"; G init -q "$H2"; git -C "$H2" remote add origin git@github.com:o/x.git
+ctl adopt "$H2"; refused "adopt refuses an origin that is not https://github.com/<owner>/<name>"
+ctl adopt "$AW" extra; refused "adopt takes one argument"
+# On Docker gitrun's git and gitcred's gh go through the git container's proxy, a fixed value.
+cat > "$S/bin/git-logged" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$S/bin/git-args.log"
+exec "$AIDC_GITCTL_REAL_GIT" "\$@"
+STUB
+chmod +x "$S/bin/git-logged"
+: > "$S/bin/git-args.log"
+AIDC_GITCTL_REAL_GIT="$S/bin/git-logged" AIDC_GITCTL_TEST_PROXY=http://proxy.test:3128 ctl fetch "$AW"
+assert_has "gitrun's git is given the proxy by value" "-c http.proxy=http://proxy.test:3128" "$(cat "$S/bin/git-args.log")"
+: > "$S/bin/git-args.log"
+AIDC_GITCTL_REAL_GIT="$S/bin/git-logged" ctl fetch "$AW"
+assert_has "and without one, proxies stay pinned off" "-c http.proxy= " "$(cat "$S/bin/git-args.log")"
+cat > "$S/bin/gh-env" <<STUB
+#!/bin/sh
+printf 'HTTPS_PROXY=%s\n' "\${HTTPS_PROXY:-}" > "$S/bin/gh-env.log"
+echo "not logged in" >&2; exit 1
+STUB
+chmod +x "$S/bin/gh-env"
+AIDC_GITCTL_REAL_GH="$S/bin/gh-env" AIDC_GITCTL_TEST_PROXY=http://proxy.test:3128 ctl status
+assert_eq "gitcred's gh is given the proxy" "HTTPS_PROXY=http://proxy.test:3128" "$(cat "$S/bin/gh-env.log")"
+AIDC_GITCTL_REAL_GH="$S/bin/gh-env" ctl status
+assert_eq "and none without it" "HTTPS_PROXY=" "$(cat "$S/bin/gh-env.log")"
 
 echo ""
 echo "=== login: the identity commits carry is the user's GitHub account ==="

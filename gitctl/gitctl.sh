@@ -36,6 +36,8 @@
 #   gitctl storage                                       bytes in gitrun's copies and the bundles
 #   gitctl remove-copy <owner/name>                      delete gitrun's private copy of a repo
 #   gitctl has-copy <owner/name>                         yes when the repo is one the user added
+#   gitctl adopt <repo>                                  add an existing working copy's repo (Docker:
+#                                                        the user's own; gitrun makes its private copy)
 #
 # <repo> is a working copy (or a worktree of one) whose origin is
 # https://github.com/<owner>/<name>, a repo the user added (aidc repo add: gitctl clone, which
@@ -62,6 +64,14 @@ if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
     HELPER='!sudo -n -u gitcred /opt/aidc/lib/gitctl/cred-helper.sh'
     case "$(id -un)" in gitrun) ROLE=run ;; gitcred) ROLE=cred ;; *) ROLE=agent ;; esac
     FORGE=""
+    # Docker made this container (/.dockerenv is root's, made by Docker, not by anything inside).
+    ON_DOCKER=0; [ -e /.dockerenv ] && ON_DOCKER=1
+    # gitwc (uid 1000, the sessions' and the user's own uid on Docker) runs the agent's verbs
+    # that write a working copy, on Docker only: there the working copies are the user's own,
+    # not group-writable, and stay as they are (owner ruling 2026-11-24).
+    if [ "$(id -un)" = gitwc ] && [ "$ON_DOCKER" != 1 ]; then
+        printf 'gitctl: refused: gitwc works only in a Docker git container\n' >&2; exit 1
+    fi
 else
     # Run from a checkout (the unit tests): no sudo; the role is named, stubs may stand in, and
     # a folder of bare repos (<forge>/<owner>/<name>.git) may stand in for GitHub.
@@ -72,13 +82,22 @@ else
     HELPER=""
     ROLE="${AIDC_GITCTL_ROLE:-agent}"
     FORGE="${AIDC_GITCTL_TEST_FORGE:-}"
+    ON_DOCKER="${AIDC_GITCTL_DOCKER:-0}"
 fi
 ulimit -c 0 2>/dev/null || true
+
+# On the Docker backend the git container has no route out but its own proxy: aidc-proxy on its
+# internal network, a Squid that reaches public addresses only (as the Kubernetes NetworkPolicy
+# allows). gitrun's git and gitcred's gh go through it. The address is fixed here, never taken
+# from the caller or the environment (sudo drops that anyway).
+GITCTL_PROXY=""
+if [ "$INSTALLED" = 1 ]; then [ "$ON_DOCKER" = 1 ] && GITCTL_PROXY="http://aidc-proxy:3128"
+else GITCTL_PROXY="${AIDC_GITCTL_TEST_PROXY:-}"; fi
 
 verb="${1:-}"
 [ $# -gt 0 ] && shift
 case "$verb" in
-    clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy|has-copy|add-copy) VERB_ROLE=run ;;
+    clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy|has-copy|add-copy|adopt) VERB_ROLE=run ;;
     pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
@@ -119,7 +138,7 @@ g() {
     env -i HOME="$RUN_HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 GIT_DIR=. GIT_CONFIG_NOSYSTEM=1 \
         GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
         "$REAL_GIT" -c core.hooksPath=/dev/null -c core.fsmonitor=false "${proto[@]}" \
-        -c http.proxy= -c http.sslVerify=true -c core.sshCommand= -c core.gitProxy= \
+        -c "http.proxy=${GITCTL_PROXY}" -c http.sslVerify=true -c core.sshCommand= -c core.gitProxy= \
         -c core.askPass= -c push.followTags=false -c push.gpgSign=false \
         -c maintenance.auto=false "${helper[@]}" "$@"
 }
@@ -329,7 +348,7 @@ sweep_store() {
 
 gh_() {
     (cd / && env -i HOME="$CRED_HOME" GH_CONFIG_DIR="$CRED_HOME/gh" PATH=/usr/bin:/bin LANG=C.UTF-8 \
-        TERM="${TERM:-dumb}" GH_PROMPT_DISABLED=1 GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 \
+        ${GITCTL_PROXY:+"HTTPS_PROXY=$GITCTL_PROXY"} TERM="${TERM:-dumb}" GH_PROMPT_DISABLED=1 GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 \
         GH_SPINNER_DISABLED=1 GH_BROWSER=echo BROWSER=echo NO_COLOR=1 "$REAL_GH" "$@")
 }
 
@@ -442,7 +461,7 @@ run_cred() {
             # Device code: gh prints a one-time code and the address to enter it at; the user
             # approves in their own browser. git gets the token from gh (https), never a key.
             (cd / && env -i HOME="$CRED_HOME" GH_CONFIG_DIR="$CRED_HOME/gh" PATH=/usr/bin:/bin LANG=C.UTF-8 \
-                TERM="${TERM:-dumb}" GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 GH_BROWSER=echo BROWSER=echo \
+                ${GITCTL_PROXY:+"HTTPS_PROXY=$GITCTL_PROXY"} TERM="${TERM:-dumb}" GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 GH_BROWSER=echo BROWSER=echo \
                 "$REAL_GH" auth login --hostname github.com --git-protocol https --web --skip-ssh-key) \
                 || die "the GitHub login did not complete"
             write_identity ;;
@@ -612,6 +631,7 @@ clone_path_ok() {
 agent_clone() {
     nargs $# 2; no_options "$@"
     local slug="$1" path="$2" head def sha ref
+    [ "$ON_DOCKER" != 1 ] || die "on Docker the git container works on your own working copies: clone it yourself, then aidc repo add <path>"
     gitctl_slug_ok "$slug" || die "$GITCTL_REASON"
     clone_path_ok "$path" || die "$GITCTL_REASON"
     cd -P -- "$path" 2>/dev/null || die "${path}: no such folder (aidc repo add makes it)"
@@ -641,6 +661,20 @@ agent_clone() {
         && ag config "branch.${def}.remote" origin && ag config "branch.${def}.merge" "refs/heads/${def}" \
         && ag reset -q --hard; } || die "cannot check out ${def}"
     echo "cloned $(forge_url "$slug") into ${path} (${def})"
+}
+
+# adopt: an existing working copy (on Docker, the user's own) becomes one of the user's repos:
+# gitrun makes its private copy of origin's repo, which every other verb then requires. The
+# working copy is only read (its origin), never changed.
+agent_adopt() {
+    nargs $# 1; no_options "$@"
+    local url
+    working_copy "$1"
+    url=$(ag -C "$WC" remote get-url origin 2>/dev/null) || die "${WC}: no origin remote"
+    url_slug "$url" || die "$GITCTL_REASON"
+    SLUG="$GITCTL_SLUG"
+    as_run add-copy "$SLUG" >/dev/null || exit 1
+    echo "added ${SLUG} (${WC})"
 }
 
 agent_fetch() {
@@ -770,7 +804,11 @@ agent_tidy() {
     # from a checkout, AIDC_GITCTL_DISK_ROOT or the working copy's parent), and never the git
     # container's folder there (.aidc: the request folder) nor a folder holding the working copy.
     local area=""
-    if [ "$INSTALLED" = 1 ]; then
+    if [ "$ON_DOCKER" = 1 ]; then
+        # On Docker only the repos the user added are mounted here: a worktree is removed only
+        # inside its working copy (set below, from the worktree list).
+        area=docker
+    elif [ "$INSTALLED" = 1 ]; then
         [[ "$WC" =~ ^(/home/[a-z0-9]([a-z0-9-]*[a-z0-9])?)/ ]] && area="${BASH_REMATCH[1]}"
         case "$area" in /home/git|/home/gitrun) area="" ;; esac
     else
@@ -807,6 +845,19 @@ agent_tidy() {
         esac
     done < <(ag -C "$WC" worktree list --porcelain) || die "cannot list ${WC}'s worktrees"
     [ ${#wts[@]} -gt 0 ] || die "cannot list ${WC}'s worktrees"
+    # On Docker a worktree recorded outside the working copy is one the git container does not
+    # see (only the working copy is mounted), not one that is gone: it is never pruned and its
+    # branch is kept, and it is named as a leftover. Pruning is skipped while there is one, as
+    # git's prune would take its record too.
+    local hidden=()
+    if [ "$area" = docker ]; then
+        area=$(realpath -e -- "${wts[0]}" 2>/dev/null || true)
+        for i in "${!wts[@]}"; do
+            hidden+=(0)
+            [ "$i" != 0 ] || continue
+            case "${wts[$i]}/" in "${area:-/nonexistent}"/?*) ;; *) hidden[i]=1; wgone[i]=0 ;; esac
+        done
+    fi
     while IFS= read -r -u 3 b; do
         [ -n "$b" ] || continue
         b="${b#refs/heads/}"
@@ -832,6 +883,10 @@ agent_tidy() {
         done
         if [ -n "$wt" ]; then
             if [ "$i" = 0 ]; then rows+=("checked-out ${b} ${wt}"); continue; fi
+            if [ "${hidden[$i]:-0}" = 1 ]; then
+                rows+=("cannot-delete ${wt} not a folder tidy removes (outside the working copy, which is all the git container sees)")
+                continue
+            fi
             if [ "${wlock[$i]}" = 1 ]; then rows+=("locked ${wt}"); continue; fi
             if [ "${wgone[$i]}" = 0 ]; then
                 if ! removable "$wt"; then
@@ -861,9 +916,13 @@ agent_tidy() {
         [ "$i" != 0 ] || continue
         [ "${wdet[$i]}" = 1 ] && [ "${wgone[$i]}" = 0 ] && rows+=("detached ${wts[$i]}")
     done
-    while IFS= read -r line; do
-        case "$line" in "Removing worktrees/"*) line="${line#Removing worktrees/}"; rows+=("pruned ${line%%:*}") ;; esac
-    done < <(ag -C "$WC" worktree prune -v 2>&1)
+    case " ${hidden[*]} " in
+        *" 1 "*) ;;
+        *)
+            while IFS= read -r line; do
+                case "$line" in "Removing worktrees/"*) line="${line#Removing worktrees/}"; rows+=("pruned ${line%%:*}") ;; esac
+            done < <(ag -C "$WC" worktree prune -v 2>&1) ;;
+    esac
     # Folders inside the working copy that were worktrees: a .git file whose admin folder is gone.
     local gd main_git
     main_git=$(ag -C "$WC" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || main_git=""
@@ -926,6 +985,7 @@ agent_side() {
         push) agent_push "$@" ;;
         unpushed) agent_unpushed "$@" ;;
         storage) agent_storage "$@" ;;
+        adopt) agent_adopt "$@" ;;
         remove-copy|has-copy) nargs $# 1; no_options "$@"; switch_to run "$verb" "$1" ;;
         add-copy) die "add-copy is gitrun's own step of gitctl clone (aidc repo add)" ;;
         status|login|logout) switch_to cred "$verb" "$@" ;;
@@ -991,7 +1051,13 @@ expect_args() {
 }
 
 case "$ROLE" in
-    agent) expect_args "$@"; agent_side ${ARGS[@]+"${ARGS[@]}"} ;;
+    agent)
+        # On Docker the verbs that write a working copy run as gitwc, its owner's uid (sudo: the
+        # one rule naming gitctl; the caller's environment is dropped).
+        if [ "$INSTALLED" = 1 ] && [ "$ON_DOCKER" = 1 ] && [ "$(id -un)" = git ]; then
+            case "$verb" in fetch|tidy|unpushed) exec sudo -n -u gitwc -- "$self" "$verb" "$@" ;; esac
+        fi
+        expect_args "$@"; agent_side ${ARGS[@]+"${ARGS[@]}"} ;;
     run)
         sweep_store
         case "$verb" in

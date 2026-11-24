@@ -8,16 +8,17 @@
 # result. Requests are data: every field is checked here, and again by gitctl, and nothing in
 # one is ever run or followed as an instruction.
 #
-# The folder ($AIDC_GIT_REQUESTS, /home/<user>/.aidc/git-requests) is the agent's, made by
+# The folder ($AIDC_GIT_REQUESTS: /home/<user>/.aidc/git-requests on Kubernetes, the
+# aidc-git-requests volume at /var/aidc/git-requests on Docker) is the agent's, made by
 # `aidc git setup`; the session group may only drop files into requests/:
 #   requests/   1730  sessions write <id>.json (they cannot list it, so one session never
 #                     sees another's ids); the agent moves each one out as it takes it
 #   results/    0710  <id>.json, written by the agent only; a session reads its own by id
 #   work/       0700  the agent's: the checked requests, their texts, the log
 #
-# Modes (AIDC_GIT_MODE, the user's kubernetes.git_mode): "ask" (default) holds a request that
-# changes GitHub until the user approves it (git-requests approve <id>, or `aidc git approve`);
-# "rules" runs it at once by gitctl's rules. Reading a pull request runs at once in both.
+# Modes (AIDC_GIT_MODE: the user's kubernetes.git_mode, or git.mode on Docker): "ask"
+# (default) holds a request that changes GitHub until the user approves it (git-requests
+# approve <id>, or `aidc git approve`); "rules" runs it at once by gitctl's rules. Reading a pull request runs at once in both.
 # A session may be given rules mode of its own while the user's mode is ask (`aidc git mode
 # <session> rules`, kept here as the session's name and the SHA-256 of its token). It applies
 # only to a request carrying that session's token (AIDC_GIT_TOKEN in its pod, which no other
@@ -27,9 +28,10 @@
 #
 # In ask mode a waiting request is handed to the git agent's Claude (AIDC_GIT_NOTIFY, a line
 # naming the request's id typed into its terminal), which asks the user with its question tool.
-# One at a time: while the last request handed over still waits, a new one is not typed in
-# (the agent runs `git-requests list` after each decision and takes the next itself), so no line
-# lands in a question the agent is asking.
+# One at a time: while a request the agent may be asking about still waits (which ones those
+# are: the comment above mark_open), a new one is not typed in (the agent runs `git-requests
+# list` after each decision and takes the next itself), so no line lands in a question the
+# agent is asking.
 #
 # What a request acts on is fixed when it is taken: the GitHub repo (owner/name, from the working
 # copy's origin then) and, for a push, the branch's commit. Both are shown to the user, and at
@@ -54,7 +56,10 @@ GITCTL_LIB=$(dirname "$self")
 
 if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
     INSTALLED=1 GITCTL=/opt/aidc/bin/gitctl REAL_GIT=/usr/bin/git
-    DISK_ROOT="/home/${AIDC_USER:-}" SESSION_GID=1000
+    # The user's disk: /home/<user> on Kubernetes; on Docker the user's home on their machine
+    # (AIDC_GIT_DISK, set by aidc git setup), where only the repos they added are mounted.
+    DISK_ROOT="${AIDC_GIT_DISK:-/home/${AIDC_USER:-}}" SESSION_GID=1000
+    [[ "$DISK_ROOT" =~ ^(/[A-Za-z0-9._-]+)+$ ]] || DISK_ROOT=/nonexistent
     TEST_FORGE=""
 else
     # Run from a checkout (the unit tests): gitctl may be a stub, the disk any folder.

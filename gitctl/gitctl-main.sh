@@ -17,6 +17,15 @@ start_tmux() {
     tmux new-window -d -t main: -n shell -c "${HOME:-/home/git}"
     tmux select-window -t main:claude
 }
+# On Docker the git agent's transcript is copied where aidc's MCP server reads every session's
+# (/var/aidc/transcript-out, mounted by aidc git setup), so an orchestrator sees its questions as
+# it sees any session's. The same copy-forward as a session's (transcript-mirror.sh, a copy of
+# the dev image's file, kept identical by its unit test).
+if [ -d /var/aidc/transcript-out ]; then
+    . /opt/aidc/lib/gitctl/transcript-mirror.sh
+    proj="${HOME:-/home/git}/.claude/projects/$(printf '%s' "${HOME:-/home/git}" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')"
+    ( while :; do aidc_mirror_copy_forward_pass "$proj" /var/aidc/transcript-out; sleep 2; done ) &
+fi
 watcher=""
 while :; do
     tmux has-session -t main 2>/dev/null || start_tmux

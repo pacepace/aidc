@@ -193,7 +193,7 @@ assert_has "and the session knows it is on Kubernetes (group-writable files, for
     '{"name":"AIDC_BACKEND","value":"kubernetes"}' "$(dev '.spec.template.spec.containers[0].env')"
 assert_has "a new session home starts as a copy of the image's (Claude Code lives there), owned by the session user" \
     "cp -a /home/vscode/. /seed/; chown 1000:1000 /seed" "$(dev '[.spec.template.spec.initContainers[] | select(.name == "seed-home") | .command]')"
-assert_eq "the repo folder is made as the session user" '[{"runAsUser":1000,"runAsGroup":1000},["mkdir","-p","/home/alice/code/proj"]]' \
+assert_eq "the repo folder is made as the session user, group-writable (umask 002)" '[{"runAsUser":1000,"runAsGroup":1000},["sh","-c","umask 002 && mkdir -p \"$1\"","sh","/home/alice/code/proj"]]' \
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "repo-dir") | [.securityContext, .command]')"
 
 np() { q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"$1\") | .spec" | tail -1; }

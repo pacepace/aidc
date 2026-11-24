@@ -462,11 +462,12 @@ spec:
           imagePullPolicy: Always
           command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/vscode/. /seed/; chown 1000:1000 /seed && chmod 0755 /seed']
           volumeMounts: [{name: home, mountPath: /seed}]
-        # The repo folder, made as the session user when it is not on the disk yet.
+        # The repo folder, made as the session user when it is not on the disk yet, group-writable
+        # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
-          command: [mkdir, -p, "${repo}"]
+          command: [sh, -c, 'umask 002 && mkdir -p "\$1"', sh, "${repo}"]
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts: [{name: disk, mountPath: "/home/${AIDC_K8S_USER}"}]
       containers:

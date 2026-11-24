@@ -152,13 +152,28 @@ fuse_overlay_works() {
 # Start dockerd on one driver and wait up to ~15s for it to answer. The socket
 # file alone is not enough: dockerd creates it before initialising storage, so a
 # driver that fails leaves a socket behind a daemon that has already exited.
+# The inner Docker network's MTU: this container's own, when that is below Docker's default
+# 1500. A Kubernetes overlay (VXLAN and the like) carries smaller packets, and large transfers
+# from inner containers then stall and reset (seen on a 1450 pod network: a git clone reset
+# after 150 s). On a plain Docker host the container's MTU is 1500 and nothing is passed.
+inner_mtu_args() {
+    local mtu
+    mtu=$(cat "${AIDC_MTU_FILE:-/sys/class/net/eth0/mtu}" 2>/dev/null || true)
+    case "$mtu" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$mtu" -lt 1500 ] && printf -- '--mtu=%s' "$mtu"
+    return 0
+}
+
 start_dockerd() {
-    local driver="$1"
-    log "starting inner dockerd (logs: /var/log/aidc/dockerd.log, storage driver: ${driver})"
+    local driver="$1" mtu_arg
+    mtu_arg=$(inner_mtu_args)
+    log "starting inner dockerd (logs: /var/log/aidc/dockerd.log, storage driver: ${driver}${mtu_arg:+, ${mtu_arg}})"
     rm -f /var/run/docker.sock /var/run/docker.pid
+    # shellcheck disable=SC2086  # mtu_arg is one word or empty
     nohup dockerd \
         --host=unix:///var/run/docker.sock \
         --storage-driver="${driver}" \
+        ${mtu_arg} \
         >> /var/log/aidc/dockerd.log 2>&1 &
     local pid=$! waited=0
     while [ $waited -lt 30 ]; do

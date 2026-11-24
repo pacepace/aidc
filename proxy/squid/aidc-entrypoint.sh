@@ -128,6 +128,29 @@ http_access deny aidc_mcp_dst aidc_mcp_port" ;;
     echo "[aidc-squid] denying aidc-mcp at ${AIDC_MCP_DENY} to this session (MCP-12)" >&2
 fi
 
+# The git container's proxy (aidc git setup on Docker, AIDC_PUBLIC_ONLY=1): public addresses
+# only, the same intent as the Kubernetes NetworkPolicy of the git pod. The git container sits
+# on an internal network with this proxy as its only way out; denying every private, loopback,
+# link-local, shared and multicast destination keeps a GitHub login held there from being
+# walked to the host, the LAN or another container. squid resolves the name it is asked for and
+# checks every address it gets (dst), so a public name pointing at a private address is refused.
+if [ "${AIDC_PUBLIC_ONLY:-}" = 1 ]; then
+    derive_from_conf
+    rules="acl aidc_not_public dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::1 fc00::/7 fe80::/10
+http_access deny aidc_not_public"
+    AIDC_PUBLIC_RULES="$rules" perl -i -pe 'if (/^http_access allow localnet/ && !$done) { print "$ENV{AIDC_PUBLIC_RULES}\n"; $done = 1 }' "$DERIVED" || {
+        echo "[aidc-squid] FATAL: could not add the public-only rule to ${DERIVED}" >&2
+        exit 1
+    }
+    deny_line=$(awk '/^http_access deny aidc_not_public/ { print NR; exit }' "$DERIVED")
+    allow_line=$(awk '/^http_access allow localnet/ { print NR; exit }' "$DERIVED")
+    if [ -z "$deny_line" ] || [ -z "$allow_line" ] || [ "$deny_line" -ge "$allow_line" ]; then
+        echo "[aidc-squid] FATAL: public-only rule missing or after 'allow localnet' in ${DERIVED}" >&2
+        exit 1
+    fi
+    echo "[aidc-squid] public addresses only (the git container's proxy)" >&2
+fi
+
 # Chain to the base image's entrypoint, passing the effective config path.
 #
 # NB: the 7.x Rock's own ENTRYPOINT is `pebble enter`, which we deliberately

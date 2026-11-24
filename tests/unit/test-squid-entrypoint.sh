@@ -123,6 +123,28 @@ env AIDC_SQUID_CONF="$SCRATCH/noallow/squid.conf" AIDC_SQUID_DERIVED="$SCRATCH/n
 assert "exits non-zero" "[ $? -ne 0 ]"
 assert "squid not started" "[ ! -e '$SCRATCH/noallow/used' ]"
 
+echo "== AIDC_PUBLIC_ONLY (the git container's proxy on Docker): private destinations refused"
+run_entry public AIDC_PUBLIC_ONLY=1
+D="$SCRATCH/public/derived.conf"
+assert "exits 0" "[ $RC -eq 0 ]"
+assert "squid started from the derived config" "[ '$CONF_USED' = '$D' ]"
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10 ::1 fc00::/7 fe80::/10; do
+    assert "refuses $net" "grep '^acl aidc_not_public dst' '$D' | grep -qF ' $net'"
+done
+assert "deny comes before allow localnet" \
+    "[ \$(line_of '$D' '^http_access deny aidc_not_public') -lt \$(line_of '$D' '^http_access allow localnet') ]"
+assert "baked config left untouched" "! grep -q aidc_not_public '$SCRATCH/public/squid.conf'"
+run_entry public-mcp AIDC_PUBLIC_ONLY=1 AIDC_MCP_DENY=192.0.2.10:7878
+assert "with the MCP deny too, both land before the allow" \
+    "[ \$(line_of '$SCRATCH/public-mcp/derived.conf' '^http_access deny aidc_not_public') -lt \$(line_of '$SCRATCH/public-mcp/derived.conf' '^http_access allow localnet') ]"
+run_entry public-off AIDC_PUBLIC_ONLY=0
+assert "off unless exactly 1: no derived config" "[ ! -e '$SCRATCH/public-off/derived.conf' ]"
+rm -f "$SCRATCH/noallow/used"
+env AIDC_SQUID_CONF="$SCRATCH/noallow/squid.conf" AIDC_SQUID_DERIVED="$SCRATCH/noallow/derived2.conf" \
+    AIDC_SQUID_ENTRYPOINT="$SCRATCH/stub.sh" STUB_OUT="$SCRATCH/noallow/used" \
+    AIDC_PUBLIC_ONLY=1 PATH="$IMAGE_BIN" "$IMAGE_BIN/sh" "$ENTRY" >/dev/null 2>&1
+assert "a config with no 'allow localnet' cannot skip the public-only rule" "[ ! -e '$SCRATCH/noallow/used' ]"
+
 echo
 echo "squid entrypoint: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

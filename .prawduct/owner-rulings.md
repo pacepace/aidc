@@ -418,3 +418,7 @@ Exposing a session port on the LAN is per use: sometimes with no password (testi
 ## 2026-11-24 — testament tracks its latest release, like Claude Code (Q-K7)
 
 testament is released on GitHub and moves fast. Sessions get its latest release, not a pinned version, and it is kept current the way Claude Code is: a new image or a running session's upgrade picks up the newest release. K8S-25's "at a pinned version" is amended to "at its latest release, kept current"; downloads are still verified against the release's own checksums where it publishes them.
+
+## 2026-11-24 — testament is fetched with the user's SSH key, not gh
+
+The owner does not use gh for regular git work. aidc fetches testament on the laptop with the user's own SSH key (newest release tag, built into a wheel locally) and hands the wheel to image builds and running sessions; no key or token enters a session or an image.

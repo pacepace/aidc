@@ -191,6 +191,8 @@ done
 line=$(k8s_kubectl -n "$NS" logs "$(proxy_pod)" -c refresher 2>/dev/null | grep '^refreshed:' | tail -n1)
 assert "every malware feed contributed entries (urlhaus > 0, hagezi > 0): ${line:-no refresh yet}" \
     "printf '%s' '$line' | grep -Eq 'urlhaus=[1-9][0-9]* hagezi=[1-9][0-9]*'"
+assert "aidc status shows the malware feeds, none lost (#60)" \
+    "status_has 'feeds:    urlhaus ' && ! status_has 'LOST:'"
 
 echo "[6/7] taint"
 # The refresher image has a shell but no perl; replace the file in one rename, as it does, and

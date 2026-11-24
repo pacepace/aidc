@@ -28,6 +28,10 @@ HAGEZI_TIF_URL="https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wil
 SQUID_DIR="/etc/squid"
 TARGET="${SQUID_DIR}/blocklist.txt"
 TARGET_NEW="${SQUID_DIR}/blocklist.txt.new"
+# What each refresh found, for `aidc status` (a lost feed is otherwise only a WARN line in this
+# container's log): each feed's entry count, when the list was last published and when a
+# refresh last ran, and the refresh interval. key=value lines, replaced whole each time.
+STATE="${SQUID_DIR}/aidc-feeds.state"
 ADDITIONS="${SQUID_DIR}/blocklist-additions.conf"
 
 WORK="$(mktemp -d)"
@@ -45,6 +49,24 @@ ADDITIONS_OUT="${WORK}/additions.domains"
 : > "$ADDITIONS_OUT"
 
 start_ts=$(date +%s)
+
+# write_state <ok|failed>: the state file, renamed into place. A failed refresh keeps the time
+# the list was last published (it still serves). Never fails the refresh.
+write_state() {
+    local published=""
+    if [[ "$1" == ok ]]; then
+        published="$start_ts"
+    elif [[ -r "$STATE" ]]; then
+        published=$(sed -n 's/^published_at=\([0-9][0-9]*\)$/\1/p' "$STATE" | head -n1)
+    fi
+    {
+        printf 'result=%s\nattempted_at=%s\npublished_at=%s\ninterval=%s\n' \
+            "$1" "$start_ts" "$published" "${AIDC_REFRESH_INTERVAL:-21600}"
+        printf 'feed_urlhaus=%s\nfeed_hagezi=%s\n' \
+            "$(wc -l < "$URLHAUS_OUT" | tr -d ' ')" "$(wc -l < "$HAGEZI_OUT" | tr -d ' ')"
+    } > "${STATE}.new" 2>/dev/null && mv -f "${STATE}.new" "$STATE" 2>/dev/null \
+        || log "WARN could not write ${STATE}"
+}
 
 log()  { echo "aidc-refresher: $*" >&2; }
 # A feed that failed, or answered with nothing usable, is a WARN line naming it:
@@ -145,6 +167,7 @@ total=$(wc -l < "$MERGED" | tr -d ' ')
 # serving until the next refresh.
 if [[ "$total" -eq 0 ]]; then
     log "merged result is empty — refusing to overwrite ${TARGET} (NET-11)"
+    write_state failed
     exit 1
 fi
 
@@ -154,6 +177,7 @@ fi
 # should make this impossible; a guard is cheap and refuses to publish otherwise.
 if ! LC_ALL=C sort -c "$MERGED" 2>/dev/null; then
     log "merged list is not in byte order — refusing to publish it (squid's lookup would miss entries)"
+    write_state failed
     exit 1
 fi
 
@@ -161,6 +185,7 @@ fi
 mkdir -p "$SQUID_DIR"
 cp "$MERGED" "$TARGET_NEW"
 mv -f "$TARGET_NEW" "$TARGET"
+write_state ok
 
 end_ts=$(date +%s)
 took=$(( end_ts - start_ts ))

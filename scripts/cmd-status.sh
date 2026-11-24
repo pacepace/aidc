@@ -25,6 +25,8 @@ trap '' PIPE
 . "$AIDC_SCRIPTS/lib/network.sh"
 # shellcheck source=lib/egress.sh
 . "$AIDC_SCRIPTS/lib/egress.sh"
+# shellcheck source=lib/feeds.sh
+. "$AIDC_SCRIPTS/lib/feeds.sh"
 
 case "${1:-}" in
     -h|--help)
@@ -32,8 +34,9 @@ case "${1:-}" in
 aidc status [<name>]
 
 No arg   pass through to `aidc list` plus a session count.
-<name>   detailed per-session report: component health, taint status,
-         declared + adhoc port forwards, and the last few dev-container logs.
+<name>   detailed per-session report: component health, taint status, the
+         malware feeds (a lost feed or a stale list), declared + adhoc port
+         forwards, and the last few dev-container logs.
 EOF
         exit 0 ;;
 esac
@@ -91,6 +94,16 @@ elif [ "$taint_rc" -eq 1 ] && [ -z "$taint_err" ]; then
     printf 'clean.\n'
 else
     printf 'unknown: the policy sidecar did not answer (%s).\n' "${taint_err:-docker exec exited ${taint_rc}}"
+fi
+
+# The malware feeds behind the blocklist (#60): a lost feed or a refresh that stopped, from the
+# refresher's state file. A refresher that cannot be asked is unknown, never fine.
+printf '\n-- malware feeds --\n'
+REFRESHER_CT="$(container_name "$NAME" refresher)"
+if fstate=$(docker exec "$REFRESHER_CT" sh -c 'cat /etc/squid/aidc-feeds.state 2>/dev/null; true' 2>/dev/null); then
+    aidc_feeds_describe "$fstate" "$(date +%s)" | sed 's/^/  /'
+else
+    printf '  unknown: the refresher sidecar did not answer\n'
 fi
 
 DEV_CT="$(container_name "$NAME" dev)"

@@ -5,6 +5,8 @@ set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
 # shellcheck source=lib.sh
 . "$AIDC_SCRIPTS/k8s/lib.sh"
+# shellcheck source=../lib/feeds.sh
+. "$AIDC_SCRIPTS/lib/feeds.sh"
 case "${1:-}" in -h|--help) printf 'aidc status <name>\n'; exit 0 ;; esac
 NAME="${1:-}"
 validate_session_name "$NAME"
@@ -32,6 +34,15 @@ case "$taint" in
     no) printf 'taint:    clean\n' ;;
     *) printf 'taint:    %s\n' "$taint" ;;
 esac
+# The malware feeds behind the blocklist (#60), from the refresher's state file; a refresher that
+# cannot be asked is unknown, never fine.
+proxy=$(k8s_kubectl -n "$ns" get pod -l "aidc/session=${NAME},app=proxy" -o name --request-timeout=10s 2>/dev/null | head -n1 || true)
+if [ -n "$proxy" ] && fstate=$(k8s_kubectl -n "$ns" exec "$proxy" -c refresher --request-timeout=10s -- \
+        sh -c 'cat /etc/squid/aidc-feeds.state 2>/dev/null; true' </dev/null 2>/dev/null); then
+    aidc_feeds_describe "$fstate" "$(date +%s)" | sed '1s/^/feeds:    /; 2,$s/^/          /' || true
+else
+    printf 'feeds:    unknown: the refresher sidecar did not answer\n'
+fi
 # The lockdown is the session's NetworkPolicies: say so only when they are there, and "unknown"
 # when the cluster cannot be asked (never NOT ENFORCED for a read that failed).
 if have=$(k8s_kubectl -n "$ns" get networkpolicy -o name --request-timeout=10s 2>/dev/null); then

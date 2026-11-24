@@ -105,6 +105,14 @@ ok "HaGeZi TIF gets at least 300 s to download (~40 MB; 60 s ran out under load)
 ok "HaGeZi TIF still gives up early on a dead connection" \
     bash -c "printf '%s' '$HAGEZI_CALL' | grep -q -- '--connect-timeout'"
 
+STATE="$SCRATCH/squid/aidc-feeds.state"
+st() { sed -n "s/^$1=//p" "$STATE"; }
+ok "a state file for aidc status: each feed's count" bash -c "[ '$(st feed_urlhaus)|$(st feed_hagezi)' = '3|2' ]"
+ok "the refresh's result, and the list published when it ran" \
+    bash -c "[ '$(st result)' = ok ] && [ -n '$(st published_at)' ] && [ '$(st published_at)' = '$(st attempted_at)' ]"
+ok "the refresh interval (default 6 h)" [ "$(st interval)" = 21600 ]
+PUBLISHED=$(st published_at)
+
 echo "=== refresher: the gitlab mirror is down ==="
 FAIL_URLS="$URLHAUS_PRIMARY" run_refresh; rc=$?
 ok "the refresh succeeds" [ "$rc" -eq 0 ]
@@ -117,6 +125,7 @@ ok "the log says the gitlab mirror failed" grep -q "urlhaus: $URLHAUS_PRIMARY fa
 
 echo "=== refresher: every feed fails ==="
 printf 'kept.example\n' > "$SCRATCH/squid/blocklist.txt"
+sed -i 's/^published_at=.*/published_at=1000/' "$STATE"
 FAIL_URLS="$URLHAUS_PRIMARY $URLHAUS_MIRROR $HAGEZI" run_refresh; rc=$?
 ok "the refresh fails (NET-11)" [ "$rc" -ne 0 ]
 ok "and leaves the last good list in place" \
@@ -125,6 +134,10 @@ ok "each failed feed is named in the log" \
     bash -c "grep -q 'urlhaus: FETCH FAILED' '$SCRATCH/out' && grep -q 'hagezi: FETCH FAILED' '$SCRATCH/out'"
 ok "a failed feed is a WARN line naming it" \
     bash -c "grep -q '^aidc-refresher: WARN urlhaus: ' '$SCRATCH/out' && grep -q '^aidc-refresher: WARN hagezi: ' '$SCRATCH/out'"
+ok "the state says the refresh failed, with both feeds at 0" \
+    bash -c "[ '$(st result)|$(st feed_urlhaus)|$(st feed_hagezi)' = 'failed|0|0' ]"
+ok "and keeps when the list still in use was published" [ "$(st published_at)" = 1000 ]
+ok "while recording when this refresh ran" [ "$(st attempted_at)" -ge "$PUBLISHED" ]
 
 echo "=== refresher: a feed answers but lists nothing ==="
 # How a feed is lost without a failed download: a changed format, or an error page
@@ -137,6 +150,9 @@ ok "the empty feed is a WARN line naming it" \
     grep -q '^aidc-refresher: WARN urlhaus: fetched but yielded 0 entries' "$SCRATCH/out"
 ok "the summary shows its zero" grep -q 'urlhaus=0 hagezi=2 ' "$SCRATCH/out"
 ok "a feed that yielded entries is not warned about" bash -c "! grep -q 'WARN hagezi' '$SCRATCH/out'"
+ok "the state shows the lost feed's zero" bash -c "[ '$(st result)|$(st feed_urlhaus)|$(st feed_hagezi)' = 'ok|0|2' ]"
+AIDC_REFRESH_INTERVAL=600 run_refresh
+ok "the interval the refresher runs at is recorded" [ "$(st interval)" = 600 ]
 
 echo
 echo "refresher feeds: ${PASS} passed, ${FAIL} failed"

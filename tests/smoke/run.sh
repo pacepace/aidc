@@ -806,6 +806,11 @@ assert "the refresher's startup refresh succeeded and wrote entries (it ${STARTU
 # publishes a list (NET-11), which is how two dead abuse.ch feeds went unnoticed.
 assert "every malware feed contributed entries (urlhaus > 0, hagezi > 0)" \
     "printf '%s' '${REFRESHED_LINE}' | grep -Eq 'urlhaus=[1-9][0-9]* hagezi=[1-9][0-9]* '"
+# aidc status shows the feeds from the refresher's state file (#60): both with entries, nothing lost.
+# shellcheck disable=SC2034  # read inside the assert's eval
+FEEDS_STATUS=$("$AIDC" status "$SESSION" 2>&1 | sed -n '/-- malware feeds --/,/^$/p')
+assert "aidc status shows the malware feeds, none lost" \
+    "printf '%s' \"\$FEEDS_STATUS\" | grep -Eq 'urlhaus [1-9][0-9]*, hagezi [1-9][0-9]* entries' && ! printf '%s' \"\$FEEDS_STATUS\" | grep -q 'LOST'"
 # NET-16 / issue #34: a new blocklist must not cost a single connection. Squid used to
 # reload for every list and refused everything for ~20 s. Run a real refresh while
 # requests stream through the proxy, and count refusals.

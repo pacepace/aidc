@@ -14,10 +14,13 @@ history work across the cluster and the user's own machines.
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** being built. Built and checked on the reference cluster (`tests/smoke/k8s.sh`): the
-backend seam, the in-cluster images, users' disks, and sessions (create, attach, list, status,
-logs, kill) with the lockdown, Docker inside, the blocklist, taint and audit, and the git
-container ("Git", on this backend and on Docker). Not built yet: the in-cluster MCP server,
-account switching, Syncthing, ports; all of it ships in aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
+backend seam, the in-cluster images, users' disks, and sessions (create with a size, attach,
+list, status, logs, restart, upgrade, refresh, kill) with the lockdown (NetworkPolicy and a
+public-only squid), Docker inside, the blocklist and its feeds in `aidc status`, taint and
+audit (with `aidc audit list|trim`), testament when configured, and the git container ("Git",
+on this backend and on Docker). Not built yet: the in-cluster MCP server, account switching,
+Syncthing, ports and LAN pages, `--egress-tcp`, `--gpu`, the taint freeze; all of it ships in
+aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
 in `.prawduct/owner-rulings.md`; each open item says what will settle it, and items marked
 **proposal** await the owner.
 
@@ -36,8 +39,8 @@ cluster (the session node)
     ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit: the only way out
     ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
-    ├─ aidc-mcp (later)                     the user's MCP server (K8S-07)
-    └─ syncthing (later)                    Claude state <-> user's machines (K8S-18)
+    ├─ aidc-mcp (not built yet: aidc 2.0)   the user's MCP server (K8S-07)
+    └─ syncthing (not built yet: aidc 2.0)  Claude state <-> user's machines (K8S-18)
 ```
 
 Sessions live in their user's namespace, named `<session>-*`, not one namespace each: every

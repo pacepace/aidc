@@ -68,6 +68,8 @@ case "$*" in
         [ -n "${K_REGISTRY_READY-1}" ] || { echo 'not found' >&2; exit 1; }
         printf '%s' "${K_REGISTRY_READY-1}" ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
+    *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
+    *" exec "*"-- docker build "*) [ "${K_BUILD_FAIL:-}" = 1 ] && { echo 'build error' >&2; exit 1; } ;;
     *" exec "*"-- wget "*)
         for p in ${K_PRESENT:-}; do case "$*" in *"/v2/${p}"*) exit 0 ;; esac; done
         exit 1 ;;
@@ -159,6 +161,21 @@ assert_has "the builder trusts plain HTTP only for aidc's own registry" \
 "$AIDC_ROOT/scripts/aidc" k8s build --force --only squid >/dev/null 2>&1
 assert_has "--force builds an image even when it is present" "aidc/squid:${VERSION_TAG} -f /build/squid/Dockerfile" "$(cat "$K_LOG")"
 assert_not_has "--only builds that role alone" "dev-base" "$(grep 'docker build' "$K_LOG")"
+
+echo "=== failure paths ==="
+: > "$K_LOG"
+out=$(K_BUILD_FAIL=1 "$AIDC_ROOT/scripts/aidc" k8s build --force --only audit 2>&1 </dev/null); rc=$?
+assert_eq "a failed build exits 1" "1" "$rc"
+assert_has "a failed build names the image" "build failed for aidc/audit:${VERSION_TAG}" "$out"
+assert_has "the builder pod is deleted after a failed build too" "delete pod builder-" "$(cat "$K_LOG")"
+out=$(K_ROLLOUT_FAIL=1 "$AIDC_ROOT/scripts/aidc" k8s setup 2>&1 </dev/null); rc=$?
+assert_eq "a registry that never gets ready fails setup" "1" "$rc"
+assert_has "and says where to look" "the registry did not become ready" "$out"
+out=$("$AIDC_ROOT/scripts/aidc" k8s setup extra 2>&1 </dev/null); rc=$?
+assert_has "setup refuses arguments" "takes no arguments" "$out"
+out=$("$AIDC_ROOT/scripts/aidc" k8s nonesuch 2>&1 </dev/null); rc=$?
+assert_eq "an unknown k8s subcommand exits 2" "2" "$rc"
+assert_has "and is named" "unknown k8s subcommand: nonesuch" "$out"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

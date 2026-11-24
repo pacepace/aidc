@@ -29,6 +29,7 @@ common.sh:require_docker
 common.sh:ensure_image
 common.sh:aidc_session_audit_dir
 common.sh:list_adhoc_forwards
+common.sh:aidc_declared_forwards
 common.sh:remove_adhoc_forwards
 common.sh:remove_session_networks
 common.sh:wait_for_dev_ready

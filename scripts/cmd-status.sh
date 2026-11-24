@@ -109,11 +109,16 @@ fi
 DEV_CT="$(container_name "$NAME" dev)"
 
 # Port forwards: declared (from compose, baked at create time) + adhoc
-# (from `aidc proxy`, one socat sidecar per forward).
+# (from `aidc proxy`, one socat sidecar per forward). Declared ports are published by the
+# aidc-<s>-dfwd-<host port> sidecars (the dev container is on an internal network and publishes
+# nothing), and by the dev container itself only on a session from before those sidecars.
 printf '\n-- port forwards --\n'
-declared_ports=$(docker inspect "$DEV_CT" \
-    --format '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostPort}}:{{$p}}{{"\n"}}{{end}}{{end}}' \
-    2>/dev/null | sed 's|/tcp$||' | awk 'NF')
+declared_ports=$( {
+    aidc_declared_forwards "$NAME"
+    docker inspect "$DEV_CT" \
+        --format '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostPort}}:{{$p}}{{"\n"}}{{end}}{{end}}' \
+        2>/dev/null | sed 's|/tcp$||'
+} | awk 'NF && !seen[$0]++')
 if [ -n "$declared_ports" ]; then
     printf '  declared:\n'
     printf '%s\n' "$declared_ports" | while IFS= read -r line; do

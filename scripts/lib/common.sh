@@ -447,6 +447,19 @@ list_adhoc_forwards() {
               --format '{{.Names}}|{{.Ports}}' 2>/dev/null
 }
 
+# aidc_declared_forwards <session>: the session's declared port forwards (aidc create --port,
+# ports:), "<host port>:<container port>" per line, from its aidc-<s>-dfwd-<host port> sidecars.
+# The container port is the one the sidecar publishes the host port to (it listens on the same
+# port it forwards to). A stopped sidecar has no published port and is left out.
+aidc_declared_forwards() {
+    docker ps --filter "name=^aidc-${1}-dfwd-[0-9]+\$" --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
+        | while IFS='|' read -r ct ports; do
+            [ -n "$ct" ] || continue
+            c=$(printf '%s' "$ports" | sed -nE 's/.*:([0-9]+)->([0-9]+)\/tcp.*/\2/p' | head -n1)
+            [ -n "$c" ] && printf '%s:%s\n' "${ct##*-dfwd-}" "$c"
+        done | sort -n
+}
+
 # Remove ALL adhoc forwarders for a session (running or stopped). Prints the
 # optional note only when there was something to remove. Best-effort: never
 # fails the caller.

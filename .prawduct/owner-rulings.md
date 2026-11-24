@@ -266,3 +266,11 @@ built alongside) or colleagues. Generic terms instead ("the reference cluster", 
 orchestrator", "a second user"); the specifics go in the owner's private repos. "This isn't a
 security breach that needs repo rewrite, just something to stop doing": what is already in
 history stays, and current files are cleaned with ordinary commits.
+
+## 2026-11-24: The external orchestrator's config section is `orchestrator:`
+
+The config section once named after the owner's private orchestrator project is `orchestrator:`,
+and docs call that role "the orchestrator", the name aidc already used for it. Not
+"coordinator": Claude Code already uses that word for a message from another Claude session
+(transcript SESSION_MESSAGE_KINDS), and one word for two roles would let an orchestrator read
+such a message as its own prompt. Owner: "yes" (2026-11-24) to `orchestrator:`.

@@ -195,6 +195,7 @@ W-K7 ops (any time, owner) ; W-R release last
 ```
 
 ### W-K0: close the git container wave (branch `feature/k8s-git-container`)
+- Status: the git container build plan's chunks are all built and reviewed, and that plan is archived (`archive/build-plan-k8s-git-container.md`, completed). Its only open items, the owner-login live GitHub and Claude tests, continue here as 02 and 03.
 - 01 Critic round finishes. Fix its findings. Goal: the wave is reviewed. Done when: verify clean.
 - 02 Owner logs in (`aidc git login`, git agent's Claude). Run the smokes' GitHub and Claude parts on a scratch repo (`AIDC_SMOKE_GIT_REPO`, `_CLAUDE`, `_PROTECT`). Done when: PR merged with two parents, branch deleted on GitHub, worktree tidied, identity seen, protections read and applied.
 - 03 Docker: a real AskUserQuestion from the git agent reaches an MCP watcher, and `session_send` answers it. Done when: the answer is seen in the transcript, or the failure is recorded (which triggers Q-M5).

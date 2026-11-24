@@ -15,7 +15,12 @@ governed_by:
       - "bash CLI, shellcheck, shell tests stub kubectl on PATH → conforms"
       - "no private names in the repo → conforms (the owner's cluster values stay in their private repos)"
 partition: serial, delegated — each chunk to one subagent (opus) in turn on this branch, briefed with the chunk and design-12 "Git"; the main agent reviews (Critic), integrates and runs the live checks; chunks share scripts/k8s/ and the git container image, so they do not run in parallel
+lifecycle: completed
+archived: 2026-11-24
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — the trusted git container
 

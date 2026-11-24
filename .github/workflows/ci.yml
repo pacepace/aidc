@@ -43,7 +43,7 @@ jobs:
         continue-on-error: true
         run: |
           shopt -s globstar nullglob
-          shellcheck scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh scripts/k8s/*.sh proxy/**/*.sh .devcontainer/*.sh gitctl/*.sh tests/unit/*.sh
+          shellcheck scripts/aidc scripts/cmd-*.sh scripts/lib/*.sh scripts/k8s/*.sh scripts/docker/*.sh proxy/**/*.sh .devcontainer/*.sh gitctl/*.sh tests/unit/*.sh
       # BLOCKING: the Homebrew formula templates are Ruby that runs unprivileged
       # on every user's machine via `brew install`. This lint rejects any
       # execution construct outside the documented allowlist (task-14 threat

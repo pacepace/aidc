@@ -16,6 +16,11 @@
 # AIDC_SMOKE_GIT_REPO=<owner/name> naming a scratch repo you own, a real push, PR, merge and
 # tidy there; with AIDC_SMOKE_GIT_CLAUDE=1, the git agent's question (git.sh says what each needs).
 #
+# Ports and ways out (W-K2): the session is made with a tunnel (--port), and with a page on the
+# network behind a login (--expose 8080 --login) when the config names kubernetes.ingress; with
+# AIDC_SMOKE_EGRESS_TCP=<host:port> (a TCP service on your LAN, e.g. a node's ssh) a relay to it;
+# with AIDC_SMOKE_GPU=1 the GPU (and without, none). A port is checked again after the restart.
+#
 # aidc kill keeps the session's audit claim by design; the smoke then lists it and removes it
 # with `aidc audit trim` (AIDC_SMOKE_KEEP_AUDIT=1 keeps it, and the end of the run names it).
 # The repo folders it made on the user's disk are removed. The git container stays.
@@ -30,6 +35,8 @@ export AIDC_SCRIPTS="$AIDC_ROOT/scripts"
 . "$AIDC_SCRIPTS/k8s/lib.sh"
 # shellcheck source=../../scripts/k8s/manifests.sh
 . "$AIDC_SCRIPTS/k8s/manifests.sh"
+# shellcheck source=../../scripts/k8s/net.sh
+. "$AIDC_SCRIPTS/k8s/net.sh"
 AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r' | tr '+' '_')
 k8s_require || exit 1
 
@@ -101,8 +108,14 @@ assert "aidc repo add ${PUBLIC_REPO} clones it onto the user's disk" \
 
 echo "[2/7] create"
 mkdir -p "$REPO"
-assert "aidc create --backend kubernetes makes a ready session" \
-    "(cd '$REPO' && '$AIDC' create '$SESSION' --backend kubernetes </dev/null)"
+TPORT=$(( 20000 + $(date +%s) % 10000 ))
+CREATE_FLAGS="--port ${TPORT}:8080"
+[ -z "$AIDC_K8S_INGRESS_DOMAIN" ] || CREATE_FLAGS="${CREATE_FLAGS} --expose 8080 --login"
+[ -z "${AIDC_SMOKE_EGRESS_TCP:-}" ] || CREATE_FLAGS="${CREATE_FLAGS} --egress-tcp ${AIDC_SMOKE_EGRESS_TCP}"
+[ "${AIDC_SMOKE_GPU:-}" != 1 ] || CREATE_FLAGS="${CREATE_FLAGS} --gpu"
+CREATE_LOG="$(mktemp)"
+assert "aidc create --backend kubernetes makes a ready session (${CREATE_FLAGS})" \
+    "(cd '$REPO' && '$AIDC' create '$SESSION' --backend kubernetes ${CREATE_FLAGS} </dev/null 2>'$CREATE_LOG')"
 assert "aidc list shows it, on the kubernetes backend" \
     "'$AIDC' list </dev/null | grep -E '^${SESSION} .*kubernetes'"
 assert "aidc status reports it clean" "status_has 'taint:    clean'"
@@ -149,6 +162,54 @@ assert "an inner container downloads through the proxy" \
 assert "an inner container cannot get out directly" \
     "! in_dev 'timeout 60 docker run --rm curlimages/curl:8.17.0 -sf -m 15 -o /dev/null https://1.1.1.1'"
 
+echo "[4a/7] ports, pages and ways out (W-K2)"
+# A page in the session, served by the session user, outliving this exec.
+in_dev "mkdir -p /tmp/smoke-www && echo aidc-smoke-page > /tmp/smoke-www/index.html && cd /tmp/smoke-www && (setsid nohup python3 -m http.server 8080 </dev/null >/dev/null 2>&1 &)" >/dev/null 2>&1
+tunnel_ok() { for _ in $(seq 30); do [ "$(curl -s -m 3 "http://127.0.0.1:${TPORT}/")" = aidc-smoke-page ] && return 0; sleep 2; done; return 1; }
+assert "the session's port answers on this machine through the tunnel (localhost:${TPORT})" "tunnel_ok"
+assert "aidc status lists the tunnel" "status_has 'localhost:${TPORT} -> ${SESSION}:8080  tunnel up'"
+assert "aidc proxy ls shows it" "'$AIDC' proxy '$SESSION' ls </dev/null | grep -q 'localhost:${TPORT} -> ${SESSION}:8080'"
+if [ -n "$AIDC_K8S_INGRESS_DOMAIN" ]; then
+    PAGE="${SESSION}-${AIDC_K8S_USER}.${AIDC_K8S_INGRESS_DOMAIN}"
+    LOGIN=$(sed -n 's/.*login for these pages.*user \([^ ]*\)  password \([^ ]*\).*/\1:\2/p' "$CREATE_LOG")
+    LB=$(k8s_kubectl -n "$NS" get ingress "${SESSION}-expose-8080" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+    page() { local i; for i in $(seq 30); do c=$(curl -s -o /dev/null -w '%{http_code}' -m 5 ${LB:+--resolve "${PAGE}:443:${LB}"} "$@" "https://${PAGE}/"); [ "$c" = "$WANT" ] && return 0; sleep 2; done; : "$i"; return 1; }
+    assert "the create printed the page's login once" "[ -n '$LOGIN' ]"
+    assert "the page at ${PAGE} asks for the login (401 without it)" "WANT=401 page"
+    assert "and serves the session's page with it" "WANT=200 page -u '$LOGIN'"
+    assert "a wrong password is refused" "WANT=401 page -u 'nobody:wrong'"
+else
+    echo "  note: kubernetes.ingress is not configured; no page checked (README, Kubernetes backend)"
+fi
+if [ "${AIDC_SMOKE_GPU:-}" = 1 ]; then
+    assert "--gpu: the GPU is in the session (nvidia-smi -L)" "in_dev 'nvidia-smi -L | grep -q GPU'"
+else
+    assert "no --gpu: no GPU in the session" "! in_dev 'nvidia-smi -L 2>/dev/null | grep -q GPU'"
+fi
+if [ -n "${AIDC_SMOKE_EGRESS_TCP:-}" ]; then
+    EH="${AIDC_SMOKE_EGRESS_TCP%:*}" EP="${AIDC_SMOKE_EGRESS_TCP##*:}"
+    case "$EH" in *[!0-9.]*) REACH="$EH" ;; *) REACH="aidc-${SESSION}-egress-$(printf '%s' "$EH" | sed 's/-/--/g; s/\./-/g')" ;; esac
+    tcp_ok() { in_dev "timeout 8 bash -c 'exec 3<>/dev/tcp/$1/$2'"; }
+    assert "the relay's name resolves in the session (its names responder)" "in_dev 'getent hosts ${REACH}'"
+    assert "the session reaches ${AIDC_SMOKE_EGRESS_TCP} through its relay" "tcp_ok '${REACH}' '${EP}'"
+    EIP=$(aidc_egress_resolve "$EH" 2>/dev/null || printf '%s' "$EH")
+    assert "but not ${EIP}:${EP} directly (only through the relay)" "! tcp_ok '${EIP}' '${EP}'"
+    assert "and no other port of it through the relay" "! tcp_ok '${REACH}' 1"
+    assert "other names still do not resolve (the responder forwards nothing)" "! in_dev 'getent hosts github.com'"
+    UID_E=$(k8s_kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    assert "aidc egress rm takes the relay away, live" "'$AIDC' egress '$SESSION' rm '${AIDC_SMOKE_EGRESS_TCP}' </dev/null && ! tcp_ok '${REACH}' '${EP}'"
+    assert "aidc egress add puts it back, live" "'$AIDC' egress '$SESSION' add '${AIDC_SMOKE_EGRESS_TCP}' </dev/null && tcp_ok '${REACH}' '${EP}'"
+    assert "and neither restarted the dev pod" "[ \"\$(k8s_kubectl -n '$NS' get pod '$POD' -o jsonpath='{.metadata.uid}')\" = '$UID_E' ]"
+    relay_log() {
+        local d
+        d=$(k8s_kubectl -n "$NS" get deploy -l "aidc/session=${SESSION},app=egress" -o jsonpath='{.items[0].metadata.name}')
+        k8s_kubectl -n "$NS" exec "deploy/${d}" -- sh -c "cat /var/aidc/audit/egress-*-${EP}.log" </dev/null
+    }
+    assert "every relayed connection is in the audit trail" "relay_log | grep -q 'accepting connection'"
+else
+    echo "  note: AIDC_SMOKE_EGRESS_TCP is not set; no relay checked"
+fi
+
 echo "[4b/7] the git container: requests from the session"
 sg_part_gitwc
 sg_part_requests
@@ -182,6 +243,8 @@ else
     echo "  note: testament.repo is not configured; the session has no testament (optional)"
 fi
 assert "aidc refresh re-pulls the malware feeds" "'$AIDC' refresh '$SESSION' </dev/null | grep -q '^refreshed:'"
+in_dev "cd /tmp && mkdir -p smoke-www && echo aidc-smoke-page > smoke-www/index.html && cd smoke-www && (setsid nohup python3 -m http.server 8080 </dev/null >/dev/null 2>&1 &)" >/dev/null 2>&1
+assert "the tunnel came back by itself on the new dev pod (localhost:${TPORT})" "tunnel_ok"
 
 echo "[5/7] the blocklist feeds"
 for _ in $(seq 60); do
@@ -224,12 +287,15 @@ in_dev "echo kept > '${DISK_REPO}/marker'" >/dev/null 2>&1 || true
 in_dev "echo aidc-smoke-history >> /home/vscode/.bash_history; mkdir -p /home/vscode/.claude/projects/aidc-smoke && echo '{\"smoke\":true}' > /home/vscode/.claude/projects/aidc-smoke/t.jsonl" >/dev/null 2>&1 || true
 AUDIT=$(k8s_kubectl -n "$NS" get statefulset "${SESSION}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null)
 assert "aidc kill removes the session" "'$AIDC' kill '$SESSION' </dev/null"
+assert "and stops this machine's tunnel to it" "! curl -s -m 3 -o /dev/null 'http://127.0.0.1:${TPORT}/'"
+[ -z "$AIDC_K8S_INGRESS_DOMAIN" ] || assert "and removes its page" \
+    "[ -z \"\$(k8s_kubectl -n '$NS' get ingress,secret -l aidc/session=$SESSION -o name)\" ]"
 trap - EXIT INT TERM
 sg_cleanup_github
 remove_repos
 assert "the smoke's working copies are removed from the user's disk" "! '$AIDC' repo list --backend kubernetes </dev/null | grep -q 'aidc-smoke-k8s/${SESSION}'"
 assert "nothing of it is left but its audit claim" \
-    "[ -z \"\$(k8s_kubectl -n '$NS' get statefulset,deployment,service,networkpolicy -l aidc/session=$SESSION -o name)\" ]"
+    "[ -z \"\$(k8s_kubectl -n '$NS' get statefulset,deployment,service,networkpolicy,ingress -l aidc/session=$SESSION -o name)\" ]"
 assert "its audit claim is kept (${AUDIT:-none named})" "[ -n '$AUDIT' ] && k8s_kubectl -n '$NS' get pvc '$AUDIT'"
 # A reader pod on the kept audit claim and the user's disk: what outlives the session.
 READER="${SESSION}-reader"

@@ -69,7 +69,7 @@ assert "the Kubernetes API is blocked" "! in_dev \"curl -sk -m 8 --noproxy '*' -
 
 echo "[4/7] Docker inside, unprivileged"
 assert "the dev pod is not privileged and runs in a user namespace" \
-    "k8s_kubectl -n '$NS' get pod '$POD' -o json | yq -p=json -e '.spec.hostUsers == false and ([.spec.containers[].securityContext.privileged // false] | all(. == false))'"
+    "k8s_kubectl -n '$NS' get pod '$POD' -o json | yq -p=json -e '.spec.hostUsers == false and ([.spec.containers[] | select(.securityContext.privileged == true)] | length == 0)'"
 assert "docker run hello-world" "in_dev 'timeout 180 docker run --rm hello-world'"
 mtu=$(in_dev "perl -e 'socket(my \$s,2,2,0); my \$r=pack(\"a16 x16\",\"eth0\"); ioctl(\$s,0x8921,\$r) and print unpack(\"x16 i\",\$r)'" 2>/dev/null)
 if [ -n "$mtu" ] && [ "$mtu" -lt 1500 ] 2>/dev/null; then
@@ -92,17 +92,23 @@ assert "every malware feed contributed entries (urlhaus > 0, hagezi > 0): ${line
     "printf '%s' '$line' | grep -Eq 'urlhaus=[1-9][0-9]* hagezi=[1-9][0-9]*'"
 
 echo "[6/7] taint"
-# shellcheck disable=SC2016  # perl's own variables
-k8s_kubectl -n "$NS" exec "$(proxy_pod)" -c refresher -- perl -e '
-    my $f = "/etc/squid/blocklist.txt"; open my $in, "<", $f or die; my @l = <$in>; close $in;
-    open my $out, ">", "$f.new" or die; print $out @l, "example.org\n"; close $out;
-    rename "$f.new", $f or die' </dev/null
+# The refresher image has a shell but no perl; replace the file in one rename, as it does, and
+# keep it sorted in byte order: squid's helper finds a domain by binary search, so an entry
+# appended to the end of a sorted list is never found.
+# shellcheck disable=SC2016  # expanded by the container's shell
+k8s_kubectl -n "$NS" exec "$(proxy_pod)" -c refresher -- sh -c \
+    'f=/etc/squid/blocklist.txt; { cat "$f"; echo example.org; } | LC_ALL=C sort -u > "$f.new" && mv "$f.new" "$f"' </dev/null
 code=$(in_dev 'curl -s -m 20 -o /dev/null -w "%{http_code}" http://example.org/' 2>/dev/null)
 assert "a blocklisted domain is refused by squid (403, got ${code:-none})" "[ '$code' = 403 ]"
 sleep 8
 assert "the policy sidecar writes the taint flag" \
     "k8s_kubectl -n '$NS' exec '$(proxy_pod)' -c policy -- cat /var/state/tainted </dev/null | grep -q malware_domains"
 assert "aidc status shows the taint" "'$AIDC' status '$SESSION' </dev/null | grep -q 'taint:    TAINTED'"
+# The audit sidecar copies the logs to its volume every 60 s (AIDC_AUDIT_INTERVAL).
+for _ in $(seq 15); do
+    k8s_kubectl -n "$NS" exec "$(proxy_pod)" -c audit -- grep -q tainted /var/aidc/audit/policy-events.log </dev/null 2>/dev/null && break
+    sleep 5
+done
 assert "the audit volume holds the policy events" \
     "k8s_kubectl -n '$NS' exec '$(proxy_pod)' -c audit -- grep -q tainted /var/aidc/audit/policy-events.log </dev/null"
 

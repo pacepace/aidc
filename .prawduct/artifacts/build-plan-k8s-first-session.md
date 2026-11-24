@@ -130,6 +130,12 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   a hand-added domain). The proxy pod now resolves through Quad9 (dnsPolicy None); live: the
   refresher loaded 2,172,272 entries from both feeds. Chunk 06's smoke must assert both feeds
   contributed, as the Docker smoke does.
+- Chunk 06: `tests/smoke/k8s.sh` (`make smoke-k8s`) passes 22 of 22 on the owner's cluster
+  (2026-11-24). The Docker smoke was not rerun for the one Docker-side change (the dev image's
+  inner dockerd MTU): rerunning it would rebuild the local `aidc/dev-base` tag the owner's
+  installed aidc uses; instead, a running Docker session reads 1500 both ways (so no `--mtu` is
+  passed and dockerd starts as before) and `tests/unit/test-dockerd-mtu.sh` covers the choice.
+  The Docker smoke passed at the end of wave 1 on the same scripts.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

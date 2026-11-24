@@ -151,8 +151,10 @@ then picked up by pinning the family's new minor.
 7. **A way to serve `face_api` without the hub** (today only the hub serves API faces), so local
    mode can also offer the HTTP API the owner wants.
 8. **Possible: L1 on a file, for an L1-only store.** 3tears already runs a collection with no
-   L2 (`NO_L2`) and no L3 (`l3_pool` None), and L1 has no size-based eviction (only the
-   absence markers are capped). L1 is SQLite opened as a named in-memory database
+   L2 (`NO_L2`) and no L3 (`l3_pool` None), and L1 has no size-based eviction in the checked-out
+   source (only the absence markers are capped). 0.95 adds an LRU to L1, off by default; an
+   L1-only store must keep it off, and should refuse to start with it on, since evicting there
+   loses the row. L1 is SQLite opened as a named in-memory database
    (`cache/sqlite.py`, `vfs=memdb`); a setting to open a file instead (write-ahead log on) would
    make an L1-only store durable on one machine. aidc's queues, ledger, watches and dead letters
    could then be 3tears collections locally, and gain L2/L3 on a mesh by configuration. To check

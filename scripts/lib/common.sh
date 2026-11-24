@@ -212,12 +212,14 @@ require_cmd() {
 
 # ---- aidc image inventory ----------------------------------------------------
 #
-# Single source of truth for the seven aidc/* images. Emits lines of:
+# Single source of truth for the aidc/* images. Emits lines of:
 #   <image-tag>|<build-context-dir>|<dockerfile-path>
 #
 # Order matters: small images first (fail-fast on the cheap ones), dev-base
-# last (the slowest). Used by:
-#   - cmd-rebuild.sh (iterates every row; force rebuild of each)
+# the slowest. gitctl (the Kubernetes backend's git container) runs only in a
+# cluster, so `aidc rebuild` skips it and `aidc k8s build` builds it. Used by:
+#   - cmd-rebuild.sh (iterates every Docker row; force rebuild of each)
+#   - k8s/k8s-build.sh (builds every row in the cluster)
 #   - ensure_image() below (looks up one row by role, build-if-missing)
 #
 # Requires AIDC_ROOT and AIDC_VERSION_TAG to be set in env. The dispatcher
@@ -233,6 +235,7 @@ aidc/audit:${AIDC_VERSION_TAG}|${AIDC_ROOT}/proxy/audit|${AIDC_ROOT}/proxy/audit
 aidc/forwarder:${AIDC_VERSION_TAG}|${AIDC_ROOT}/proxy/forwarder|${AIDC_ROOT}/proxy/forwarder/Dockerfile
 aidc/mcp:${AIDC_VERSION_TAG}|${AIDC_ROOT}/mcp|${AIDC_ROOT}/mcp/Dockerfile
 aidc/dev-base:${AIDC_VERSION_TAG}|${AIDC_ROOT}/.devcontainer|${AIDC_ROOT}/.devcontainer/Dockerfile
+aidc/gitctl:${AIDC_VERSION_TAG}|${AIDC_ROOT}/gitctl|${AIDC_ROOT}/gitctl/Dockerfile
 EOF
 }
 

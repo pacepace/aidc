@@ -499,3 +499,109 @@ spec:
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
 EOF
 }
+
+# k8s_render_git <node-selector-json>: the user's git container (docs/design-12-kubernetes.md,
+# "Git"): its home claim, its egress policy and its Deployment, in the user's namespace.
+#
+# It is the only thing that pushes, so it holds the user's SSH key and GitHub login, in its own
+# home claim on the user's retained class: a lost claim is a lost login, and the user, not the
+# admin, adds them again. It mounts the user's disk at the same path sessions do, so a repo has
+# one path everywhere.
+#
+# It runs as the git user (uid 2000; its own group 2000, plus the session group 1000 that the
+# shared parts of a repo belong to), unprivileged, with no API token and no service links.
+# Egress is Quad9 and public addresses only, as the session proxy's, so a key held here cannot
+# be walked to the API server, a node, a session or the LAN; nothing may connect to it (the
+# namespace's default-deny covers ingress, and the policy names it again for this pod). Like
+# the proxy, it resolves through Quad9 only, the one DNS its policy allows.
+#
+# Not under the sessions' runtime class: it runs no Docker, and its uid 2000 must be the same
+# number on the shared disk as in the repo lock design-12 measured.
+k8s_render_git() {
+    local sel="$1" ns img
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    img="${AIDC_K8S_REGISTRY_PULL}/aidc/gitctl:${AIDC_VERSION_TAG}"
+    local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}"
+    cat <<EOF2
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: git-egress, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {app: git}}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{ipBlock: {cidr: 9.9.9.9/32}}, {ipBlock: {cidr: 149.112.112.112/32}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: git-home, namespace: ${ns}, labels: {${labels}, app: git}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: git, namespace: ${ns}, labels: {${labels}, app: git}}
+spec:
+  replicas: 1
+  # Recreate: two git containers at once would share one home (one SSH key, one gh config) and
+  # race on the same repos.
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: git}}
+  template:
+    metadata: {labels: {${labels}, app: git}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      dnsPolicy: None
+      dnsConfig: {nameservers: [9.9.9.9, 149.112.112.112]}
+      # The session group, named here rather than left to the image's /etc/group.
+      securityContext: {supplementalGroups: [1000], seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        # A new home starts as a copy of the image's /home/git (Claude Code lives there, with
+        # the shell setup), as a session's home does. A new claim is empty and root-owned, so
+        # this one step runs as root, with only the capabilities a copy and a chown need. Only
+        # on first use (.profile is the marker): a restarted pod keeps the user's secrets.
+        - name: seed-home
+          image: ${img}
+          imagePullPolicy: Always
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed']
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
+          volumeMounts: [{name: home, mountPath: /seed}]
+      containers:
+        - name: git
+          image: ${img}
+          imagePullPolicy: Always
+          workingDir: /home/git
+          env:
+            - {name: HOME, value: /home/git}
+            - {name: AIDC_USER, value: "${AIDC_K8S_USER}"}
+          securityContext:
+            runAsUser: 2000
+            runAsGroup: 2000
+            runAsNonRoot: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          readinessProbe: {exec: {command: [tmux, has-session, -t, main]}, periodSeconds: 10}
+          resources: {requests: {cpu: 100m, memory: 512Mi}}
+          volumeMounts:
+            - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
+            - {name: home, mountPath: /home/git}
+      volumes:
+        - {name: disk, persistentVolumeClaim: {claimName: disk}}
+        - {name: home, persistentVolumeClaim: {claimName: git-home}}
+EOF2
+}

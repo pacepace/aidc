@@ -182,3 +182,21 @@ k8s_require_session() {
         *) die "cannot tell whether session '$2' exists: the cluster did not answer: ${where#unknown }" ;;
     esac
 }
+
+# k8s_git_pod <namespace>: the name of the user's git container pod (Running, not being
+# deleted), and returns 0; prints "absent" and returns 1 when there is none; prints
+# "unknown <why>" and returns 2 when the cluster cannot be asked. Never "absent" for a cluster
+# that did not answer.
+k8s_git_pod() {
+    local ns="$1" out
+    if ! out=$(k8s_kubectl -n "$ns" get pod -l app=git --field-selector=status.phase=Running \
+            -o jsonpath='{range .items[?(!@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' \
+            --request-timeout=10s 2>&1); then
+        printf 'unknown (%s)\n' "$(printf '%s' "$out" | tail -n1)"
+        return 2
+    fi
+    out=$(printf '%s\n' "$out" | grep -m1 . || true)
+    if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
+    printf 'absent\n'
+    return 1
+}

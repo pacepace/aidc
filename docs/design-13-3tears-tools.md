@@ -152,7 +152,7 @@ then picked up by pinning the family's new minor.
    mode can also offer the HTTP API the owner wants.
 8. **Possible: L1 on a file, for an L1-only store.** 3tears already runs a collection with no
    L2 (`NO_L2`) and no L3 (`l3_pool` None), and L1 has no size-based eviction in the checked-out
-   source (only the absence markers are capped). 0.95 adds an LRU to L1, off by default; an
+   source (only the absence markers are capped). 0.95.0, not yet released, adds an LRU to L1, off by default; an
    L1-only store must keep it off, and should refuse to start with it on, since evicting there
    loses the row. L1 is SQLite opened as a named in-memory database
    (`cache/sqlite.py`, `vfs=memdb`); a setting to open a file instead (write-ahead log on) would

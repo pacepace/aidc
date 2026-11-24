@@ -42,6 +42,9 @@ info "rebuilding all aidc/* images at ${AIDC_VERSION_TAG}"
 count=0
 while IFS='|' read -r tag context dockerfile; do
     [ -z "$tag" ] && continue
+    # The git container runs only on the Kubernetes backend (aidc k8s build builds it there);
+    # building it here would cost every Docker user minutes for an image nothing runs.
+    case "$tag" in aidc/gitctl:*) continue ;; esac
     info "==> building ${tag}"
     # dev-base bakes Claude Code from Anthropic's installer; bust that one
     # layer so every rebuild fetches the current release (see Dockerfile).

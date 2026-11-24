@@ -303,3 +303,5 @@ Python 3.12 is not a constraint (the MCP server already requires 3.14).
 Refined (2026-11-24): the converted server runs either way: it serves itself locally the way it
 is used now (its own MCP endpoint, no 3tears infrastructure needed), or it joins a 3tears mesh
 ("then it can serve itself locally the way it is used now or it can join a 3tears mesh").
+Refined (2026-11-24): the rebuilt server uses 3tears-observe for its observability ("we should use
+3tears observe then while we're at it").

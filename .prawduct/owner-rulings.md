@@ -320,3 +320,15 @@ other 3tears packages before building. Still after the Kubernetes work.
 The Kubernetes backend work is finished before aidc 2.0 (3tears adoption) starts: "we have to
 finish it before 3tears, so do the 3tears plan, but finish the k8s work". The 2.0 plan is written
 now; the build waits. Next Kubernetes wave: the git container.
+
+## 2026-11-24: The git container logs in to GitHub once, as the user; the agent cannot reach the token
+
+GitHub access for the git container is one `gh` login (device code approved in the user's
+browser), on the condition that the agent cannot get around the hardened commands ("are we
+hardening the gh commands so that the agent couldn't circumvent this? If so then I think we do
+this"). So the token is readable only by a separate credential user; the real `git`/`gh` run as
+that user through one fixed sudo rule that allows only the wrappers; the agent's own user cannot
+read the token. Commits, pushes and PRs show as the user ("commits have to show up as me"): the
+author name and email come from the user's GitHub account; no signing. Rejected: per-repo
+manual tokens or keys (too much ceremony), a GitHub App (acts as a bot), SSH agent forwarding
+(only works while connected).

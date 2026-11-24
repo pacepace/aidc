@@ -5,7 +5,7 @@ scope: send-provenance
 date: 2026-11-08
 title: A pasted prompt says who sent it
 ---
-**Why:** asked by the metallm session, approved by Pace 2026-11-08. A pasted prompt and a typed
+**Why:** asked by the coordinator's session, approved by Pace 2026-11-08. A pasted prompt and a typed
 one look the same to the session's Claude, so an orchestrator's send, or one it made for a
 person, read as the session's own person typing (live 2026-11-07 18:39:44Z: an agent's vote
 prompt was answered as the person's).

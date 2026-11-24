@@ -224,6 +224,13 @@ next message uses the new account with no restart; sessions never refresh, so th
 each other over a rotating refresh token. The broker renews each account's access token before
 it expires and rewrites the sessions' files.
 
+The broker writes into the session's Claude config **directory**, which the session pod mounts as
+a whole directory (on the user's volume). Never a single-file mount, a `subPath`, or a Secret
+volume: Claude replaces `.credentials.json` by rename, so a single-file mount goes stale on one
+side and cannot be renamed over on the other. That is what made in-container logins expire and
+account switches not stick in aidc's Docker backend before 1.5 (CTR-13, anthropics/claude-code#18443).
+The measurement below renamed within the directory, as the broker will.
+
 Measured 2026-11-24 (Claude Code 2.1.331, two Max accounts, one running interactive session):
 
 | Step | Next message served by |

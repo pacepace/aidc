@@ -76,7 +76,7 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
 
 ### Chunk 01: The git container
 
-- **Deliverables:** `aidc/gitctl` image (in the inventory, built by `aidc k8s build`); rendered
+- **Deliverables:** the git container image from `gitctl/Dockerfile` (in the inventory, built by `aidc k8s build`); rendered
   Deployment, home claim and NetworkPolicy in the user's namespace; `aidc git setup` (apply),
   `aidc git attach` (its tmux, to log in to GitHub and Claude), `aidc git status`; `aidc user add`
   offers it. Unit tests (kubectl stub); live: the pod runs, reaches GitHub, cannot reach the

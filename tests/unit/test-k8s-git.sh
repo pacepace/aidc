@@ -64,7 +64,9 @@ case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
-    *"get pvc disk"*) [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
+    *"get pvc disk"*)
+        [ "${K_PVC_WARN:-}" = 1 ] && echo "Warning: client version skew" >&2
+        [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
     *"get pod -l app=git"*)
         if [ "${K_NO_POD:-}" = 1 ]; then echo '{"items":[]}'
         else echo '{"items":[{"metadata":{"name":"git-old","deletionTimestamp":"2026-11-24T00:00:00Z"}},{"metadata":{"name":"git-7d9f-abc"}}]}'; fi ;;
@@ -164,6 +166,9 @@ assert_not_has "and applies nothing" "apply" "$(cat "$K_LOG")"
 out=$(K_DOWN=1 run git setup)
 assert_has "a cluster that does not answer is said so, not 'no disk'" "the cluster did not answer" "$out"
 assert_not_has "and is not reported as a missing user" "aidc user add" "$out"
+out=$(K_PVC_WARN=1 run git setup)
+assert_has "a kubectl warning on a disk read that worked is not 'no disk'" "exit=0" "$out"
+assert_not_has "and does not send the user to add a disk" "aidc user add" "$out"
 out=$(K_ROLLOUT_FAIL=1 run git setup)
 assert_has "a container that never gets ready is reported with where to look" "did not become ready" "$out"
 assert_has "and exits 1" "exit=1" "$out"

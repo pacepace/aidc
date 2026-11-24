@@ -20,10 +20,12 @@ k8s_require || exit 1
 [ "$AIDC_K8S_USER" != "git" ] || die "kubernetes.user 'git' clashes with the git container's own home (/home/git)"
 
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
-# The disk comes from `aidc user add`; a cluster that does not answer is not "no disk".
+# The disk comes from `aidc user add`; a cluster that does not answer is not "no disk". kubectl's
+# messages go to a file, not into the phase: a warning on a call that worked must not read as "no disk".
+err=$(mktemp); trap 'rm -f "$err"' EXIT
 if ! phase=$(k8s_kubectl -n "$ns" get pvc disk --ignore-not-found -o jsonpath='{.status.phase}' \
-        --request-timeout=10s 2>&1); then
-    die "cannot read ${AIDC_K8S_USER}'s disk in ${ns}: the cluster did not answer: $(printf '%s' "$phase" | tail -n1)"
+        --request-timeout=10s 2>"$err"); then
+    die "cannot read ${AIDC_K8S_USER}'s disk in ${ns}: the cluster did not answer: $(tail -n1 "$err")"
 fi
 [ "$phase" = "Bound" ] || die "${AIDC_K8S_USER} has no disk in ${ns}${phase:+ (it is ${phase})}: run \`aidc user add ${AIDC_K8S_USER}\` first"
 

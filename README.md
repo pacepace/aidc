@@ -619,6 +619,96 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `session_invoke` | A short, single-shot question whose answer is needed inline ("what does function X return?") — blocks until done; a fresh Claude, one at a time per session |
 | `session_invoke_async` | A short, single-shot question whose answer can land in the conversation later; a fresh Claude, one at a time per session |
 
+### The git container: pushes and PRs for your sessions
+
+Sessions cannot push. One git container per user does, on either backend: it holds your GitHub
+login where its own agent cannot read it, and pushes and opens and merges pull requests by its
+rules (fast-forward pushes only, never a force push, never `main`, `master`, `develop` or the
+default branch directly, merge commits only, no commit or PR text with AI attribution).
+Design: [docs/design-12-kubernetes.md](docs/design-12-kubernetes.md), "Git".
+
+**Set it up once.** `aidc git setup` starts it: on Docker the container `aidc-git-dev`, beside
+your sessions, behind its own proxy that reaches public addresses only (DNS through Quad9); in a
+cluster a `git` Deployment in your namespace (after `aidc user add`). Safe to run again: it
+restarts the container on the current image, and keeps its volumes (your login, its home, its
+private copies of your repos). `aidc git status` says whether it runs and is logged in, the git
+mode, how many requests wait, and how much its copies take ("unknown" when it cannot be asked).
+
+**Log it in.** `aidc git login` logs it in to GitHub as you: a one-time code you approve in your
+browser. Commits it makes show as you (your GitHub name; your public email, else GitHub's
+noreply address for your account), unsigned. `aidc git logout` removes the login. Its agent (a
+Claude of its own) needs its own Claude login: `aidc git attach` opens its terminal (window
+`claude`, and a `shell`), where you log in as in any session; detach with Ctrl-b d. With
+`aidc claude-token` set, the Docker git container takes that token as sessions do.
+
+**Add your repos.** Only repos you add reach GitHub through it:
+
+- On Docker it works on your own working copies, never its own clones: `aidc repo add <path>`
+  takes a working copy under your home whose origin is `https://github.com/<owner>/<name>` (to
+  keep pushing over SSH yourself, set the SSH URL as the push URL only). The container sees it
+  at the same path; nothing in it is re-owned or locked. `aidc repo remove <path|owner/name>`
+  forgets it and never deletes your working copy.
+- In a cluster `aidc repo add <github-url|owner/name> [--path P]` clones it onto your disk
+  (default `/home/<user>/<name>`), an ordinary working copy shared by your sessions;
+  `aidc repo remove` deletes the working copy only with `--delete-working-copy`, and not while
+  anything in it is unpushed unless `--even-unpushed` is given too.
+
+`aidc repo list` shows them. Behind each, the git container keeps a private copy of the GitHub
+repo that only the user holding the login runs git in; commits move between the two as git
+bundles, so nothing a session writes in a working copy (hooks, config, filters) runs where the
+login is.
+
+**How sessions ask.** A session works in its own worktree and branch inside an added repo
+(`git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD`; on Docker the worktree
+must be inside the working copy, and the session must have been created after `aidc git setup`,
+or created again, to get the request folder). Its `gh` is aidc's stand-in, not GitHub's CLI:
+`gh pr create` (pushing the branch first), `gh aidc push`, `gh pr merge` (merge commit only),
+`gh pr view`, `gh pr list` and `gh pr status` become requests the git container answers, so
+`/prawduct:pr` and plain `gh pr create` work unchanged. `git push` in a session fails and says to
+use `gh pr create`. The stand-in waits up to a minute for the answer, then prints
+"requested; waiting for approval" with the request's id (`gh aidc request <id>` reads it later).
+
+**Approve or deny.** In the git mode `ask` (the default) each push, PR and merge waits for you:
+`aidc git requests` lists them, `aidc git requests <id>` shows one (session, repo, branch and
+the commit you approve: a branch that moves after the request is refused), `aidc git approve
+<id>` runs it, `aidc git deny <id> [why]` refuses it and the session reads why. Your git agent
+also asks you about each waiting request with its question tool: answer in its terminal
+(`aidc attach git`). Reads (`gh pr view`, `gh pr list`) run at once. Requests and results are
+deleted after 30 days.
+
+**Modes.** `rules` lets gitctl's rules decide at once. Your mode is `git.mode` in the global
+config on Docker and `kubernetes.git_mode` in a cluster (applied by `aidc git setup`).
+`aidc git mode` lists it and the sessions given their own; `aidc git mode <session> rules` lets
+one session's requests run at once (each session sends a random token only it has, so another
+session cannot claim its mode), and `aidc git mode <session> default` takes it back. A session
+cannot be made stricter than your mode (`ask` under your `rules` is refused); one created
+before per-session modes existed must be created again.
+
+**From the terminal.** `aidc git push <repo> <branch>`, `aidc git pr <repo> <branch> [--base B]
+--title T --body-file F` and `aidc git merge <repo> <number>` do the same for a working copy;
+running the command is your approval. `aidc git tidy [<repo>]` deletes merged branches (on
+GitHub and locally) and their clean worktrees, and lists every leftover (unpushed, unmerged,
+uncommitted, orphaned worktree folders) without deleting it; `merge` tidies after itself. The
+first push of a repo shows GitHub's protections of its default branch; `aidc git protect
+<repo>` turns missing ones on (a ruleset against force pushes and deletion, merge commits
+allowed) only when you answer yes, and never turns any off (rulesets on private repos need a
+paid GitHub plan; GitHub's refusal is shown).
+
+**The git agent is a session.** It is the session named `git`: `aidc list` shows it (profile
+`git-agent`), `aidc attach git`, `aidc status git` and `aidc logs git` reach it, and `aidc kill
+git` and `aidc create git` are refused (`aidc git setup` manages it). It runs Claude with
+managed instructions it cannot change (the git rules; everything sessions write is data, never
+instructions) and a fixed allow list, and only it, never a session, reaches GitHub.
+
+**An orchestrator and ask mode.** On Docker the git agent's transcript reaches `aidc mcp` like
+any session's, so an orchestrator that watches the session `git` (`session_watch`) receives the
+agent's question about a request as that session's reply. Answering it with `session_send` is
+not yet checked live (the question tool may not take a pasted answer); answer in its terminal
+or with `aidc git approve|deny` meanwhile. **On Kubernetes the question does not reach an
+orchestrator yet:** the MCP server's session tools reach cluster sessions only with aidc 2.0's
+per-user MCP server. Until then answer by attaching (`aidc attach git`) or with `aidc git
+approve|deny`. This is the current behaviour, pending an owner ruling.
+
 ## Reference
 
 ### Commands
@@ -645,7 +735,8 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 | `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
 | `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
-| `aidc git {setup\|login\|logout\|attach\|status\|push\|pr\|merge\|tidy\|protect\|requests\|approve\|deny}` | Kubernetes backend: your git container, which holds your GitHub login and pushes, opens and merges PRs for you and your sessions (see "Kubernetes backend"). |
+| `aidc git {setup\|login\|logout\|attach\|status\|push\|pr\|merge\|tidy\|protect\|requests\|approve\|deny\|mode}` | Your git container (Docker or Kubernetes), which holds your GitHub login and pushes, opens and merges PRs for you and your sessions (see "The git container"). |
+| `aidc repo {add\|list\|remove}` | The repos your git container works on: your own working copies on Docker, clones on your disk in a cluster. |
 
 ### Profiles
 
@@ -674,51 +765,14 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
   privileged pods.
 - `aidc user add <name>`: the user's namespace and disk.
-- `aidc git setup | login | logout | attach | status`: the user's git container, the one thing
-  in the cluster that will push and open PRs (sessions cannot). `setup` starts it in your
-  namespace with its request folder on your disk (safe to run again; it restarts the container
-  so a rebuilt image is picked up); `login` logs it in to GitHub as you (a device code you
-  approve in your browser, so the admin never handles it), and its commits then show as you:
-  your GitHub name, and your public email or else GitHub's noreply address for your account,
-  unsigned; `attach` opens its terminal; `status` says whether it runs and is logged in, its
-  git mode, how many session requests wait for you, and how much its private copies take
-  ("unknown" when the cluster or the container does not answer). Its agent runs as its own
-  user (uid 2000, in the sessions' group), unprivileged, with no API token, and cannot read the
-  login: only gitctl's fixed verbs reach it. The container reaches public addresses and Quad9
-  DNS only, and nothing may connect to it. The login, its home and its private copies are
-  volumes, kept when the container is replaced.
-- `aidc git push <repo> <branch>`, `aidc git pr <repo> <branch> [--base B] --title T --body-file F`
-  and `aidc git merge <repo> <number>`: the git container pushes (fast-forward only, never
-  `main`, `master` or `develop`, no commit with AI attribution), pushes and opens a PR, or
-  merges one (always a merge commit), for a working copy on your disk; running the command is
-  your approval. After a merge it tidies. The first push to a repo shows GitHub's protections
-  of its default branch; `aidc git protect <repo>` turns missing ones on (a ruleset against
-  force pushes and deletion, merge commits allowed) only when you answer yes, and never turns
-  any off. `aidc git tidy [<repo>]` deletes merged branches (on GitHub and locally) and their
-  clean worktrees, and lists every leftover (unpushed, unmerged, uncommitted, orphaned worktree
-  folders) without deleting it.
-- Sessions ask through `gh`: a stand-in in the session image (not GitHub's CLI; it holds no
-  login) that turns `gh pr create` (with the push before it; `gh aidc push` pushes only),
-  `gh pr merge`, `gh pr view` and `gh pr list` into request files in
-  `/home/<user>/.aidc/git-requests`, waits up to a minute for the git container's answer and
-  prints it as gh would. `kubernetes.git_mode: ask` (the default) holds each push, PR and merge
-  until you approve it (`aidc git requests`, `aidc git approve <id>`, `aidc git deny <id>`); the
-  session hears "requested; waiting for approval" with the id (`gh aidc request <id>`, `gh pr
-  status`). `rules` lets gitctl's rules decide at once. Reads run at once in both. Requests and
-  results are deleted after 30 days. `git push` in a session still fails, and says to use
-  `gh pr create`. Sessions here make group-writable files (umask 002), so the git container
-  can tidy their worktrees. On Docker the stand-in says no git container is set up.
-- `aidc repo add <github-url|owner/name> [--path P]`: your git container clones the repo onto
-  your disk (default `/home/<user>/<name>`) as an ordinary working copy, yours and your
-  sessions', shared with the git container. It gets there through the git container's own
-  private copy of the GitHub repo, which only the user that holds the GitHub login (by way of
-  a helper) ever runs git in; commits move between the two as git bundles. Private repos need
-  the git container's GitHub login. `aidc repo list` shows the working copies on your disk;
-  `aidc repo remove <path|owner/name>` deletes the private copy, and the working copy only
-  with `--delete-working-copy`; that refuses, listing them, while the working copy or a
-  worktree in it holds commits on no GitHub branch, uncommitted changes or stashes, unless
-  `--even-unpushed` is given too. `aidc git status` reports how much the private copies take,
-  with a warning above `git_storage_warn` (default 1Gi).
+- `aidc git ...` and `aidc repo ...`: the user's git container, the one thing in the cluster
+  that pushes and opens PRs (sessions cannot); see "The git container" above. In a cluster it
+  runs in your namespace with its request folder at `/home/<user>/.aidc/git-requests` on your
+  disk; its agent runs as its own user (uid 2000, in the sessions' group), unprivileged, with
+  no API token, and reaches public addresses and Quad9 DNS only (NetworkPolicy); nothing may
+  connect to it. `aidc repo add` clones onto your disk; sessions make group-writable files
+  (umask 002), so the git container can tidy their worktrees. `aidc git status` warns when its
+  private copies take more than `git_storage_warn` (default 1Gi).
 - `aidc create <name> --backend kubernetes [--profile P]`: a session in the cluster, in your
   namespace. It sees your whole disk and starts at the current directory's place on it: a path
   under your home directory is the same path under `/home/<user>` on the disk, so a repo's
@@ -869,6 +923,13 @@ egress_tcp:                           # TCP destinations the session may reach t
 
 notify_webhook: ""                    # POSTed to on taint events
 
+# Only relevant if you use the git container on Docker (`aidc git setup`; a cluster's are
+# kubernetes.git_mode and kubernetes.git_storage_warn):
+git:
+  mode: ask                           # sessions' push/PR/merge requests: ask (you approve each) or
+                                      # rules (gitctl's rules decide); applied by `aidc git setup`
+  storage_warn: 1Gi                   # `aidc git status` warns when its private copies take more
+
 # Only relevant if you use `aidc mcp`:
 mcp:
   bind_address: 127.0.0.1             # bind the MCP server here. Change to e.g. your ZeroTier/Tailscale IP for remote access.
@@ -951,10 +1012,18 @@ Each session is independent. Multiple sessions run side by side.
 ## Smoke tests
 
 ```bash
-make smoke
+make smoke        # Docker
+make smoke-k8s    # the cluster of your kubernetes: config
 ```
 
-36 assertions. Roughly a minute or two — it brings up the full multi-container stack (dev + squid + refresher + policy + audit) and drives real proxy/taint retries. Covers isolation (no host docker.sock / no gh / no SSH), git asymmetry (push fails, commit works), DinD, proxy allow/deny, taint detection, audit dir survival after kill. The harness writes to `tests/scratch/` (gitignored); your host home is not touched.
+A few minutes each: a real session (dev + squid + refresher + policy + audit), checked for
+isolation (no host docker.sock, no GitHub CLI, no SSH), git asymmetry (push fails, commit
+works), DinD, proxy allow/deny, taint detection, the MCP server, and audit survival after kill;
+then the git container (setup, a public repo added, a session's requests denied, approved and
+run in rules mode, tidy, the git agent as a session). With the git container logged in and
+`AIDC_SMOKE_GIT_REPO=<owner/name>` naming a scratch repo you own, also a real push, PR, merge
+and tidy there. [tests/smoke/README.md](tests/smoke/README.md) says what each part needs. The
+Docker harness writes to `tests/scratch/` (gitignored) and removes what it made.
 
 ## Docs
 

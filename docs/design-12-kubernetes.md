@@ -62,29 +62,34 @@ Sessions cannot push. One trusted git container per user holds the GitHub login 
 only thing that pushes, pulls or opens PRs (K8S-04). It runs Claude Code with the git rules:
 
 - merge commits only; never force-push; no AI attribution in commits, PRs, code or docs;
-- git mode per session, from **ask** (default, waits in the git container's terminal for the
-  user) to **rules** (the agent decides by the rules); each user sets their own default (K8S-05);
-- an orchestrator the user drives may approve through the user's MCP
-  server; sandboxed sessions never reach that server (K8S-06);
+- git mode, from **ask** (default: each session request waits for the user) to **rules**
+  (gitctl's rules decide at once); each user sets their own, and may give one session `rules`
+  (K8S-05; "Per-session git mode" below);
+- an orchestrator the user drives may approve through the user's MCP server; sandboxed sessions
+  never reach that server (K8S-06; "Ask mode and orchestrators" below for where this stands);
 - the first time it meets a repo it checks the GitHub protections (no force push, merge commits
   only) and offers to turn on any that are missing (K8S-23).
 
 **Hard rules are enforced by code, not only instructions** (K8S-24). The git container's Claude reads
 text written by sandboxed sessions (commit messages, diffs, requests), which can try to talk it
 into breaking a rule. So: GitHub branch protection where available; a PreToolUse hook in a
-read-only managed settings file; and wrapped `git` and `gh` binaries that refuse `--force`,
-`--force-with-lease`, `+refspec`, squash/rebase merges and attribution trailers.
+read-only managed settings file; and, as built, no route to the login but `gitctl`'s fixed
+verbs, which build their own git and gh command lines and refuse force pushes, protected
+branches, non-merge merges and attribution (below). Wrapping `git` and `gh` behind option checks
+was built first and dropped: they accept too many spellings of too many options to fence.
 
 As built so far: `aidc git setup` runs it as a one-replica Deployment `git` in the user's
 namespace, from the `aidc/gitctl` image (git, a pinned and checksum-checked `gh`, Claude Code,
 openssh, tmux), built in the cluster with the others. It runs as uid 2000 (its own group 2000,
 so the files that lock a repo are not group-writable by sessions; supplementary group 1000, the
-sessions'), unprivileged with no capabilities, no service-account token, no service links. It
+sessions'), unprivileged (only SETUID, SETGID and AUDIT_WRITE, for sudo to gitctl's users), no
+service-account token, no service links. It
 mounts the user's disk at `/home/<user>` and its own home claim `git-home` (on the retained
 `storage_class`: it holds the user's secrets) at `/home/git`, seeded once from the image as a
 session's home is. Its NetworkPolicy `git-egress` allows no ingress and egress to Quad9 DNS and
-public addresses only, the proxy's rule, and it resolves through Quad9 only. The user adds
-their own GitHub login and SSH key through `aidc git attach` (its tmux). Measured 2026-11-24 on
+public addresses only, the proxy's rule, and it resolves through Quad9 only. The user logs it
+in to GitHub with `aidc git login` (one `gh` login over HTTPS; no SSH key) and its Claude through
+`aidc git attach` (its tmux). Measured 2026-11-24 on
 the reference cluster: GitHub reachable over HTTPS and SSH; the API service, every node's API
 server, kubelet and ssh, the registry pod, cluster DNS and a listening pod in a namespace with
 no policies all refused; the user's disk visible.
@@ -291,6 +296,28 @@ backend themselves: `--backend`, else the config's `backend:`, else Kubernetes w
 - The agent's transcript is copied (the dev image's `transcript-mirror.sh`, kept identical) into
   the MCP server's `transcripts/git`, given to the agent, so an orchestrator reads its questions
   as it reads any session's.
+- A working copy is mounted only while it is still as recorded (no symlink at it or on the way, a
+  real `.git` folder); after the start each mounted path's device and inode inside the container
+  must equal the host's (Linux hosts), else the container is removed: a symlink swapped in
+  between the check and Docker's mount is caught. `gitwc` acts only on a path at or inside one of
+  those mounts whose `.git` and config are its own (uid 1000), never on a repo the agent made.
+
+### Ask mode and orchestrators
+
+The owner ruling "Ask-mode git approvals bubble up through the orchestrator" has the git agent
+ask with its question tool, an orchestrator see that question as any session's, and the answer
+come back by `session_send` or from the user in the terminal. Where that stands (2026-11-24):
+
+- Docker: the git agent's transcript reaches `aidc mcp` (above), so an orchestrator that watches
+  the session `git` gets the question as that session's reply. Whether `session_send` can answer
+  it is not yet checked: the MCP server's own notes say the question widget may not take a
+  pasted answer and Enter. Checked by hand with a logged-in git agent (tests/smoke/README.md).
+- Kubernetes: the question does not reach an orchestrator. The MCP server's session tools reach
+  cluster sessions only with aidc 2.0's per-user MCP server (K8S-07); until then the user
+  answers by attaching (`aidc attach git`) or with `aidc git approve|deny`. This is the current
+  behaviour, pending an owner ruling.
+- Both: `aidc git requests|approve|deny` always work, and answer the request whatever the agent
+  is asking.
 
 ### Proposal: lock the parts of the repo that can run code
 
@@ -609,3 +636,7 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
 | Session behaviour at real access-token expiry with no refresh token | live test (hours) |
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
+| Git agent's question answered by `session_send` (Docker) | live check with a logged-in git agent (tests/smoke/README.md) |
+| Git agent's question reaching an orchestrator on Kubernetes | owner ruling; aidc 2.0's per-user MCP server |
+| A real push, PR, merge, tidy and protect through the git container | the smokes' GitHub part, with a login and a scratch repo |
+| The Docker git container on macOS (volume ownership, the mount check) | live test on a Mac |

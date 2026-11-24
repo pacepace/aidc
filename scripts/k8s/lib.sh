@@ -238,6 +238,33 @@ k8s_require_session() {
     esac
 }
 
+# k8s_dev_pod_uid <namespace> <session>: the dev pod's uid now, "" when there is none.
+k8s_dev_pod_uid() {
+    k8s_kubectl -n "$1" get pod "${2}-dev-0" --ignore-not-found -o jsonpath='{.metadata.uid}' \
+        --request-timeout=10s </dev/null 2>/dev/null || true
+}
+
+# k8s_wait_dev_ready <namespace> <session> <old-uid> <seconds>: wait until the session's dev pod
+# is a new one (its uid is not <old-uid>) and has said it is ready (user-main's marker in its
+# log: tmux and Claude are up). Returns 1 when it did not within <seconds>, saying where to
+# look on stderr.
+k8s_wait_dev_ready() {
+    local ns="$1" s="$2" old="$3" end uid
+    end=$(( $(date +%s) + $4 ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        uid=$(k8s_dev_pod_uid "$ns" "$s")
+        if [ -n "$uid" ] && [ "$uid" != "$old" ] \
+                && k8s_kubectl -n "$ns" logs "${s}-dev-0" -c dev --request-timeout=10s </dev/null 2>/dev/null \
+                    | grep -q '\[aidc-user-main\] ready'; then
+            return 0
+        fi
+        sleep 3
+    done
+    printf '[aidc] error: the dev pod of %s did not come back ready in %ss; see: kubectl -n %s describe pod %s-dev-0\n' \
+        "$s" "$4" "$ns" "$s" >&2
+    return 1
+}
+
 # k8s_git_pod <namespace>: the name of the user's git container pod (Running, not being
 # deleted), and returns 0; prints "absent" and returns 1 when there is none; prints
 # "unknown <why>" and returns 2 when the cluster cannot be asked. Never "absent" for a cluster

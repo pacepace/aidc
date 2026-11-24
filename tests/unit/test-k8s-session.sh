@@ -82,6 +82,14 @@ case "$*" in
         fi ;;
     *"get statefulset -l app=dev"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
+    *"get pod demo-dev-0 --ignore-not-found -o jsonpath={.metadata.uid}"*)
+        # The dev pod's uid: "old" until the pod is deleted or rolled, then "new" (K_UID_FILE).
+        cat "$K_UID_FILE" 2>/dev/null || printf 'old' ;;
+    *"delete pod demo-dev-0"*|*"rollout restart statefulset/demo-dev"*) [ "${K_NEVER_BACK:-}" = 1 ] || printf 'new' > "$K_UID_FILE" ;;
+    *"get pod demo-dev-0 -o jsonpath={.spec.containers"*) printf '%s' "${K_POD_IMAGE:-localhost:5000/aidc/dev-base:$(head -n1 "$AIDC_ROOT_FOR_STUB/VERSION")}" ;;
+    *"get statefulset demo-dev"*"jsonpath"*) printf 'localhost:5000/aidc/dev-base:v0.0.1' ;;
+    *"exec pod/demo-proxy-abc -c refresher -- /usr/local/bin/refresh.sh"*) echo "refreshed: 9 entries from urlhaus=4 hagezi=5 additions=0 (took 1s)" ;;
+    *"exec -i demo-dev-0 -c dev -- sudo -u vscode -H env HOME=/home/vscode sh -c"*) : ;;
     *"get pod demo-dev-0 -o jsonpath"*) printf 'Running' ;;
     *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
@@ -101,6 +109,7 @@ exit 0
 STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
+export K_UID_FILE="$SCRATCH/dev-uid" AIDC_ROOT_FOR_STUB="$AIDC_ROOT" AIDC_K8S_READY_WAIT=4
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
     K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
@@ -306,8 +315,51 @@ assert_eq "the size is measured after the final sweep" "yes" "$([ "${finalize_li
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 
-echo "=== the dispatcher's --backend switch ==="
+echo "=== restart, upgrade and refresh on Kubernetes ==="
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 run restart demo)
+assert_has "restart finds a cluster session without the flag and replaces its dev pod" "delete pod demo-dev-0" "$(cat "$K_LOG")"
+assert_has "and waits until a NEW pod says it is ready" "session demo is back" "$out"
+assert_has "exit 0" "exit=0" "$out"
+assert_not_has "the proxy is not touched" "proxy" "$(grep -E 'delete|rollout|set image' "$K_LOG")"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_NEVER_BACK=1 run restart demo)
+assert_has "a pod that never comes back is an error, with where to look" "did not come back ready in 4s; see: kubectl -n aidc-u-alice describe pod demo-dev-0" "$out"
+assert_has "exit 1" "exit=1" "$out"
 out=$(run restart demo --backend kubernetes)
+assert_has "restart of a session that is not there says so" "no session 'demo'" "$out"
+out=$(K_GIT=1 run restart git --backend kubernetes)
+assert_has "the git agent is not restarted as a session" "not a session aidc restart manages" "$out"
+
+rm -f "$K_UID_FILE"
+ver=$(head -n1 "$AIDC_ROOT/VERSION")
+out=$(K_EXISTS=1 run upgrade demo --yes)
+log=$(cat "$K_LOG")
+assert_has "upgrade points the dev pod and its init containers at this version's image" \
+    "set image statefulset/demo-dev dev=localhost:5000/aidc/dev-base:${ver} seed-home=localhost:5000/aidc/dev-base:${ver} repo-dir=localhost:5000/aidc/dev-base:${ver}" "$log"
+assert_has "and rolls it, so the pod is new even under the same tag" "rollout restart statefulset/demo-dev" "$log"
+assert_has "it shows the image it replaces" "current image: localhost:5000/aidc/dev-base:v0.0.1" "$out"
+assert_has "and says it is done once the new pod is ready on that image" "upgraded demo to localhost:5000/aidc/dev-base:${ver}" "$out"
+assert_has "testament: not configured is one line, and the upgrade goes on" "testament: not configured" "$out"
+assert_has "exit 0" "exit=0" "$out"
+rm -f "$K_UID_FILE"
+out=$(K_EXISTS=1 K_POD_IMAGE=localhost:5000/aidc/dev-base:v0.0.1 run upgrade demo --yes)
+assert_has "a pod that came back on another image is an error" "came back on localhost:5000/aidc/dev-base:v0.0.1" "$out"
+rm -f "$K_UID_FILE"
+out=$(: > "$K_APPLIED"; : > "$K_LOG"; cd "$HOME/code/proj" && printf 'n\n' | K_EXISTS=1 "$AIDC_ROOT/scripts/aidc" upgrade demo 2>&1; echo "exit=$?")
+assert_has "without --yes it asks, and n aborts" "aborted" "$out"
+assert_not_has "changing nothing" "set image" "$(cat "$K_LOG")"
+out=$(K_GIT=1 run upgrade git --yes --backend kubernetes)
+assert_has "the git agent is not upgraded as a session" "not a session aidc upgrade manages" "$out"
+
+out=$(K_EXISTS=1 run refresh demo)
+assert_has "refresh runs the refresher's one-shot refresh in the proxy pod" "exec pod/demo-proxy-abc -c refresher -- /usr/local/bin/refresh.sh" "$(cat "$K_LOG")"
+assert_has "and shows what it loaded" "refreshed: 9 entries" "$out"
+out=$(K_GIT=1 run refresh git --backend kubernetes)
+assert_has "the git agent has no blocklist to refresh" "no proxy and no blocklist" "$out"
+
+echo "=== the dispatcher's --backend switch ==="
+out=$(run network demo --backend kubernetes)
 assert_has "a verb the backend does not have yet is refused" "not available on the kubernetes backend yet" "$out"
 # A Docker verb must get exactly the arguments it would get without the flag.
 cat > "$SCRATCH/bin/docker" <<'DSTUB'
@@ -332,7 +384,7 @@ assert_has "a session in the cluster gets the Kubernetes verb" "logs deployment/
 assert_eq "and Docker is not asked" "" "$(cat "$D_LOG")"
 : > "$D_LOG"; out=$(run logs demo --component squid)
 assert_has "a session not in the cluster goes to Docker" "docker " "$(cat "$D_LOG")"
-out=$(K_EXISTS=1 run restart demo)
+out=$(K_EXISTS=1 run network demo)
 assert_has "a cluster session's verb the backend lacks says so" "not available on the kubernetes backend yet" "$out"
 out=$(K_EXISTS=1 run kill demo)
 assert_has "kill finds a cluster session without the flag" "session demo removed" "$out"

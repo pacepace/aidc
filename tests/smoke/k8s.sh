@@ -155,6 +155,34 @@ sg_part_requests
 sg_part_github sg_make_gh_wc
 sg_part_claude
 
+echo "[4c/7] restart, upgrade and refresh; the conversation resumes"
+# A conversation in the session home, where Claude keeps the repo's (one message is enough for
+# the aidc-claude wrapper to pass --continue), and a fact about the pods before.
+DISK_DIR="/home/${AIDC_K8S_USER}${REPO#"$HOME"}"
+PROJ=$(printf '%s' "$DISK_DIR" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')
+in_dev "mkdir -p /home/vscode/.claude/projects/${PROJ} && printf '%s\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"aidc smoke\"}}' > /home/vscode/.claude/projects/${PROJ}/aidc-smoke.jsonl" >/dev/null 2>&1 || true
+PROXY_BEFORE=$(proxy_pod)
+UID_BEFORE=$(k8s_kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+# resumed: Claude runs in the new pod with --continue (it is started a moment after "ready").
+resumed() { for _ in $(seq 20); do in_dev "ps -eo args | grep -q -- '[c]laude.*--continue'" && return 0; sleep 3; done; return 1; }
+assert "aidc restart gives the session a new dev pod" \
+    "'$AIDC' restart '$SESSION' </dev/null && [ \"\$(k8s_kubectl -n '$NS' get pod '$POD' -o jsonpath='{.metadata.uid}')\" != '$UID_BEFORE' ]"
+assert "its home is kept (a file written before is there)" "in_dev 'test -f /home/vscode/.aidc-smoke-write'"
+assert "Claude resumes the conversation (--continue)" "resumed"
+assert "the proxy pod was not touched" "[ \"\$(proxy_pod)\" = '$PROXY_BEFORE' ]"
+UID_BEFORE=$(k8s_kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+assert "aidc upgrade --yes rolls it onto this version's image" \
+    "'$AIDC' upgrade '$SESSION' --yes </dev/null && [ \"\$(k8s_kubectl -n '$NS' get pod '$POD' -o jsonpath='{.metadata.uid}')\" != '$UID_BEFORE' ]"
+assert "the upgraded pod runs ${AIDC_VERSION_TAG}" \
+    "k8s_kubectl -n '$NS' get pod '$POD' -o jsonpath='{.spec.containers[0].image}' | grep -q ':${AIDC_VERSION_TAG}\$'"
+assert "Claude resumes the conversation after the upgrade too" "resumed"
+if [ -n "$(bash -c ". '$AIDC_SCRIPTS/lib/config.sh'; . '$AIDC_SCRIPTS/lib/testament.sh'; aidc_testament_repo" 2>/dev/null)" ]; then
+    assert "testament is in the session (testament.repo is configured)" "in_dev 'bash -lc \"testament --version\"'"
+else
+    echo "  note: testament.repo is not configured; the session has no testament (optional)"
+fi
+assert "aidc refresh re-pulls the malware feeds" "'$AIDC' refresh '$SESSION' </dev/null | grep -q '^refreshed:'"
+
 echo "[5/7] the blocklist feeds"
 for _ in $(seq 60); do
     k8s_kubectl -n "$NS" logs "$(proxy_pod)" -c refresher 2>/dev/null | grep -q '^refreshed:' && break

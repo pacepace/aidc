@@ -837,9 +837,13 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   session of the same name never writes over it) and your disk, and records the trail's size on
   the claim. Kept audit volumes add up: `aidc audit list` and `aidc audit trim` (see "Kept audit
   trails") remove them with their volume and data, whatever the storage class retains.
+- `aidc restart <name>` gives the session a new dev pod on the same image, `aidc upgrade <name>`
+  one on this aidc version's image (after `aidc k8s build`), and `aidc refresh <name>` re-pulls
+  its malware feeds. The proxy pod, the session home and your disk are kept, so Claude resumes
+  its conversation (`--continue`).
 - Not yet on this backend: `--port`, `--dns`, `--network`, `--egress-tcp`, `--gpu`, and
-  `restart`, `upgrade`, `proxy`, `network`, `egress`, `refresh` (each says so). A tainted session
-  is recorded and reported, not frozen.
+  `proxy`, `network`, `egress` (each says so). A tainted session is recorded and reported, not
+  frozen.
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
 the pod: the dev pod reaches only its own Squid and has no DNS at all (Squid resolves names), so

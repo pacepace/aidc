@@ -69,6 +69,9 @@ printf '%s\n' "$*" >> "$K_LOG"
 [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
+    # aidc user add's kubeconfig (test-k8s-user.sh tests it): a token and the cluster's address.
+    *"create token"*) echo 'eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjE4OTM0NTYwMDB9.c2ln' ;;
+    *"config view"*) echo '{"clusters":[{"name":"c","cluster":{"server":"https://k.example:6443"}}]}' ;;
     *"get configmap git-repos"*)
         [ "${K_CM_EXISTS:-}" = 1 ] && echo '{"metadata":{"resourceVersion":"7"},"data":{"repos":"o/r\n"}}' ;;
     *"create -f -"*|*"replace -f -"*) cat >> "$K_CMS" ;;

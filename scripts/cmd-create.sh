@@ -158,6 +158,8 @@ EOF
 done
 
 validate_session_name "$NAME"
+# The git agent's name, on both backends (aidc git setup makes it; its container would collide).
+[ "$NAME" != git ] || die "'git' is the name of your git agent (aidc git setup); choose another session name"
 require_docker
 aidc_retire_auth_bridge
 require_cmd jq envsubst
@@ -694,6 +696,25 @@ if [ -n "$GIT_USER_NAME" ] && [ -n "$GIT_USER_EMAIL" ]; then
 else
     info "git identity: NOT bridged (set host's git config --global user.name and user.email)"
 fi
+# The git container (aidc git setup, scripts/docker/lib.sh). Every session gets its own random
+# token: its gh stand-in sends it with each request, so a git mode the user gives this session
+# (aidc git mode) applies to its requests alone. Only its dev container holds it. When the git
+# container is set up, the session also gets its request folder (the aidc-git-requests volume,
+# the git container's: sessions may only drop requests in and read their own results).
+GIT_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+printf '%s' "$GIT_TOKEN" | grep -Eq '^[0-9a-f]{64}$' || die "could not make the session's git token"
+GIT_REQUESTS_PATH="" GIT_REQUESTS_MOUNT="" GIT_REQUESTS_VOLUME_DECL=""
+if docker volume inspect aidc-git-requests >/dev/null 2>&1; then
+    GIT_REQUESTS_PATH=/var/aidc/git-requests
+    GIT_REQUESTS_MOUNT="- git-requests:${GIT_REQUESTS_PATH}:rw"
+    GIT_REQUESTS_VOLUME_DECL="  git-requests:
+    name: aidc-git-requests
+    external: true"
+    info "git container: requests go to ${GIT_REQUESTS_PATH} (gh pr create asks it)"
+else
+    info "git container: none set up (aidc git setup); this session cannot ask for pushes"
+fi
+export GIT_TOKEN GIT_REQUESTS_PATH GIT_REQUESTS_MOUNT GIT_REQUESTS_VOLUME_DECL
 export TAINT_RESPONSE="$AIDC_TAINT_RESPONSE"
 export TLD_TAINTS="$AIDC_TLD_TAINTS"
 export NOTIFY_WEBHOOK="$AIDC_NOTIFY_WEBHOOK"

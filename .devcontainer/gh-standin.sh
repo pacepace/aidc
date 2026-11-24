@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gh in an aidc session: a stand-in, not GitHub's CLI. Sessions hold no GitHub login and cannot
-# reach GitHub to push. On the Kubernetes backend the user's git container can (owner rulings
+# reach GitHub to push. The user's git container can, on either backend (owner rulings
 # 2026-11-24): this stand-in turns `gh pr create` (with the push before it), `gh pr merge` and
 # the pull request reads into requests, small JSON files in the request folder on the user's
 # disk ($AIDC_GIT_REQUESTS), waits up to about a minute for the git container's result, and
@@ -35,10 +35,11 @@ unsupported() {
     die "${1}: not available in an aidc session. This gh is a stand-in that asks your git container; it does: pr create (pushes too), pr merge (merge commit), pr view, pr list, pr status, repo view, aidc push, aidc request <id> (gh --help)"
 }
 
-# The request folder: set on the Kubernetes backend, the git container's, and ready.
+# The request folder: set when the user has a git container (on Docker, for sessions created
+# after aidc git setup), the git container's, and ready.
 need_folder() {
     if [ -z "$REQ" ]; then
-        die "no git container is set up for this session, so nothing here can push or reach GitHub. On the Docker backend, push and open pull requests from your own machine."
+        die "no git container is set up for this session, so nothing here can push or reach GitHub. On the Docker backend, push and open pull requests from your own machine, or have the user run aidc git setup and create this session again."
     fi
     { [ -d "$REQ/requests" ] && [ "$(stat -c %u "$REQ" 2>/dev/null)" = "$AGENT_UID" ]; } \
         || die "the git container's request folder (${REQ}) is not set up, or is not the git container's: ask the user to run aidc git setup"

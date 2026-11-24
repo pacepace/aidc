@@ -37,6 +37,9 @@ volumes:
   pyenv-versions:
     name: aidc-pyenv-versions
     external: true
+  # The git container's request folder (aidc git setup), shared and never removed with a
+  # session: external. Declared only when it exists.
+${GIT_REQUESTS_VOLUME_DECL}
 ${OVERLAY_VOLUMES_DECLARATIONS}
 services:
   squid:
@@ -156,6 +159,11 @@ ${DEV_NETWORKS_BLOCK}
       AIDC_SHARE_PLUGINS: "${AIDC_SHARE_PLUGINS}"
       AIDC_GIT_USER_NAME: "${GIT_USER_NAME}"
       AIDC_GIT_USER_EMAIL: "${GIT_USER_EMAIL}"
+      # The git container (aidc git setup): the request folder the gh stand-in writes to (empty
+      # when none is set up), and this session's own token, sent with each request.
+      AIDC_BACKEND: "docker"
+      AIDC_GIT_REQUESTS: "${GIT_REQUESTS_PATH}"
+      AIDC_GIT_TOKEN: "${GIT_TOKEN}"
       # The container owns its Claude config directory, on the dev-home volume
       # (same layout as Anthropic's reference devcontainer): credentials,
       # .claude.json and session state live here and are never bind-mounted from
@@ -190,6 +198,7 @@ ${DNS_BLOCK}
       ${CLAUDE_PLUGINS_MOUNT}              # ~/.claude/plugins RO at home path (cache resolves by convention; share_plugins)
       ${CLAUDE_PLUGINS_MOUNT_ABS}         # same dir RO at host-absolute path (marketplace resolves by installLocation)
       ${TRANSCRIPT_MIRROR_MOUNT}           # design-09: in-container mirror copies transcripts here for MCP to read
+      ${GIT_REQUESTS_MOUNT}                # the git container's request folder (only when it is set up)
 ${OVERLAY_VOLUMES_MOUNTS}
     depends_on:
       squid:

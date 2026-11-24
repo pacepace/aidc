@@ -406,3 +406,7 @@ On Kubernetes the git agent's ask-mode question reaches no orchestrator until th
 ## 2026-11-24 — Everything ships in 2.0; nothing is left behind
 
 Every piece of the Kubernetes program goes into 2.0 with the 3tears adoption: the per-user MCP server, account switching, Syncthing, ports/tunnel/LAN Ingress, GPU, `--egress-tcp`, the taint freeze, restart/upgrade, the audit trim (#77) and the git container's live GitHub test. None of it is deferred to a backlog item or a later release. Work is done all the way, not filed.
+
+## 2026-11-24 — Where the orchestrator reaches the per-user MCP from (Q-M1)
+
+The orchestrator runs somewhere inside the owner's VPN: maybe in the cluster, maybe not. So the per-user MCP server is always reachable in the cluster by its Service name, and can also be exposed to the VPN/LAN when the config asks (an Ingress name with TLS, or a LAN address), always behind its bearer token. Both paths are built and tested in 2.0.

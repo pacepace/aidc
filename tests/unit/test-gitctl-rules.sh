@@ -109,8 +109,13 @@ G init -q --bare "$R"
 G clone -q "$R" "$W" 2>/dev/null
 G -C "$W" commit -q --allow-empty -m "first"
 G -C "$W" push -q origin HEAD:main 2>/dev/null
-# The user adds the repo (aidc repo add: gitctl clone), which gives gitrun its private copy;
-# gitctl reaches GitHub for no repo the user has not added.
+# The user adds the repo: aidc repo add, on the laptop, puts it on the list of added repos
+# (mounted read-only in the git container; here a file the test writes, AIDC_GITCTL_ADDED_LIST),
+# then gitctl clone gives gitrun its private copy. gitctl reaches GitHub for no repo off the list.
+LIST="$S/added-repos"; export AIDC_GITCTL_ADDED_LIST="$LIST"
+list_add() { printf '%s\n' "$1" >> "$LIST"; }
+list_del() { { grep -vixF -- "$1" "$LIST" || true; } > "$LIST.tmp"; mv -f "$LIST.tmp" "$LIST"; }
+list_add o/r
 mkdir -p "$S/added"; ctl clone o/r "$S/added"
 assert_eq "the user adds o/r: gitrun now holds its private copy" "0 yes" "$RC $([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
 G -C "$W" switch -q -c feature
@@ -706,6 +711,9 @@ A="$S/forge/o/adopted.git"; G init -q --bare "$A"
 AW="$S/disk/adopted"; G clone -q "$A" "$AW" 2>/dev/null; G -C "$AW" commit -q --allow-empty -m "first"; G -C "$AW" push -q origin HEAD:main 2>/dev/null
 ctl fetch "$AW"; refused "before adopt, the repo is not one the user added: fetch is refused"
 cfg=$(md5sum < "$AW/.git/config")
+ctl adopt "$AW"; refused "adopt of a repo not on the user's list is refused (aidc repo add lists it first)"
+assert_eq "and gitrun makes no copy of it" no "$([ -d "$STORE/o/adopted.git" ] && echo yes || echo no)"
+list_add o/adopted
 ctl adopt "$AW"
 assert_eq "adopt makes gitrun's private copy" "0 yes" "$RC $([ -d "$STORE/o/adopted.git" ] && echo yes || echo no)"
 assert_has "and says which repo" "added o/adopted" "$OUT"
@@ -898,6 +906,41 @@ AIDC_GITCTL_ROLE=cred ctl pr-view o/r 7
 assert_eq "an added repo still works as gitcred" "pr view 7 --repo o/r " "$CALLS"
 
 echo ""
+echo "=== added means on the user's list: the agent cannot make gitrun take a repo ==="
+# The agent (uid git, or gitwc on Docker) reaches gitrun's add-copy through sudo directly, runs
+# gitctl clone itself (the command aidc repo add runs), and can adopt a working copy whose origin
+# it set. None of them adds a repo: gitrun refuses every repo off the list, and has-copy (what
+# gitcred asks) answers no for one, even with a private copy in the store.
+other_copy() { [ -d "$STORE/o/other.git" ] && echo yes || echo no; }
+AIDC_GITCTL_ROLE=run AIDC_GITCTL_CALLER=git ctl add-copy o/other
+refused "the agent's add-copy through sudo (as gitrun) of a repo off the list is refused"
+assert_has "saying the user adds it" "aidc repo add o/other" "$OUT"
+AIDC_GITCTL_ROLE=run AIDC_GITCTL_CALLER=gitwc ctl add-copy o/other; refused "gitwc's add-copy (as gitrun) of a repo off the list is refused"
+mkdir -p "$S/disk/sneak-clone"; ctl clone o/other "$S/disk/sneak-clone"
+refused "the agent's own gitctl clone of a repo off the list is refused"
+assert_eq "and leaves the folder empty" "" "$(ls -A "$S/disk/sneak-clone")"
+ctl adopt "$U"; refused "the agent's adopt of a working copy whose origin it set to a repo off the list is refused"
+assert_eq "none of them made a copy" no "$(other_copy)"
+ctl has-copy o/other; refused "has-copy then answers no"
+AIDC_GITCTL_ROLE=cred ctl pr-merge o/other 7; refused "and gitcred's merge of it is refused before gh runs"
+# A copy in the store is not "added": one left over (or made while the repo was listed) does not count.
+list_add o/other
+AIDC_GITCTL_ROLE=run AIDC_GITCTL_CALLER=git bash "$GITCTL/gitctl.sh" add-copy o/other >/dev/null 2>&1; RC=$?
+assert_eq "once the user lists the repo, add-copy makes its copy" "0 yes" "$RC $(other_copy)"
+ctl has-copy o/other; assert_eq "and has-copy answers yes" "0 yes" "$RC $OUT"
+AIDC_GITCTL_ROLE=cred ctl pr-merge o/other 7
+assert_has "and gitcred merges it" "pr merge 7 --repo o/other" "$CALLS"
+list_del o/other
+ctl has-copy o/other; refused "taken off the list, has-copy answers no though the copy is still there"
+assert_eq "(it is)" yes "$(other_copy)"
+AIDC_GITCTL_ROLE=cred ctl pr-merge o/other 7; refused "and gitcred's merge is refused"
+AIDC_GITCTL_ROLE=run ctl fetch o/other; refused "and gitrun's fetch of it"
+AIDC_GITCTL_ROLE=run ctl remove-copy o/other
+assert_eq "remove-copy still deletes a copy off the list (aidc repo remove)" "0 no" "$RC $(other_copy)"
+AIDC_GITCTL_ADDED_LIST="" ctl has-copy o/r; refused "with no list at all, nothing is added (has-copy answers no)"
+AIDC_GITCTL_ADDED_LIST="$S/no-such-list" AIDC_GITCTL_ROLE=cred ctl pr-view o/r 7; refused "and gitcred acts on nothing"
+
+echo ""
 echo "=== an approved request acts on the repo and commit it was approved for ==="
 ctl pr-view-json "$H" 7 --expect-repo o/r
 assert_has "--expect-repo naming the working copy's repo: the verb runs" "pr view 7 --repo o/r --json" "$CALLS"
@@ -924,7 +967,7 @@ echo "=== push never moves origin's default branch, whatever its name ==="
 G init -q --bare "$F/o/t.git"; git --git-dir="$F/o/t.git" symbolic-ref HEAD refs/heads/trunk
 TT="$S/t-seed"; G clone -q "$F/o/t.git" "$TT" 2>/dev/null
 G -C "$TT" switch -q -c trunk 2>/dev/null; G -C "$TT" commit -q --allow-empty -m "first"; G -C "$TT" push -q origin trunk 2>/dev/null
-TC="$S/disk/trunked"; mkdir -p "$TC"; ctl clone o/t "$TC"
+TC="$S/disk/trunked"; mkdir -p "$TC"; list_add O/T; ctl clone o/t "$TC"
 assert_eq "a repo whose default branch is trunk is added, on trunk" "0 trunk" "$RC $(git -C "$TC" branch --show-current)"
 G -C "$TC" commit -q --allow-empty -m "Straight to trunk"
 tbefore=$(git --git-dir="$F/o/t.git" rev-parse trunk)
@@ -951,6 +994,7 @@ if gitctl_ai_identity "author Devin Jones <devin@example.com> 1 +0000"; then fai
 else pass "the user's own identity (a name on the list) is never refused"; fi
 if gitctl_ai_identity "author Devin Jones <claude@example.invalid> 1 +0000"; then pass "but an AI email beside the user's name is"
 else fail "an AI email beside the user's name passed"; fi
+# shellcheck disable=SC2034  # read by gitctl_ai_identity (gitctl-rules.sh, sourced above)
 GITCTL_OWN_NAME="" GITCTL_OWN_EMAIL=""
 G -C "$W" switch -q feature
 git -C "$W" -c user.name=Claude -c user.email=claude@example.invalid commit -q --allow-empty -m "Plain message"
@@ -1061,6 +1105,14 @@ bash "$S/mut/gitctl.sh" tidy "$T" >/dev/null 2>&1
 assert_eq "with tidy's folder check removed, the planted request folder is deleted (so the tidy test would fail)" no \
     "$([ -d "$REQS" ] && echo yes || echo no)"
 
+mut 's/^    { \[ -n "$ADDED_LIST" \] && \[ -f "$ADDED_LIST" \] && \[ -r "$ADDED_LIST" \]; } || return 1$/    return 0/'
+grep -q '^    return 0$' "$S/mut/gitctl-run.sh" || fail "the list-check mutation did not apply"
+: > "$S/bin/calls.log"
+AIDC_GITCTL_ROLE=run bash "$S/mut/gitctl.sh" add-copy o/other >/dev/null 2>&1
+AIDC_GITCTL_ROLE=cred bash "$S/mut/gitctl.sh" pr-merge o/other 7 >/dev/null 2>&1
+assert_has "with gitrun's added-repos list check removed, the agent's add-copy makes a copy and gitcred merges a repo the user never added (so the list tests would fail)" \
+    "pr merge 7 --repo o/other" "$(cat "$S/bin/calls.log")"
+rm -rf "$STORE/o/other.git"
 mut 's/           cred_added "$1" ;;/           : ;;/'
 : > "$S/bin/calls.log"
 AIDC_GITCTL_ROLE=cred bash "$S/mut/gitctl.sh" pr-merge o/other 7 >/dev/null 2>&1

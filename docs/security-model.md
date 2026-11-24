@@ -196,7 +196,14 @@ copies. Its network reaches public addresses only. What remains, by design or no
   `rules` mode nothing waits for you.
 - **The git agent is not a boundary.** Its allow list and instructions are courtesies; it can run
   gitctl itself (and reach gitcred through sudo directly), so a session that talks it into acting
-  gets what gitctl's rules allow, no more: only repos you added (gitcred asks gitrun itself), and
+  gets what gitctl's rules allow, no more: only repos you added, and "added" is a list written
+  only from your machine by `aidc repo add|remove` (on Kubernetes the `git-repos` ConfigMap, on
+  Docker `~/.config/aidc/git-added/repos`), mounted read-only in the git container; no pod there
+  holds an API token. gitrun copies no repo off that list and `has-copy`, which gitcred asks
+  before every gh call on a repo, answers no for one, so the agent's own `gitctl clone`, `adopt`
+  or a direct `sudo -u gitrun gitctl.sh add-copy` adds nothing. On Docker the list sits in your
+  `~/.config/aidc`, so a session whose workspace covers that folder could change it, as it could
+  the token file beside it. And
   on Docker the user's uid (`gitwc`) only for fetch, tidy and unpushed on a mounted working copy.
   Only its instructions stop it approving a request without asking you. What it changed on
   GitHub is recorded where it cannot change it (`aidc git log`: each push, PR, merge, comment,

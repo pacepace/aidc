@@ -96,6 +96,34 @@ dk_git_repos() {
     return 0
 }
 
+# The list of repos the user added (aidc repo add|remove), one lower-case owner/name a line, in
+# a folder of its own on this machine, bind-mounted read-only into the git container at
+# /etc/aidc/git-repos: gitctl's gitrun copies, and gitcred acts on, only a repo on it. Nothing in
+# the container can write it (a read-only mount; gitwc, the user's uid, included). A folder, not
+# the file, is mounted, so a list replaced here (a new file, renamed into place) is the one the
+# running container reads.
+dk_git_added_dir() { printf '%s/.config/aidc/git-added' "$(aidc_host_home)"; }
+dk_git_added() {
+    local f
+    f="$(dk_git_added_dir)/repos"
+    [ -f "$f" ] || return 0
+    grep -E '^[a-z0-9][a-z0-9-]*/[a-z0-9._-]+$' "$f" 2>/dev/null || true
+}
+# dk_git_added_change add|remove <owner/name>: put the repo on the list or take it off.
+# Returns 1, saying why on stderr, when the list could not be written.
+dk_git_added_change() {
+    local d slug cur new
+    d=$(dk_git_added_dir)
+    slug=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+    mkdir -p "$d" || { printf '[aidc] error: cannot make %s\n' "$d" >&2; return 1; }
+    cur=$(dk_git_added)
+    if [ "$1" = add ]; then new=$(printf '%s\n%s\n' "$cur" "$slug" | grep -v '^$' | sort -u)
+    else new=$(printf '%s\n' "$cur" | grep -vxF -- "$slug" | grep -v '^$' || true); fi
+    { printf '%s\n' "$new" | grep -v '^$' > "$d/repos.tmp" || true; } \
+        && chmod 0644 "$d/repos.tmp" && mv -f "$d/repos.tmp" "$d/repos" \
+        || { printf '[aidc] error: cannot write %s/repos\n' "$d" >&2; return 1; }
+}
+
 # dk_git_origin <working-copy>: its origin URL, read from the one file (no include followed).
 dk_git_origin() {
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git config --file "$1/.git/config" --get remote.origin.url 2>/dev/null
@@ -249,7 +277,7 @@ dk_git_check_mounts() {
 # it or on the way: dk_git_mount_ok), is left out with a warning (Docker would make an empty
 # root-owned folder in place of a gone one, and follow a symlink to another folder).
 dk_git_start() {
-    local disk transcripts token="" tokfile mounts=() mounted=() p bad
+    local disk transcripts token="" tokfile mounts=() mounted=() p bad added
     dk_git_settings
     disk=$(dk_git_disk)
     transcripts=$(dk_git_transcripts_dir)
@@ -258,6 +286,10 @@ dk_git_start() {
         token=$(tr -d '[:space:]' < "$tokfile" 2>/dev/null || true)
         case "$token" in sk-ant-oat01-*) ;; *) token="" ;; esac
     fi
+    # The list of added repos: made here (an empty list) when missing, so Docker does not make
+    # a root-owned folder in its place; mounted read-only.
+    added=$(dk_git_added_dir)
+    { mkdir -p "$added" && { [ -f "$added/repos" ] || : > "$added/repos"; }; } || die "cannot make ${added}"
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         if dk_git_mount_ok "$p"; then mounts+=(-v "${p}:${p}:rw"); mounted+=("$p")
@@ -278,7 +310,7 @@ dk_git_start() {
         -e "CLAUDE_CODE_OAUTH_TOKEN=${token}" \
         -v aidc-git-home:/home/git -v aidc-git-cred:/var/lib/gitctl/gitcred \
         -v aidc-git-run:/var/lib/gitctl/gitrun -v "${DK_GIT_REQUESTS_VOLUME}:${DK_GIT_REQUESTS}" \
-        -v "${transcripts}:/var/aidc/transcript-out:rw" \
+        -v "${transcripts}:/var/aidc/transcript-out:rw" -v "${added}:/etc/aidc/git-repos:ro" \
         ${mounts[@]+"${mounts[@]}"} \
         "aidc/gitctl:${AIDC_VERSION_TAG}" >/dev/null || die "could not start the git container"
     if ! bad=$(dk_git_check_mounts ${mounted[@]+"${mounted[@]}"}); then

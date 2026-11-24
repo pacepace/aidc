@@ -2,8 +2,9 @@
 # aidc repo remove <path|owner/name> [--delete-working-copy [--even-unpushed]]: forget a repo in
 # the git container.
 #
-# Always deletes gitrun's private copy of the GitHub repo (gitctl remove-copy), so copies do not
-# pile up in its store. The working copy on the user's disk holds the sessions' work, so it is
+# Always takes the repo off the user's list of added repos (the git-repos ConfigMap: lib.sh,
+# k8s_git_repos_*), so gitctl acts on it no more, and deletes gitrun's private copy of the GitHub
+# repo (gitctl remove-copy), so copies do not pile up in its store. The working copy on the user's disk holds the sessions' work, so it is
 # deleted only when the user says so, by a one-shot root pod (manifests.sh, k8s_render_repo_dir,
 # mode delete) that refuses anything but a git working copy. Sessions' worktrees usually sit
 # inside the working copy, so before that the git agent fetches and lists what the delete would
@@ -92,6 +93,7 @@ if [ -n "$path" ] && [ "$DELETE_WC" = 1 ]; then
     fi
 fi
 
+k8s_git_repos_change "$ns" remove "$slug" || die "could not take ${slug} off the list of added repos; nothing was removed"
 k8s_kubectl -n "$ns" exec "$pod" -c git -- gitctl remove-copy "$slug" </dev/null >&2 \
     || die "the git container could not remove its copy of ${slug}"
 if [ -n "$path" ]; then

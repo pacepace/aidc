@@ -61,12 +61,17 @@ assert_not_has() {
 #   K_NO_GIT_POLICY=1    the git-egress policy is missing
 #   K_COPIES / K_BUNDLES bytes in gitrun's private copies / the agent's bundles (1 MiB / 0);
 #   K_NO_STORAGE=1       gitctl storage printed nothing
+#   K_CM_EXISTS=1        the list of added repos (ConfigMap git-repos) exists, holding o/r;
+#                        create/replace of it append to $K_CMS
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
 [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
+    *"get configmap git-repos"*)
+        [ "${K_CM_EXISTS:-}" = 1 ] && echo '{"metadata":{"resourceVersion":"7"},"data":{"repos":"o/r\n"}}' ;;
+    *"create -f -"*|*"replace -f -"*) cat >> "$K_CMS" ;;
     *"apply -f -"*) { echo ---; cat; } >> "$K_APPLIED"
         [ "${K_UNCHANGED:-}" = 1 ] && echo "deployment.apps/git unchanged" || echo "deployment.apps/git configured" ;;
     *"get pod repo-dir-"*"jsonpath"*)
@@ -109,7 +114,7 @@ STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
+    K_APPLIED="$SCRATCH/applied.yaml" K_CMS="$SCRATCH/configmaps.json" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
 # backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
 # aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
@@ -122,7 +127,7 @@ kubernetes:
   tolerations:
     - {key: role, operator: Equal, value: dev, effect: NoSchedule}
 EOF
-run() { : > "$K_APPLIED"; : > "$K_LOG"; "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null; echo "exit=$?"; }
+run() { : > "$K_APPLIED"; : > "$K_LOG"; : > "$K_CMS"; "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null; echo "exit=$?"; }
 q() { yq -N ea "$1" -o=json -I=0 "$K_APPLIED"; }
 VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr '+' '_')
 
@@ -171,11 +176,24 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
 assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home, the private copies at gitrun's store" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"}]' \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
 assert_eq "the volumes are the user's disk claim and the git-home, git-cred and git-run claims" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}}]' \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}}]' \
     "$(pod '.volumes')"
+# The list of repos the user added is the one thing gitctl takes "added" from: read-only in the
+# pod, a ConfigMap no one in the namespace can write (no container holds an API token), made
+# here when missing and never rewritten by setup.
+assert_eq "the list of added repos is mounted read-only (0444) in every container that has it, and in no init step" \
+    '[{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true}]' \
+    "$(pod '[(.containers[], .initContainers[]) | .volumeMounts[] | select(.name == "repos")]')"
+assert_eq "no container can reach the API to change it (no service account token)" false "$(pod '.automountServiceAccountToken')"
+assert_eq "setup makes the list when there is none, empty, labelled for the user" \
+    '{"kind":"ConfigMap","metadata":{"name":"git-repos","namespace":"aidc-u-alice","labels":{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice","app":"git"}},"data":{"repos":""}}' \
+    "$(jq -c '{kind, metadata, data}' "$K_CMS")"
+assert_has "by create (never over one that exists)" "create -f -" "$(cat "$K_LOG")"
+cm_line=$(grep -n "create -f -" "$K_LOG" | head -1 | cut -d: -f1); dep_line=$(grep -n "apply -f -" "$K_LOG" | head -1 | cut -d: -f1)
+assert_eq "before the pod that mounts it is applied" yes "$([ "${cm_line:-99}" -lt "${dep_line:-0}" ] && echo yes || echo no)"
 assert_eq "the home and login claims (the user's secrets) are on the user's retained class, not the session one" \
     '"shared-disk"' "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name != "git-run") | .spec.storageClassName' | sort -u)"
 assert_eq "the private copies (a cache of GitHub) are on the session class, 10Gi unless configured" '["scratch","10Gi"]' \
@@ -240,6 +258,8 @@ assert_eq "it applies the same manifests (apply leaves what is right alone)" "$f
 assert_not_has "and deletes nothing but its own one-shot folder pod (the home claim holds the user's secrets)" " delete " \
     "$(grep -v ' delete pod repo-dir-requests-' "$K_LOG")"
 
+out=$(K_CM_EXISTS=1 run git setup)
+assert_eq "run again with the list there, setup leaves it as it is" "" "$(cat "$K_CMS")$(grep -E 'create -f -|replace -f -' "$K_LOG")"
 echo "=== aidc git setup: failures ==="
 out=$(K_NO_DISK=1 run git setup)
 assert_has "no disk: says to add the user first" "run \`aidc user add alice\` first" "$out"

@@ -29,17 +29,28 @@ log() { printf '[aidc-entrypoint] %s\n' "$*" >&2; }
 # `git config --global user.{name,email}`. We write a minimal ~vscode/.gitconfig
 # (NOT the host's whole gitconfig — that often carries credential helpers,
 # signing keys, and includeIf paths we don't want bridged).
+# Written by git itself (git config --file), which quotes and escapes each value: a name with a
+# double quote or a backslash is stored as written, not as a config line git cannot read. Into a
+# new file, renamed into place, so nothing already at that name is followed.
+# write_git_identity <file> <name> <email>
+write_git_identity() {
+    local f="$1" tmp
+    tmp=$(mktemp "${f}.XXXXXX") || return 1
+    if GIT_CONFIG_NOSYSTEM=1 git config --file "$tmp" user.name "$2" \
+        && GIT_CONFIG_NOSYSTEM=1 git config --file "$tmp" user.email "$3" \
+        && GIT_CONFIG_NOSYSTEM=1 git config --file "$tmp" init.defaultBranch main \
+        && chmod 0644 "$tmp" && mv -f "$tmp" "$f"; then
+        return 0
+    fi
+    rm -f "$tmp"; return 1
+}
 if [ -n "${AIDC_GIT_USER_NAME:-}" ] && [ -n "${AIDC_GIT_USER_EMAIL:-}" ]; then
     log "writing /home/vscode/.gitconfig (user: ${AIDC_GIT_USER_NAME} <${AIDC_GIT_USER_EMAIL}>)"
-    cat > /home/vscode/.gitconfig <<GITCONFIG
-[user]
-    name = ${AIDC_GIT_USER_NAME}
-    email = ${AIDC_GIT_USER_EMAIL}
-[init]
-    defaultBranch = main
-GITCONFIG
-    chown vscode:vscode /home/vscode/.gitconfig
-    chmod 0644 /home/vscode/.gitconfig
+    if write_git_identity /home/vscode/.gitconfig "$AIDC_GIT_USER_NAME" "$AIDC_GIT_USER_EMAIL"; then
+        chown vscode:vscode /home/vscode/.gitconfig
+    else
+        log "WARN: could not write /home/vscode/.gitconfig (commits made here carry no identity)"
+    fi
 fi
 
 # Enable the host's shared plugins inside the container (share_plugins).

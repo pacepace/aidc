@@ -694,6 +694,10 @@ export CLAUDE_RESUME
 # config).
 GIT_USER_NAME="$(git config --get user.name 2>/dev/null || true)"
 GIT_USER_EMAIL="$(git config --get user.email 2>/dev/null || true)"
+# A control character would reach the session's config (proxy/compose-render.sh drops it too).
+if [ "$(printf '%s%s' "$GIT_USER_NAME" "$GIT_USER_EMAIL" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then
+    GIT_USER_NAME="" GIT_USER_EMAIL=""
+fi
 export GIT_USER_NAME GIT_USER_EMAIL
 if [ -n "$GIT_USER_NAME" ] && [ -n "$GIT_USER_EMAIL" ]; then
     info "git identity: ${GIT_USER_NAME} <${GIT_USER_EMAIL}>"

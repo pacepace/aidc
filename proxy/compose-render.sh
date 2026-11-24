@@ -43,6 +43,16 @@ set -euo pipefail
 : "${CLAUDE_RESUME:=true}"
 : "${GIT_USER_NAME:=}"
 : "${GIT_USER_EMAIL:=}"
+# The git identity lands in double-quoted YAML values, which compose then interpolates: a
+# backslash or double quote is escaped for YAML and a $ doubled for compose, so any name arrives
+# as written. One with a control character (a newline would end the value and start YAML of its
+# own) is not bridged at all, as on Kubernetes (aidc create says so).
+yaml_dq() { local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"; printf '%s' "${v//\$/\$\$}"; }
+if [ "$(printf '%s%s' "$GIT_USER_NAME" "$GIT_USER_EMAIL" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then
+    GIT_USER_NAME="" GIT_USER_EMAIL=""
+fi
+GIT_USER_NAME=$(yaml_dq "$GIT_USER_NAME"); GIT_USER_EMAIL=$(yaml_dq "$GIT_USER_EMAIL")
+export GIT_USER_NAME GIT_USER_EMAIL
 
 # Compute the conditional docker-socket mount. In freeze mode (the product
 # default) the policy sidecar needs the host docker socket so it can

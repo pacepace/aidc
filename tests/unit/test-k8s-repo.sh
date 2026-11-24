@@ -48,6 +48,10 @@ assert_not_has() {
 #   K_LIST_REAL=dir   repo list runs its real scan script over dir (with host git)
 #   K_UNPUSHED="lines" what gitctl unpushed reports before its end line (printf %b);
 #   K_EXEC_FAIL_UNPUSHED=1 gitctl unpushed fails (a fetch that failed)
+#   K_CM (a file)     the ConfigMap git-repos (the list of added repos) as the cluster holds it:
+#                     get prints it, create/replace write it (a stale resourceVersion is a conflict)
+#   K_CM_FAIL=1       reading it fails as an unreachable cluster does
+#   K_LIST_STALE=1    the git pod does not see the list (its mounted file is missing)
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$K_LOG"
@@ -55,6 +59,19 @@ printf '%s\n' "$*" >> "$K_LOG"
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) { echo ---; cat; } >> "$K_APPLIED" ;;
+    *"get configmap git-repos"*)
+        [ "${K_CM_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
+        [ -s "$K_CM" ] && cat "$K_CM"; exit 0 ;;
+    *"create -f -"*|*"replace -f -"*)
+        j=$(cat); old=$(jq -r '.metadata.resourceVersion // "0"' "$K_CM" 2>/dev/null || echo 0)
+        case "$*" in
+            *create*) [ -s "$K_CM" ] && { echo 'Error from server (AlreadyExists)' >&2; exit 1; } ;;
+            *) [ "$(printf '%s' "$j" | jq -r '.metadata.resourceVersion')" = "$old" ] || { echo 'Error from server (Conflict)' >&2; exit 1; } ;;
+        esac
+        printf '%s' "$j" | jq -c --arg rv "$((old + 1))" '.metadata.resourceVersion = $rv' > "$K_CM" ;;
+    *"exec git-7d9f-abc -c git -- cat /etc/aidc/git-repos/repos"*)
+        [ "${K_LIST_STALE:-}" = 1 ] && exit 1
+        [ -s "$K_CM" ] && jq -r '.data.repos' "$K_CM"; exit 0 ;;
     *"get pod -l app=git"*)
         if [ "${K_NO_POD:-}" = 1 ]; then echo '{"items":[]}'
         else echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}'; fi ;;
@@ -96,7 +113,7 @@ STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH"
+    K_APPLIED="$SCRATCH/applied.yaml" K_CM="$SCRATCH/configmap.json" AIDC_K8S_GIT_REPOS_WAIT=2 PATH="$SCRATCH/bin:$PATH"
 # backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
 # aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
@@ -185,6 +202,55 @@ assert_has "and exits 1" "exit=1" "$out"
 assert_eq "and the empty folder still goes back to the session user" "make own" "$(pods)"
 out=$(K_FAIL_STEP=own run repo add octo/hello)
 assert_has "a clone that cannot be given to the session user says so, with how to retry" "could not be given to the session user" "$out"
+
+echo "=== the list of added repos: written from here, read-only in the git pod ==="
+# gitctl takes "added" from that list alone (the agent can ask gitrun for a copy of anything,
+# and run gitctl clone itself), so aidc repo add puts the repo on it, from the user's kubectl,
+# and the git pod must see it there before the clone; a failed add takes it off again.
+cm_repos() { jq -r '.data.repos' "$K_CM" 2>/dev/null | grep . || true; }
+rm -f "$K_CM"
+out=$(run repo add Octo/Hello)
+assert_has "a repo is added" "exit=0" "$out"
+assert_eq "it is on the list, lower-case" "octo/hello" "$(cm_repos)"
+assert_eq "the list is the git-repos ConfigMap in the user's namespace, labelled as aidc's" \
+    '{"name":"git-repos","namespace":"aidc-u-alice","labels":{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice","app":"git"}}' \
+    "$(jq -c '.metadata | del(.resourceVersion)' "$K_CM")"
+w_line=$(grep -nE "(create|replace) -f -" "$K_LOG" | head -1 | cut -d: -f1)
+seen_line=$(grep -n "cat /etc/aidc/git-repos/repos" "$K_LOG" | head -1 | cut -d: -f1)
+clone_line=$(grep -n "gitctl clone" "$K_LOG" | cut -d: -f1)
+assert_eq "written, then seen by the git pod, then cloned" yes \
+    "$([ "${w_line:-99}" -lt "${seen_line:-0}" ] && [ "${seen_line:-99}" -lt "${clone_line:-0}" ] && echo yes || echo no)"
+out=$(run repo add octo/other --path /home/alice/other)
+assert_eq "a second repo joins it; the first stays (replace at the version read)" $'octo/hello\nocto/other' "$(cm_repos)"
+assert_has "by replace" "replace -f -" "$(cat "$K_LOG")"
+out=$(K_LIST_STALE=1 run repo add octo/stale --path /home/alice/stale)
+assert_has "a git pod that never sees the entry stops the add" "does not see octo/stale on the list of added repos" "$out"
+assert_has "exit 1" "exit=1" "$out"
+assert_not_has "before any folder is made or anything cloned" "gitctl clone" "$(cat "$K_LOG")"
+assert_eq "and no folder pod" "" "$(cat "$K_APPLIED")"
+assert_eq "and the entry is taken off again" $'octo/hello\nocto/other' "$(cm_repos)"
+out=$(K_CLONE_FAIL=1 run repo add octo/broken --path /home/alice/broken)
+assert_has "a clone that fails" "exit=1" "$out"
+assert_eq "takes its new entry off the list" $'octo/hello\nocto/other' "$(cm_repos)"
+out=$(K_CLONE_FAIL=1 run repo add octo/hello --path /home/alice/hello3)
+assert_eq "but not an entry that was there before (another working copy of it)" $'octo/hello\nocto/other' "$(cm_repos)"
+out=$(K_CM_FAIL=1 run repo add octo/third --path /home/alice/third)
+assert_has "a list that cannot be read stops the add" "cannot read the list of added repos" "$out"
+assert_not_has "before anything is cloned" "gitctl clone" "$(cat "$K_LOG")"
+rm -f "$K_CM"
+out=$(K_STATE=repo run repo add octo/hello)
+assert_has "a working copy already there (added before the list existed) is put on the list" "exit=0" "$out"
+assert_eq "it is" "octo/hello" "$(cm_repos)"
+assert_has "and gitrun gets its copy from it (gitctl adopt: it changes nothing there)" "gitctl adopt /home/alice/hello" "$(execs)"
+assert_not_has "nothing is cloned" "gitctl clone" "$(cat "$K_LOG")"
+out=$(K_STATE=repo run repo remove /home/alice/hello)
+assert_eq "repo remove takes it off the list" "" "$(cm_repos)"
+off_line=$(grep -n "replace -f -" "$K_LOG" | tail -1 | cut -d: -f1); rm_line=$(grep -n "gitctl remove-copy" "$K_LOG" | cut -d: -f1)
+assert_eq "before gitrun's copy is removed" yes "$([ "${off_line:-99}" -lt "${rm_line:-0}" ] && echo yes || echo no)"
+out=$(K_STATE=repo K_CM_FAIL=1 run repo remove /home/alice/hello)
+assert_has "a list that cannot be changed stops the remove, saying so" "nothing was removed" "$out"
+assert_not_has "before the copy is removed" "remove-copy" "$(cat "$K_LOG")"
+rm -f "$K_CM"
 
 echo "=== aidc repo list ==="
 out=$(K_LIST=$'/home/alice/hello\thttps://github.com/octo/hello\tmain\n/home/alice/old\thttps://github.com/octo/old\tfeature' run repo list)

@@ -30,6 +30,12 @@ fi
 [ "$phase" = "Bound" ] || die "${AIDC_K8S_USER} has no disk in ${ns}${phase:+ (it is ${phase})}: run \`aidc user add ${AIDC_K8S_USER}\` first"
 
 sel=$(k8s_node_selector) || exit 1
+# The list of added repos the pod mounts (lib.sh, k8s_git_repos_*): made empty when there is none,
+# never rewritten here (it is aidc repo add|remove's).
+k8s_git_repos_read "$ns" || exit 1
+if [ -z "$K8S_GIT_REPOS_RV" ]; then
+    k8s_git_repos_write "$ns" "" || die "could not make the list of added repos in ${ns}"
+fi
 info "applying ${AIDC_K8S_USER}'s git container in ${ns}"
 applied=$(k8s_render_git "$sel" | k8s_kubectl apply -f -) || die "could not apply the git container"
 printf '%s\n' "$applied" >&2

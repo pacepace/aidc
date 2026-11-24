@@ -661,7 +661,11 @@ Claude of its own) needs its own Claude login: `aidc git attach` opens its termi
 `aidc repo list` shows them. Behind each, the git container keeps a private copy of the GitHub
 repo that only the user holding the login runs git in; commits move between the two as git
 bundles, so nothing a session writes in a working copy (hooks, config, filters) runs where the
-login is.
+login is. Which repos are added is a list only `aidc repo add|remove` on your machine writes,
+read-only in the git container (in a cluster the `git-repos` ConfigMap, on Docker
+`~/.config/aidc/git-added/repos`): the git agent cannot add a repo itself, and gitctl acts on
+no other. A repo added before that list existed is taken over by running `aidc repo add` again
+(after `aidc git setup`).
 
 **How sessions ask.** A session works in its own worktree and branch inside an added repo
 (`git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD`; on Docker the worktree

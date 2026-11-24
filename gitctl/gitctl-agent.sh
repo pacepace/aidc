@@ -146,7 +146,8 @@ clone_path_ok() {
 # bundle gitrun makes. Group-shared (umask 002, core.sharedRepository=group), so sessions and
 # the agent can both work in it; origin is the GitHub URL, for the record (only gitctl reaches
 # it). The default branch is the one origin's HEAD points at (main or master first when two
-# branches share its commit).
+# branches share its commit). Only a repo on the user's list: gitrun's add-copy refuses any other
+# (run_listed), so running clone is not a way to add a repo.
 agent_clone() {
     nargs $# 2; no_options "$@"
     local slug="$1" path="$2" head def sha ref
@@ -182,9 +183,10 @@ agent_clone() {
     echo "cloned $(forge_url "$slug") into ${path} (${def})"
 }
 
-# adopt: an existing working copy (on Docker, the user's own) becomes one of the user's repos:
-# gitrun makes its private copy of origin's repo, which every other verb then requires. The
-# working copy is only read (its origin), never changed.
+# adopt: gitrun makes its private copy of an existing working copy's repo (on Docker, the
+# user's own), which every other verb then requires. Only for a repo already on the user's list
+# (aidc repo add wrote it there first): gitrun's add-copy refuses any other, so an origin the
+# agent set adds nothing. The working copy is only read (its origin), never changed.
 agent_adopt() {
     nargs $# 1; no_options "$@"
     local url

@@ -316,6 +316,78 @@ k8s_repo_dir_step() {
     esac
 }
 
+# The list of repos the user added: the ConfigMap git-repos in the user's namespace, key repos,
+# one lower-case owner/name a line, written here only (aidc repo add|remove and git setup, with
+# the user's kubectl). The git pod mounts it read-only at K8S_GIT_REPOS_FILE's folder; gitctl's
+# gitrun copies, and gitcred acts on, only a repo on it. No pod in the namespace holds an API
+# token (automountServiceAccountToken: false), so neither the git agent nor a session can
+# change it.
+K8S_GIT_REPOS_CM=git-repos
+K8S_GIT_REPOS_FILE=/etc/aidc/git-repos/repos
+
+# k8s_git_repos_read <namespace>: the list now, in K8S_GIT_REPOS, and the ConfigMap's
+# resourceVersion in K8S_GIT_REPOS_RV (empty: there is none yet). Returns 1, saying why on
+# stderr, when the cluster did not answer: never "no repos" then.
+k8s_git_repos_read() {
+    local out
+    K8S_GIT_REPOS="" K8S_GIT_REPOS_RV=""
+    if ! out=$(k8s_kubectl -n "$1" get configmap "$K8S_GIT_REPOS_CM" --ignore-not-found -o json \
+            --request-timeout=10s </dev/null); then
+        printf '[aidc] error: cannot read the list of added repos in %s: the cluster did not answer\n' "$1" >&2
+        return 1
+    fi
+    [ -n "$out" ] || return 0
+    K8S_GIT_REPOS=$(printf '%s' "$out" | jq -r '.data.repos // ""') \
+        && K8S_GIT_REPOS_RV=$(printf '%s' "$out" | jq -r '.metadata.resourceVersion // ""') \
+        || { printf '[aidc] error: cannot read the list of added repos in %s\n' "$1" >&2; return 1; }
+    [ -n "$K8S_GIT_REPOS_RV" ] || { printf '[aidc] error: the list of added repos in %s has no resourceVersion\n' "$1" >&2; return 1; }
+}
+
+# k8s_git_repos_write <namespace> <list>: the ConfigMap with <list>: created when there is none
+# (K8S_GIT_REPOS_RV empty), else replaced at the resourceVersion just read, so a change made in
+# between is refused (a conflict), never overwritten.
+k8s_git_repos_write() {
+    local verb=create
+    [ -z "$K8S_GIT_REPOS_RV" ] || verb=replace
+    k8s_render_git_repos "$1" "$2" "$K8S_GIT_REPOS_RV" | k8s_kubectl "$verb" -f - >/dev/null
+}
+
+# k8s_git_repos_change <namespace> add|remove <owner/name>: put the repo on the list or take it
+# off (read, change, write; tried again on a conflict). Returns 1, saying why, when it could not.
+k8s_git_repos_change() {
+    local ns="$1" op="$2" slug new
+    slug=$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')
+    for _ in 1 2 3; do
+        k8s_git_repos_read "$ns" || return 1
+        if [ "$op" = add ]; then
+            printf '%s\n' "$K8S_GIT_REPOS" | grep -qxF -- "$slug" && [ -n "$K8S_GIT_REPOS_RV" ] && return 0
+            new=$(printf '%s\n%s\n' "$K8S_GIT_REPOS" "$slug" | grep -v '^$' | sort -u)
+        else
+            printf '%s\n' "$K8S_GIT_REPOS" | grep -qxF -- "$slug" || return 0
+            new=$(printf '%s\n' "$K8S_GIT_REPOS" | grep -vxF -- "$slug" | grep -v '^$' || true)
+        fi
+        k8s_git_repos_write "$ns" "$new" && return 0
+    done
+    printf '[aidc] error: could not update the list of added repos in %s\n' "$ns" >&2
+    return 1
+}
+
+# k8s_git_repos_wait <namespace> <git-pod> <owner/name>: wait until the git pod's mounted copy
+# of the list has the repo (the kubelet brings a changed ConfigMap into a pod's volume within
+# about a minute), up to AIDC_K8S_GIT_REPOS_WAIT seconds (default 180). Returns 1 when it
+# never did.
+k8s_git_repos_wait() {
+    local ns="$1" pod="$2" slug end
+    slug=$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')
+    end=$(( $(date +%s) + ${AIDC_K8S_GIT_REPOS_WAIT:-180} ))
+    while :; do
+        k8s_kubectl -n "$ns" exec "$pod" -c git -- cat "$K8S_GIT_REPOS_FILE" </dev/null 2>/dev/null \
+            | tr '[:upper:]' '[:lower:]' | grep -qxF -- "$slug" && return 0
+        [ "$(date +%s)" -lt "$end" ] || return 1
+        sleep 3
+    done
+}
+
 # The request folder on the user's disk: sessions' gh stand-in drops push and pull request
 # requests in it for the git container (gitctl/git-requests.sh). The git container's own.
 k8s_git_requests_path() { printf '/home/%s/.aidc/git-requests' "$AIDC_K8S_USER"; }

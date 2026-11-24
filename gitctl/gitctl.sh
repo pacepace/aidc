@@ -36,15 +36,18 @@
 #   gitctl storage                                       bytes in gitrun's copies and the bundles
 #   gitctl remove-copy <owner/name>                      delete gitrun's private copy of a repo
 #   gitctl has-copy <owner/name>                         yes when the repo is one the user added
+#                                                        (on the user's list, and gitrun has its copy)
 #   gitctl log [<lines>]                                 what gitctl changed on GitHub (gitrun's and
 #                                                        gitcred's own records), oldest first
 #   gitctl adopt <repo>                                  add an existing working copy's repo (Docker:
 #                                                        the user's own; gitrun makes its private copy)
 #
 # <repo> is a working copy (or a worktree of one) whose origin is
-# https://github.com/<owner>/<name>, a repo the user added (aidc repo add: gitctl clone, which
-# gives gitrun its private copy); every verb that reaches GitHub refuses any other repo, reads
-# included. A verb on a <repo> may end with `--expect-repo <owner/name>`: it is refused unless
+# https://github.com/<owner>/<name>, a repo the user added: `aidc repo add`, run on the user's
+# laptop, writes it into the list of added repos (ADDED_LIST, mounted read-only here), then has
+# gitctl clone or adopt give gitrun its private copy. gitrun makes a copy of, and acts on, no repo
+# missing from that list, whoever asks; every verb that reaches GitHub refuses any other repo,
+# reads included. A private copy alone is not "added": the agent can ask gitrun for one. A verb on a <repo> may end with `--expect-repo <owner/name>`: it is refused unless
 # the working copy's origin is that repo (the request watcher passes what the user approved).
 # push may also end with `--expect-commit <sha>`: refused unless that is the branch's commit;
 # pr-merge with `--expect-head <sha>`: refused unless that is the pull request's head now, and the
@@ -79,6 +82,11 @@ if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
     INSTALLED=1
     REAL_GIT=/usr/bin/git REAL_GH=/usr/local/bin/gh
     RUN_HOME=/home/gitrun CRED_HOME=/var/lib/gitctl/gitcred RUN_STORE=/var/lib/gitctl/gitrun
+    # The repos the user added (aidc repo add), one owner/name a line, written only from the
+    # user's laptop and mounted read-only here: on Kubernetes the git-repos ConfigMap (the pod
+    # holds no API token), on Docker ~/.config/aidc/git-added bind-mounted :ro. Nothing in this
+    # container, gitrun included, can write it.
+    ADDED_LIST=/etc/aidc/git-repos/repos
     HELPER='!sudo -n -u gitcred /opt/aidc/lib/gitctl/cred-helper.sh'
     case "$(id -un)" in gitrun) ROLE=run ;; gitcred) ROLE=cred ;; *) ROLE=agent ;; esac
     FORGE=""
@@ -103,6 +111,8 @@ else
     REAL_GIT="${AIDC_GITCTL_REAL_GIT:-$(command -v git)}" REAL_GH="${AIDC_GITCTL_REAL_GH:-$(command -v gh || echo gh)}"
     RUN_HOME="${HOME:-/}" CRED_HOME="${AIDC_GITCTL_CRED_HOME:-${HOME:-/}}"
     RUN_STORE="${AIDC_GITCTL_RUN_STORE:-}"
+    # Unset, no repo is listed (nothing is added), as an installed container without the list.
+    ADDED_LIST="${AIDC_GITCTL_ADDED_LIST:-}"
     HELPER=""
     ROLE="${AIDC_GITCTL_ROLE:-agent}"
     FORGE="${AIDC_GITCTL_TEST_FORGE:-}"

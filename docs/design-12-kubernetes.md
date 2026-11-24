@@ -135,7 +135,18 @@ request's merge also to the head the user was shown when it was taken, `--expect
 gitcred checks for itself that a repo is one the user added before any gh call that names one:
 it asks gitrun (`has-copy`, read only, through the one sudo rule gitcred has, to that verb of
 gitctl only), so a caller who reaches gitcred through sudo directly cannot act on another repo
-either. gitrun and gitcred each append a line for every action that changes GitHub (push,
+either. "Added" is not "gitrun holds a copy": the agent can ask gitrun for a copy (sudo to its
+`add-copy`, its own `gitctl clone`, `gitctl adopt` on an origin it set). It is the list of added
+repos, one owner/name a line, which only the user's machine writes: on Kubernetes the
+`git-repos` ConfigMap in the user's namespace (written by `aidc repo add|remove` and created
+empty by `aidc git setup` with the user's kubectl), mounted read-only at `/etc/aidc/git-repos`
+in the git container, whose pod, like every pod aidc makes, has no service account token; on
+Docker `~/.config/aidc/git-added/repos`, its folder bind-mounted `:ro` at the same path. gitrun
+refuses every verb that makes or uses a copy (`add-copy`, so `clone` and `adopt`, `fetch`,
+`push`, `delete-branch`) for a repo off the list, and `has-copy` answers no for one even with a
+copy in the store; `remove-copy` still deletes any. A caller check on gitrun (refusing `add-copy`
+when sudo's caller is the agent) would add nothing: `aidc repo add` itself reaches gitrun as the
+agent (`kubectl exec` and `docker exec -u git` run as uid 2000), so it could not tell them apart. gitrun and gitcred each append a line for every action that changes GitHub (push,
 delete-branch; pr-create, pr-comment, pr-merge, protect) to an action log in their own storage,
 which the agent cannot write: time, verb, repo, branch or PR, commit, who asked (a request's id
 or `direct`) and the calling user; each is capped at 1 MiB, then kept as one older file.
@@ -147,12 +158,17 @@ uid 2000, with a dummy token: `sudo -l` lists only gitctl; the token is unreadab
 tried; every verb refuses options and malformed arguments. The bypasses that remain are listed
 in the build plan (`build-plan-k8s-git-container.md`, Chunk 02 decisions).
 
-Repos as built: `aidc repo add <owner/name>` has a one-shot root pod (CHOWN, DAC_OVERRIDE,
+Repos as built: `aidc repo add <owner/name>` first puts the repo on the `git-repos` ConfigMap and
+waits (up to `AIDC_K8S_GIT_REPOS_WAIT`, 180 s) until the git pod's mounted copy has it (the
+kubelet brings a changed ConfigMap into the volume within about a minute); a failed add takes a
+new entry off again. A working copy of the repo already at the path is put on the list and
+adopted (`gitctl adopt`), so one added before the list existed is taken over by running `aidc
+repo add` again. Then a one-shot root pod (CHOWN, DAC_OVERRIDE,
 FOWNER and FSETID only, symlinks on the way refused, never followed) make the repo folder and
 give it to the agent while `gitctl clone` fills it from gitrun's bundle, then give the working
 copy to the session user, group-shared (setgid, `core.sharedRepository=group`) so the agent,
 in the session group, works in it too. It is an ordinary repo: no lock, sessions write all of
-it. `aidc repo remove` deletes gitrun's private copy (`gitctl remove-copy`), and the working
+it. `aidc repo remove` takes the repo off the list, then deletes gitrun's private copy (`gitctl remove-copy`), and the working
 copy only with `--delete-working-copy`: first the agent fetches and lists what the delete would
 lose (`gitctl unpushed`: branches with commits on no origin branch, detached commits,
 uncommitted changes, stashes, and every worktree), and any of it refuses the delete unless
@@ -160,8 +176,9 @@ uncommitted changes, stashes, and every worktree), and any of it refuses the del
 with origin's branches as the working copy last fetched them, and says so); the root pod then empties the folder it checked from inside
 and removes it by name with `rmdir`, so a folder swapped in at that name is never deleted.
 `aidc repo list` strips control characters from the names and URLs it prints, which sessions
-write. gitctl reaches GitHub only for repos the user added (gitrun holds a private copy): only
-`clone` makes a copy, and every other verb, pull request reads included, refuses another repo. `aidc git status` reports the private copies' and
+write. gitctl reaches GitHub only for repos the user added (on the list, and gitrun holds a
+private copy): only `clone` and `adopt` make a copy, of a listed repo only, and every other verb,
+pull request reads included, refuses another repo. `aidc git status` reports the private copies' and
 bundles' size and warns above `kubernetes.git_storage_warn` (default 1Gi).
 
 Sessions make their own worktrees (owner ruling 2026-11-24): a session sees the whole disk and
@@ -305,9 +322,11 @@ git setup` and `aidc repo` are per backend. What differs is only what Docker is:
 - Working copies are the user's own on their machine, never cloned, locked or re-owned. `aidc
   repo add <path>` (under the home, origin `https://github.com/<owner>/<name>`) records it in
   `~/.config/aidc/git-repos`, recreates the container with it mounted at its own path (the one
-  sessions see) and runs `gitctl adopt` (gitrun makes its private copy; the working copy is only
-  read). Only those working copies are mounted. `repo remove` drops the copy and the mount and
-  never deletes the working copy. The watcher's disk is the user's home (`AIDC_GIT_DISK`).
+  sessions see), puts its GitHub repo on the list of added repos
+  (`~/.config/aidc/git-added/repos`, the folder mounted `:ro` at `/etc/aidc/git-repos`) and runs
+  `gitctl adopt` (gitrun makes its private copy, of a listed repo only; the working copy is only
+  read). Only those working copies are mounted. `repo remove` takes the repo off the list and
+  drops the copy and the mount, and never deletes the working copy. The watcher's disk is the user's home (`AIDC_GIT_DISK`).
 - The agent (uid 2000) cannot write the user's files, which are not group-writable, so the verbs
   that write a working copy (`fetch`'s import, `tidy`, `unpushed`) run as `gitwc`, uid 1000 (the
   sessions' and the user's uid), through one more sudo rule; gitctl refuses `gitwc` unless Docker

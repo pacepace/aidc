@@ -38,6 +38,14 @@ assert_has() {
            echo "    )"; FAIL=$((FAIL + 1)) ;;
     esac
 }
+assert_not_has() {
+    local desc="$1" needle="$2" hay="$3"
+    case "$hay" in
+        *"$needle"*) echo "  FAIL: $desc ('$needle' present in:"; printf '%s\n' "$hay" | tail -15 | sed 's/^/      /'
+           echo "    )"; FAIL=$((FAIL + 1)) ;;
+        *) echo "  PASS: $desc"; PASS=$((PASS + 1)) ;;
+    esac
+}
 
 # kubectl stub: logs calls; apply appends stdin to $K_APPLIED.
 #   get pvc disk            Bound unless K_NO_DISK=1
@@ -293,8 +301,21 @@ out=$(run create demo --backend kubernetes)
 assert_eq "the session pod gets the user's name, quoting and all" "Alice \"Al\" O'Neil \\ Example" "$(idenv AIDC_GIT_USER_NAME)"
 assert_eq "and email" "alice@example.com" "$(idenv AIDC_GIT_USER_EMAIL)"
 assert_has "and create says which identity" "git identity: Alice" "$out"
-ep=$(cat "$AIDC_ROOT/.devcontainer/entrypoint.sh")
-assert_has "the session's entrypoint writes them to its .gitconfig (the same image on both backends)" 'name = ${AIDC_GIT_USER_NAME}' "$ep"
+# The session's entrypoint (the same image on both backends) writes them with git config, so
+# git reads back exactly that name: its function, run here on a file of the test's.
+eval "$(sed -n '/^write_git_identity() {/,/^}/p' "$AIDC_ROOT/.devcontainer/entrypoint.sh")"
+GC="$SCRATCH/session-gitconfig"
+if write_git_identity "$GC" "Alice \"Al\" O'Neil \\ Example" alice@example.com; then
+    assert_eq "the session's .gitconfig holds the name with its quote and backslash, as git reads it" \
+        "Alice \"Al\" O'Neil \\ Example|alice@example.com|main" \
+        "$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$GC" git config --get user.name)|$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$GC" git config --get user.email)|$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$GC" git config --get init.defaultBranch)"
+    assert_eq "and git in the session runs with it (no bad config line)" 0 \
+        "$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$GC" git config --list >/dev/null 2>&1; echo $?)"
+    assert_eq "readable by the session user" 644 "$(stat -c %a "$GC")"
+else
+    assert_eq "write_git_identity writes the session's .gitconfig" 0 1
+fi
+assert_eq "the entrypoint no longer writes the values into the file unquoted" 0 "$(grep -c 'name = ${AIDC_GIT_USER_NAME}' "$AIDC_ROOT/.devcontainer/entrypoint.sh")"
 git config --global user.name $'Two\nlines'
 out=$(run create demo --backend kubernetes)
 assert_eq "an identity with a control character is not bridged (it would reach the .gitconfig)" "|" "$(idenv AIDC_GIT_USER_NAME)|$(idenv AIDC_GIT_USER_EMAIL)"

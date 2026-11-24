@@ -23,9 +23,25 @@ g() {
         -c maintenance.auto=false "${helper[@]}" "$@"
 }
 
+# run_listed OWNER/NAME: whether the repo is on the user's list of added repos (ADDED_LIST,
+# gitctl.sh), compared without case. The list is written from the user's laptop only and is
+# mounted read-only here, so no one in this container can put a repo on it. No list, no repo.
+run_listed() {
+    local want="${1,,}" line
+    { [ -n "$ADDED_LIST" ] && [ -f "$ADDED_LIST" ] && [ -r "$ADDED_LIST" ]; } || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [ "${line,,}" = "$want" ] && return 0
+    done < <(head -c 1048576 -- "$ADDED_LIST" 2>/dev/null)
+    return 1
+}
+not_added() { die "${1} is not one of the user's repos (the user adds it: aidc repo add ${1})"; }
+
 # enter_copy OWNER/NAME [new]: enter gitrun's private bare copy of the repo and bring it up to
-# date with origin's branches. Only `new` (gitctl clone: aidc repo add) makes a missing copy;
-# every other verb refuses a repo the user has not added. A copy made here whose fetch fails is
+# date with origin's branches. A repo not on the user's list (run_listed) is refused first,
+# `new` included, whoever called: the agent can reach gitrun's add-copy (sudo, gitctl clone,
+# gitctl adopt), so the list, not the caller, decides. Only `new` (gitctl clone or adopt, which
+# aidc repo add runs) makes a missing copy; every other verb refuses a repo with none. A copy made here whose fetch fails is
 # removed again, so a failed add leaves no repo looking added. The store is gitrun's and open
 # to no one else (checked), so nothing in it was written by anyone but gitrun; each step down
 # is entered with cd -P and checked with pwd -P. Sets ORIGIN_URL, and ORIGIN_HEAD to origin's
@@ -33,15 +49,14 @@ g() {
 enter_copy() {
     local slug="${1,,}" owner name store head made=0
     owner="${slug%/*}" name="${slug#*/}"
+    run_listed "$1" || not_added "$1"
     [ -n "$RUN_STORE" ] || die "no private store for gitrun"
     cd -P -- "$RUN_STORE" 2>/dev/null || die "${RUN_STORE}: gitrun's store is missing"
     store=$(pwd -P)
     [ "$(stat -c %u .)" = "$(id -u)" ] || die "${RUN_STORE} is not gitrun's"
     (( 8#$(stat -c %a .) & 8#077 )) && die "${RUN_STORE} is open to others: gitrun keeps its copies where only it can go"
     umask 077
-    if [ "${2:-}" != new ] && [ ! -d "${owner}/${name}.git" ]; then
-        die "${1} is not one of the user's repos (the user adds it: aidc repo add ${1})"
-    fi
+    if [ "${2:-}" != new ] && [ ! -d "${owner}/${name}.git" ]; then not_added "$1"; fi
     { mkdir -p -- "$owner" && cd -P -- "$owner" && [ "$(pwd -P)" = "${store}/${owner}" ]; } \
         || die "${RUN_STORE}/${owner}: cannot enter it"
     if [ ! -e "${name}.git" ]; then
@@ -206,15 +221,17 @@ run_remove_copy() {
     echo "removed the private copy of ${1}"
 }
 
-# has-copy: whether gitrun holds a private copy of the repo, i.e. the user added it (aidc repo
-# add). Read only; makes nothing.
+# has-copy: whether the user added the repo: it is on the user's list (run_listed) and gitrun
+# holds its private copy. A copy of a repo not on the list (left over, or made some other way)
+# answers no. Read only; makes nothing. gitcred asks this before every gh call on a repo.
 run_has_copy() {
     nargs $# 1; no_options "$@"
     gitctl_slug_ok "$1" || die "$GITCTL_REASON"
     local slug="${1,,}"
+    run_listed "$1" || not_added "$1"
     cd -P -- "$RUN_STORE" 2>/dev/null || die "${RUN_STORE}: gitrun's store is missing"
     [ "$(stat -c %u .)" = "$(id -u)" ] || die "${RUN_STORE} is not gitrun's"
-    [ -d "${slug}.git" ] || die "${1} is not one of the user's repos (the user adds it: aidc repo add ${1})"
+    [ -d "${slug}.git" ] || not_added "$1"
     echo yes
 }
 

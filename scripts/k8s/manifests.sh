@@ -668,12 +668,28 @@ spec:
             - {name: home, mountPath: /home/git}
             - {name: cred, mountPath: /var/lib/gitctl/gitcred}
             - {name: run-store, mountPath: /var/lib/gitctl/gitrun}
+            # The repos the user added (aidc repo add, from the laptop): read-only, and the pod
+            # holds no API token, so nothing in it can add one (gitctl, ADDED_LIST).
+            - {name: repos, mountPath: /etc/aidc/git-repos, readOnly: true}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: git-home}}
         - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
         - {name: run-store, persistentVolumeClaim: {claimName: git-run}}
+        - {name: repos, configMap: {name: git-repos, defaultMode: 292}}  # 0444
 EOF2
+}
+
+# k8s_render_git_repos <namespace> <list> [<resourceVersion>]: the ConfigMap holding the list of
+# repos the user added (lib.sh, k8s_git_repos_*), as JSON for kubectl create or replace; with a
+# resourceVersion, a replace of exactly that version.
+k8s_render_git_repos() {
+    jq -n --arg ns "$1" --arg repos "$2" --arg rv "${3:-}" --arg user "$AIDC_K8S_USER" '{
+        apiVersion: "v1", kind: "ConfigMap",
+        metadata: ({name: "git-repos", namespace: $ns,
+            labels: {"app.kubernetes.io/managed-by": "aidc", "aidc/user": $user, app: "git"}}
+            + (if $rv == "" then {} else {resourceVersion: $rv} end)),
+        data: {repos: (if $repos == "" then "" else $repos + "\n" end)}}'
 }
 
 # The repo folder step's script (sh, as root in the init image, with only CHOWN, DAC_OVERRIDE,

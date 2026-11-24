@@ -11,7 +11,10 @@
 # every verb but fetch, tidy and unpushed.
 # gitcred asks gitrun one thing: whether the user added a repo (has-copy, read only). It checks
 # that itself before any gh call that names a repo, so a caller who reaches gitcred directly
-# cannot act on a repo the user did not add.
+# cannot act on a repo the user did not add. "Added" is the user's list (aidc repo add, from the
+# laptop), mounted read-only at /etc/aidc/git-repos: the agent and gitwc can reach gitrun's
+# add-copy (as gitctl clone and adopt do), but gitrun makes a copy of, and has-copy answers yes
+# for, only a repo on that list.
 Defaults:git,gitrun,gitcred,gitwc env_reset, !lecture, !use_pty
 Defaults:git,gitrun,gitcred,gitwc secure_path="/usr/bin:/bin"
 git     ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh

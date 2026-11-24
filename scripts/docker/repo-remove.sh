@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # aidc repo remove <path|owner/name> (Docker): the git container forgets a working copy: gitrun's
-# private copy of its GitHub repo is deleted (so copies do not pile up in its store) and the
+# GitHub repo is taken off the list of added repos (lib.sh, dk_git_added), so gitctl acts on it
+# no more, gitrun's private copy of it is deleted (so copies do not pile up in its store) and the
 # working copy is no longer mounted. The working copy itself is the user's own and is never
 # deleted here.
 
@@ -35,9 +36,10 @@ else
 fi
 dk_git_target
 if [ -n "$slug" ]; then
+    dk_git_added_change remove "$slug" || die "could not take ${slug} off the list of added repos; nothing was removed"
     dk_git_exec gitctl remove-copy "$slug" >&2 || die "the git container could not remove its copy of ${slug}"
 else
-    info "cannot tell ${ARG}'s GitHub repo (the working copy is gone or its origin changed): its private copy, if any, is left (gitctl remove-copy <owner/name>)"
+    info "cannot tell ${ARG}'s GitHub repo (the working copy is gone or its origin changed): its private copy and its entry on the list of added repos, if any, are left (aidc repo remove <owner/name>)"
 fi
 if [ -n "$paths" ]; then
     { grep -vxF -f <(printf '%s' "$paths") "$f" || true; } > "${f}.tmp"

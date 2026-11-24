@@ -87,7 +87,8 @@ case "$a" in
         echo "github=${D_GH:-no}"
         if [ -n "${D_REQERR:-}" ]; then echo "requests-error=${D_REQERR}"; else echo "waiting=${D_WAITING:-0}"; fi
         echo "storage-copies ${D_COPIES:-1048576}"; echo "storage-bundles ${D_BUNDLES:-0}"; exit 0 ;;
-    "exec -u git aidc-git-dev gitctl adopt "*) [ "${D_ADOPT_RC:-0}" = 0 ] && { echo "added o/r (${a##* })"; exit 0; }
+    "exec -u git aidc-git-dev gitctl adopt "*) cp "$HOME/.config/aidc/git-added/repos" "$D_LOG.list" 2>/dev/null
+        [ "${D_ADOPT_RC:-0}" = 0 ] && { echo "added o/r (${a##* })"; exit 0; }
         echo "gitctl: refused: cannot fetch https://github.com/o/r" >&2; exit 1 ;;
     "exec -u git aidc-git-dev gitctl protection "*|"exec -u git aidc-git-dev gitctl protect "*)
         printf 'repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nend\n'; exit 0 ;;
@@ -184,6 +185,13 @@ assert_has "its transcript goes where the MCP server reads every session's" \
     "-v ${HOMEP}/.local/state/aidc-mcp/transcripts/git:/var/aidc/transcript-out:rw" "$git_run"
 assert_has "that folder is given to the agent" "chown 2000:" "$(line '/transcripts/git:/t')"
 assert_not_has "with no working copy added, none of the user's folders is mounted" "-v ${HOMEP}/src" "$git_run"
+# gitctl takes "added" from this list alone: written here (aidc repo add|remove), read-only in
+# the container, so neither the agent nor gitwc (the user's uid) can put a repo on it.
+assert_has "the list of added repos is mounted read-only at the path gitctl reads" \
+    "-v ${HOMEP}/.config/aidc/git-added:/etc/aidc/git-repos:ro " "$git_run"
+assert_eq "it is mounted once, and only read-only" 1 "$(printf '%s\n' "$git_run" | grep -o -- ':/etc/aidc/git-repos[:a-z]*' | sort -u | wc -l | tr -d ' ')"
+assert_eq "setup made the folder and an empty list (so Docker makes no root-owned folder in its place)" "yes 0" \
+    "$([ -d "$HOMEP/.config/aidc/git-added" ] && echo yes) $(wc -c < "$HOMEP/.config/aidc/git-added/repos" | tr -d ' ')"
 assert_has "it says what comes next" "aidc git login" "$out"
 out=$(D_VOLS="aidc-git-home aidc-git-cred aidc-git-run aidc-git-requests" run git setup)
 assert_not_has "run again, the volumes (the login, the private copies) are kept" "volume create" "$(calls)"
@@ -216,14 +224,23 @@ assert_has "a working copy outside the user's home is refused" "below your home"
 out=$(run repo add "$WC")
 assert_eq "a GitHub working copy under the home is added" 0 "$(run repo add "$WC" >/dev/null; echo $?)"
 assert_eq "it is recorded once" 1 "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
-: > "$D_LOG"; rm -f "$HOME/.config/aidc/git-repos"; out=$(run repo add "$WC")
+: > "$D_LOG"; rm -f "$HOME/.config/aidc/git-repos" "$HOME/.config/aidc/git-added/repos" "$D_LOG.list"; out=$(run repo add "$WC")
 assert_has "the git container is started again with it mounted at its own path" "-v ${WC}:${WC}:rw" "$(line 'run -d --name aidc-git-dev')"
 assert_has "and gitctl adopts it (gitrun's private copy)" "exec -u git aidc-git-dev gitctl adopt ${WC}" "$(calls)"
+ADDED="$HOMEP/.config/aidc/git-added/repos"
+assert_eq "its GitHub repo is on the list of added repos" "o/r" "$(cat "$ADDED")"
+assert_eq "written before the adopt (the list the adopt runs against already has it)" "o/r" "$(cat "$D_LOG.list" 2>/dev/null)"
 out=$(D_ADOPT_RC=1 run repo add "$HOMEP/src/proj2" 2>&1)
 mkdir -p "$HOMEP/src/proj2"; git -C "$HOMEP/src/proj2" init -q; git -C "$HOMEP/src/proj2" remote add origin https://github.com/o/r2
 out=$(D_ADOPT_RC=1 run repo add "$HOMEP/src/proj2")
 assert_has "when the git container cannot take it, it is forgotten again" "was not added" "$out"
 assert_eq "and not recorded" 0 "$(grep -cxF "$HOMEP/src/proj2" "$HOME/.config/aidc/git-repos")"
+assert_eq "and its repo is taken off the list again (o/r, added before, stays)" "o/r" "$(cat "$ADDED")"
+out=$(D_ADOPT_RC=1 run repo add "$WC")
+assert_eq "a working copy added before whose adopt fails now stays added (only what this run added is undone)" 1 \
+    "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
+assert_eq "as does its repo on the list" "o/r" "$(cat "$ADDED")"
+assert_not_has "and the container is not restarted for it" "run -d --name aidc-git-dev" "$(calls)"
 out=$(run repo list)
 assert_has "repo list shows it with its origin" "https://github.com/o/r.git" "$out"
 mkdir -p "$HOMEP/gone"; printf '%s\n' "$HOMEP/gone" >> "$HOME/.config/aidc/git-repos"
@@ -263,12 +280,13 @@ for x in "$SW" "$HOMEP/linkparent/inner" "$HOMEP/src/dotgit"; do
     { grep -vxF -- "$x" "$HOME/.config/aidc/git-repos" || true; } > "$SCRATCH/repos.tmp"; mv "$SCRATCH/repos.tmp" "$HOME/.config/aidc/git-repos"
 done
 out=$(run repo remove "$HOMEP/gone")
-assert_has "a working copy that went away can still be forgotten" "its private copy, if any, is left" "$out"
+assert_has "a working copy that went away can still be forgotten" "if any, are left (aidc repo remove <owner/name>)" "$out"
 assert_eq "and is" 0 "$(grep -cxF "$HOMEP/gone" "$HOME/.config/aidc/git-repos")"
 out=$(run repo remove "$WC" --delete-working-copy)
 assert_has "the user's working copy is never deleted" "never deletes it" "$out"
 out=$(run repo remove "$WC")
 assert_has "remove deletes gitrun's private copy" "exec -u git aidc-git-dev gitctl remove-copy o/r" "$(calls)"
+assert_eq "and takes o/r off the list of added repos" "" "$(cat "$ADDED")"
 assert_eq "and forgets the working copy" 0 "$(grep -cxF "$WC" "$HOME/.config/aidc/git-repos")"
 assert_not_has "which is no longer mounted" "-v ${WC}:" "$(line 'run -d --name aidc-git-dev')"
 assert_eq "and is left on disk" yes "$([ -d "$WC/.git" ] && echo yes)"
@@ -402,6 +420,17 @@ render() {
         ENCODED_REPO=-r AIDC_VERSION_TAG=v0 "$@" bash "$AIDC_ROOT/proxy/compose-render.sh" < "$AIDC_ROOT/proxy/compose.yaml.template"
 }
 if command -v yq >/dev/null 2>&1; then
+    # The user's git identity, as compose reads it: a quote and a backslash survive the YAML (and
+    # a $ is doubled, compose's literal $); a control character is not bridged.
+    y=$(render GIT_USER_NAME="Alice \"Al\" O'Neil \\ Example" GIT_USER_EMAIL=alice@example.com)
+    assert_eq "Docker: a git name with a double quote and a backslash reaches the session as written" \
+        "Alice \"Al\" O'Neil \\ Example|alice@example.com" \
+        "$(printf '%s' "$y" | yq '.services.dev.environment | .AIDC_GIT_USER_NAME + "|" + .AIDC_GIT_USER_EMAIL')"
+    y=$(render GIT_USER_NAME='Cost $HOME' GIT_USER_EMAIL=alice@example.com)
+    assert_eq "a \$ in it is compose's literal \$ (\$\$), not a variable" 'Cost $$HOME' "$(printf '%s' "$y" | yq '.services.dev.environment.AIDC_GIT_USER_NAME')"
+    y=$(render GIT_USER_NAME=$'Two\nlines: x' GIT_USER_EMAIL=alice@example.com)
+    assert_eq "a name with a control character is not bridged (it cannot add YAML of its own)" "|" \
+        "$(printf '%s' "$y" | yq '.services.dev.environment | .AIDC_GIT_USER_NAME + "|" + .AIDC_GIT_USER_EMAIL')"
     y=$(render GIT_TOKEN=feed GIT_REQUESTS_PATH=/var/aidc/git-requests GIT_REQUESTS_MOUNT="- git-requests:/var/aidc/git-requests:rw" \
         GIT_REQUESTS_VOLUME_DECL=$'  git-requests:\n    name: aidc-git-requests\n    external: true')
     assert_eq "with the git container set up, the request folder is mounted at its path" "git-requests:/var/aidc/git-requests:rw" \

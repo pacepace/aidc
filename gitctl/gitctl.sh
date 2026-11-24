@@ -658,16 +658,33 @@ agent_fetch() {
 #   uncommitted <path>      a worktree with changes not committed (untracked files count)
 #   stash <n>               n stashed changes
 #   worktree <path>         each worktree besides the working copy itself
+#   not-fetched             gitrun holds no copy of the repo any more (aidc repo remove took it,
+#                           and the delete of the working copy is being run again): compared
+#                           with origin's branches as the working copy last fetched them
 # Read with the agent's own git (no login). Submodules are not entered (their config would be
 # read), no lock is taken, and a worktree whose folder is gone (prunable) holds nothing. Any
 # step that fails ends the verb with an error: "cannot tell" is never "nothing unpushed".
+# Only a repo the user added is fetched; one whose copy is gone is still reported, from what the
+# working copy already has, so a retried `aidc repo remove --delete-working-copy` (its first run
+# removed the copy, then stopped) is checked again rather than refused.
 agent_unpushed() {
     nargs $# 1; no_options "$@"
-    local wt line n b rows=() list
-    working_copy "$1"; agent_slug "$WC"
-    new_bundle
-    as_run fetch "$SLUG" > "$BUNDLE" || exit 1
-    import_bundle "$WC"
+    local wt line n b rows=() list url has
+    working_copy "$1"
+    url=$(ag -C "$WC" remote get-url origin 2>/dev/null) || die "${WC}: no origin remote"
+    url_slug "$url" || die "$GITCTL_REASON"
+    SLUG="$GITCTL_SLUG"
+    if [ -n "$EXPECT_SLUG" ] && [ "${SLUG,,}" != "${EXPECT_SLUG,,}" ]; then
+        die "${WC}'s origin is now ${SLUG}, not ${EXPECT_SLUG} as approved: nothing done"
+    fi
+    if has=$(as_run has-copy "$SLUG" 2>&1 </dev/null); then
+        new_bundle
+        as_run fetch "$SLUG" > "$BUNDLE" || exit 1
+        import_bundle "$WC"
+    else
+        # Only "not one of the user's repos" means no copy; any other failure is no answer.
+        case "$has" in *"is not one of the user's repos"*) rows+=("not-fetched") ;; *) die "${has#gitctl: refused: }" ;; esac
+    fi
     list=$(ag -C "$WC" for-each-ref --format='%(refname)' refs/heads/) || die "cannot list ${WC}'s branches"
     while IFS= read -r b; do
         [ -n "$b" ] || continue

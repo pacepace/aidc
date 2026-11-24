@@ -253,6 +253,13 @@ assert_has "unless --even-unpushed is given" "deleted the working copy /home/ali
 out=$(K_STATE=repo K_UNPUSHED='branch 1 x\e[2J\e]0;t\a' run repo remove /home/alice/hello --delete-working-copy)
 assert_eq "names in the refusal reach the terminal without control characters" no \
     "$(printf '%s' "$out" | LC_ALL=C grep -q $'[\x01-\x08\x0b-\x1f\x7f]' && echo yes || echo no)"
+# A retried delete: the first run removed gitrun's copy, then stopped. gitctl unpushed reports
+# from what the working copy last fetched; the delete goes on, saying so.
+out=$(K_STATE=repo K_UNPUSHED='not-fetched' run repo remove /home/alice/hello --delete-working-copy)
+assert_has "a retry after the copy is gone deletes a working copy with nothing unpushed" "deleted the working copy /home/alice/hello" "$out"
+assert_has "saying it was checked against what it last fetched" "checked against GitHub's branches as it last fetched them" "$out"
+out=$(K_STATE=repo K_UNPUSHED='not-fetched\nbranch 1 feat-x' run repo remove /home/alice/hello --delete-working-copy)
+assert_has "and still refuses one with unpushed work" "holds work that is not on GitHub; nothing was removed" "$out"
 out=$(K_STATE=repo run repo remove /home/alice/hello --even-unpushed)
 assert_has "--even-unpushed alone is refused" "goes with --delete-working-copy" "$out"
 out=$(K_STATE=repo run repo remove /home/alice/hello)

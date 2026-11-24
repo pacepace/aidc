@@ -139,7 +139,8 @@ it. `aidc repo remove` deletes gitrun's private copy (`gitctl remove-copy`), and
 copy only with `--delete-working-copy`: first the agent fetches and lists what the delete would
 lose (`gitctl unpushed`: branches with commits on no origin branch, detached commits,
 uncommitted changes, stashes, and every worktree), and any of it refuses the delete unless
-`--even-unpushed` is given too; the root pod then empties the folder it checked from inside
+`--even-unpushed` is given too (run again after a first run removed gitrun's copy, it compares
+with origin's branches as the working copy last fetched them, and says so); the root pod then empties the folder it checked from inside
 and removes it by name with `rmdir`, so a folder swapped in at that name is never deleted.
 `aidc repo list` strips control characters from the names and URLs it prints, which sessions
 write. gitctl reaches GitHub only for repos the user added (gitrun holds a private copy): only

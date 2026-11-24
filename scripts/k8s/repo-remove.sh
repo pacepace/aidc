@@ -73,6 +73,7 @@ if [ -n "$path" ] && [ "$DELETE_WC" = 1 ]; then
         work="" trees=""
         while IFS= read -r line; do
             case "$line" in
+                not-fetched) info "the git container no longer keeps a copy of ${slug} (removed earlier): ${path} is checked against GitHub's branches as it last fetched them" ;;
                 "branch "*) n="${line#branch }"; work+=$'\n'"  branch ${n#* }: ${n%% *} commit(s) on no origin branch" ;;
                 "detached "*) n="${line#detached }"; work+=$'\n'"  ${n#* }: ${n%% *} commit(s) on a detached HEAD, on no origin branch" ;;
                 "uncommitted "*) work+=$'\n'"  ${line#uncommitted }: uncommitted changes" ;;

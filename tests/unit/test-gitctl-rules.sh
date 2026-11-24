@@ -488,10 +488,23 @@ ctl unpushed "$C"
 assert_has "a worktree whose folder is gone is named but holds nothing to read" "worktree $C/s2" "$OUT"
 assert_eq "and does not fail the report" 0 "$RC"
 mv "$S/s2-moved" "$C/s2"
-git -C "$C" config remote.origin.url "$F/o/nothere.git"
+# A fetch that fails: GitHub (the forge) does not answer for a repo gitrun has a copy of.
+chmod 000 "$F/o/r.git"
 ctl unpushed "$C"
+chmod 755 "$F/o/r.git"
 assert_eq "a fetch that fails ends with an error and no end line, never an empty report" "1 no" \
     "$RC $(printf '%s\n' "$OUT" | grep -qx end && echo yes || echo no)"
+# A repo whose private copy is gone (aidc repo remove's first run took it, then stopped): no
+# fetch (gitctl reaches GitHub only for added repos), a report from what the copy last fetched.
+G -C "$C/s1" commit -q --allow-empty -m "More session work"
+git -C "$C" config remote.origin.url "$F/o/nothere.git"
+ctl unpushed "$C"
+assert_eq "a repo with no private copy is still reported, marked not fetched, with its end line" "0 not-fetched yes" \
+    "$RC $(printf '%s\n' "$OUT" | head -n1) $(printf '%s\n' "$OUT" | grep -qx end && echo yes || echo no)"
+assert_has "and its unpushed work is still named" "branch 1 feat2" "$OUT"
+assert_eq "and gitrun made no copy of it" no "$([ -e "$STORE/o/nothere.git" ] && echo yes || echo no)"
+ctl unpushed "$C" --expect-repo o/other
+refused "unpushed still holds the working copy to --expect-repo"
 git -C "$C" config remote.origin.url "$F/o/r.git"
 git -C "$C" config core.fsmonitor "touch $S/PWNED-fsm"
 ctl unpushed "$C"

@@ -121,6 +121,15 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   on its cached image, so aidc images are pulled Always; under Sysbox /sys/class/net shows the
   node's interfaces, not the pod's, so the inner dockerd reads its MTU by ioctl.
   Confirmed on the rebuilt image: the session's inner dockerd runs with `--mtu=1450`.
+- Chunk 05: the dispatcher finds a session's backend by asking the configured cluster first
+  (`scripts/k8s/session-where.sh`, quiet when none is configured) and Docker otherwise; `create`
+  takes the config's top-level `backend:`; `list` shows both. Live: create from the config
+  default, list, status, logs, attach (a tmux client attached) and kill without the flag.
+- Chunk 05 found: the refresher resolved through cluster DNS, which the proxy's policy blocks,
+  so every session ran with an EMPTY malware blocklist (the earlier taint check passed only on
+  a hand-added domain). The proxy pod now resolves through Quad9 (dnsPolicy None); live: the
+  refresher loaded 2,172,272 entries from both feeds. Chunk 06's smoke must assert both feeds
+  contributed, as the Docker smoke does.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

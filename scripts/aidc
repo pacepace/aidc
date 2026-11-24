@@ -77,7 +77,7 @@ fi
 # The backend switch point (docs/design-12-kubernetes.md, "Backend seam"): `--backend
 # kubernetes` runs the verb's Kubernetes implementation, scripts/k8s/session-<verb>.sh, instead
 # of the Docker one. `--backend docker` (the default) is the same as no flag.
-BACKEND="docker"
+BACKEND=""
 ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -87,7 +87,30 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
-case "$BACKEND" in
+# No flag: `create` takes the config's top-level `backend:` (default docker); a verb that names
+# a session goes where that session lives, asking the configured cluster first (a quiet no
+# when there is none) and Docker otherwise. `list` shows both.
+if [ -z "$BACKEND" ]; then
+    case "$SUBCOMMAND" in
+        create)
+            BACKEND=$(sed -n 's/^backend:[[:space:]]*\([a-z0-9]*\).*/\1/p' \
+                "${HOME}/.config/aidc/config.yaml" 2>/dev/null | head -n1)
+            ;;
+        attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
+            if [ $# -gt 0 ] && bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$1"; then
+                BACKEND="kubernetes"
+            fi
+            ;;
+        list)
+            if bash "$AIDC_SCRIPTS/k8s/session-where.sh" --configured; then
+                # The Docker list first; on a machine without Docker it says nothing.
+                if out=$(bash "$AIDC_SCRIPTS/cmd-list.sh" "$@" 2>/dev/null); then printf '%s\n\n' "$out"; fi
+                exec bash "$AIDC_SCRIPTS/k8s/session-list.sh"
+            fi
+            ;;
+    esac
+fi
+case "${BACKEND:-docker}" in
     docker) ;;
     kubernetes|k8s)
         K8S_SCRIPT="$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh"

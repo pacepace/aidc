@@ -314,6 +314,11 @@ spec:
       enableServiceLinks: false
       nodeSelector: ${sel}
       tolerations: ${AIDC_K8S_TOLERATIONS}
+      # Quad9, the only DNS the proxy's NetworkPolicy allows. Squid's own config names it too,
+      # but the refresher's feed downloads resolve through resolv.conf: with cluster DNS they
+      # failed, and every session ran with an empty malware blocklist (seen live).
+      dnsPolicy: None
+      dnsConfig: {nameservers: [9.9.9.9, 149.112.112.112]}
       initContainers:
         # A Docker volume starts as a copy of the image's folder; an emptyDir starts empty.
         - name: seed-squid-etc

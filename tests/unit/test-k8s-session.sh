@@ -58,6 +58,12 @@ case "$*" in
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"get pvc -l"*) printf 'persistentvolumeclaim/home-demo-dev-0\npersistentvolumeclaim/demo-audit\n' ;;
+    *"get statefulset demo-dev -o json"*) [ "${K_EXISTS:-}" = 1 ] || exit 1
+        echo '{"metadata":{"annotations":{"aidc/repo":"/home/alice/code/proj","aidc/profile":"multi"}}}' ;;
+    *"get statefulset -l app=dev"*) [ "${K_EXISTS:-}" = 1 ] && printf 'demo\t1\tmulti\t2026-11-24T04:00:00Z\n' ;;
+    *"get pod demo-dev-0 -o jsonpath"*) printf 'Running' ;;
+    *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
+    *"exec pod/demo-proxy-abc -c policy -- cat /var/state/tainted"*) [ "${K_TAINTED:-}" = 1 ] && echo '{"trigger":"malware_domains"}' || exit 1 ;;
 esac
 exit 0
 STUB
@@ -129,6 +135,9 @@ assert_eq "the proxy reaches public addresses only (no cluster, node, LAN or VPN
     "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '.egress[1].to[0].ipBlock.except')"
 assert_eq "the proxy's DNS is Quad9 only" '["9.9.9.9/32","149.112.112.112/32"]' \
     "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '[.egress[0].to[].ipBlock.cidr]')"
+assert_eq "the proxy pod resolves through Quad9, the only DNS its policy allows (the refresher needs it for the blocklist feeds)" \
+    '["None",["9.9.9.9","149.112.112.112"]]' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec | [.dnsPolicy, .dnsConfig.nameservers]' | tail -1)"
 assert_eq "the audit volume is on the user's (retained) storage class" '"shared-disk"' \
     "$(q 'select(.kind == "PersistentVolumeClaim") | .spec.storageClassName' | tail -1)"
 assert_has "the proxy pod seeds squid's folder before squid starts" "seed-squid-etc" \
@@ -161,7 +170,7 @@ out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 
 echo "=== the dispatcher's --backend switch ==="
-out=$(run attach demo --backend kubernetes)
+out=$(run restart demo --backend kubernetes)
 assert_has "a verb the backend does not have yet is refused" "not available on the kubernetes backend yet" "$out"
 # A Docker verb must get exactly the arguments it would get without the flag.
 cat > "$SCRATCH/bin/docker" <<'DSTUB'
@@ -179,6 +188,40 @@ assert_eq "--backend=docker, anywhere on the line, too" "$plain" "$flagged2"
 assert_has "and the Docker verb really ran" "docker " "$plain"
 out=$(run list --backend nonesuch)
 assert_has "an unknown backend is refused" "unknown backend: nonesuch" "$out"
+
+echo "=== routing by where the session lives (no --backend) ==="
+: > "$D_LOG"; out=$(K_EXISTS=1 run logs demo --component squid)
+assert_has "a session in the cluster gets the Kubernetes verb" "logs deployment/demo-proxy -c squid" "$(cat "$K_LOG")"
+assert_eq "and Docker is not asked" "" "$(cat "$D_LOG")"
+: > "$D_LOG"; out=$(run logs demo --component squid)
+assert_has "a session not in the cluster goes to Docker" "docker " "$(cat "$D_LOG")"
+out=$(K_EXISTS=1 run restart demo)
+assert_has "a cluster session's verb the backend lacks says so" "not available on the kubernetes backend yet" "$out"
+out=$(K_EXISTS=1 run kill demo)
+assert_has "kill finds a cluster session without the flag" "session demo removed" "$out"
+
+echo "=== the config's default backend for create ==="
+printf 'backend: kubernetes\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(run create demo)
+assert_has "backend: kubernetes in the config makes create use the cluster" "session demo is ready" "$out"
+out=$(run create demo --backend docker --help)
+assert_has "--backend docker still wins over the config" "aidc create" "$out"
+sed -i '/^backend: kubernetes$/d' "$HOME/.config/aidc/config.yaml"
+
+echo "=== list, attach, status, logs ==="
+out=$(K_EXISTS=1 run list)
+assert_has "list shows cluster sessions with their backend" "kubernetes" "$out"
+assert_has "the cluster row names the session" "demo" "$out"
+: > "$K_LOG"; run attach demo --backend kubernetes >/dev/null
+assert_has "attach runs tmux as the session user in the dev container" \
+    "exec -it demo-dev-0 -c dev -- sudo -u vscode -H env" "$(cat "$K_LOG")"
+out=$(K_EXISTS=1 run status demo)
+assert_has "status names the repo" "repo:     /home/alice/code/proj" "$out"
+assert_has "status says the session is clean" "taint:    clean" "$out"
+out=$(K_EXISTS=1 K_TAINTED=1 run status demo)
+assert_has "status shows a taint" "taint:    TAINTED" "$out"
+out=$(K_EXISTS=1 run logs demo --component nonesuch)
+assert_has "an unknown component is refused by name" "unknown component: nonesuch" "$out"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

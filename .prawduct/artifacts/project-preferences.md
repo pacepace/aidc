@@ -8,8 +8,7 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
 - **Languages**: bash for the CLI and the container entrypoints (`scripts/`, `.devcontainer/`,
   `proxy/`); Python for the MCP control plane (`mcp/`).
 - **Versions**: bash 4+ (GNU userland assumed: `sed -i`, `stat -c`); Python 3.14 (the MCP server
-  requires it; CI tests it),
-  exercised in CI.
+  requires it, and CI tests it).
 - **Package manager**: `uv`, with a committed `uv.lock`. Every command runs `uv run --frozen`.
 
 ## Code Style

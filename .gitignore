@@ -75,3 +75,4 @@ mcp/tests/scratch/
 .prawduct/.native-reviews/
 .prawduct/.pr-body.md
 .prawduct/.session-activity.json
+.claude/worktrees/

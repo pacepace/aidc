@@ -385,3 +385,12 @@ branch from the working copy and gitrun imports the bundle into its private bare
 pushes; on fetch/clone gitrun fetches into its private copy and writes a bundle the agent
 imports. Repos on the user's Kubernetes disk are ordinary repos owned by the user's sessions, not
 locked; this supersedes the repo-lock proposal (design-12) and gitctl's lock checks.
+
+## 2026-11-24: Ask-mode git approvals bubble up through the orchestrator
+
+In ask mode a session's `gh pr create` waits up to about a minute for the answer, then returns
+"requested; waiting for approval" (owner agreed). Approvals use the approval path the
+orchestrator already has, "so these get bubbled up": the git agent asks with Claude Code's
+question tool, which aidc already delivers to the orchestrator as a session's question; the
+answer comes back by session_send, or from the user in the git agent's terminal, whichever is
+first. No separate approval system.

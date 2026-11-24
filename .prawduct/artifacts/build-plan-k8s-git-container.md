@@ -125,7 +125,10 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
   image that writes a request (branch, title, body) to a request folder on the user's disk, so
   `/prawduct:pr` and plain `gh pr create` work unchanged in sessions; the git container acts on
   requests by its rules (ask mode: shows the user first) and knows nothing of prawduct (owner
-  ruling 2026-11-24). Request and result files are cleared after 30 days (owner: nothing piles up
+  ruling 2026-11-24). The stand-in waits up to about a minute for a result, then returns
+  "requested; waiting for approval". Requests reach the git agent as prompts; in ask mode it asks
+  with Claude Code's question tool, which aidc already delivers to the orchestrator, so approvals
+  bubble up with no separate system (owner ruling 2026-11-24). Request and result files are cleared after 30 days (owner: nothing piles up
   unnoticed). Tidy after a merge deletes the branch (GitHub and local), the session's
   worktree and its admin folder, and reports every leftover; sessions create their own worktrees
   (owner ruling 2026-11-24), owned by uid 1000 under a sticky `.git/worktrees/`, so removal is a

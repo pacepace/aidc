@@ -314,3 +314,9 @@ worked around: `3tears-mcp` gains progress, resources, tools/list_changed, cance
 richer error model ("enhance 3tears mcp to support these things properly and give it more error
 codes"), taken as the chance to really improve the MCP server. Plan the adoption across the
 other 3tears packages before building. Still after the Kubernetes work.
+
+## 2026-11-24: Finish the Kubernetes work before the 3tears move
+
+The Kubernetes backend work is finished before aidc 2.0 (3tears adoption) starts: "we have to
+finish it before 3tears, so do the 3tears plan, but finish the k8s work". The 2.0 plan is written
+now; the build waits. Next Kubernetes wave: the git container.

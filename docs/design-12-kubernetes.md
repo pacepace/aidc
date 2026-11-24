@@ -210,8 +210,9 @@ Accounts run out of usage quota during work, so a running session must switch ac
 losing its conversation (K8S-17). Whether it switches on its own or waits for the user is a
 setting, and each user sets the order accounts are used in.
 
-Signals: the statusline's `rate_limits` (proactive, e.g. 90 %), and the `StopFailure` hook with
-`rate_limit` (reactive).
+Signals: the statusline's weekly `rate_limits.seven_day` (proactive, e.g. 90 %), and the
+`StopFailure` hook with `rate_limit` (reactive). There is no 5-hour window any more (owner,
+2026-11-24).
 
 **Proposal**, two mechanisms, to choose by a live test:
 

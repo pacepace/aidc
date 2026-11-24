@@ -43,7 +43,7 @@ assert_not_has() {
 #   D_PROXY_ENV       the proxy's environment (default AIDC_PUBLIC_ONLY=1)
 #   D_TOKEN           AIDC_GIT_TOKEN in session s1's dev container
 #   D_SESSIONS="s1"   sessions that exist (by label)
-#   D_SEEN_INODE=n    the inode the git container sees at a mounted path (default: the host's)
+#   D_SEEN=dev:ino    the device and inode the git container sees at a mounted path (default: the host's)
 cat > "$SCRATCH/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$D_LOG"
@@ -77,9 +77,9 @@ case "$a" in
     "inspect aidc-"*"-dev --format"*) echo "2026-11-24T00:00:00Z"; exit 0 ;;
     "exec aidc-"*"-policy test -f /var/state/tainted") exit 1 ;;
     "exec -u git aidc-git-dev tmux has-session -t main") exit 0 ;;
-    "exec -u git aidc-git-dev stat -c %i -- "*) # what the container sees at a mounted path
-        [ -n "${D_SEEN_INODE:-}" ] && { echo "$D_SEEN_INODE"; exit 0; }
-        stat -c %i -- "${a##* }"; exit 0 ;;
+    "exec -u git aidc-git-dev stat -c %d:%i -- "*) # what the container sees at a mounted path
+        [ -n "${D_SEEN:-}" ] && { echo "$D_SEEN"; exit 0; }
+        stat -c %d:%i -- "${a##* }"; exit 0 ;;
     "exec -u git aidc-git-dev sh -c "*)
         echo "github=${D_GH:-no}"; echo "waiting=${D_WAITING:-0}"
         echo "storage-copies ${D_COPIES:-1048576}"; echo "storage-bundles ${D_BUNDLES:-0}"; exit 0 ;;
@@ -230,11 +230,17 @@ for x in "$SW" "$HOMEP/linkparent/inner" "$HOMEP/src/dotgit"; do
 done
 assert_not_has "nor is the folder the symlink points at" "$OTHER" "$(line 'run -d --name aidc-git-dev')"
 assert_has "the working copy still as recorded is mounted" "-v ${WC}:${WC}:rw" "$(line 'run -d --name aidc-git-dev')"
-assert_has "and checked from inside the container after the start" "exec -u git aidc-git-dev stat -c %i -- ${WC}" "$(calls)"
+assert_has "and checked from inside the container after the start" "exec -u git aidc-git-dev stat -c %d:%i -- ${WC}" "$(calls)"
 assert_not_has "a start whose mounts match keeps the container" "rm -f aidc-git-dev" "$(sed -n '/run -d --name aidc-git-dev/,$p' "$D_LOG")"
 # Swapped between the check and Docker's mount (and back): the container sees another folder.
-out=$(D_SEEN_INODE=1 run git setup); rc=$?
+out=$(D_SEEN="$(stat -c %d "$WC"):1" run git setup); rc=$?
 assert_has "a working copy the container sees as another folder stops the start, named" "${WC} changed while the git container started" "$out"
+assert_eq "it fails" 1 "$([ "$rc" != 0 ] && echo 1 || echo 0)"
+assert_has "and the container is removed" "rm -f aidc-git-dev" "$(sed -n '/run -d --name aidc-git-dev/,$p' "$D_LOG")"
+# An inode number is unique only within one filesystem: a folder on another filesystem with
+# the same inode number is another folder.
+out=$(D_SEEN="$(( $(stat -c %d "$WC") + 1 )):$(stat -c %i "$WC")" run git setup); rc=$?
+assert_has "the same inode on another device stops the start too" "${WC} changed while the git container started" "$out"
 assert_eq "it fails" 1 "$([ "$rc" != 0 ] && echo 1 || echo 0)"
 assert_has "and the container is removed" "rm -f aidc-git-dev" "$(sed -n '/run -d --name aidc-git-dev/,$p' "$D_LOG")"
 for x in "$SW" "$HOMEP/linkparent/inner" "$HOMEP/src/dotgit"; do

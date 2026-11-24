@@ -158,6 +158,7 @@ driving git by the rules, and orchestrator approval over MCP, come after (chunk 
 - (07, Critic) The git proxy resolves through Quad9: squid's own `dns_nameservers 9.9.9.9 149.112.112.112` (squid.conf), which the entrypoint now requires in public-only mode (and refuses `AIDC_DNS_SERVERS` there, which would drop it); the proxy container also gets `--dns` Quad9. The review's premise (host resolvers) held only for non-squid lookups.
 - (07, Critic) Public-only also refuses NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16). Not ::ffff:0:0/96: squid holds IPv4 as v4-mapped, so that range refused github.com live; mapped private addresses (::ffff:10.0.0.1, ::ffff:127.0.0.1) were already 403 through the IPv4 ranges (checked live).
 - (07, Critic) Residual coverage: the off-Docker gitwc refusal and the sudo switch to gitwc run only in the installed image, no unit test reaches them (live: Chunk 06's checks "gitwc refused outside Docker", "gitwc refused for a non-mounted repo"); the mount check itself is unit-tested and was run live as gitwc.
+- (06) `dk_git_check_mounts` compares device and inode (`%d:%i`, both sides), not the inode alone: an inode number is unique only within one filesystem. Unit test adds a same-inode, other-device case (mutation: comparing the inode part alone fails it).
 
 **Level:** Medium. The repo lock is measured (design-12). Not yet: `gh` and SSH inside a pod
 behind NetworkPolicy, Claude Code with a managed read-only hook in the git container.

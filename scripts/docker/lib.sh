@@ -220,20 +220,23 @@ dk_git_mount_ok() {
     [ -d "$p/.git" ] && [ ! -L "$p/.git" ]
 }
 
-# dk_git_inode <path>: the folder's inode on this machine (no symlink followed), or nothing.
-dk_git_inode() { stat -c %i -- "$1" 2>/dev/null || stat -f %i -- "$1" 2>/dev/null || true; }
+# dk_git_inode <path>: the folder's device and inode on this machine, as <device>:<inode> (no
+# symlink followed), or nothing. Both, because an inode number is unique only within one
+# filesystem: a folder on another filesystem can have the same one.
+dk_git_inode() { stat -c %d:%i -- "$1" 2>/dev/null || stat -f %d:%i -- "$1" 2>/dev/null || true; }
 
 # dk_git_check_mounts <path>...: after the start, each working copy the container sees at its
-# path is the folder this machine has there (the same inode, and still as recorded), so a
-# symlink swapped in between dk_git_mount_ok and Docker's mount, then swapped back, is caught.
-# On Linux only: there a bind mount shows the source folder's own inode; Docker Desktop's file
-# sharing (macOS) need not. Returns 1, naming the path, on a mismatch.
+# path is the folder this machine has there (the same device and inode, and still as
+# recorded), so a symlink swapped in between dk_git_mount_ok and Docker's mount, then swapped
+# back, is caught. On Linux only: there a bind mount shows the source folder's own device and
+# inode; Docker Desktop's file sharing (macOS) need not. Returns 1, naming the path, on a
+# mismatch.
 dk_git_check_mounts() {
     local p seen want
     [ $# -gt 0 ] && [ "$(uname -s)" = Linux ] || return 0
     for p in "$@"; do
         want=$(dk_git_inode "$p")
-        seen=$(docker exec -u git "$DK_GIT_CT" stat -c %i -- "$p" </dev/null 2>/dev/null) || seen=""
+        seen=$(docker exec -u git "$DK_GIT_CT" stat -c %d:%i -- "$p" </dev/null 2>/dev/null) || seen=""
         if [ -z "$want" ] || [ "$seen" != "$want" ] || ! dk_git_mount_ok "$p"; then
             printf '%s\n' "$p"; return 1
         fi

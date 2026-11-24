@@ -289,3 +289,6 @@ Docker, kept claims on Kubernetes), so aidc needs a command that lists them and 
 is explicit and never touches a running session's trail.
 Refined (2026-11-24): any aidc command warns when the kept audit trails are larger than 100 MB
 ("something should warn you when you run any aidc command if it is larger than 100MB").
+Refined (2026-11-24): on Kubernetes the size check runs only during cluster commands, and its
+answer may be cached for about a day ("only during a cluster command, caching the answer is fine
+if we make it check once a day or something").

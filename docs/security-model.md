@@ -165,7 +165,7 @@ token for it. The token is the session's to use, so it is readable inside the se
 Claude, and by anything that runs commands there. It is kept out of everything else: the command
 line that delivers it (it goes in on standard input), the audit log, every tool result, the
 session's audit directory and `.claude.json`. The orchestrator decides what the token can reach
-and for how long; aidc only carries it. The server's host is `metallm.callback_url`, never the
+and for how long; aidc only carries it. The server's host is `coordinator.callback_url`, never the
 caller's choice, and the session's egress policy still decides whether the session can reach it.
 
 ### A repo configuring its own sandbox (SEC-09)

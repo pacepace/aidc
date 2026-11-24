@@ -556,15 +556,15 @@ The MCP server is built for an orchestrating agent that runs somewhere else on y
 1. The orchestrator injects the current `conversation_id` into its agent's system prompt; the agent passes it through and never has to invent it.
 2. The agent calls `session_send(name, prompt)` (below), or `session_invoke_async(name, prompt, conversation_id)` for a short single-shot question. The call returns immediately.
 3. aidc hands the prompt to the session's agent (`session_send`), or runs the question in the named session container (`session_invoke_async` runs a fresh `aidc-claude --print <prompt>`, stopped after 30 minutes).
-4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"person"|"orchestrator"|"", "interrupted": true|false}` (plus `"sent_by"` with a `"person"` origin: whoever `session_send`'s `sent_by` named) (plus `"prompts"`, the `session_send` prompts the reply answers as `{prompt_id, sent_by, conversation_id}` in paste order, and `"pasted_at"`, when their batch was pasted) (plus `"speaker": "human"|"agent"` with `metallm.send_speaker: true`). Two callbacks are notices rather than replies and carry `error_code`: `"prompt_dropped"` for a queued prompt whose session was removed before it could be pasted, and `"prompt_waiting"`, sent once, for a queued prompt that has waited 10 minutes (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
+4. When it finishes, aidc POSTs to `{callback_url}/api/v1/internal/callback/{conversation_id}` with `Authorization: Bearer <mcp-token>`. `session_invoke_async` sends `{"content": "...", "ok": true|false}`; the session watcher behind `session_send` sends `{"content", "ok", "source": "agent_watch", "session": "<name>", "prompt_origin": "terminal"|"person"|"orchestrator"|"", "interrupted": true|false}` (plus `"sent_by"` with a `"person"` origin: whoever `session_send`'s `sent_by` named) (plus `"prompts"`, the `session_send` prompts the reply answers as `{prompt_id, sent_by, conversation_id}` in paste order, and `"pasted_at"`, when their batch was pasted) (plus `"speaker": "human"|"agent"` with `coordinator.send_speaker: true`). Two callbacks are notices rather than replies and carry `error_code`: `"prompt_dropped"` for a queued prompt whose session was removed before it could be pasted, and `"prompt_waiting"`, sent once, for a queued prompt that has waited 10 minutes (every field is described in [design 10, D5](docs/design-10-turn-state-and-sending.md#d5-the-callback-payload-contract)).
 5. The orchestrator verifies the bearer, injects the content into the conversation, and wakes its agent.
 
 **Setup (one time):**
 
-**Step 1 — Tell aidc where the callback endpoint lives.** Add `metallm.callback_url` to `~/.config/aidc/config.yaml` (the key keeps its historical name):
+**Step 1 — Tell aidc where the callback endpoint lives.** Add `coordinator.callback_url` to `~/.config/aidc/config.yaml`:
 
 ```yaml
-metallm:
+coordinator:
   callback_url: https://orchestrator.example.com
 ```
 
@@ -576,7 +576,7 @@ metallm:
 
 **Notes:**
 - Use `session_status` before calling `session_invoke_async` to confirm the target session is alive.
-- If `metallm.callback_url` is not set, the tool returns an error immediately rather than silently losing the result.
+- If `coordinator.callback_url` is not set, the tool returns an error immediately rather than silently losing the result.
 - A short question whose answer is needed inline is `session_invoke` (synchronous). Anything that may take more than about a minute, or that edits files or runs builds or tests, is `session_send`, not either invoke.
 - One headless run at a time per session: while a `session_invoke` or `session_invoke_async` runs, another is refused with `error_code: "invoke_busy"`, naming the run (its `run_id`, `started_at`, `prompt`, `pid`). `session_status` lists runs under `headless_runs`, including one left from before an `aidc-mcp` restart (`orphan: true`), and `session_interrupt` with `target: "headless"` stops one with every process it started.
 - A headless run is a fresh Claude: it never resumes the session's conversation. `session_invoke` has no time limit. If the caller cancels the call (`notifications/cancelled`), closes its MCP session, or drops the connection, the run is stopped in the container. A client that abandons a call without any of those cannot be seen; the one-at-a-time rule and `headless_runs` cover that case.
@@ -593,7 +593,7 @@ metallm:
 
 **`session_unwatch(name)`** — closes the webhook for a session, stopping automatic delivery. No-op if nothing is being watched.
 
-**`session_mcp_set(name, server, path, bearer)`** — gives the session's Claude one HTTP MCP server on the orchestrator's own API, so the Claude working in the session can read from the orchestrator or ask it things. `path` is a path on that API; aidc adds the host from `metallm.callback_url`, so a caller cannot point a session anywhere else. `bearer` is the token Claude sends. Call it again whenever the token changes.
+**`session_mcp_set(name, server, path, bearer)`** — gives the session's Claude one HTTP MCP server on the orchestrator's own API, so the Claude working in the session can read from the orchestrator or ask it things. `path` is a path on that API; aidc adds the host from `coordinator.callback_url`, so a caller cannot point a session anywhere else. `bearer` is the token Claude sends. Call it again whenever the token changes.
 
 - **Where it goes.** Under the session's Claude config directory, on its dev-home volume: the token in `aidc-mcp/<server>.bearer` (mode 0600), a helper `aidc-mcp/headers.sh` that prints it as an `Authorization` header, and one entry in `.claude.json` (`mcpServers.<server>`: the URL and the helper, no token). The entry is written into the installed state, after the first start has installed the seed that strips every `mcpServers` entry; a session still starting is refused (`session_not_ready`).
 - **When Claude can use it.** Claude Code loads its MCP servers when it starts and runs the helper on each connection and again when a call is refused (401 or 403). So a new token for a server the session already has needs no restart, and a server the session did not have is there after Claude restarts (`aidc restart <name>`). The result says which (`needs_claude_restart`).
@@ -749,8 +749,8 @@ mcp:
                                       # writing Claude's per-project memory on the HOST, so turning this on mounts
                                       # your home dir into the aidc-mcp container. Off, the tool is not offered at all.
 
-# Only relevant if an orchestrator drives sessions over MCP (the key keeps its historical name):
-metallm:
+# Only relevant if an orchestrator drives sessions over MCP:
+coordinator:
   callback_url: ""                    # base URL of the orchestrator's callback endpoint (e.g. https://orchestrator.example.com).
                                       # Required for session_invoke_async / session_send to deliver results back.
                                       # See "Driving sessions from an orchestrator" above.

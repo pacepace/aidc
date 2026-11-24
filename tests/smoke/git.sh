@@ -78,6 +78,29 @@ sg_part_setup() {
     echo "  note: GitHub login: ${SG_LOGGED_IN}"
 }
 
+# gitctl's user switch as the installed image has it (the unit tests run gitctl from a checkout,
+# with no sudo): gitwc, the user's uid on Docker, runs the agent's working-copy verbs there and
+# nowhere else. Needs SG_WC (a working copy the git container sees).
+sg_part_gitwc() {
+    local ctl=/opt/aidc/lib/gitctl/gitctl.sh out
+    echo "[git] gitctl's switch to gitwc, in the image"
+    if [ "$SG_BACKEND" = kubernetes ]; then
+        out=$(sg_git sudo -n -u gitwc "$ctl" unpushed "$SG_WC" 2>&1 || true)
+        assert "gitwc is refused off Docker (${out:0:80})" \
+            "printf '%s' \"\$out\" | grep -q 'gitwc works only in a Docker git container'"
+    else
+        assert "the sudo rule lets the agent run gitctl as gitwc, which takes a working-copy verb" \
+            "sg_git sudo -n -u gitwc '$ctl' unpushed '${SG_WC}'"
+        out=$(sg_git sudo -n -u gitwc "$ctl" push "$SG_WC" main 2>&1 || true)
+        assert "and refuses any other verb as gitwc (${out:0:80})" \
+            "printf '%s' \"\$out\" | grep -q 'does not run as gitwc'"
+        assert "the agent's own gitctl unpushed switches to gitwc and works" "sg_git gitctl unpushed '${SG_WC}'"
+    fi
+    out=$(sg_git sudo -n -u gitwc /bin/sh -c id 2>&1 || true)
+    assert "the sudo rule allows gitctl only, nothing else as gitwc" \
+        "! printf '%s' \"\$out\" | grep -q 'uid='"
+}
+
 sg_part_requests() {
     echo "[git] a repo, a session's worktree, and its requests"
     local wt_rel=".aidc-smoke-${SG_SESSION}"

@@ -172,6 +172,59 @@ ctl push "$W" feature
 assert_eq "the push still works" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
 assert_eq "and never carries tags" "" "$(git -C "$R" tag)"
 
+# No attribution in code or docs: the lines each pushed commit adds are scanned too. The test
+# builds such text from parts, so this file adds none of its own.
+TRAILER="Co-Authored""-By: Cla""ude <noreply@example.com>"
+ROBOT=$(printf '\360\237\244\226')
+G -C "$W" switch -q -c diffscan main
+printf 'notes\n%s\n' "$TRAILER" > "$W/NOTES.md"; G -C "$W" add NOTES.md; G -C "$W" commit -q -m "Add notes"
+ctl push "$W" diffscan
+assert_eq "a commit adding a file line with an attribution trailer is not pushed" none "$(remote_sha diffscan)"
+assert_has "and the reason says it is in a file" "adds AI attribution to a file" "$OUT"
+G -C "$W" reset -q --hard main
+printf 'done %s\n' "$ROBOT" > "$W/STATUS.txt"; G -C "$W" add STATUS.txt; G -C "$W" commit -q -m "Add status"
+ctl push "$W" diffscan
+assert_eq "a file line with the robot emoji is not pushed either" none "$(remote_sha diffscan)"
+G -C "$W" reset -q --hard main
+printf 'Fix the Claude Code transcript reader\n' > "$W/CHANGES.md"; G -C "$W" add CHANGES.md; G -C "$W" commit -q -m "Changes"
+ctl push "$W" diffscan
+assert_eq "a file that only talks about Claude is pushed" "$(git -C "$W" rev-parse diffscan)" "$(remote_sha diffscan)"
+# On origin already (pushed some other way): moving it, or merging origin's branch in, adds none
+# of its lines; a merge that writes one itself does.
+O2="$S/elsewhere2"; G clone -q "$R" "$O2" 2>/dev/null; G -C "$O2" switch -q main
+printf 'fixture\n%s\n' "$TRAILER" > "$O2/fixture.txt"; G -C "$O2" add fixture.txt; G -C "$O2" commit -q -m "A fixture"
+G -C "$O2" push -q origin main 2>/dev/null
+ctl fetch "$W"
+G -C "$W" switch -q -c moved origin/main
+G -C "$W" mv fixture.txt fixture-moved.txt; G -C "$W" commit -q -m "Move the fixture"
+ctl push "$W" moved
+assert_eq "a commit that only moves a file holding such a line is pushed (rename)" "$(git -C "$W" rev-parse moved)" "$(remote_sha moved)"
+G -C "$W" switch -q diffscan
+G -C "$W" merge -q --no-ff --no-edit origin/main
+ctl push "$W" diffscan
+assert_eq "a merge bringing in origin's lines is pushed (they are not the merge's own)" "$(git -C "$W" rev-parse diffscan)" "$(remote_sha diffscan)"
+G -C "$W" switch -q -c evil "$(git -C "$W" rev-parse 'diffscan^1')"
+G -C "$W" merge -q --no-ff --no-commit origin/main 2>/dev/null
+printf 'merged\n%s\n' "$TRAILER" > "$W/MERGE.md"; G -C "$W" add MERGE.md; G -C "$W" commit -q --no-edit
+ctl push "$W" evil
+assert_eq "a merge that writes such a line itself is not pushed" none "$(remote_sha evil)"
+G -C "$W" switch -q feature
+
+# gitrun packs its private copies itself (git gc --auto at each verb; git's own automatic
+# maintenance is off): loose objects a fetch left are packed, so a copy does not grow file by
+# file. The copy's own config (gitrun's) here unpacks every fetch and asks for gc at once.
+O3="$S/elsewhere3"; G clone -q "$R" "$O3" 2>/dev/null; G -C "$O3" switch -q main
+mkdir -p "$O3/many"; for i in $(seq 600); do printf '%s\n' "$i" > "$O3/many/f$i"; done
+G -C "$O3" add many; G -C "$O3" commit -q -m "Many files"; G -C "$O3" push -q origin main 2>/dev/null
+git --git-dir="$STORE/o/r.git" config fetch.unpackLimit 100000
+git --git-dir="$STORE/o/r.git" config gc.auto 1
+loose() { find "$STORE/o/r.git/objects" -path '*/objects/[0-9a-f][0-9a-f]/*' -type f | wc -l | tr -d ' '; }
+ctl fetch "$W"
+for _ in $(seq 50); do [ "$(loose)" -lt 10 ] && break; sleep 0.2; done
+assert_eq "gitrun's gc packs the loose objects a fetch left in its private copy" "0 yes" \
+    "$RC $([ "$(loose)" -lt 10 ] && echo yes || echo "no: $(loose) loose")"
+git --git-dir="$STORE/o/r.git" config --unset fetch.unpackLimit; git --git-dir="$STORE/o/r.git" config --unset gc.auto
+
 # The working copy is anyone's in the session group: config planted there runs nothing on
 # gitctl's steps (the agent's bundle and import pin hooks and fsmonitor off), and gitrun never
 # runs git in it at all.
@@ -629,6 +682,7 @@ assert_eq "a merged branch whose worktree has uncommitted changes: deleted on Gi
     "yes yes yes" "$(row "uncommitted $T/wt-dirty") $([ -f "$T/wt-dirty/draft.txt" ] && echo yes || echo no) $(git -C "$T" rev-parse -q --verify t-dirty >/dev/null && echo yes || echo no)"
 assert_has "a worktree with a folder the agent cannot write is not touched, and named" "cannot-delete $T/wt-ro not writable" "$OUT"
 assert_eq "and nothing of it was deleted" yes "$([ -f "$T/wt-ro/ro/f" ] && echo yes || echo no)"
+assert_has "with how the user clears it (from a session)" "remove it from a session" "$OUT"
 assert_eq "an unpushed branch is reported with its count, and kept" "yes yes" \
     "$(row 'unpushed 1 t-unpushed') $(git -C "$T" rev-parse -q --verify t-unpushed >/dev/null && echo yes || echo no)"
 assert_eq "a pushed, unmerged branch is reported and kept, here and on GitHub" "yes yes" \

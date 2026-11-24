@@ -423,7 +423,7 @@ agent_tidy() {
                 # Every folder in it must be one the agent may empty, or the remove would stop
                 # half way: check first, delete nothing when one is not.
                 why=$(find "$wt" -xdev -type d ! -writable -print -quit 2>/dev/null)
-                if [ -n "$why" ]; then rows+=("cannot-delete ${wt} not writable by the git container: ${why}"); continue; fi
+                if [ -n "$why" ]; then rows+=("cannot-delete ${wt} not writable by the git container: ${why} (written by a session with another umask, or as root: remove it from a session, e.g. sudo rm -rf it there)"); continue; fi
                 if line=$(ag -C "$WC" worktree remove "$wt" 2>&1 </dev/null); then rows+=("removed-worktree ${wt}")
                 else rows+=("cannot-delete ${wt} $(printf '%s' "$line" | tail -n1)"); continue; fi
             fi

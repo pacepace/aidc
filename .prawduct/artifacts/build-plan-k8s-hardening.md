@@ -116,3 +116,8 @@ backends, checked live) and 06 (pod replacement must keep the conversation: chec
 0706859 (smoke cleanup) is in its scope.
 
 ## Decisions made mid-build
+- (01) `aidc user add` keeps reading the disk phase as before: a failed read there only re-applies the (idempotent) disk claim, which fails on its own if the cluster is down; nothing is mistaken.
+- (02) The squid message for public-only is generic now (it serves the git proxy and k8s sessions). Measured live on the reference cluster before the squid image was rebuilt: the old message, same rules.
+- (03, P6) The diff scan reads only the lines each pushed commit adds (renames followed; a merge as a combined diff, so lines merged in from another branch or origin are not the merge's own). It refuses, as the message scan does. Inferred: test data that needs such text builds it from parts (this repo's new tests do); the older tests' literal lines are already on origin and are never re-scanned. Owner can veto (it binds aidc's own development through the git container too).
+- (03, P12) Kept the git container's rights as they are (no gitwc-like path on Kubernetes, which would let the agent act as every session's uid). Instead shells opened from outside a k8s session (kubectl exec, sudo) get umask 002 like the session's own processes, and tidy's cannot-delete line says how to clear what is left (root-owned files from inner Docker builds).
+- (03, P18) Image-level checks live in tests/smoke/git.sh (`sg_part_gitwc`), run by both smokes; the k8s half was checked live against the running git container.

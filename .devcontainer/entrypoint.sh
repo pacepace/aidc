@@ -53,6 +53,30 @@ if [ -n "${AIDC_GIT_USER_NAME:-}" ] && [ -n "${AIDC_GIT_USER_EMAIL:-}" ]; then
     fi
 fi
 
+# On Kubernetes the user's disk is shared with the git container, which tidies merged worktrees
+# as a member of the session group: what a session writes there must be group-writable. The
+# session's own processes inherit user-main.sh's umask; shells opened from outside (kubectl
+# exec, aidc attach's shell windows, sudo) get the same here: login and interactive bash read
+# the two files, and sudo would otherwise add its own 022 to whatever umask its caller had.
+# Files written as root (a Docker build bind-mounting the disk) are still the session's to
+# remove; gitctl tidy names them.
+# group_write_shells <root>: writes them under <root> (/ in the container).
+group_write_shells() {
+    local r="${1%/}" tmp
+    mkdir -p "${r}/etc/profile.d" "${r}/etc/sudoers.d" || return 1
+    printf '# aidc (Kubernetes): files on the shared disk stay group-writable\numask 002\n' \
+        > "${r}/etc/profile.d/aidc-umask.sh" && chmod 0644 "${r}/etc/profile.d/aidc-umask.sh" || return 1
+    grep -qx 'umask 002  # aidc' "${r}/etc/bash.bashrc" 2>/dev/null \
+        || printf '\numask 002  # aidc\n' >> "${r}/etc/bash.bashrc" || return 1
+    tmp=$(mktemp "${r}/etc/sudoers.d/.aidc-umask.XXXXXX") || return 1
+    printf 'Defaults umask=0002\nDefaults umask_override\n' > "$tmp" && chmod 0440 "$tmp" \
+        && mv -f "$tmp" "${r}/etc/sudoers.d/aidc-umask" || { rm -f "$tmp"; return 1; }
+}
+if [ "${AIDC_BACKEND:-}" = kubernetes ]; then
+    group_write_shells / && log "shells and sudo: umask 002 (the shared disk stays group-writable)" \
+        || log "WARN: could not set umask 002 for shells and sudo (continuing)"
+fi
+
 # Enable the host's shared plugins inside the container (share_plugins).
 #
 # cmd-create.sh bind-mounts ~/.claude/plugins read-only, which lets Claude

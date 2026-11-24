@@ -150,6 +150,7 @@ assert "an inner container cannot get out directly" \
     "! in_dev 'timeout 60 docker run --rm curlimages/curl:8.17.0 -sf -m 15 -o /dev/null https://1.1.1.1'"
 
 echo "[4b/7] the git container: requests from the session"
+sg_part_gitwc
 sg_part_requests
 sg_part_github sg_make_gh_wc
 sg_part_claude

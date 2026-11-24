@@ -961,6 +961,7 @@ else
     assert "a session created after setup, on the working copy" \
         "'$AIDC' create '$SG_SESSION' --repo '$SG_WC' --trust-repo-config </dev/null"
     SG_SESSION_MADE=1
+    sg_part_gitwc
     sg_part_requests
     sg_part_github sg_make_gh_wc
     sg_part_claude

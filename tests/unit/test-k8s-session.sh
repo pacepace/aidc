@@ -357,6 +357,20 @@ if write_git_identity "$GC" "Alice \"Al\" O'Neil \\ Example" alice@example.com; 
 else
     assert_eq "write_git_identity writes the session's .gitconfig" 0 1
 fi
+# Shells opened from outside a Kubernetes session (kubectl exec, sudo) write group-writable
+# files on the shared disk too, so the git container can tidy what they made.
+eval "$(sed -n '/^group_write_shells() {/,/^}/p' "$AIDC_ROOT/.devcontainer/entrypoint.sh")"
+GW="$SCRATCH/gwroot"; mkdir -p "$GW/etc"; printf '# distro bashrc\n' > "$GW/etc/bash.bashrc"
+group_write_shells "$GW"; group_write_shells "$GW"
+assert_eq "login shells get umask 002" "umask 002" "$(grep -x 'umask 002' "$GW/etc/profile.d/aidc-umask.sh")"
+assert_eq "interactive bash too, once however often the entrypoint runs" 1 "$(grep -c '^umask 002  # aidc$' "$GW/etc/bash.bashrc")"
+assert_eq "and sudo keeps it (its own 022 would be added otherwise)" "Defaults umask=0002|Defaults umask_override|440" \
+    "$(paste -sd'|' "$GW/etc/sudoers.d/aidc-umask")|$(stat -c %a "$GW/etc/sudoers.d/aidc-umask")"
+if command -v visudo >/dev/null 2>&1; then
+    assert_eq "a sudoers file sudo accepts" 0 "$(visudo -c -f "$GW/etc/sudoers.d/aidc-umask" >/dev/null 2>&1; echo $?)"
+fi
+assert_has "the entrypoint does this on Kubernetes only (the Docker repo is the host's)" \
+    'if [ "${AIDC_BACKEND:-}" = kubernetes ]; then' "$(grep -A1 'group_write_shells / ' "$AIDC_ROOT/.devcontainer/entrypoint.sh" | head -1; grep -B1 'group_write_shells / ' "$AIDC_ROOT/.devcontainer/entrypoint.sh" | head -1)"
 assert_eq "the entrypoint no longer writes the values into the file unquoted" 0 "$(grep -c 'name = ${AIDC_GIT_USER_NAME}' "$AIDC_ROOT/.devcontainer/entrypoint.sh")"
 git config --global user.name $'Two\nlines'
 out=$(run create demo --backend kubernetes)

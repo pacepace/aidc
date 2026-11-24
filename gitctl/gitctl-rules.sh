@@ -20,9 +20,16 @@ gitctl_refuse() { GITCTL_REASON="$1"; return 1; }
 # on a line, not only at its start: `--body="Thanks. Co-Authored-By: Claude"` is still a
 # trailer once GitHub renders it. Text that merely talks about Claude passes.
 gitctl_attribution() {
-    local text="$1"
-    GITCTL_HIT=$(printf '%s\n' "$text" | LC_ALL=C grep -m1 -F "$(printf '\360\237\244\226')") && return 0
-    GITCTL_HIT=$(printf '%s\n' "$text" | LC_ALL=C grep -m1 -iE \
+    gitctl_attribution_stream < <(printf '%s\n' "$1")
+}
+
+# gitctl_attribution_stream: the same check on stdin, read once, as a stream: the lines a push
+# adds can be far larger than a shell variable should hold. 0, with the first offending line in
+# GITCTL_HIT, when one carries attribution. Called with a redirect, not in a pipeline, so
+# GITCTL_HIT is set in the caller's shell.
+gitctl_attribution_stream() {
+    GITCTL_HIT=$(LC_ALL=C grep -m1 -iE \
+        -e "$(printf '\360\237\244\226')" \
         -e "co[- ]?authored[- ]?by[[:space:]]*:?.*(${GITCTL_AI})" \
         -e "signed[- ]?off[- ]?by[[:space:]]*:.*(${GITCTL_AI})" \
         -e "(generated|created|written|authored|made|produced)[[:space:]]+(with|by|using|via|in)[[:space:]]+[^[:alnum:]]*(${GITCTL_AI})" \

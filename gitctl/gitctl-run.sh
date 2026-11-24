@@ -158,6 +158,10 @@ run_push() {
         gitctl_check_text "$raw" "commit ${sha:0:12}" || die "$GITCTL_REASON; reword it before pushing"
         ids=$(printf '%s\n' "$raw" | sed -n '/^$/q; /^\(author\|committer\) /p')
         gitctl_ai_identity "$ids" && die "commit ${sha:0:12} is authored or committed as an AI tool or bot"
+        # No attribution in code or docs either: the lines this commit adds, read as a stream.
+        if gitctl_attribution_stream < <(added_lines "$sha"); then
+            die "commit ${sha:0:12} adds AI attribution to a file (${GITCTL_HIT:0:120}); no attribution in code or docs. Take it out, or build such text from parts where it is test data"
+        fi
     done < <(g rev-list "$local_sha" "${nots[@]}" --)
     if ! g push --no-recurse-submodules --no-follow-tags "$ORIGIN_URL" "${local_sha}:refs/heads/${branch}"; then
         action push "$slug" "$branch" "$local_sha" failed
@@ -166,6 +170,23 @@ run_push() {
     action push "$slug" "$branch" "$local_sha" ok
     # The one line a caller reads back (a session's request result, which sets its upstream).
     echo "pushed ${branch} ${local_sha}"
+}
+
+# added_lines SHA: the lines commit SHA adds, without their diff prefix. A plain commit against
+# its parent (or the empty tree); a merge as a combined diff, where only a line new against every
+# parent counts (what the merge itself wrote; a line from a merged branch was that branch's,
+# scanned when it was pushed, or origin's). Renames are followed, so a moved file adds nothing.
+# No diff driver, text conversion or colour: what is compared is the bytes the push sends.
+added_lines() {
+    local n
+    n=$(g rev-list --no-walk --parents "$1" | awk '{ print NF - 1 }')
+    [ "${n:-0}" -ge 1 ] || n=1
+    g diff-tree -p --cc -M --root --no-commit-id --no-color --no-ext-diff --no-textconv "$1" 2>/dev/null \
+        | awk -v n="$n" 'BEGIN { p = ""; for (i = 0; i < n; i++) p = p "+" }
+            /^diff --(git|cc|combined) / { h = 1; next }
+            /^@@/ { h = 0; next }
+            h { next }
+            substr($0, 1, n) == p { print substr($0, n + 1) }'
 }
 
 # delete-branch: delete a branch on GitHub after its pull request merged (gitctl tidy). Only a

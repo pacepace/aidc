@@ -60,7 +60,8 @@ default_base() { git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/nul
 new_id() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 
 # submit ACTION [jq --arg pairs...]: write the request (whole, then renamed into place) and
-# keep its id for gh pr status. Sets ID.
+# keep its id for gh pr status. Sets ID. The session's token (AIDC_GIT_TOKEN, in its pod only)
+# goes with it, so a git mode the user gave this session applies to its requests alone.
 submit() {
     local action="$1" tmp
     shift
@@ -69,7 +70,8 @@ submit() {
     tmp="$REQ/requests/.${ID}.tmp"
     if ! ( umask 027
       jq -n --arg id "$ID" --arg session "${AIDC_SESSION:-session}" --arg action "$action" \
-        --arg repo "$REPO" --arg worktree "$WORKTREE" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@" \
+        --arg repo "$REPO" --arg worktree "$WORKTREE" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg token "${AIDC_GIT_TOKEN:-}" "$@" \
         '{version: 1, id: $id, session: $session, action: $action, repo: $repo, worktree: $worktree, created: $created}
          + ($ARGS.named | del(.id, .session, .action, .repo, .worktree, .created) | with_entries(select(.value != "")))' \
         > "$tmp" ) || ! mv -f -- "$tmp" "$REQ/requests/${ID}.json"; then

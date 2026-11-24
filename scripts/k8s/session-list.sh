@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# aidc list, Kubernetes part: the user's sessions in the configured cluster, with their taint.
+# aidc list, Kubernetes part: the user's sessions in the configured cluster, with their taint,
+# and the git agent (the git container's Claude, an aidc session under a reserved name).
 
 set -euo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
@@ -11,7 +12,10 @@ ns=$(k8s_user_ns "$AIDC_K8S_USER")
 rows=$(k8s_kubectl -n "$ns" get statefulset -l app=dev --request-timeout=10s \
     -o jsonpath='{range .items[*]}{.metadata.labels.aidc/session}{"\t"}{.status.readyReplicas}{"\t"}{.metadata.annotations.aidc/profile}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}') \
     || die "the cluster did not answer; its sessions are unknown (${ns})"
-if [ -z "$rows" ]; then
+git=$(k8s_kubectl -n "$ns" get deployment -l "app=git,aidc/session=${K8S_GIT_SESSION}" --request-timeout=10s \
+    -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}') \
+    || die "the cluster did not answer; its sessions are unknown (${ns})"
+if [ -z "$rows" ] && [ -z "$git" ]; then
     printf 'No aidc sessions in the cluster (%s).\n' "$ns"
     exit 0
 fi
@@ -22,3 +26,9 @@ printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r s ready profile start
     printf '%-20s %-15s %-10s %-25s %-9s %s\n' "$s" "$st" "${profile:-?}" "$started" \
         "$(k8s_session_taint "$ns" "$s" | cut -d' ' -f1)" "kubernetes"
 done
+# The git agent: trusted (no proxy, no sandbox, so no taint to read), managed by aidc git setup.
+if [ -n "$git" ]; then
+    IFS="$(printf '\t')" read -r ready started <<<"$git"
+    case "${ready:-0}" in 0|'') st="starting" ;; *) st="running" ;; esac
+    printf '%-20s %-15s %-10s %-25s %-9s %s\n' "$K8S_GIT_SESSION" "$st" "git-agent" "$started" "-" "kubernetes"
+fi

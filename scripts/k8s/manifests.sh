@@ -496,6 +496,10 @@ spec:
             # container can tidy merged worktrees.
             - {name: AIDC_BACKEND, value: kubernetes}
             - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
+            # The session's own token, sent with its requests: a git mode the user gives this
+            # session (aidc git mode) applies to requests carrying it, and no other session can
+            # read it (sessions reach no API server and no other pod).
+            - {name: AIDC_GIT_TOKEN, value: "${AIDC_K8S_GIT_TOKEN:-}"}
           volumeMounts:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/vscode}
@@ -534,6 +538,10 @@ k8s_render_git() {
     ns=$(k8s_user_ns "$AIDC_K8S_USER")
     img="${AIDC_K8S_REGISTRY_PULL}/aidc/gitctl:${AIDC_VERSION_TAG}"
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}"
+    # The git agent is an aidc session (owner ruling 2026-11-24) under a reserved name: its
+    # Deployment and pod carry the session label, so aidc's lookup finds it like any session.
+    # Not in the selector: a Deployment's selector cannot change, and app: git stays its key.
+    local session="aidc/session: ${K8S_GIT_SESSION}"
     cat <<EOF2
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -577,7 +585,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: git, namespace: ${ns}, labels: {${labels}, app: git}}
+metadata: {name: git, namespace: ${ns}, labels: {${labels}, ${session}, app: git}}
 spec:
   replicas: 1
   # Recreate: two git containers at once would share one home (one SSH key, one gh config) and
@@ -585,7 +593,7 @@ spec:
   strategy: {type: Recreate}
   selector: {matchLabels: {app: git}}
   template:
-    metadata: {labels: {${labels}, app: git}}
+    metadata: {labels: {${labels}, ${session}, app: git}}
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -613,6 +621,20 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
           volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}]
+        # Claude Code is copied into the home once, when it is seeded; this brings a home made
+        # earlier the image's Claude when that is newer than the one it has. As the git user,
+        # not root: the home is the agent's, so nothing it planted there is followed by root.
+        - name: refresh-claude
+          image: ${img}
+          imagePullPolicy: Always
+          command: [/opt/aidc/lib/gitctl/claude-refresh.sh, /home/git, /seed]
+          securityContext:
+            runAsUser: 2000
+            runAsGroup: 2000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: home, mountPath: /seed}]
       containers:
         - name: git
           image: ${img}
@@ -623,6 +645,10 @@ spec:
             - {name: AIDC_USER, value: "${AIDC_K8S_USER}"}
             - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
             - {name: AIDC_GIT_MODE, value: "${AIDC_K8S_GIT_MODE:-ask}"}
+            # In ask mode a waiting request is handed to the git agent's Claude, which asks the
+            # user with its question tool (the approval path every session's question takes).
+            - {name: AIDC_GIT_NOTIFY, value: /opt/aidc/lib/gitctl/git-notify.sh}
+            - {name: AIDC_SESSION, value: "${K8S_GIT_SESSION}"}
           securityContext:
             runAsUser: 2000
             runAsGroup: 2000

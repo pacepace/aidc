@@ -10,6 +10,10 @@ NAME="${1:-}"
 validate_session_name "$NAME"
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
+if k8s_is_git_session "$NAME"; then
+    printf 'session:  %s (your git agent: the git container, kubernetes, namespace %s)\n' "$NAME" "$ns"
+    exec bash "$AIDC_SCRIPTS/k8s/git-status.sh"
+fi
 k8s_require_session "$ns" "$NAME"
 sts=$(k8s_kubectl -n "$ns" get statefulset "${NAME}-dev" -o json) \
     || die "cannot read session '${NAME}': the cluster did not answer"

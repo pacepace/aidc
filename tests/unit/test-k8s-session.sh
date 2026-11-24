@@ -53,8 +53,12 @@ case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
+    *"get deployment,statefulset -l aidc/session=git"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_GIT:-}" = 1 ] && echo "deployment.apps/git" ;;
     *"get deployment,statefulset -l"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
+    *"get deployment -l app=git,aidc/session=git"*) [ "${K_GIT:-}" = 1 ] && printf '1\t2026-11-24T03:00:00Z\n' ;;
+    *"get pod -l app=git"*) echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}' ;;
     *"get deployment "*"-proxy"*) [ "${K_EXISTS:-}" = 1 ] || exit 1 ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
@@ -259,6 +263,35 @@ for verb in kill status attach; do
     assert_has "$verb: an unreachable cluster is said as such, never 'no such session'" \
         "the cluster did not answer" "$out"
 done
+
+echo "=== the git agent: a session under a reserved name ==="
+out=$(run create git --backend kubernetes)
+assert_has "no session may be named git (the git agent's name; its claims would collide)" "'git' is reserved for your git agent" "$out"
+assert_eq "and nothing is applied" "" "$(cat "$K_APPLIED")"
+out=$(run create demo --backend kubernetes)
+tok=$(yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "AIDC_GIT_TOKEN") | .value' "$K_APPLIED" | sort -u)
+assert_eq "each session gets one token of its own (64 hex), the same in both renders" yes \
+    "$(printf '%s' "$tok" | grep -Eqx '[0-9a-f]{64}' && echo yes || echo no)"
+out=$(run create demo --backend kubernetes)
+tok2=$(yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "AIDC_GIT_TOKEN") | .value' "$K_APPLIED" | sort -u)
+assert_eq "and a new session a new one" yes "$([ -n "$tok2" ] && [ "$tok" != "$tok2" ] && echo yes || echo no)"
+out=$(K_GIT=1 run kill git)
+assert_has "aidc kill git (found in the cluster) refuses the git agent" "aidc kill does not remove it" "$out"
+assert_has "and exits 1" "exit=1" "$out"
+assert_not_has "removing nothing" "delete" "$(cat "$K_LOG")"
+out=$(K_GIT=1 run list --backend kubernetes)
+assert_has "aidc list shows the git agent" "git                  running         git-agent" "$out"
+out=$(run list --backend kubernetes)
+assert_not_has "only when it is there" "git-agent" "$out"
+: > "$K_LOG"; K_GIT=1 run attach git >/dev/null
+assert_has "aidc attach git opens the git container's tmux as its own user" \
+    "exec -it git-7d9f-abc -c git -- env TERM=" "$(cat "$K_LOG")"
+K_GIT=1 run logs git >/dev/null
+assert_has "aidc logs git reads the git container's log" "logs deployment/git -c git" "$(cat "$K_LOG")"
+out=$(K_GIT=1 run logs git --component squid)
+assert_has "it has no proxy components" "has one component: git" "$out"
+out=$(K_GIT=1 run status git)
+assert_has "aidc status git names it as the git agent" "session:  git (your git agent" "$out"
 
 echo "=== the config's default backend for create ==="
 printf 'backend: kubernetes\n' >> "$HOME/.config/aidc/config.yaml"

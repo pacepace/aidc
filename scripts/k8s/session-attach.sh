@@ -9,6 +9,8 @@ case "${1:-}" in -h|--help) printf 'aidc attach <name>\n\nAttaches to the sessio
 NAME="${1:-}"
 validate_session_name "$NAME"
 k8s_require || exit 1
+# The git agent: its own pod and user (aidc git attach is the same).
+if k8s_is_git_session "$NAME"; then k8s_git_attach; exit; fi
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 pod="${NAME}-dev-0"
 k8s_require_session "$ns" "$NAME"

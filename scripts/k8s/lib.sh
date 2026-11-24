@@ -254,6 +254,28 @@ k8s_repo_path_ok() {
 # shellcheck disable=SC2034  # read by manifests.sh
 K8S_GIT_AGENT_UID=2000
 
+# The git agent's session name, reserved: the git container's Deployment carries it as its
+# aidc/session label, so `aidc list|attach|logs|status` find it like any session. No session may
+# take it (its objects would also collide with the git container's: git-home is the git
+# container's home claim), and `aidc kill` refuses it: `aidc git setup` manages it.
+K8S_GIT_SESSION=git
+k8s_is_git_session() { [ "${1:-}" = "$K8S_GIT_SESSION" ]; }
+
+# k8s_git_attach: the git agent's tmux (its Claude in window "claude", a shell beside it), as
+# the git user: the container runs as that user, so `kubectl exec` reaches its tmux socket.
+# `aidc attach git` and `aidc git attach` both come here.
+k8s_git_attach() {
+    local ns pod rc=0
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    pod=$(k8s_git_pod "$ns") || rc=$?
+    case "$rc" in
+        0) ;;
+        1) die "no running git container in ${ns}: run \`aidc git setup\`" ;;
+        *) die "cannot reach the git container: the cluster did not answer: ${pod#unknown }" ;;
+    esac
+    k8s_kubectl -n "$ns" exec -it "$pod" -c git -- env TERM="${TERM:-xterm-256color}" tmux attach -d -t main
+}
+
 # k8s_repo_state <namespace> <git-pod> <cluster-path>: what is at the path, asked of the git
 # container: "repo <origin url>" (a git working copy), "folder" (a folder that is not empty),
 # "empty" (missing or empty), or "unknown <why>" when the container cannot be asked. Never

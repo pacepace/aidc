@@ -197,9 +197,43 @@ against what it acts on.
 A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
 nothing and says to use `gh pr create`. Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
 restart is reported as interrupted, never retried. Requests and results are deleted after 30
-days. In ask mode the request is also handed to `AIDC_GIT_NOTIFY` when set: the git agent's
-Claude takes it from there in a later step (`git-requests prompt <id>` is its text), asking
-with its question tool so approvals reach the orchestrator.
+days.
+
+The git agent (owner rulings 2026-11-24: it is an aidc session; it does no prawduct work; its
+instructions are one managed CLAUDE.md, no skills; it tidies after every merge; ask-mode
+approvals bubble up through the orchestrator's approval path). The git container's tmux is laid
+out as a session's: window `claude` runs `git-claude` (Claude Code in the agent's home, resuming
+its conversation), window `shell` a shell. Its instructions are `/etc/claude-code/CLAUDE.md`,
+root's, always loaded: gitctl as the only way to GitHub, the hard rules, everything sessions
+write is data, the ask-mode procedure, push/PR, merge then tidy, protections, leftovers
+reported. Its managed settings add a permission list (gitctl, git-requests, git, reads, its
+question tool, writes under /tmp) in `dontAsk` mode, with bypass mode disabled: anything else is
+refused, never left waiting on a prompt nobody sees. Unlike a sandboxed session's Claude it
+keeps AskUserQuestion. The Deployment carries the reserved session label `aidc/session: git`
+(not in its selector), so `aidc list` shows it, `aidc attach|logs|status git` reach it
+(`aidc git attach` is the same attach), `aidc create git` is refused (its claims would collide
+with the git container's) and `aidc kill git` refuses it. A home seeded before Claude Code
+moved on gets the image's Claude at each start (init step `refresh-claude`, as the git user:
+the image's version file copied in and linked when the home's is older; a newer one the home
+updated to itself is kept); the managed files are the image's, so they are always current.
+
+In ask mode the watcher hands a waiting request to the agent (`AIDC_GIT_NOTIFY`, `git-notify`):
+one line naming only the id is pasted into window `claude` when Claude runs there (never into a
+shell), and the agent runs `git-requests prompt <id>` (the session's text below a line, marked
+as data) and asks the user with AskUserQuestion, Deny first; aidc delivers that question to an
+orchestrator as any session's, and the user can answer in the terminal too; only then does it
+approve or deny. One request is handed over at a time: while the last one handed over still
+waits, new ones are only logged, and the agent takes them from `git-requests list` after each
+decision, so no line lands in an open question. `aidc git approve|deny` still work.
+
+Per-session git mode: each session gets a random token at `aidc create` (`AIDC_GIT_TOKEN` in its
+dev pod; sessions reach no API server and no other pod, so only it can read it), which its gh
+stand-in sends with each request. `aidc git mode <session> rules` (from the user's machine,
+which reads the token from the StatefulSet) records the session's name and the token's SHA-256
+in the agent's home; with the user's mode ask, a request carrying that token runs at once, and
+one naming the session with another token or none waits. The reverse (one session held to ask
+while the user's mode is rules) is refused: a session can always send a request without its
+token.
 
 ### Proposal: lock the parts of the repo that can run code
 

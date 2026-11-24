@@ -148,6 +148,71 @@ OUT=$(AIDC_GIT_MODE=yolo bash "$GR" once 2>&1)
 assert_eq "an unknown mode is ask" "pending|" "$(state "$id")|$(calls)"
 
 echo ""
+echo "=== a session's own mode: rules for one session, by its token ==="
+# With the user's mode ask, a session given rules (aidc git mode) runs its requests at once, but
+# only requests carrying its token: another session naming it, or sending no token, stays ask.
+TOK=$(printf 'a%.0s' $(seq 64)) OTHER=$(printf 'b%.0s' $(seq 64))
+printf '%s\n' "$TOK" | bash "$GR" mode demo rules >/dev/null 2>&1
+gr modes
+assert_eq "modes lists the user's mode and the session's own" "default ask|demo rules" "$(printf '%s\n' "$OUT" | paste -sd'|' -)"
+assert_eq "only the token's SHA-256 is kept, never the token" "no" \
+    "$(grep -rqF "$TOK" "$S/home/.local/state/gitctl/modes" && echo yes || echo no)"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push "{\"token\":\"$TOK\"}")"; gr once
+assert_eq "a request with the session's token runs at once" "done|rules" "$(state "$id")|$(jq -r .mode "$REQ/results/$id.json")"
+assert_eq "the token is not kept with the request" "" "$(jq -r '.token // ""' "$REQ/work/$id.json")"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push "{\"token\":\"$OTHER\"}")"; gr once
+assert_eq "another token naming the same session waits for the user" "pending|ask|" "$(state "$id")|$(jq -r .mode "$REQ/results/$id.json")|$(calls)"
+gr deny "$id"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push)"; gr once
+assert_eq "so does a request with no token" "pending|" "$(state "$id")|$(calls)"
+gr deny "$id"
+id=$(newid); put "$id" "$(req "$id" push '{"token":"not-a-token"}')"; gr once
+assert_has "a malformed token refuses the request" "refused: token: not a session token" "$(jq -r .message "$REQ/results/$id.json")"
+printf 'short\n' | bash "$GR" mode demo rules >/dev/null 2>&1
+assert_eq "rules without a token on stdin is refused" 1 "$?"
+gr mode demo default
+assert_eq "default takes the session's mode back" "default ask" "$(bash "$GR" modes 2>&1 | paste -sd'|' -)"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push "{\"token\":\"$TOK\"}")"; gr once
+assert_eq "and its token no longer loosens anything" "pending" "$(state "$id")"
+gr deny "$id"
+OUT=$(AIDC_GIT_MODE=rules bash "$GR" mode demo ask 2>&1); RC=$?
+assert_eq "holding one session to ask under the user's rules is refused (it could send no token)" 1 "$RC"
+assert_has "saying why" "can always send a request without its token" "$OUT"
+gr mode ../x rules
+assert_eq "a session name that is not one is refused" 1 "$RC"
+
+echo ""
+echo "=== ask mode hands a waiting request to the git agent's Claude, one at a time ==="
+cat > "$S/bin/notify" <<'STUB'
+#!/usr/bin/env bash
+[ "${N_FAIL:-}" = 1 ] && exit 1
+echo "$1" >> "$(dirname "$0")/notify.log"
+STUB
+chmod +x "$S/bin/notify"
+export AIDC_GIT_NOTIFY="$S/bin/notify"
+: > "$S/bin/notify.log"
+a=$(newid); put "$a" "$(req "$a" push)"; gr once
+assert_eq "a waiting request is handed over by its id" "$a" "$(cat "$S/bin/notify.log")"
+b=$(newid); put "$b" "$(req "$b" push)"; gr once
+assert_eq "a second one is not typed in while the first still waits (it may be mid-question)" "$a" "$(cat "$S/bin/notify.log")"
+assert_has "it is logged as waiting behind it" "$b waits behind $a" "$(cat "$REQ/work/requests.log")"
+gr deny "$a"
+c=$(newid); put "$c" "$(req "$c" push)"; gr once
+assert_eq "once the first is decided, the next new one is handed over" "$a|$c" "$(paste -sd'|' "$S/bin/notify.log")"
+gr deny "$b"; gr deny "$c"
+d=$(newid); put "$d" "$(req "$d" push)"; N_FAIL=1 gr once
+assert_has "Claude not running: logged, the request stays in the list" "$d not handed to the git agent" "$(cat "$REQ/work/requests.log")"
+e=$(newid); put "$e" "$(req "$e" push)"; gr once
+assert_eq "and the next one is handed over (nothing marked as handed)" "$e" "$(tail -n1 "$S/bin/notify.log")"
+gr deny "$d"
+printf '%s\n' "$e" > "$REQ/work/notified"
+( cd "$REQ" && timeout 3 bash "$GR" watch >/dev/null 2>&1 ) || true
+assert_eq "a restart forgets what was handed over (Claude's question went with it)" "no" \
+    "$([ -e "$REQ/work/notified" ] && echo yes || echo no)"
+gr deny "$e"
+unset AIDC_GIT_NOTIFY
+
+echo ""
 echo "=== an approval acts on the repo and commit the user saw ==="
 feat_sha=$(git -C "$P" rev-parse feat)
 reset_calls; id=$(newid); put "$id" "$(req "$id" push)"; gr once
@@ -286,6 +351,12 @@ assert_eq "the request it wrote: the branch, base, title, body, repo and worktre
     "pr-create|demo|$P|$P|feat|main|Add it|From stdin." \
     "$(jq -r '[.action, .session, .repo, .worktree, .branch, .base, .title, .body] | join("|")' "$REQ/requests/$new")"
 assert_eq "the session cannot list the requests (no read on requests/ for the group)" 1730 "$(stat -c %a "$REQ/requests")"
+assert_eq "a session with no token sends none" "" "$(jq -r '.token // ""' "$REQ/requests/$new")"
+ls "$REQ/requests" > "$S/before"
+OUT=$(AIDC_GIT_TOKEN="$(printf 'c%.0s' $(seq 64))" AIDC_GH_WAIT=1 bash "$GH" pr create --title "Add it" --body B 2>&1)
+new2=$(comm -13 "$S/before" <(ls "$REQ/requests") | head -1)
+assert_eq "a session's token goes with its request" "$(printf 'c%.0s' $(seq 64))" "$(jq -r '.token // ""' "$REQ/requests/$new2")"
+rm -f -- "$REQ/requests/${new2:?}"
 # The watcher takes it (rules) while the stand-in waits: end to end.
 ( sleep 2; AIDC_GIT_MODE=rules bash "$GR" once >/dev/null 2>&1 ) &
 reset_calls
@@ -364,7 +435,7 @@ assert_eq "set before tmux and Claude start (they inherit it)" yes \
 echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
 cp "$GR" "$S/mut.sh"; cp "$AIDC_ROOT/gitctl/gitctl-rules.sh" "$S/"
-sed -i 's/if \[ "\$MODE" = rules \]; then run "\$id"/if :; then run "$id"/' "$S/mut.sh"
+sed -i 's/if \[ "\$Q_mode" = rules \]; then run "\$id"/if :; then run "$id"/' "$S/mut.sh"
 id=$(newid); put "$id" "$(req "$id" push)"; reset_calls
 bash "$S/mut.sh" once >/dev/null 2>&1
 assert_eq "with the ask-mode hold removed, a push runs without approval (so the ask test would fail)" "done" "$(state "$id")"
@@ -373,6 +444,12 @@ id=$(newid); ln -s "$S/home/secret" "$REQ/requests/$id.json"
 AIDC_GIT_MODE=rules bash "$S/mut.sh" once >/dev/null 2>&1
 assert_eq "with the symlink check removed, the symlink is followed (so the symlink test would fail)" yes \
     "$(grep -q SECRET "$REQ/results/$id.json" 2>/dev/null || [ "$(jq -r .message "$REQ/results/$id.json")" != "refused: not a plain file" ] && echo yes || echo no)"
+cp "$GR" "$S/mut.sh"; sed -i 's/if \[ "\$m" = rules \] && \[ "\$h" = "\$(sha256 "\$2")" \]; then/if [ "$m" = rules ]; then/' "$S/mut.sh"
+printf '%s\n' "$TOK" | bash "$GR" mode demo rules >/dev/null 2>&1
+id=$(newid); put "$id" "$(req "$id" push "{\"token\":\"$OTHER\"}")"; reset_calls
+bash "$S/mut.sh" once >/dev/null 2>&1
+assert_eq "with the token's hash check removed, another token takes the session's mode (so the token test would fail)" "done" "$(state "$id")"
+bash "$GR" mode demo default >/dev/null 2>&1
 cp "$GR" "$S/mut.sh"; sed -i 's/if ! bound; then/if false; then/' "$S/mut.sh"
 id=$(newid); put "$id" "$(req "$id" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
 git -C "$P" remote set-url origin https://github.com/evil/x; reset_calls

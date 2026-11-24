@@ -46,6 +46,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 validate_session_name "$NAME"
+! k8s_is_git_session "$NAME" || die "'git' is reserved for your git agent (aidc git setup); pick another session name"
 # Stricter than Docker's names: a Kubernetes Service name must start with a letter, and a label
 # value must end with a letter or digit. Checked before anything is created, so a refused name
 # leaves nothing behind.
@@ -75,6 +76,10 @@ if k8s_kubectl -n "$ns" get deployment "${NAME}-proxy" >/dev/null 2>&1; then
 fi
 
 sel=$(k8s_node_selector) || exit 1
+# The session's own token (gh stand-in requests carry it; aidc git mode keys on it), made once
+# here: the session is rendered twice below and both must carry the same one.
+AIDC_K8S_GIT_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+[[ "$AIDC_K8S_GIT_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "cannot make the session's token"
 AUDIT_CLAIM="${NAME}-audit-$(date -u +%Y%m%d%H%M%S)"
 info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, audit ${AUDIT_CLAIM})"
 info "config: ${AIDC_CONFIG_SOURCES:-none found (defaults)}"

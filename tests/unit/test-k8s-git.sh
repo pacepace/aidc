@@ -77,6 +77,9 @@ case "$*" in
     *"exec git-7d9f-abc -c git -- gitctl tidy"*) printf 'deleted-remote feat\nremoved-worktree /home/alice/r/wt\nunpushed 2 other\norphaned /home/alice/r/old\nend\n' ;;
     *"exec git-7d9f-abc -c git -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
     *"exec git-7d9f-abc -c git -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
+    *"exec -i git-7d9f-abc -c git -- git-requests mode"*) cat > "$K_STDIN"; echo "mode set" ;;
+    *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_NO_SESSION:-}" = 1 ] || echo "statefulset.apps/demo-dev" ;;
+    *"get statefulset demo-dev -o jsonpath"*) printf '%s' "${K_TOKEN-$(printf 'f%.0s' $(seq 64))}" ;;
     *"exec git-7d9f-abc -c git -- gitctl"*|*"exec -i git-7d9f-abc -c git -- bash -c"*|*"exec git-7d9f-abc -c git -- git-requests"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }
         cat >/dev/null 2>&1 || true; echo "ok: $*" | cut -c1-80 ;;
@@ -106,7 +109,7 @@ STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test
+    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab
@@ -211,6 +214,20 @@ assert_has "a git_mode that is not ask or rules is refused" "is not ask or rules
 cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
 
+echo "=== the git agent: an aidc session, its Claude refreshed, ask mode handed to it ==="
+assert_eq "the Deployment and its pod carry the reserved session label (aidc's lookup finds the git agent)" '["git","git"]' \
+    "$(dep '[.metadata.labels["aidc/session"], .spec.template.metadata.labels["aidc/session"]]')"
+assert_eq "the selector is unchanged (a Deployment's selector cannot change)" '{"app":"git"}' "$(dep '.spec.selector.matchLabels')"
+genv=$(pod '.containers[] | select(.name == "git") | .env')
+assert_has "ask mode hands waiting requests to the git agent's Claude" '{"name":"AIDC_GIT_NOTIFY","value":"/opt/aidc/lib/gitctl/git-notify.sh"}' "$genv"
+assert_has "it knows its session name" '{"name":"AIDC_SESSION","value":"git"}' "$genv"
+assert_eq "an existing home gets the image's Claude: refresh-claude runs after the seed, as the git user, with nothing" \
+    '["seed-home","refresh-claude"] {"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}' \
+    "$(pod '[.initContainers[].name]') $(pod '.initContainers[] | select(.name == "refresh-claude") | .securityContext')"
+assert_eq "it reads the image's own home and writes the home claim only" \
+    '["/opt/aidc/lib/gitctl/claude-refresh.sh","/home/git","/seed"] [{"name":"home","mountPath":"/seed"}]' \
+    "$(pod '.initContainers[] | select(.name == "refresh-claude") | .command') $(pod '.initContainers[] | select(.name == "refresh-claude") | .volumeMounts')"
+
 echo "=== aidc git setup: run again ==="
 nopod() { yq -N e 'select(.kind != "Pod")' "$K_APPLIED"; }
 first=$(nopod)
@@ -249,6 +266,32 @@ assert_has "no running container: says to set it up" "run \`aidc git setup\`" "$
 assert_has "and exits 1" "exit=1" "$out"
 out=$(K_DOWN=1 run git attach)
 assert_has "a cluster that does not answer is said so" "the cluster did not answer" "$out"
+
+out=$(run attach git --backend kubernetes)
+assert_has "aidc attach git is the same as aidc git attach" \
+    "exec -it git-7d9f-abc -c git -- env TERM=xterm-test tmux attach -d -t main" "$(cat "$K_LOG")"
+
+echo "=== aidc git mode: a session's own git mode ==="
+out=$(run git mode)
+assert_has "with no arguments it lists the modes" "exec git-7d9f-abc -c git -- git-requests modes" "$(cat "$K_LOG")"
+: > "$K_STDIN"
+out=$(run git mode demo rules)
+assert_has "rules: the session's token is read from its StatefulSet" "get statefulset demo-dev -o jsonpath" "$(cat "$K_LOG")"
+assert_has "and handed to the git container on stdin, never on its command line" \
+    "exec -i git-7d9f-abc -c git -- git-requests mode demo rules" "$(cat "$K_LOG")"
+assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
+assert_not_has "..." "ffffffff" "$(grep -v 'get statefulset' "$K_LOG")"
+out=$(K_TOKEN="" run git mode demo rules)
+assert_has "a session made before tokens: says to create it again" "create it again" "$out"
+assert_has "and exits 1" "exit=1" "$out"
+out=$(K_NO_SESSION=1 run git mode demo rules)
+assert_has "no such session is refused" "no session 'demo'" "$out"
+out=$(run git mode demo default)
+assert_has "default goes straight to the git container" "exec git-7d9f-abc -c git -- git-requests mode demo default" "$(cat "$K_LOG")"
+out=$(run git mode demo yolo)
+assert_has "an unknown mode is refused" "not rules, ask or default" "$out"
+out=$(run git mode git rules)
+assert_has "the git agent has no mode of its own" "the git agent sends no requests" "$out"
 
 echo "=== aidc git status ==="
 out=$(K_GH=yes run git status)

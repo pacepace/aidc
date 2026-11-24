@@ -20,6 +20,12 @@ done
 validate_session_name "$NAME"
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
+if k8s_is_git_session "$NAME"; then
+    # The git agent: its container's log (the request watcher keeps its own, git-requests).
+    case "$COMPONENT" in dev|git) ;; *) die "the git agent has one component: git" ;; esac
+    k8s_kubectl -n "$ns" logs ${FOLLOW[@]+"${FOLLOW[@]}"} deployment/git -c git
+    exit
+fi
 case "$COMPONENT" in
     dev) target="statefulset/${NAME}-dev" ;;
     squid|refresher|policy|audit) target="deployment/${NAME}-proxy" ;;

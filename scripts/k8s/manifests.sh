@@ -116,6 +116,16 @@ spec:
   ingress:
     - from: [{podSelector: {matchLabels: {app: builder}}}]
       ports: [{protocol: TCP, port: 5000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: builders-take-no-connections
+  namespace: ${ns}
+  labels: {${K8S_MANAGED_BY}}
+spec:
+  podSelector: {matchLabels: {app: builder}}
+  policyTypes: [Ingress]
 EOF
 }
 
@@ -154,7 +164,10 @@ spec:
       # The inner Docker network gets the pod network's MTU: a cluster overlay (VXLAN and the
       # like) carries smaller packets than Docker's default 1500, and large transfers inside
       # a build then stall and reset (seen: a git clone from GitHub, reset after 150 s).
-      command: [sh, -c, 'exec dockerd-entrypoint.sh --host=unix:///var/run/docker.sock --mtu="\$(cat /sys/class/net/eth0/mtu)"']
+      # dockerd itself, not the image's dockerd-entrypoint.sh: given any flag, that script still
+      # prepends its default --host=tcp://0.0.0.0:2375 (no TLS), which on a privileged pod would
+      # hand node root to anything that reaches the pod (seen live: both listeners).
+      command: [sh, -c, 'exec dockerd --host=unix:///var/run/docker.sock --mtu="\$(cat /sys/class/net/eth0/mtu)"']
       securityContext: {privileged: true}
       env: [{name: DOCKER_TLS_CERTDIR, value: ""}]
       volumeMounts: [{name: etc-docker, mountPath: /etc/docker}]

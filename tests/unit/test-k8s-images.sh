@@ -99,7 +99,7 @@ echo "=== aidc k8s setup: the registry manifest ==="
 : > "$K_APPLIED"; : > "$K_LOG"
 "$AIDC_ROOT/scripts/aidc" k8s setup >/dev/null 2>&1
 assert_eq "setup applies the namespace, the volume, the registry, its Service and its push fence" \
-    "Namespace PersistentVolumeClaim Deployment Service NetworkPolicy" \
+    "Namespace PersistentVolumeClaim Deployment Service NetworkPolicy NetworkPolicy" \
     "$(yq -N ea '.kind' "$K_APPLIED" | paste -sd' ' -)"
 dep() { yq ea "select(.kind == \"Deployment\") | $1" -o=json -I=0 "$K_APPLIED"; }
 assert_eq "the registry listens on the node's loopback only, on the configured port" \
@@ -117,7 +117,10 @@ assert_eq "the Service exposes the configured port in-cluster" "5050" \
 assert_has "every kubectl call uses the configured context" "--context lab apply" "$(cat "$K_LOG")"
 assert_eq "only builder pods of the system namespace may reach the registry (no session can replace an image)" \
     '{"podSelector":{"matchLabels":{"app":"registry"}},"policyTypes":["Ingress"],"ingress":[{"from":[{"podSelector":{"matchLabels":{"app":"builder"}}}],"ports":[{"protocol":"TCP","port":5000}]}]}' \
-    "$(yq -N ea 'select(.kind == "NetworkPolicy") | .spec' -o=json -I=0 "$K_APPLIED")"
+    "$(yq -N ea 'select(.kind == "NetworkPolicy" and .metadata.name == "registry-push-from-builders-only") | .spec' -o=json -I=0 "$K_APPLIED")"
+assert_eq "builder pods accept no connections at all (their Docker is privileged)" \
+    '{"podSelector":{"matchLabels":{"app":"builder"}},"policyTypes":["Ingress"]}' \
+    "$(yq -N ea 'select(.kind == "NetworkPolicy" and .metadata.name == "builders-take-no-connections") | .spec' -o=json -I=0 "$K_APPLIED")"
 assert_eq "the system namespace, and only it, allows the privileged builder" "privileged" \
     "$(yq -N ea 'select(.kind == "Namespace") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$K_APPLIED")"
 
@@ -150,6 +153,9 @@ assert_eq "the builder is privileged (the squid base needs UIDs no user namespac
 assert_has "the builder's Docker listens on its unix socket only, never the pod network" \
     '--host=unix:///var/run/docker.sock --mtu' "$(b '.spec.containers[0].command')"
 assert_not_has "no TCP listener for the builder's Docker" 'tcp://' "$(b '.spec.containers[0].command')"
+assert_has "the builder runs dockerd itself: the image's entrypoint script would add a TCP listener" \
+    'exec dockerd --host' "$(b '.spec.containers[0].command')"
+assert_not_has "never through dockerd-entrypoint.sh" 'dockerd-entrypoint' "$(b '.spec.containers[0].command')"
 assert_has "the builder's Docker uses the pod network's MTU (an overlay's packets are smaller)" \
     '--mtu=\"$(cat /sys/class/net/eth0/mtu)\"' "$(b '.spec.containers[0].command')"
 assert_eq "the builder lands on the session nodes, so images match their CPU architecture" \

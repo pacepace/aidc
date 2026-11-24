@@ -84,6 +84,11 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   owns files as UID 584792, beyond any user namespace), its Docker listens on its socket only and
   uses the pod network's MTU (an overlay's 1450 stalled a git clone at Docker's default 1500).
   The same MTU issue awaits Docker inside session pods: chunk 04 must set it there too.
+- Chunk 02: the builder runs `dockerd` itself, never the dind image's entrypoint script, which
+  adds an unauthenticated TCP listener whatever flags it is given (seen live); builder pods
+  also take no inbound connections (NetworkPolicy). Checked live on the reference cluster: the
+  builder listens on its unix socket only; the node pulls through the loopback host port with
+  the registry fence in place; a pod outside the system namespace cannot reach the registry.
 - Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
   the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 

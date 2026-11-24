@@ -152,9 +152,10 @@ behind NetworkPolicy, Claude Code with a managed read-only hook in the git conta
 - **Deliverables:** the same git container, gitctl, request folder, instructions and
   session-ness on the Docker backend (owner ruling 2026-11-24): `aidc git setup|attach|status`
   start and use a `git` container with its own login volumes and a network that reaches only
-  public addresses. First settle with the owner whose repos it works on, since on Docker the user
-  also uses their repos directly and a gitrun-owned lock would get in their way. Live: the Docker
-  smoke extended.
+  public addresses. It works on the user's own working copies on their machine, unlocked and
+  owned by the user (owner ruling 2026-11-24): gitrun never runs git in them; the agent bundles
+  the commits to push (`git bundle`, no login), gitrun fetches the bundle into a private bare
+  copy, scans and pushes from it. Live: the Docker smoke extended.
 
 ### Chunk 06: End to end and docs
 

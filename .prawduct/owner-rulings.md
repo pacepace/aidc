@@ -367,3 +367,12 @@ the git agent's instructions and its being an aidc session all apply on the Dock
 well. Open design question for that work: on Docker the user also uses the repos directly on
 their machine, so a repo lock owned by the gitrun uid would get in their way; settle whose repos
 the Docker git container works on before building it.
+
+## 2026-11-24: On Docker the git container works on the user's own working copies
+
+"my own working copies on my laptop." The Docker git container pushes and opens PRs for the
+repos the user works in on their machine; it does not keep its own clones, and those repos are
+not locked or re-owned. Consequence (proposed for Chunk 07): gitrun never runs git in the user's
+repo; the agent (no login) writes the commits to push into a `git bundle`, and gitrun fetches
+the bundle into a private bare copy, scans and pushes from there, so no repo config the user or a
+session wrote can run as gitrun.

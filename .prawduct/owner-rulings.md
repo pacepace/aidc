@@ -292,3 +292,11 @@ Refined (2026-11-24): any aidc command warns when the kept audit trails are larg
 Refined (2026-11-24): on Kubernetes the size check runs only during cluster commands, and its
 answer may be cached for about a day ("only during a cluster command, caching the answer is fine
 if we make it check once a day or something").
+
+## 2026-11-24: aidc's MCP server becomes a 3tears tools server (after the Kubernetes work)
+
+aidc's control plane is to be rebuilt on 3tears tools ("convert the mcp to being a tears tools
+mcp and use all the things that gets used, then we don't need two"): each aidc tool a 3tears
+tool, so one implementation is reachable on the 3tears mesh, as MCP and as an HTTP API. Not a
+separate bridge. Investigate properly now; build after the Kubernetes backend work is finished.
+Python 3.12 is not a constraint (the MCP server already requires 3.14).

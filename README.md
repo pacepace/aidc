@@ -643,6 +643,7 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 | `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
+| `aidc k8s check` | Say whether the cluster in the `kubernetes:` config can run aidc sessions, and what is missing (see "Kubernetes backend"). |
 
 ### Profiles
 
@@ -655,6 +656,36 @@ You can type into that window yourself. A reply to a prompt you typed there is s
 - `aidc-<name>-refresher`  — keeps the blocklist fresh
 - `aidc-<name>-policy`     — tails the proxy log, manages taint state
 - `aidc-<name>-audit`      — collects forensics into a host-visible dir
+
+## Kubernetes backend
+
+Being built (design: [docs/design-12-kubernetes.md](docs/design-12-kubernetes.md)). Sessions
+will also run on a Kubernetes cluster, with the same commands. What works today:
+`aidc k8s check`.
+
+The cluster needs a runtime that runs Docker inside a pod without privileged mode (Sysbox,
+measured with Sysbox 0.7.2 on k3s 1.35) and a storage class whose volumes several pods on one
+node can mount at once (each user's repos live on one volume). Everything about the cluster is
+configuration, in the global config:
+
+```yaml
+kubernetes:
+  context: my-cluster            # kubeconfig context (default: kubectl's current one)
+  kubeconfig: ~/.kube/config     # optional
+  user: alice                    # whose sessions (default: your login name)
+  namespace_prefix: aidc         # every namespace aidc makes starts with this
+  runtime_class: sysbox-runc     # runs session pods
+  storage_class: shared-zfs      # the user's disk (required)
+  node_selector: {}              # added to session pods
+  tolerations: []                # added to session pods
+  registry:                      # where aidc keeps the images it builds in the cluster
+    port: 5000                   # push: registry.<prefix>-system.svc.cluster.local:<port>
+                                 # pull: localhost:<port> (the node, through a loopback-only host port)
+```
+
+`aidc k8s check` reads it and checks, without changing anything, that kubectl reaches the
+cluster, the runtime class and storage class exist, a ready node can take session pods, and you
+may create namespaces. Needs `kubectl` and `yq`.
 
 ## Config
 

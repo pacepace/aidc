@@ -9,6 +9,7 @@
 #   - the per-verb scripts and the Docker network libraries may call docker;
 #   - in common.sh and config.sh only the named Docker helper functions may;
 #   - the dispatcher and every other shared library may not.
+# The Kubernetes backend's mirror image: kubectl only in scripts/k8s/, and docker never there.
 #
 # Hygiene: reads files only.
 
@@ -111,6 +112,28 @@ for f in "$AIDC_ROOT"/scripts/lib/*.sh; do
     rel="lib/$(basename "$f")"
     check "scripts/$rel calls docker only where allowed" "$(leaks "$rel")"
 done
+
+echo "=== kubectl stays in the Kubernetes backend, and docker out of it ==="
+# kubectl_calls <file>: like docker_calls, for kubectl.
+kubectl_calls() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        /(^|[;&|({`]|\$\(|(^|[^a-zA-Z0-9_])(then|else|do|if|elif|while|until|exec|xargs|env|time)|!|command -v)[[:space:]]*kubectl([[:space:]]|$)/ {
+            print NR
+        }
+    ' "$1"
+}
+outside=""
+for f in "$AIDC_ROOT"/scripts/aidc "$AIDC_ROOT"/scripts/cmd-*.sh "$AIDC_ROOT"/scripts/lib/*.sh; do
+    for n in $(kubectl_calls "$f"); do outside="${outside}${f#"$AIDC_ROOT"/}:${n} "; done
+done
+check "no kubectl outside scripts/k8s/" "$outside"
+inside=""
+for f in "$AIDC_ROOT"/scripts/k8s/*.sh; do
+    [ -f "$f" ] || continue
+    for hit in $(docker_calls "$f"); do inside="${inside}${f#"$AIDC_ROOT"/}:${hit} "; done
+done
+check "no docker in scripts/k8s/" "$inside"
 
 echo "=== every allowed helper still exists ==="
 missing=""

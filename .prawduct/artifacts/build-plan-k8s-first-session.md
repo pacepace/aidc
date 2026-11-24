@@ -77,7 +77,11 @@ green). No kubectl calls outside `scripts/k8s/` and the files the confinement te
   per-user RBAC comes with `aidc user add`'s second half. Inferred: acceptable for two trusted
   users (ruling 2026-11-23, users are trusted peers).
 
-**Decisions made mid-build:** (append here)
+**Decisions made mid-build:**
+- Chunk 01: the ranch's example config moves to chunk 03, where its storage class exists to name
+  in it; one agent-cluster PR instead of two (Constraints: generic, ranch config outside aidc).
+- Chunk 01: the Kubernetes backend requires `yq` (node selector and tolerations are structured;
+  the awk fallback parser reads only flat keys). `aidc k8s check` says so when it is missing.
 
 **Level:** Medium. Measured already: Sysbox Docker-in-pod, NetworkPolicy egress, port-forward,
 shared ZFS dataset with correct file owners in Sysbox, registry push/pull. Not yet: the aidc dev

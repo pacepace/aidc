@@ -21,6 +21,11 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
 - **Comments**: they say WHY, and name the incident or measurement behind a rule where one
   exists. A comment that narrates history ("used to be X") is deleted once the history is in
   the design doc or the changelog.
+- **No private names**: aidc is public. Code, docs, tests, fixtures and `.prawduct/` records
+  name none of the owner's private infrastructure, projects or people (their cluster, nodes,
+  addresses, domains, routers, private repos, other projects, colleagues). Use generic terms
+  ("the reference cluster", "the coordinator", "a second user") and keep specifics in the
+  owner's private repos. History is not rewritten for it (owner ruling 2026-11-24).
 - **Errors**: catch specific exceptions; a genuinely necessary broad catch carries
   `# prawduct:allow prawduct/broad-except -- <reason>`. Shell libraries report their own
   failures (never assume a `die` helper the caller may not have sourced).

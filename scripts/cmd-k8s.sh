@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: Set up and check a Kubernetes cluster for aidc sessions.
 #
-# Usage: aidc k8s <check> [args]
+# Usage: aidc k8s <check|setup|build> [args]
 #
 # The cluster comes from the `kubernetes:` block of ~/.config/aidc/config.yaml (README,
 # "Kubernetes backend"). Each subcommand is scripts/k8s/k8s-<name>.sh.
@@ -15,6 +15,8 @@ usage() {
 aidc k8s <subcommand>
 
   check    Say whether the configured cluster can run aidc sessions, and what is missing.
+  setup    Make the system namespace and the private image registry (once per cluster).
+  build    Build aidc's images in the cluster and push them to that registry.
 
 The cluster, the runtime class, the storage class and the rest come from the
 `kubernetes:` block of ~/.config/aidc/config.yaml (see the README, "Kubernetes backend").

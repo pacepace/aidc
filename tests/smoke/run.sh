@@ -11,6 +11,13 @@
 #
 # Anti-leak: the cleanup trap runs on every exit path. The session name is
 # timestamped so reruns can't collide with a user's real session.
+#
+# Step 9b is the git container's part (tests/smoke/git.sh; AIDC_SMOKE_GIT=0 skips it): it
+# sets up the git container (and, when this machine had none, removes it again at the end),
+# clones a public repo (AIDC_SMOKE_PUBLIC_REPO, default octocat/Hello-World: only fetched) into
+# the scratch folder, adds it, and checks a second session's requests. With the git container
+# logged in and AIDC_SMOKE_GIT_REPO=<owner/name> naming a scratch repo you own, a real push,
+# PR, merge and tidy there; with AIDC_SMOKE_GIT_CLAUDE=1, the git agent's question.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,6 +73,11 @@ cleanup() {
     if [ -n "${MCP_SMOKE:-}" ]; then
         docker rm -f "$MCP_SMOKE" >/dev/null 2>&1 || true
     fi
+    git_cleanup
+    # The MCP transcript folder aidc create made for each of the smoke's sessions (empty: no
+    # Claude ran), so reruns leave nothing in the host's state.
+    rmdir "${XDG_STATE_HOME:-$HOME/.local/state}/aidc-mcp/transcripts/${SESSION}" \
+        "${XDG_STATE_HOME:-$HOME/.local/state}/aidc-mcp/transcripts/${SESSION}-git" 2>/dev/null || true
 
     # git commit inside the dev container (uid 1000) leaves .git objects owned by
     # 1000; a host runner at a different uid (CI: 1001) can't rm them. Fall back to
@@ -94,6 +106,66 @@ dev_exec() {
     # -u vscode: container's entrypoint drops to vscode for user-facing work;
     # smoke assertions need to run as the same user.
     docker exec -u vscode "aidc-${SESSION}-dev" bash -c "$1"
+}
+
+# --- the git container's part (step 9b; tests/smoke/git.sh) ---------------
+# shellcheck disable=SC2034  # read by git.sh
+SG_BACKEND=docker
+SG_SESSION="${SESSION}-git"
+PUBLIC_REPO="${AIDC_SMOKE_PUBLIC_REPO:-octocat/Hello-World}"
+SG_WC="$SCRATCH/wc"
+SG_GH_WC_PATH="$SCRATCH/gh"
+GIT_OWNED=""      # 1 when this machine had no git container: the smoke removes what it made
+GIT_REPOS_NEW=""  # 1 when ~/.config/aidc/git-repos did not exist before the run
+SG_SESSION_MADE=""
+# shellcheck disable=SC2329  # called by git.sh
+sg_in() { docker exec -u vscode "aidc-${SG_SESSION}-dev" bash -c "$1" </dev/null; }
+# shellcheck disable=SC2329  # called by git.sh
+sg_git() { docker exec -u git aidc-git-dev "$@" </dev/null; }
+# The scratch repo's working copy: on Docker the user's own clone; this one is made empty with
+# origin set, the git container's copy fetched (with its login), and its default branch
+# checked out from that.
+# shellcheck disable=SC2329  # called by git.sh
+sg_make_gh_wc() {
+    local def
+    mkdir -p "$SG_GH_WC_PATH" && git -C "$SG_GH_WC_PATH" init -q \
+        && git -C "$SG_GH_WC_PATH" remote add origin "https://github.com/${AIDC_SMOKE_GIT_REPO}" || return 1
+    "$AIDC" repo add "$SG_GH_WC_PATH" --backend docker </dev/null >&2 || return 1
+    sg_git gitctl fetch "$SG_GH_WC_PATH" >&2 || return 1
+    def=$(git -C "$SG_GH_WC_PATH" for-each-ref --format='%(refname:lstrip=3)' 'refs/remotes/origin/main' 'refs/remotes/origin/master' | head -n1)
+    [ -n "$def" ] || def=$(git -C "$SG_GH_WC_PATH" for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin | head -n1)
+    git -C "$SG_GH_WC_PATH" checkout -q -b "$def" "origin/${def}" >&2 || return 1
+    printf '%s' "$SG_GH_WC_PATH"
+}
+# shellcheck source=git.sh
+. "$SCRIPT_DIR/git.sh"
+git_cleanup() {
+    [ "${AIDC_SMOKE_GIT:-1}" = 1 ] || return 0
+    sg_cleanup_github 2>/dev/null || true
+    [ -z "$SG_SESSION_MADE" ] || "$AIDC" kill "$SG_SESSION" >/dev/null 2>&1 || true
+    local wc
+    for wc in "$SG_WC" "$SG_GH_WC_PATH"; do
+        if grep -qxF -- "$wc" "$HOME/.config/aidc/git-repos" 2>/dev/null; then
+            "$AIDC" repo remove "$wc" --backend docker </dev/null >/dev/null 2>&1 || true
+        fi
+    done
+    if [ "$GIT_OWNED" = 1 ]; then
+        echo "[cleanup] removing the git container this run made"
+        docker rm -f aidc-git-dev aidc-git-squid >/dev/null 2>&1 || true
+        docker network rm aidc-git-net aidc-git-egress >/dev/null 2>&1 || true
+        # The git agent's transcript folder belongs to its uid: removed by a root container.
+        local tdir="${XDG_STATE_HOME:-$HOME/.local/state}/aidc-mcp/transcripts"
+        if [ -d "$tdir/git" ]; then
+            docker run --rm --network none -v "${tdir}:/t" --entrypoint /bin/rm \
+                "aidc/gitctl:${AIDC_VERSION_TAG:-x}" -rf /t/git >/dev/null 2>&1 || true
+        fi
+        docker volume rm aidc-git-home aidc-git-cred aidc-git-run aidc-git-requests >/dev/null 2>&1 || true
+        # The list of added working copies, when the run made it and left it empty.
+        if [ "$GIT_REPOS_NEW" = 1 ] && [ ! -s "$HOME/.config/aidc/git-repos" ]; then
+            rm -f "$HOME/.config/aidc/git-repos"
+        fi
+        GIT_OWNED=""
+    fi
 }
 
 echo "=== aidc smoke test ==="
@@ -858,6 +930,38 @@ assert "session_list, run by the aidc CLI inside aidc-mcp, lists $SESSION" \
 assert "session_status reports $SESSION, tainted" \
     "printf '%s' \"\$MCP_STATUS\" | jq -e --arg s '${SESSION}' '.ok and (.data.raw | contains(\"aidc session: \" + \$s)) and (.data.tainted | not | not)'"
 docker rm -f "$MCP_SMOKE" >/dev/null 2>&1 || true
+echo
+
+# --- step 9b: the git container --------------------------------------------
+echo "[9b/11] the git container"
+if [ "${AIDC_SMOKE_GIT:-1}" != 1 ]; then
+    echo "  SKIP: AIDC_SMOKE_GIT=${AIDC_SMOKE_GIT}"
+else
+    if ! docker inspect aidc-git-dev >/dev/null 2>&1 && ! docker volume inspect aidc-git-home >/dev/null 2>&1; then
+        GIT_OWNED=1
+    fi
+    [ -e "$HOME/.config/aidc/git-repos" ] || GIT_REPOS_NEW=1
+    AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r' | tr '+' '_')
+    sg_part_setup
+    git clone -q "https://github.com/${PUBLIC_REPO}" "$SG_WC"
+    # The second session's audit goes to the scratch folder too (a repo config, trusted below).
+    mkdir -p "$SG_WC/.aidc" && printf 'audit_dir: %s\n' "$AUDIT_DIR_OVERRIDE" > "$SG_WC/.aidc/config.yaml"
+    printf '.aidc/\n' >> "$SG_WC/.git/info/exclude"
+    chmod -R a+rwX "$SG_WC"
+    assert "aidc repo add takes the user's working copy of ${PUBLIC_REPO}" \
+        "'$AIDC' repo add '$SG_WC' --backend docker </dev/null"
+    assert "a session created after setup, on the working copy" \
+        "'$AIDC' create '$SG_SESSION' --repo '$SG_WC' --trust-repo-config </dev/null"
+    SG_SESSION_MADE=1
+    sg_part_requests
+    sg_part_github sg_make_gh_wc
+    sg_part_claude
+    "$AIDC" kill "$SG_SESSION" >/dev/null 2>&1 || true
+    SG_SESSION_MADE=""
+    assert "aidc repo remove forgets the working copy and drops the git container's copy" \
+        "'$AIDC' repo remove '$SG_WC' --backend docker </dev/null && ! '$AIDC' repo list --backend docker </dev/null | grep -qF '$SG_WC'"
+    assert "and leaves the working copy itself" "test -d '$SG_WC/.git'"
+fi
 echo
 
 # --- step 10: kill tears everything down ----------------------------------

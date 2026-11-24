@@ -10,8 +10,14 @@
 # Usage: bash tests/smoke/k8s.sh            (uses ~/.config/aidc/config.yaml)
 #        AIDC_SMOKE_HOME=<dir> bash tests/smoke/k8s.sh   (a HOME holding another config)
 #
+# It also runs the git container's part (tests/smoke/git.sh): `aidc git setup`, a public repo
+# added and removed again (AIDC_SMOKE_PUBLIC_REPO, default octocat/Hello-World: only fetched),
+# the session's requests. With the git container logged in to GitHub and
+# AIDC_SMOKE_GIT_REPO=<owner/name> naming a scratch repo you own, a real push, PR, merge and
+# tidy there; with AIDC_SMOKE_GIT_CLAUDE=1, the git agent's question (git.sh says what each needs).
+#
 # Leaves behind only the session's audit claim, which aidc keeps by design; the end of the run
-# names it. The repo folder it made on the user's disk is removed.
+# names it. The repo folders it made on the user's disk are removed. The git container stays.
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,14 +55,48 @@ in_dev() { k8s_kubectl -n "$NS" exec "$POD" -c dev -- sudo -E -u vscode bash -c 
 status_has() { local out; out=$("$AIDC" status "$SESSION" </dev/null 2>&1); case "$out" in *"$1"*) return 0 ;; esac; return 1; }
 proxy_pod() { k8s_kubectl -n "$NS" get pod -l "aidc/session=${SESSION},app=proxy" -o name | head -n1; }
 
+# The git container's part (tests/smoke/git.sh).
+# shellcheck disable=SC2034  # read by git.sh
+SG_BACKEND=kubernetes
+# shellcheck disable=SC2034  # read by git.sh
+SG_SESSION="$SESSION"
+PUBLIC_REPO="${AIDC_SMOKE_PUBLIC_REPO:-octocat/Hello-World}"
+SG_WC="/home/${AIDC_K8S_USER}/aidc-smoke-k8s/${SESSION}-wc"
+SG_GH_WC_PATH="/home/${AIDC_K8S_USER}/aidc-smoke-k8s/${SESSION}-gh"
+# shellcheck disable=SC2329  # called by git.sh
+sg_in() { k8s_kubectl -n "$NS" exec "$POD" -c dev -- sudo -E -H -u vscode bash -c "umask 002; $1" </dev/null; }
+# shellcheck disable=SC2329  # called by git.sh
+sg_git() { k8s_kubectl -n "$NS" exec deploy/git -c git -- "$@" </dev/null; }
+# shellcheck disable=SC2329  # called by git.sh
+sg_make_gh_wc() {
+    "$AIDC" repo add "$AIDC_SMOKE_GIT_REPO" --path "$SG_GH_WC_PATH" --backend kubernetes </dev/null >&2 || return 1
+    printf '%s' "$SG_GH_WC_PATH"
+}
+# shellcheck source=git.sh
+. "$SCRIPT_DIR/git.sh"
+
 cleanup() {
+    sg_cleanup_github
     echo "[cleanup] killing ${SESSION}"
     "$AIDC" kill "$SESSION" </dev/null >/dev/null 2>&1 || true
+    remove_repos
+}
+# The working copies the smoke added (and gitrun's copies of them), whatever they hold.
+remove_repos() {
+    local wc
+    for wc in "$SG_WC" "$SG_GH_WC_PATH"; do
+        "$AIDC" repo remove "$wc" --delete-working-copy --even-unpushed --backend kubernetes </dev/null >/dev/null 2>&1 || true
+    done
 }
 trap cleanup EXIT INT TERM
 
 echo "[1/7] the cluster"
 assert "aidc k8s check passes" "'$AIDC' k8s check </dev/null"
+
+echo "[1b/7] the git container, and a public repo on the user's disk"
+sg_part_setup
+assert "aidc repo add ${PUBLIC_REPO} clones it onto the user's disk" \
+    "'$AIDC' repo add '${PUBLIC_REPO}' --path '${SG_WC}' --backend kubernetes </dev/null"
 
 echo "[2/7] create"
 mkdir -p "$REPO"
@@ -91,6 +131,11 @@ assert "an inner container downloads through the proxy" \
     "in_dev 'timeout 240 docker run --rm -e https_proxy=\$HTTPS_PROXY curlimages/curl:8.17.0 -sfL -m 200 -o /dev/null https://github.com/pyenv/pyenv/archive/refs/heads/master.tar.gz'"
 assert "an inner container cannot get out directly" \
     "! in_dev 'timeout 60 docker run --rm curlimages/curl:8.17.0 -sf -m 15 -o /dev/null https://1.1.1.1'"
+
+echo "[4b/7] the git container: requests from the session"
+sg_part_requests
+sg_part_github sg_make_gh_wc
+sg_part_claude
 
 echo "[5/7] the blocklist feeds"
 for _ in $(seq 60); do
@@ -132,6 +177,9 @@ in_dev "echo aidc-smoke-history >> /home/vscode/.bash_history; mkdir -p /home/vs
 AUDIT=$(k8s_kubectl -n "$NS" get statefulset "${SESSION}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null)
 assert "aidc kill removes the session" "'$AIDC' kill '$SESSION' </dev/null"
 trap - EXIT INT TERM
+sg_cleanup_github
+remove_repos
+assert "the smoke's working copies are removed from the user's disk" "! '$AIDC' repo list --backend kubernetes </dev/null | grep -q 'aidc-smoke-k8s/${SESSION}'"
 assert "nothing of it is left but its audit claim" \
     "[ -z \"\$(k8s_kubectl -n '$NS' get statefulset,deployment,service,networkpolicy -l aidc/session=$SESSION -o name)\" ]"
 assert "its audit claim is kept (${AUDIT:-none named})" "[ -n '$AUDIT' ] && k8s_kubectl -n '$NS' get pvc '$AUDIT'"

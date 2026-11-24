@@ -106,10 +106,20 @@ Setup needs: the session's worktree admin folder (`.git/worktrees/<name>/`) owne
 session user (git's ownership check refuses otherwise) and group-setgid, so files the git
 container rewrites during `gc` stay writable by the session.
 
-Storage note: the per-user volume is mounted by the git container and every session at once.
-OpenEBS ZFS refused a second mount of the same volume (`device already mounted`); local-path
-allowed it. The real volume needs a class that allows several pods on one node (for ZFS LocalPV,
-`shared: "yes"`; to verify).
+Storage: the per-user volume is mounted by the git container and every session at once, and
+sessions run with Kubernetes user namespaces (`hostUsers: false`, which Sysbox needs: a Sysbox pod
+without it failed to start). Measured 2026-11-24 on ranch-dev01:
+
+| Volume | Several pods | Session's files on disk |
+|---|---|---|
+| local-path (a folder on the node's ZFS) | yes | correct (uid 1000 shows as 1000 everywhere) |
+| OpenEBS ZFS LocalPV (default) | no: `device already mounted` | not reached |
+| NFS from the node's ZFS (as the station songs share) | yes | wrong: written as a host uid derived from that pod's own ID range (e.g. 2211906536), and every other pod's files show as `nobody` |
+
+NFS cannot carry Kubernetes' ID remapping, so a session's files would belong to a different
+owner in every other pod, and after the session restarts. **Proposal:** while sessions run only
+on ranch-dev01, the per-user volume is a folder on the node's local ZFS (a dataset per user,
+mounted as a local volume), not NFS. Sessions on other nodes would need a different answer.
 
 ## Sessions: Sysbox, Docker inside, GPU on request
 
@@ -272,6 +282,6 @@ Kubernetes code lands.
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | `kubectl port-forward` with default-deny ingress | live test |
-| Shared per-user volume on ZFS (`shared: "yes"`) | live test |
+| Per-user volume: local ZFS dataset per user | owner proposal |
 | Sysbox node setup in agent-cluster scripts | owner proposal |
 | LAN name, wildcard cert, DNS | owner proposal |

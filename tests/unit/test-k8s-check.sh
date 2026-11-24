@@ -192,7 +192,7 @@ echo "=== aidc k8s check with a user's own credentials (aidc user add's Role and
 granted() {
     # shellcheck disable=SC1091
     ( . "$AIDC_ROOT/scripts/k8s/lib.sh"; . "$AIDC_ROOT/scripts/k8s/manifests.sh"; k8s_load_settings
-      { k8s_render_user_access alice; printf '%s\n' '---'; k8s_render_user_shared; } \
+      { k8s_render_user_access alice; printf '%s\n' '---'; k8s_render_user_shared ""; } \
         | yq ea -o=json -I=0 "[select(.kind == \"Role\" and .metadata.name == \"aidc-user\") , select(.kind == \"ClusterRole\" and .metadata.name == \"aidc-user\") ${1:+| select(.kind == \"Role\")}] | {\"status\": {\"resourceRules\": ([.[].rules[]] + [{\"apiGroups\": [\"authorization.k8s.io\"], \"resources\": [\"selfsubjectrulesreviews\"], \"verbs\": [\"create\"]}])}}" - )
 }
 out=$(K_NODES='n1 True\n' K_RULES="$(granted)" K_CANI_NS=no K_CANI_REG=no run_check)

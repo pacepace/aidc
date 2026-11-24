@@ -37,8 +37,9 @@ k8s_valid_label "$USER_NAME" || die "user name '${USER_NAME}' must be lowercase 
 [ -z "$PRINT_TOKEN" ] || [ -z "$OUT" ] || die "--token prints the token instead of writing a file: not with --out"
 k8s_require || exit 1
 DURATION="${DURATION:-$AIDC_K8S_USER_TOKEN_TTL}"
-printf '%s' "$DURATION" | grep -Eqx '([0-9]+h)?([0-9]+m)?([0-9]+s)?' && [ -n "$DURATION" ] \
-    || die "token lifetime '${DURATION}' is not a duration such as 720h or 90m"
+if [ -z "$DURATION" ] || ! printf '%s' "$DURATION" | grep -Eqx '([0-9]+h)?([0-9]+m)?([0-9]+s)?'; then
+    die "token lifetime '${DURATION}' is not a duration such as 720h or 90m"
+fi
 
 ns=$(k8s_user_ns "$USER_NAME")
 ctx="${ns}"

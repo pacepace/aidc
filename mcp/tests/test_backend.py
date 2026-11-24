@@ -14,6 +14,7 @@ import pytest
 from aidc_mcp import backend
 
 PKG = Path(backend.__file__).parent
+ROLE_SUFFIXES = ("-dev", "-policy", "-audit", "-net", "-proxy", "-refresher")
 
 
 def docker_leaks(source: str) -> list[str]:
@@ -24,12 +25,20 @@ def docker_leaks(source: str) -> list[str]:
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Constant) and node.value == "docker":
             found.append(f"line {node.lineno}: the string 'docker'")
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+                not any(ch.isspace() for ch in node.value)
+                and (node.value.startswith("aidc-")
+                     and ("{" in node.value or node.value.endswith("-"))
+                     or node.value in ROLE_SUFFIXES)):
+            found.append(f"line {node.lineno}: part of an aidc container name")
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+                "no such container" in node.value.lower()):
+            found.append(f"line {node.lineno}: reads the backend's error text")
         if isinstance(node, ast.JoinedStr) and node.values:
             first, last = node.values[0], node.values[-1]
             if (isinstance(first, ast.Constant) and str(first.value).startswith("aidc-")
                     and isinstance(last, ast.Constant)
-                    and str(last.value) in ("-dev", "-policy", "-audit", "-net", "-proxy",
-                                            "-refresher")):
+                    and str(last.value) in ROLE_SUFFIXES):
                 found.append(f"line {node.lineno}: an aidc container name")
     return found
 
@@ -40,7 +49,12 @@ def test_the_leak_scanner_catches_each_kind_of_leak():
     assert docker_leaks('c = f"aidc-{name}-dev"')
     assert docker_leaks('n = f"aidc-{s}-net"')
     assert docker_leaks('p = f"aidc-{s}-proxy"')
+    assert docker_leaks('c = "aidc-" + name + "-dev"')
+    assert docker_leaks('c = "aidc-{}-dev".format(name)')
+    assert docker_leaks('if "No such container" in err: pass')
     assert not docker_leaks('log("docker exec exited 1")')
+    assert not docker_leaks('buf = "aidc-send"; cmd = "aidc-claude"')
+    assert not docker_leaks('"""aidc-mcp entry point, {see} below."""')
     assert not docker_leaks('backend.target(name)')
 
 
@@ -114,3 +128,21 @@ def test_the_inspect_and_list_commands_match_what_their_parsers_read():
     assert backend.DEV_LIST_FORMAT.count("\t") == 3
     assert backend.instance_argv("p") == [
         "docker", "inspect", "--type", "network", "--format", "{{.Id}}", "aidc-p-net"]
+
+
+def test_the_inspect_readers_turn_output_into_facts():
+    assert backend.mount_source(b"/home/u/audit/p\n") == "/home/u/audit/p"
+    assert backend.mount_source(b"\n") is None
+    env, wd = backend.env_and_workdir(b"PATH=/bin\nAIDC_REPO_PATH=/r\nX=a=b\n\x1f/w\n")
+    assert env == {"PATH": "/bin", "AIDC_REPO_PATH": "/r", "X": "a=b"} and wd == "/w"
+    assert backend.env_and_workdir(b"") == ({}, "")
+
+
+@pytest.mark.parametrize(("stderr", "missing"), [
+    ("Error response from daemon: No such container: aidc-p-dev", True),
+    ("Error: No such container: aidc-p-dev", True),
+    ("cat: /var/state/tainted: No such file or directory", False),
+    ("Error response from daemon: container is paused", False),
+])
+def test_a_missing_container_is_told_from_a_failure_inside_it(stderr, missing):
+    assert backend.container_missing(stderr) is missing

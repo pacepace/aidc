@@ -56,11 +56,36 @@ def mount_source_args(tgt: str, destination: str) -> list[str]:
             "{{end}}{{end}}"]
 
 
+def mount_source(stdout: bytes) -> str | None:
+    """What :func:`mount_source_args` printed: the host path, or None when nothing is
+    mounted there."""
+    path = stdout.decode("utf-8", errors="replace").strip()
+    return path or None
+
+
 def env_workdir_args(tgt: str) -> list[str]:
     """Arguments (after BIN) that print `tgt`'s environment, one per line, then a \\x1f,
     then its working dir."""
     return ["inspect", tgt, "--format",
             "{{range .Config.Env}}{{println .}}{{end}}\x1f{{.Config.WorkingDir}}"]
+
+
+def env_and_workdir(stdout: bytes) -> tuple[dict[str, str], str]:
+    """What :func:`env_workdir_args` printed: the environment (first value wins, as a
+    process sees it) and the working dir ("" when unset)."""
+    env_text, _, workdir = stdout.decode("utf-8", errors="replace").partition("\x1f")
+    env: dict[str, str] = {}
+    for line in env_text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key not in env:
+            env[key] = value
+    return env, workdir.strip()
+
+
+def container_missing(stderr: str) -> bool:
+    """Whether a failed exec or inspect says the container does not exist (the session is
+    gone or was never made), as opposed to the command failing inside it."""
+    return "no such container" in stderr.lower()
 
 
 #: Columns of :func:`dev_list_args`' rows, tab-separated.

@@ -63,9 +63,8 @@ async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerRe
 
 
 def _missing_file(err: str) -> bool:
-    """cat's own "No such file", as opposed to docker's "No such container"."""
-    low = err.lower()
-    return "no such file" in low and "no such container" not in low
+    """cat's own "No such file", as opposed to the container being missing."""
+    return "no such file" in err.lower() and not backend.container_missing(err)
 
 
 class TaintUnknown(Exception):
@@ -111,8 +110,7 @@ async def audit_dir(name: str) -> str | None:
     """The session's audit dir on the HOST: the source of the audit sidecar's mount."""
     res = await run_docker(*backend.mount_source_args(
         backend.target(name, backend.ROLE_AUDIT), AUDIT_MOUNT))
-    path = res.stdout.decode("utf-8", errors="replace").strip()
-    return path if res.returncode == 0 and path else None
+    return backend.mount_source(res.stdout) if res.returncode == 0 else None
 
 
 async def repo_path(name: str) -> str | None:
@@ -121,13 +119,8 @@ async def repo_path(name: str) -> str | None:
     res = await run_docker(*backend.env_workdir_args(backend.target(name)))
     if res.returncode != 0:
         return None
-    env, _, workdir = res.stdout.decode("utf-8", errors="replace").partition("\x1f")
-    for line in env.splitlines():
-        if line.startswith("AIDC_REPO_PATH="):
-            value = line.split("=", 1)[1].strip()
-            if value:
-                return value
-    return workdir.strip() or None
+    env, workdir = backend.env_and_workdir(res.stdout)
+    return env.get("AIDC_REPO_PATH", "").strip() or workdir or None
 
 
 async def policy_events(name: str) -> list[dict[str, Any]]:

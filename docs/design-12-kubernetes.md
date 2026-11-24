@@ -22,8 +22,8 @@ Items marked **proposal** await the owner.
 cluster (ranch-dev01)
 ├─ namespace aidc-<user>                    one per user
 │   ├─ aidc-mcp                             the user's MCP server (K8S-07)
-│   ├─ git container                        Claude Code + SSH key + gh (K8S-03..06)
-│   ├─ syncthing                            Claude state <-> user's machines (K8S-17)
+│   ├─ git container                        Claude Code + SSH key + gh (K8S-04..06)
+│   ├─ syncthing                            Claude state <-> user's machines (K8S-18)
 │   └─ PVC code-<user>                      all the user's repos + worktrees (K8S-02)
 └─ namespace aidc-<user>-<session>          one per session
     ├─ dev pod   (runtimeClass sysbox-runc) Claude, Docker, optional GPU
@@ -310,7 +310,8 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
 - **MCP server:** `mcp/src/aidc_mcp/backend.py` is the one module that knows sessions run on
   Docker. Callers address a container as `backend.target(session, role)` (roles `dev`, `policy`,
   `audit`) and get commands from it: `exec_argv` (user, workdir, env, stdin), the inspect and list
-  queries with the readers of their output, and the session's instance id. They keep their own
+  queries with the readers of their output, the reading of a missing container, and the
+  session's instance id. They keep their own
   process handling (sync or async, timeouts, stdin). `mcp/tests/test_backend.py` fails if any
   other module starts `docker` or spells a container name. The Kubernetes backend answers the
   same functions with `kubectl` and namespace/pod names.

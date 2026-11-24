@@ -17,3 +17,8 @@ backend can answer instead. No behaviour change.
 - CLI: the dispatcher is the switch point (one `cmd-<verb>.sh` per verb);
   `tests/unit/test-backend-confinement.sh` keeps `docker` out of the dispatcher and the shared
   libraries, except the named Docker helpers.
+
+## Consumer note
+
+none: nothing a user or an orchestrator sees changes; the MCP tool envelope, the CLI's commands
+and output, and the commands aidc runs against Docker are the same.

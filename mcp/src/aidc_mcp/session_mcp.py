@@ -197,7 +197,7 @@ def hand(name: str, *, server: str, path: str, bearer: str, base_url: str,
             "the session is still starting: its Claude state is not installed yet. "
             "Try again shortly",
             "session_not_ready")
-    if proc.returncode != 0 and "No such container" in said:
+    if proc.returncode != 0 and backend.container_missing(said):
         raise SessionMcpError(f"no such session: {name}", "no_such_session")
     entry = (proc.stdout or "").strip().splitlines()[-1:] or [""]
     if proc.returncode != 0 or entry[0] not in (ENTRY_ADDED, ENTRY_UNCHANGED):

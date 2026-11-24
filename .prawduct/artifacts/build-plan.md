@@ -38,8 +38,11 @@ partition: serial — three small chunks, each depending on the last; a delegate
   Kubernetes wave finds a verb that does not map.
 - **Inferred:** the MCP seam returns an argv (`exec_argv`) rather than running the process,
   because the call sites differ in sync/async, stdin, timeouts and stream handling, and keeping
-  those in the caller keeps the change mechanical. Inferred: the role names above are the full
-  set; chunk 02's inventory confirms.
+  those in the caller keeps the change mechanical. Resolved (chunk 02 inventory): the MCP server
+  addresses only `dev`, `policy` and `audit`, which `backend.py` defines; `proxy` and
+  `refresher` are used only by the CLI (`cmd-refresh.sh`, the network libraries), so the MCP
+  seam owes nothing for them. The leak scanner still watches their names so none is built in
+  Python later.
 - **Decisions made mid-build:**
   - [DECISION: chunk 01's interface differs from the forecast above | callers address a
     container by the string `backend.target(session, role)` and pass it to
@@ -87,7 +90,8 @@ partition: serial — three small chunks, each depending on the last; a delegate
   Kubernetes wave adds its verbs beside these and the dispatcher picks by the session's backend.
   Documented in design-12 "Backend seam".
 - `tests/unit/test-backend-confinement.sh`: `docker` is invoked only in the files that implement
-  the Docker backend (the `cmd-*.sh` verbs, `lib/network.sh`, `lib/egress.sh`) and, in the shared
+  the Docker backend (the `scripts/cmd-*.sh` verbs, `scripts/lib/network.sh`,
+  `scripts/lib/egress.sh`) and, in the shared
   libraries, only inside the named Docker helper functions (`common.sh`: session_exists,
   require_docker, ensure_image, aidc_session_audit_dir, list/remove_adhoc_forwards,
   remove_session_networks, wait_for_dev_ready; `config.sh`: aidc_mcp_deny_target). Every other
@@ -101,12 +105,16 @@ partition: serial — three small chunks, each depending on the last; a delegate
   session_exec, file_put, session_kill) through the new backend module.
 - design-12 "Backend seam" updated to what was built (done in chunk 02); change record
   `.prawduct/changes/backend-seam.md` (CHANGELOG is written from it at release).
-- Result 2026-11-24: `make smoke` 121 passed, 0 failed (166 s). Live MCP check against a real
+- Result 2026-11-24: `make smoke` all passed. Live MCP check against a real
   session (`seamprobe`, created and killed with this branch's CLI): 14 of 14 — instance id and
   gone, dev listing, taint, policy events, audit dir, repo path, git in the repo, tmux exec,
-  window list, screen capture, headless listing, stdin, exec user. The orchestrator round trip
-  through a running aidc-mcp was not run: the live aidc-mcp on this host serves real sessions,
-  and every function it would call on these paths was called directly instead.
+  window list, screen capture, headless listing, stdin, exec user. Then a round trip through a
+  running aidc-mcp built from this branch (a second server on a spare port with its own token
+  and state, scoped to a throwaway session `seamrt`; the live aidc-mcp was not touched):
+  session_list, session_status, session_exec, file_put to a new path, audit_get, the scope
+  refusal and session_send (queued and pasted) all answered as before. Overwriting a file with
+  file_put fails in Ubuntu 26.04 sessions (uutils `install` from /dev/stdin); the same command
+  fails without this branch, so it is filed as pacepace/aidc#76, not fixed in this refactor.
 
 ## Verification strategy
 

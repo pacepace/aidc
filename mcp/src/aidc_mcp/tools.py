@@ -4652,7 +4652,7 @@ def register(app: Any) -> None:
         try:
             events = await sf.policy_events(name)
         except sf.TaintUnknown as exc:
-            if "no such container" in str(exc).lower():
+            if backend.container_missing(str(exc)):
                 return _envelope_err(f"There is no session named '{name}'. Check session_list.",
                                      code="no_such_session")
             return _envelope_err(f"the session's policy sidecar did not answer: {exc}",

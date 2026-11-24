@@ -34,16 +34,24 @@ config.sh:aidc_mcp_deny_target
 "
 
 # docker_calls <file>: "<line>:<function>" for each line that runs docker as a command
-# (a command word after a separator, `exec`, `xargs`, `!`, `$(` or `command -v`), outside
-# comments. <function> is the enclosing shell function, or "-" at top level.
+# (a command word after a separator, a keyword such as `if` or `while`, `exec`, `xargs`,
+# `env`, `timeout N`, `!`, `$(` or `command -v`), outside comments. <function> is the
+# enclosing shell function, or "-" at top level; a one-line function ends on its own line.
 docker_calls() {
     awk '
         /^[[:space:]]*#/ { next }
-        /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)/ { fn = $1; sub(/\(\).*/, "", fn) }
-        /^}/ { fn = "" }
-        /(^|[;&|({`]|\$\(|then|else|do|exec|xargs|!|command -v)[[:space:]]*docker([[:space:]]|$)/ {
+        /^(function[[:space:]]+)?[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*(\(\))?[[:space:]]*\{/ ||
+        /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)/ {
+            fn = $0
+            sub(/^function[[:space:]]+/, "", fn)
+            sub(/[[:space:]]*(\(\))?[[:space:]]*\{.*$/, "", fn)
+            sub(/[[:space:]]*\(\).*$/, "", fn)
+            oneline = ($0 ~ /\}[[:space:]]*$/)
+        }
+        /(^|[;&|({`]|\$\(|(^|[^a-zA-Z0-9_])(then|else|do|if|elif|while|until|exec|xargs|env|time)|timeout[[:space:]]+[0-9]+[a-z]?|!|command -v)[[:space:]]*docker([[:space:]]|$)/ {
             print NR ":" (fn == "" ? "-" : fn)
         }
+        /^}/ || oneline { fn = ""; oneline = 0 }
     ' "$1"
 }
 
@@ -78,17 +86,22 @@ cat > "$probe" <<'EOF'
 top() { docker ps; }
 f() {
     x=$(docker inspect a)
+    if docker info; then :; fi
+    timeout 5 docker ps
     if ! docker info >/dev/null; then :; fi
     printf '%s\n' "$ids" | xargs docker rm -f
     command -v docker >/dev/null
     echo "docker not found"
 }
+docker version
+function g { docker ps; }
 EOF
 found=$(docker_calls "$probe" | tr '\n' ' ')
-if [ "$found" = "2:top 4:f 5:f 6:f 7:f " ]; then
+want="2:top 4:f 5:f 6:f 7:f 8:f 9:f 12:- 13:g "
+if [ "$found" = "$want" ]; then
     echo "  PASS: finds a call in each position, and skips comments and messages"; PASS=$((PASS + 1))
 else
-    echo "  FAIL: leak finder found '$found' (want '2:top 4:f 5:f 6:f 7:f ')"; FAIL=$((FAIL + 1))
+    echo "  FAIL: leak finder found '$found' (want '$want')"; FAIL=$((FAIL + 1))
 fi
 
 echo "=== docker stays in the Docker backend ==="

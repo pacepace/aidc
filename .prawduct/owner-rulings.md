@@ -340,3 +340,12 @@ included (gate, hygiene, template, body); the git container knows nothing of pra
 no prawduct check. Since sessions cannot reach GitHub, a session's `gh` (PR create, and the push
 before it) becomes a request handed to the git container, which applies only its own rules
 (gitctl's hard rules; ask or rules mode) and then pushes and opens the PR.
+
+## 2026-11-24: Sessions make their own worktrees on Kubernetes
+
+A session agent that wants to work on a repo makes its own worktree and branch (`git worktree
+add`, under a name it chooses) in a repo the git container added to the user's disk; when done
+it asks the git container to push and open the PR, and later to merge. aidc does not hand a
+session a repo on Kubernetes (no `aidc create --repo` worktree step): "isn't that something the
+dev container agents do on their own when they want to work on a repo?" The lock leaves
+`.git/worktrees/` writable by sessions (sticky, so one cannot remove another's).

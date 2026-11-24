@@ -376,3 +376,12 @@ not locked or re-owned. Consequence (proposed for Chunk 07): gitrun never runs g
 repo; the agent (no login) writes the commits to push into a `git bundle`, and gitrun fetches
 the bundle into a private bare copy, scans and pushes from there, so no repo config the user or a
 session wrote can run as gitrun.
+
+## 2026-11-24: One git design on both backends: bundles, no repo lock
+
+"shouldn't we make them both the same?" Yes: Kubernetes uses the bundle approach too. gitrun
+never runs git in a repo anyone else can write: on push the git agent (no login) bundles the
+branch from the working copy and gitrun imports the bundle into its private bare copy, scans and
+pushes; on fetch/clone gitrun fetches into its private copy and writes a bundle the agent
+imports. Repos on the user's Kubernetes disk are ordinary repos owned by the user's sessions, not
+locked; this supersedes the repo-lock proposal (design-12) and gitctl's lock checks.

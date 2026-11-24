@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# aidc git status: the git container's pod, GitHub login and SSH key, and its egress policy.
+# aidc git status: the git container's pod, GitHub login and SSH key, its storage (gitrun's
+# private copies and the agent's bundles, with a warning above kubernetes.git_storage_warn, so
+# nothing fills its disk unnoticed) and its egress policy.
 #
 # Every answer is one of yes, no or unknown: a cluster or container that cannot be asked is
 # "unknown", never "no", because a user told "not logged in" logs in again, and one told
@@ -32,6 +34,7 @@ esac
 
 github="unknown (the container cannot be asked)"
 ssh="unknown (the container cannot be asked)"
+storage="unknown (the container cannot be asked)"
 if [ "$rc" = 0 ]; then
     # One exec for both answers. Only a line the script printed counts: an exec that fails
     # before running it leaves both unknown. `gitctl status` asks gh, as the login's user,
@@ -43,7 +46,8 @@ if [ "$rc" = 0 ]; then
             yes) echo "github=yes" ;; no) echo "github=no" ;; unknown) echo "github=stored" ;;
         esac
         keys=$(ls "$HOME"/.ssh/id_* 2>/dev/null | grep -v "\.pub$" | xargs -r -n1 basename | paste -sd" " -)
-        echo "ssh=${keys:-none}"' </dev/null 2>/dev/null || true)
+        echo "ssh=${keys:-none}"
+        gitctl storage 2>/dev/null | sed "s/^/storage-/"' </dev/null 2>/dev/null || true)
     case "$(printf '%s\n' "$out" | sed -n 's/^github=//p')" in
         yes) github="logged in" ;;
         no) github="not logged in (aidc git attach, then: gitctl login)" ;;
@@ -56,8 +60,19 @@ if [ "$rc" = 0 ]; then
         *) ssh="yes (${keys})" ;;
     esac
 fi
+copies=$(printf '%s\n' "${out:-}" | sed -n 's/^storage-copies //p')
+bundles=$(printf '%s\n' "${out:-}" | sed -n 's/^storage-bundles //p')
+if [ "$rc" = 0 ] && printf '%s' "$copies" | grep -Eq '^[0-9]+$'; then
+    total=$(( copies + ${bundles:-0} ))
+    human() { awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB", u); i = 1; while (b >= 1024 && i < 5) { b /= 1024; i++ } printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
+    storage="$(human "$total") (private copies $(human "$copies"), bundles $(human "${bundles:-0}"))"
+    if limit=$(k8s_bytes "$AIDC_K8S_GIT_STORAGE_WARN") && [ "$total" -gt "$limit" ]; then
+        storage="${storage}; WARNING: over kubernetes.git_storage_warn (${AIDC_K8S_GIT_STORAGE_WARN}): aidc repo remove what you no longer work on"
+    fi
+fi
 printf 'github:   %s\n' "$github"
 printf 'ssh key:  %s\n' "$ssh"
+printf 'storage:  %s\n' "$storage"
 
 if have=$(k8s_kubectl -n "$ns" get networkpolicy -o name --request-timeout=10s 2>/dev/null); then
     missing=""

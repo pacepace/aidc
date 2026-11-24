@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# aidc create <name> --backend kubernetes [--repo PATH] [--profile P]: a session in the cluster.
+# aidc create <name> --backend kubernetes [--profile P]: a session in the cluster.
 #
 # The session lives in the user's namespace (scripts/k8s/manifests.sh, k8s_render_session):
-# its proxy pod first, then, once the proxy's Service has an address, the dev pod. The repo is
-# on the user's disk at the same path as on the user's Linux machines: a path under this
-# machine's home directory maps to /home/<user>/..., so a Mac's /Users/<name>/x and a Linux
-# /home/<name>/x name the same repo and the same Claude history.
+# its proxy pod first, then, once the proxy's Service has an address, the dev pod. It sees the
+# user's whole disk and starts in the current directory's place on it, at the same path as on
+# the user's Linux machines: a path under this machine's home directory maps to
+# /home/<user>/..., so a Mac's /Users/<name>/x and a Linux /home/<name>/x name the same folder
+# and the same Claude history.
+#
+# No --repo: aidc does not hand a session a repo here. Repos are added with `aidc repo add`
+# (the git container clones and locks them), and a session that works on one makes its own
+# worktree and branch in it (owner ruling 2026-11-24).
 
 set -euo pipefail
 
@@ -18,21 +23,22 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-aidc create <name> --backend kubernetes [--repo PATH] [--profile P]
+aidc create <name> --backend kubernetes [--profile P]
 
 Starts a session in the cluster of the `kubernetes:` config, on your disk there
-(`aidc user add` makes it). PATH is the repo's path on your disk, given as on your own
-machine (default: the current directory); it is created when missing. P is the toolchain
-profile (default: the config's, else multi).
+(`aidc user add` makes it). The session sees your whole disk and starts in the current
+directory's place on it (made when missing). It takes no --repo: add repos with
+`aidc repo add`, and the session makes its own worktree and branch in one with
+`git worktree add`. P is the toolchain profile (default: the config's, else multi).
 USAGE
 }
 
-NAME="" REPO="" PROFILE_OVERRIDE=""
+NAME="" PROFILE_OVERRIDE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --repo) REPO="${2:-}"; shift 2 ;;
-        --repo=*) REPO="${1#--repo=}"; shift ;;
+        --repo|--repo=*)
+            die "--repo is not used on the kubernetes backend: the session sees your whole disk. Add the repo with \`aidc repo add <owner/name>\`; the session makes its own worktree and branch in it (git worktree add)" ;;
         --profile) PROFILE_OVERRIDE="${2:-}"; shift 2 ;;
         --profile=*) PROFILE_OVERRIDE="${1#--profile=}"; shift ;;
         -*) die "not supported on the kubernetes backend yet: $1" ;;
@@ -49,24 +55,12 @@ k8s_require || exit 1
 # The user's config, and the repo's own .aidc/config.yaml as cmd-create.sh reads it (load_config
 # also reports the repo settings it refused: SEC-09). Read from the repo on this machine when it
 # is here; the cluster copy is not readable from here.
-LOCAL_REPO="${REPO:-$PWD}"
-[ -d "$LOCAL_REPO" ] || LOCAL_REPO="$PWD"
-load_config "$LOCAL_REPO" "$LOCAL_REPO"
+load_config "$PWD" "$PWD"
 aidc_report_repo_requests
 PROFILE="${PROFILE_OVERRIDE:-${AIDC_PROFILE:-multi}}"
 
-# k8s_cluster_repo_path <path>: where <path> is on the user's disk.
-k8s_cluster_repo_path() {
-    local p="$1" home="${HOME%/}"
-    case "$p" in /*) ;; *) p="${PWD%/}/${p}" ;; esac
-    case "$p" in
-        "/home/${AIDC_K8S_USER}"|"/home/${AIDC_K8S_USER}/"*) printf '%s' "${p%/}" ;;
-        "$home"|"$home/"*) printf '/home/%s%s' "$AIDC_K8S_USER" "${p#"$home"}" ;;
-        *) return 1 ;;
-    esac
-}
-REPO_PATH=$(k8s_cluster_repo_path "${REPO:-$PWD}") \
-    || die "the repo must be under your home directory (${HOME}) or /home/${AIDC_K8S_USER}: got ${REPO:-$PWD}"
+REPO_PATH=$(k8s_cluster_repo_path "$PWD") \
+    || die "run aidc create from under your home directory (${HOME}) or /home/${AIDC_K8S_USER}: the session starts at the same place on your disk (got ${PWD})"
 case "$REPO_PATH" in *[\"\\]*|*$'\n'*) die "the repo path may not contain quotes, backslashes or newlines" ;; esac
 
 ns=$(k8s_user_ns "$AIDC_K8S_USER")

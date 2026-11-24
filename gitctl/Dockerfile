@@ -53,10 +53,9 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && gh --version
 
 # The git user, uid 2000, its own primary group (2000) and a member of the session group
-# (1000). Its own primary group, not 1000: the files it creates to lock a repo (.git/config,
-# hooks/) must not be group-writable by sessions, and core.sharedRepository=group makes the
-# files git writes writable by their group. The shared parts of a repo get group 1000 from
-# their setgid folders instead. Ubuntu's default `ubuntu` user holds 1000 and goes first.
+# (1000). Its own primary group, not 1000, so what it keeps in its own home is not the
+# sessions'; the working copies it shares with sessions get group 1000 from their setgid
+# folders. Ubuntu's default `ubuntu` user holds 1000 and goes first.
 RUN userdel -r ubuntu 2>/dev/null || true \
     && groupadd -g 1000 session \
     && groupadd -g 2000 git \
@@ -66,8 +65,10 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 # out of the agent's reach. Three users:
 #   git     (2000) the agent and the user's terminal; runs ordinary git as itself and holds no
 #                  credential, so nothing it runs can reach GitHub;
-#   gitrun  (2002) runs git for gitctl's fetch and push (its own group, plus the session group
-#                  a repo's shared parts belong to); holds no secret; its home is root's;
+#   gitrun  (2002) runs git for gitctl's fetch and push, only in its own private bare copies
+#                  (/var/lib/gitctl/gitrun, the git-run claim, its alone), never in a working
+#                  copy; commits reach it and leave it as bundles; holds no secret; its home is
+#                  root's;
 #   gitcred (2001) runs gh and git's credential helper; the only user that can read the
 #                  GitHub login, in its home on the git-cred claim (/var/lib/gitctl/gitcred).
 # git reaches the other two only through gitctl (gitctl/sudoers), a set of fixed verbs that
@@ -76,9 +77,10 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 RUN groupadd -g 2001 gitcred \
     && useradd -M -u 2001 -g 2001 -d /var/lib/gitctl/gitcred -s /usr/sbin/nologin gitcred \
     && groupadd -g 2002 gitrun \
-    && useradd -M -u 2002 -g 2002 -G session -d /home/gitrun -s /usr/sbin/nologin gitrun \
+    && useradd -M -u 2002 -g 2002 -d /home/gitrun -s /usr/sbin/nologin gitrun \
     && install -d -o root -g root -m 0755 /home/gitrun /var/lib/gitctl \
-    && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred
+    && install -d -o gitcred -g gitcred -m 0711 /var/lib/gitctl/gitcred \
+    && install -d -o gitrun -g gitrun -m 0700 /var/lib/gitctl/gitrun
 COPY gitctl-rules.sh gitctl.sh gh-shim.sh cred-helper.sh claude-hook.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl

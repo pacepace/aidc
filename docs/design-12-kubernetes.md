@@ -100,13 +100,20 @@ git runs as `gitrun` (no secret; the token comes from the credential helper, for
 `https://github.com` only) and gh as `gitcred`, the only user that can read the login, kept on
 its own claim, `git-cred`. sudo drops the caller's environment, and called through sudo
 directly a verb re-checks everything as that user and opens no file the caller names (texts
-come on stdin). A git verb enters the repo's `.git` once and checks it from inside: it and its config, hooks,
-info and objects/info belong to gitrun or root and are writable by no group or other (whatever
-git reads there would run with the login), and the config holds only allowed keys (no
-includes, URL rewrites, proxies or programs). Every git then runs with `GIT_DIR=.`, so a folder
-swapped above it changes nothing, and is given origin's URL by value, after checking it is one
-`https://github.com/<owner>/<name>`, with proxies and other protocols pinned off and replace
-refs ignored.
+come on stdin, and so do bundles). gitrun never runs git in a repo anyone else can write
+(owner ruling 2026-11-24, "One git design on both backends"): it keeps a private bare copy of
+each GitHub repo in its own store (the `git-run` claim, 0700, gitrun's; gitctl refuses a
+store anyone else can enter) and moves commits between that copy and the working copies as git
+bundles. `fetch` and `clone`: gitrun fetches origin into its copy (pruning deleted branches,
+then `gc --auto`) and writes a bundle to stdout; the agent imports it into the working copy as
+itself, with `bundle unbundle` (no transport at all) and one ref transaction, its own git
+pinned against hooks, fsmonitor and auto gc. `push`: the agent bundles the branch from the
+working copy and hands it to gitrun on stdin; gitrun saves it in its own store, verifies it
+(its base must already be in the private copy), unbundles it there and takes only the branch's
+commit. Every git gitrun runs is given origin's URL by value, built from `<owner>/<name>`, with
+proxies and other protocols pinned off and replace refs ignored. Bundles are temporary on both
+sides: each is deleted when its verb ends, whatever the outcome, and one over an hour old (a
+killed verb's) is swept at the start of the next verb.
 `push` sends the one branch by the exact commit it checked, never forced, never tags, never to
 `main`, `master` or `develop` (they change by PR merges); it asks origin what it has
 (`ls-remote`) rather than trusting `refs/remotes/*`, reads each commit it would send whole, and
@@ -120,11 +127,28 @@ uid 2000, with a dummy token: `sudo -l` lists only gitctl; the token is unreadab
 tried; every verb refuses options and malformed arguments. The bypasses that remain are listed
 in the build plan (`build-plan-k8s-git-container.md`, Chunk 02 decisions).
 
+Repos as built: `aidc repo add <owner/name>` has a one-shot root pod (CHOWN, DAC_OVERRIDE,
+FOWNER and FSETID only, symlinks on the way refused, never followed) make the repo folder and
+give it to the agent while `gitctl clone` fills it from gitrun's bundle, then give the working
+copy to the session user, group-shared (setgid, `core.sharedRepository=group`) so the agent,
+in the session group, works in it too. It is an ordinary repo: no lock, sessions write all of
+it. `aidc repo remove` deletes gitrun's private copy (`gitctl remove-copy`), and the working
+copy only with `--delete-working-copy`. `aidc git status` reports the private copies' and
+bundles' size and warns above `kubernetes.git_storage_warn` (default 1Gi).
+
+Sessions make their own worktrees (owner ruling 2026-11-24): a session sees the whole disk and
+runs `git worktree add -b <branch> <path>` itself in a working copy; `aidc create` takes no
+`--repo` on this backend.
+
 **Cleanup is the git container's job** (K8S-08). Merged branches and their worktrees are deleted.
 Anything else left behind (unmerged, unpushed, orphaned worktrees) is flagged to the user at
 once, not left to rot.
 
 ### Proposal: lock the parts of the repo that can run code
+
+Superseded 2026-11-24 by the owner ruling "One git design on both backends: bundles, no repo
+lock" (as built above: gitrun works only in its own private copies). Kept as the record of what
+was measured; nothing in aidc locks a repo now.
 
 A repo on the shared disk is written by sandboxed sessions. Git runs code from only two places
 in a repo: its settings file (`.git/config`: hooks path, fsmonitor, ssh command, filters) and its

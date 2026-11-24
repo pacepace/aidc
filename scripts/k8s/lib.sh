@@ -52,6 +52,10 @@ _k8s_cfg_json() {
 #   AIDC_K8S_USER_DISK_SIZE size of each user's disk (default 100Gi)
 #   AIDC_K8S_SESSION_STORAGE_CLASS / _HOME_SIZE  each session's home volume, deleted with the
 #                           session (default: storage_class, 50Gi)
+#   AIDC_K8S_GIT_STORE_SIZE the git container's private copies of GitHub repos (git-run claim,
+#                           on the session class; default 10Gi)
+#   AIDC_K8S_GIT_STORAGE_WARN  `aidc git status` warns when those copies and its bundles take
+#                           more (default 1Gi)
 #   AIDC_K8S_CPU_REQUEST / _MEMORY_REQUEST / _CPU_LIMIT / _MEMORY_LIMIT  session size (2 / 8Gi
 #                           guaranteed, up to 16 / 32Gi: K8S-19)
 #   AIDC_K8S_REGISTRY_STORAGE_CLASS / _SIZE  the registry's volume (default the user disk's
@@ -92,6 +96,8 @@ k8s_load_settings() {
     AIDC_K8S_SESSION_STORAGE_CLASS=$(_k8s_cfg '.kubernetes.session_storage_class')
     AIDC_K8S_SESSION_STORAGE_CLASS="${AIDC_K8S_SESSION_STORAGE_CLASS:-$AIDC_K8S_STORAGE_CLASS}"
     AIDC_K8S_HOME_SIZE=$(_k8s_cfg '.kubernetes.home_size'); AIDC_K8S_HOME_SIZE="${AIDC_K8S_HOME_SIZE:-50Gi}"
+    AIDC_K8S_GIT_STORE_SIZE=$(_k8s_cfg '.kubernetes.git_store_size'); AIDC_K8S_GIT_STORE_SIZE="${AIDC_K8S_GIT_STORE_SIZE:-10Gi}"
+    AIDC_K8S_GIT_STORAGE_WARN=$(_k8s_cfg '.kubernetes.git_storage_warn'); AIDC_K8S_GIT_STORAGE_WARN="${AIDC_K8S_GIT_STORAGE_WARN:-1Gi}"
     AIDC_K8S_CPU_REQUEST=$(_k8s_cfg '.kubernetes.cpu'); AIDC_K8S_CPU_REQUEST="${AIDC_K8S_CPU_REQUEST:-2}"
     AIDC_K8S_MEMORY_REQUEST=$(_k8s_cfg '.kubernetes.memory'); AIDC_K8S_MEMORY_REQUEST="${AIDC_K8S_MEMORY_REQUEST:-8Gi}"
     AIDC_K8S_CPU_LIMIT=$(_k8s_cfg '.kubernetes.cpu_limit'); AIDC_K8S_CPU_LIMIT="${AIDC_K8S_CPU_LIMIT:-16}"
@@ -102,7 +108,8 @@ k8s_load_settings() {
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
         AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE AIDC_K8S_USER_DISK_SIZE \
-        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_CPU_REQUEST AIDC_K8S_MEMORY_REQUEST \
+        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN \
+        AIDC_K8S_CPU_REQUEST AIDC_K8S_MEMORY_REQUEST \
         AIDC_K8S_CPU_LIMIT AIDC_K8S_MEMORY_LIMIT
 }
 
@@ -204,4 +211,87 @@ k8s_git_pod() {
     if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
     printf 'absent\n'
     return 1
+}
+
+# k8s_cluster_repo_path <path>: where <path> is on the user's disk. A path under this
+# machine's home directory maps to /home/<user>/..., so a Mac's /Users/<name>/x and a Linux
+# /home/<name>/x name the same repo and the same Claude history; /home/<user>/... is taken as
+# it is. Returns 1 for anything else.
+k8s_cluster_repo_path() {
+    local p="$1" home="${HOME%/}"
+    case "$p" in /*) ;; *) p="${PWD%/}/${p}" ;; esac
+    case "$p" in
+        "/home/${AIDC_K8S_USER}"|"/home/${AIDC_K8S_USER}/"*) printf '%s' "${p%/}" ;;
+        "$home"|"$home/"*) printf '/home/%s%s' "$AIDC_K8S_USER" "${p#"$home"}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# k8s_repo_path_ok <cluster-path>: a folder below /home/<user> named only with letters,
+# digits, '.', '_' and '-', with no . or .. part: what gitctl clone accepts, and safe to put
+# in a manifest.
+k8s_repo_path_ok() {
+    local p="$1" c parts
+    case "$p" in "/home/${AIDC_K8S_USER}/"?*) ;; *) return 1 ;; esac
+    printf '%s' "$p" | grep -Eq '^(/[A-Za-z0-9._-]+)+$' || return 1
+    IFS=/ read -ra parts <<<"${p#/}"
+    for c in "${parts[@]}"; do case "$c" in .|..) return 1 ;; esac; done
+}
+
+# The git container's agent user (gitctl/Dockerfile): it clones a new working copy, in a folder
+# `aidc repo add` gives it, before the folder goes to the session user.
+# shellcheck disable=SC2034  # read by manifests.sh
+K8S_GIT_AGENT_UID=2000
+
+# k8s_repo_state <namespace> <git-pod> <cluster-path>: what is at the path, asked of the git
+# container: "repo <origin url>" (a git working copy), "folder" (a folder that is not empty),
+# "empty" (missing or empty), or "unknown <why>" when the container cannot be asked. Never
+# "empty" for a container that did not answer.
+k8s_repo_state() {
+    local ns="$1" pod="$2" p="$3" out
+    # shellcheck disable=SC2016  # expanded by the container's shell
+    out=$(k8s_kubectl -n "$ns" exec "$pod" -c git -- sh -c '
+        if [ -d "$1/.git" ]; then echo "state=repo $(git config --file "$1/.git/config" --get remote.origin.url 2>/dev/null || echo "?")"
+        elif [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null)" ]; then echo "state=folder"
+        else echo "state=empty"; fi' sh "$p" </dev/null 2>&1) || true
+    case "$out" in
+        *state=*) printf '%s\n' "${out##*state=}" ;;
+        *) printf 'unknown (the git container did not answer: %s)\n' "$(printf '%s' "$out" | tail -n1)" ;;
+    esac
+}
+
+# k8s_bytes <size>: a Kubernetes-style size (512Mi, 1Gi, 2G, 1500) in bytes; returns 1 when unreadable.
+k8s_bytes() {
+    local n="${1%%[!0-9]*}" u="${1##*[0-9]}"
+    [ -n "$n" ] || return 1
+    case "$u" in
+        "") echo "$n" ;; Ki) echo $((n * 1024)) ;; Mi) echo $((n * 1024 ** 2)) ;; Gi) echo $((n * 1024 ** 3)) ;;
+        Ti) echo $((n * 1024 ** 4)) ;; k|K) echo $((n * 1000)) ;; M) echo $((n * 1000 ** 2)) ;;
+        G) echo $((n * 1000 ** 3)) ;; T) echo $((n * 1000 ** 4)) ;; *) return 1 ;;
+    esac
+}
+
+# k8s_repo_dir_step <namespace> <cluster-path> <mode> <node-selector-json>: run the repo folder
+# pod (manifests.sh, k8s_render_repo_dir; sourced by the caller) in <mode> and wait for it,
+# up to three minutes. Prints the pod's last line; returns 1, with why on stderr, when it
+# failed or did not finish. The pod is deleted either way.
+k8s_repo_dir_step() {
+    local ns="$1" path="$2" mode="$3" sel="$4" name phase="" logs
+    name="repo-dir-${mode}-$(date -u +%Y%m%d%H%M%S)-$$"
+    if ! k8s_render_repo_dir "$name" "$path" "$mode" "$sel" | k8s_kubectl apply -f - >/dev/null; then
+        printf '[aidc] error: could not start the folder step for %s\n' "$path" >&2
+        return 1
+    fi
+    for _ in $(seq 90); do
+        phase=$(k8s_kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        case "$phase" in Succeeded|Failed) break ;; esac
+        sleep 2
+    done
+    logs=$(k8s_kubectl -n "$ns" logs "$name" 2>&1 || true)
+    k8s_kubectl -n "$ns" delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    case "$phase" in
+        Succeeded) printf '%s\n' "$logs" | tail -n1 ;;
+        Failed) printf '[aidc] error: %s\n' "$(printf '%s' "$logs" | tail -n1)" >&2; return 1 ;;
+        *) printf '[aidc] error: the folder step for %s did not finish (phase: %s)\n' "$path" "${phase:-unknown}" >&2; return 1 ;;
+    esac
 }

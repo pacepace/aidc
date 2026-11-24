@@ -683,11 +683,22 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   reaches public addresses and Quad9 DNS only, and nothing may connect to it. Its home, holding
   your login and key, is a volume on `storage_class`, kept when the container is replaced.
   Pushing through it comes next.
-- `aidc create <name> --backend kubernetes [--repo PATH] [--profile P]`: a session in the
-  cluster, in your namespace, on your disk. PATH is given as on your own machine; a path under
-  your home directory is the same path under `/home/<user>` on the disk, so a repo's Claude
-  history has the same name everywhere. A top-level `backend: kubernetes` in the config makes
-  the cluster the default for `create`.
+- `aidc repo add <github-url|owner/name> [--path P]`: your git container clones the repo onto
+  your disk (default `/home/<user>/<name>`) as an ordinary working copy, yours and your
+  sessions', shared with the git container. It gets there through the git container's own
+  private copy of the GitHub repo, which only the user that holds the GitHub login (by way of
+  a helper) ever runs git in; commits move between the two as git bundles. Private repos need
+  the git container's GitHub login. `aidc repo list` shows the working copies on your disk;
+  `aidc repo remove <path|owner/name>` deletes the private copy, and the working copy only
+  with `--delete-working-copy`. `aidc git status` reports how much the private copies take,
+  with a warning above `git_storage_warn` (default 1Gi).
+- `aidc create <name> --backend kubernetes [--profile P]`: a session in the cluster, in your
+  namespace. It sees your whole disk and starts at the current directory's place on it: a path
+  under your home directory is the same path under `/home/<user>` on the disk, so a repo's
+  Claude history has the same name everywhere. There is no `--repo` here: a session that works
+  on an added repo makes its own worktree and branch in it
+  (`git -C <repo> worktree add -b <branch> <repo>/<folder> origin/HEAD`). A top-level
+  `backend: kubernetes` in the config makes the cluster the default for `create`.
 - `aidc attach | status | logs | kill <name>` find the session where it lives (the cluster is
   asked first when one is configured); `aidc list` shows both backends. `kill` keeps the
   session's audit volume (`<name>-audit-<UTC time>`, named for when it was made, so a later
@@ -723,6 +734,9 @@ kubernetes:
                                  # (default: storage_class); like storage_class, several pods on
                                  # a node must be able to mount one volume (the audit sidecar reads
                                  # the home), and it should delete its volumes when released
+  git_store_size: 10Gi           # the git container's private copies of GitHub repos (on the
+                                 # session class: a cache of GitHub)
+  git_storage_warn: 1Gi          # `aidc git status` warns when those copies take more
   cpu: 2                         # guaranteed per session; cpu_limit / memory_limit: the ceiling
   memory: 8Gi                    #   (default 16 and 32Gi)
   user_disk_size: 100Gi          # each user's disk

@@ -560,6 +560,16 @@ spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
 ---
+# gitrun's private bare copies of the user's GitHub repos (gitctl): a cache of GitHub, so on the
+# session class, deleted with nothing else; gitrun's alone (0700).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: git-run, namespace: ${ns}, labels: {${labels}, app: git}}
+spec:
+  storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_GIT_STORE_SIZE}}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: git, namespace: ${ns}, labels: {${labels}, app: git}}
@@ -590,13 +600,14 @@ spec:
           imagePullPolicy: Always
           # The login's home is gitcred's: 0711, so git can read the identity file a login
           # writes there but cannot list it; gh's own files in it are 0600.
-          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred']
+          # gitrun's store is gitrun's alone: gitctl refuses one anyone else can enter.
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred && chown 2002:2002 /run-store && chmod 0700 /run-store']
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
-          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}]
+          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}]
       containers:
         - name: git
           image: ${img}
@@ -618,9 +629,94 @@ spec:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/git}
             - {name: cred, mountPath: /var/lib/gitctl/gitcred}
+            - {name: run-store, mountPath: /var/lib/gitctl/gitrun}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: git-home}}
         - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
+        - {name: run-store, persistentVolumeClaim: {claimName: git-run}}
 EOF2
+}
+
+# The repo folder step's script (sh, as root in the init image, with only CHOWN, DAC_OVERRIDE,
+# FOWNER and FSETID: the last so the setgid bit survives a chmod of a folder whose group,
+# 1000, root is not in), for the folder $1 below the user's disk mounted at $2. Each step down is entered
+# with cd -P and checked with pwd -P, so a symlink a session put on the way is refused, never
+# followed. $3 is the mode:
+#   make    before the clone: missing folders on the way are made as the session user, as
+#           `mkdir -p` in a session would; the repo folder itself (missing or empty) is given
+#           to the git container's agent ($4), writable by it alone, so nothing is planted in
+#           it while gitctl clones;
+#   own     after the clone: the working copy becomes the session user's, like any repo a
+#           session made, group-shared (setgid) so the agent, in the session group, can work
+#           in it too; symlinks in it are not followed;
+#   delete  aidc repo remove --delete-working-copy: the folder goes, if it is a git working copy.
+# shellcheck disable=SC2016  # run by the pod's shell
+K8S_REPO_DIR_SCRIPT='set -eu
+p="$1" top="$2" mode="$3" agent="$4"
+cd -P "$top"
+rest="${p#"$top"/}" here="$top"
+while [ -n "$rest" ]; do
+    c="${rest%%/*}"
+    if [ "$c" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    here="$here/$c"
+    if [ -L "$c" ]; then echo "refused: $here is a symlink" >&2; exit 3; fi
+    made=0
+    if [ ! -e "$c" ]; then
+        if [ "$mode" != make ]; then echo "refused: $here does not exist" >&2; exit 3; fi
+        mkdir "$c"; made=1
+    fi
+    cd -P "$c"
+    if [ "$(pwd -P)" != "$here" ]; then echo "refused: $here moved on the way" >&2; exit 3; fi
+    if [ -n "$rest" ] && [ "$made" = 1 ]; then chown 1000:1000 . && chmod 0755 .; fi
+done
+case "$mode" in
+    make)
+        if [ -n "$(ls -A .)" ]; then echo "refused: $p is not empty" >&2; exit 3; fi
+        chown "$agent:1000" . && chmod 0755 .
+        echo "ready: $p" ;;
+    own)
+        chown -R -h 1000:1000 . && chmod 2775 .
+        echo "owned: $p" ;;
+    delete)
+        if [ ! -d .git ] || [ -L .git ]; then echo "refused: $p is not a git working copy" >&2; exit 3; fi
+        cd -P .. && rm -rf -- "$c"
+        echo "deleted: $p" ;;
+    *) echo "refused: unknown mode $mode" >&2; exit 3 ;;
+esac'
+
+# k8s_render_repo_dir <pod-name> <cluster-path> <mode> <node-selector-json>: a one-shot pod
+# running K8S_REPO_DIR_SCRIPT in <mode> (make, own or delete) for `aidc repo add|remove`.
+# Root, because only root can give a folder on the session user's disk to the agent and back;
+# with only the capabilities that needs, no escalation, no API token, no network (the
+# namespace's default-deny).
+k8s_render_repo_dir() {
+    local name="$1" path="$2" mode="$3" sel="$4" ns
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  namespace: ${ns}
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: repo-dir}
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeSelector: ${sel}
+  tolerations: ${AIDC_K8S_TOLERATIONS}
+  containers:
+    - name: repo-dir
+      image: ${K8S_INIT_IMAGE}
+      command: [sh, -c, $(printf '%s' "$K8S_REPO_DIR_SCRIPT" | jq -Rs .), repo-dir, "${path}", "/home/${AIDC_K8S_USER}", "${mode}", "${K8S_GIT_AGENT_UID}"]
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID]}
+      volumeMounts: [{name: disk, mountPath: "/home/${AIDC_K8S_USER}"}]
+  volumes:
+    - {name: disk, persistentVolumeClaim: {claimName: disk}}
+EOF
 }

@@ -56,6 +56,8 @@ assert_not_has() {
 #   K_GH=yes|stored|no   what gh says inside (default no)
 #   K_KEYS="id_ed25519"  the SSH keys in ~/.ssh (default none)
 #   K_NO_GIT_POLICY=1    the git-egress policy is missing
+#   K_COPIES / K_BUNDLES bytes in gitrun's private copies / the agent's bundles (1 MiB / 0);
+#   K_NO_STORAGE=1       gitctl storage printed nothing
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -73,7 +75,8 @@ case "$*" in
     *"get deployment git"*) [ "${K_NO_DEP:-}" = 1 ] || echo "deployment.apps/git" ;;
     *"exec git-7d9f-abc -c git -- sh -c"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'error: unable to upgrade connection' >&2; exit 1; }
-        echo "github=${K_GH:-no}"; echo "ssh=${K_KEYS:-none}" ;;
+        echo "github=${K_GH:-no}"; echo "ssh=${K_KEYS:-none}"
+        [ "${K_NO_STORAGE:-}" = 1 ] || { echo "storage-copies ${K_COPIES:-1048576}"; echo "storage-bundles ${K_BUNDLES:-0}"; } ;;
     *"get networkpolicy -o name"*)
         echo "networkpolicy.networking.k8s.io/default-deny"
         [ "${K_NO_GIT_POLICY:-}" = 1 ] || echo "networkpolicy.networking.k8s.io/git-egress" ;;
@@ -102,8 +105,8 @@ out=$(run git setup)
 assert_has "setup reports the container ready" "the git container is ready" "$out"
 assert_has "and exits 0" "exit=0" "$out"
 assert_has "and points the user at attach to add their own secrets" "aidc git attach" "$out"
-assert_eq "it applies the egress policy, the home and login claims and the Deployment, nothing else" \
-    "NetworkPolicy/git-egress PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred Deployment/git" \
+assert_eq "it applies the egress policy, the home, login and private-copy claims and the Deployment, nothing else" \
+    "NetworkPolicy/git-egress PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred PersistentVolumeClaim/git-run Deployment/git" \
     "$(yq -N e '[.kind, .metadata.name] | join("/")' "$K_APPLIED" | paste -sd' ' -)"
 assert_eq "everything goes in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_has "it waits for the Deployment to be ready" "rollout status deployment/git" "$(cat "$K_LOG")"
@@ -141,14 +144,19 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
     "$(pod '.containers[] | select(.name == "git") | [.image, .imagePullPolicy]')"
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
-assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"}]' \
+assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home, the private copies at gitrun's store" \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
-assert_eq "the volumes are the user's disk claim, the git-home claim and the git-cred claim" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}}]' \
+assert_eq "the volumes are the user's disk claim and the git-home, git-cred and git-run claims" \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}}]' \
     "$(pod '.volumes')"
 assert_eq "the home and login claims (the user's secrets) are on the user's retained class, not the session one" \
-    '"shared-disk"' "$(q 'select(.kind == "PersistentVolumeClaim") | .spec.storageClassName' | sort -u)"
+    '"shared-disk"' "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name != "git-run") | .spec.storageClassName' | sort -u)"
+assert_eq "the private copies (a cache of GitHub) are on the session class, 10Gi unless configured" '["scratch","10Gi"]' \
+    "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "git-run") | [.spec.storageClassName, .spec.resources.requests.storage]')"
+assert_has "gitrun's store is gitrun's alone (gitctl refuses one others can enter)" \
+    "chown 2002:2002 /run-store && chmod 0700 /run-store" \
+    "$(pod '.initContainers[] | select(.name == "seed-home") | .command')"
 assert_eq "it is ready only when its tmux session is up" '["tmux","has-session","-t","main"]' \
     "$(pod '.containers[] | select(.name == "git") | .readinessProbe.exec.command')"
 assert_eq "the egress policy, exactly: no ingress; Quad9 DNS; public addresses only" \
@@ -222,6 +230,21 @@ out=$(K_NO_POD=1 run git status)
 assert_has "a Deployment with no running pod says not running" "pod:      not running" "$out"
 out=$(K_NO_POD=1 K_NO_DEP=1 run git status)
 assert_has "no Deployment says not set up, with the command" "pod:      not set up (run: aidc git setup)" "$out"
+out=$(run git status)
+assert_has "storage: what the private copies and bundles take" "storage:  1.0 MiB (private copies 1.0 MiB, bundles 0 B)" "$out"
+assert_not_has "under the threshold, no warning" "WARNING" "$out"
+out=$(K_COPIES=1073741824 K_BUNDLES=1048576 run git status)
+assert_has "above kubernetes.git_storage_warn (default 1Gi) it warns, saying what to do" \
+    "WARNING: over kubernetes.git_storage_warn (1Gi): aidc repo remove what you no longer work on" "$out"
+cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/config.bak"
+printf '  git_storage_warn: 4Gi\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(K_COPIES=2147483648 run git status)
+assert_not_has "the threshold is the config's" "WARNING" "$out"
+cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
+out=$(K_NO_STORAGE=1 run git status)
+assert_has "storage gitctl did not report is unknown" "storage:  unknown" "$out"
+out=$(K_EXEC_FAIL=1 run git status)
+assert_has "a container that cannot be asked: storage unknown" "storage:  unknown" "$out"
 out=$(K_NO_GIT_POLICY=1 run git status)
 assert_has "a missing egress policy is reported loudly" "NOT ENFORCED: NetworkPolicy missing: git-egress" "$out"
 

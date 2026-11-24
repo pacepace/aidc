@@ -5,13 +5,17 @@
 # The agent holds no credential; gitctl's verbs are the only things that push, open, comment on
 # or merge a pull request, so a verb that lets a caller's text through as an option, pushes an
 # attributed or forced commit, trusts a ref a session can move, or reads a file as gitcred
-# breaks the owner's rules on GitHub or hands out the token. Each refusal is checked against
-# the real outcome: the bare remote's refs for pushes (real git, a local bare repo standing in
-# for GitHub), and a stub gh that records what it was asked to run. The last section removes
-# two guards and shows these tests notice.
+# breaks the owner's rules on GitHub or hands out the token. gitrun never runs git in a working
+# copy: commits travel as bundles between it and its private copy, so a bundle it would take
+# from a path, leave behind, or import without the checks, and config planted in a working copy
+# that ran on gitctl's steps, are tested too. Each refusal is checked against the real outcome:
+# the forge's refs for pushes (real git, a folder of bare repos standing in for GitHub), and a
+# stub gh that records what it was asked to run. The last section removes guards and shows
+# these tests notice.
 #
-# Run from a checkout, gitctl skips sudo (the role is named in AIDC_GITCTL_ROLE) and may accept
-# a local-path origin (AIDC_GITCTL_ALLOW_LOCAL_ORIGIN=1); installed, it ignores both. Needs jq.
+# Run from a checkout, gitctl skips sudo (the role is named in AIDC_GITCTL_ROLE) and takes the
+# stand-in forge, gitrun's store and the bundle folder from AIDC_GITCTL_TEST_FORGE,
+# AIDC_GITCTL_RUN_STORE and AIDC_GITCTL_BUNDLE_DIR; installed, it ignores them. Needs jq.
 #
 # Hygiene: scratch lives under tests/scratch/ INSIDE the repo (gitignored).
 #
@@ -51,7 +55,7 @@ STUB
 chmod +x "$S/bin/gh"
 AIDC_GITCTL_REAL_GIT=$(command -v git)
 export AIDC_GITCTL_REAL_GH="$S/bin/gh" AIDC_GITCTL_REAL_GIT
-unset AIDC_GITCTL_ROLE AIDC_GITCTL_ALLOW_LOCAL_ORIGIN
+unset AIDC_GITCTL_ROLE AIDC_GITCTL_TEST_FORGE
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 G() { git -c user.name=Someone -c user.email=someone@example.com -c init.defaultBranch=main "$@"; }
 
@@ -82,9 +86,12 @@ for t in "Fix the Claude Code transcript reader" "Signed-off-by: A Person <a@exa
 done
 
 echo ""
-echo "=== push: a bare repo stands in for GitHub ==="
-export AIDC_GITCTL_ALLOW_LOCAL_ORIGIN=1
-R="$S/remote.git" W="$S/work"
+echo "=== push: a folder of bare repos stands in for GitHub ==="
+# gitrun keeps its private copies in a store only it can enter; the agent's bundles go in their
+# own folder. Run from a checkout, gitctl takes all three from the environment.
+F="$S/forge" R="$S/forge/o/r.git" W="$S/work" STORE="$S/store" BUNDLES="$S/bundles"
+mkdir -p "$S/forge/o"; mkdir -m 0700 "$STORE"
+export AIDC_GITCTL_TEST_FORGE="$F" AIDC_GITCTL_RUN_STORE="$STORE" AIDC_GITCTL_BUNDLE_DIR="$BUNDLES"
 G init -q --bare "$R"
 G clone -q "$R" "$W" 2>/dev/null
 G -C "$W" commit -q --allow-empty -m "first"
@@ -143,31 +150,30 @@ ctl push "$W" feature
 assert_eq "the push still works" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
 assert_eq "and never carries tags" "" "$(git -C "$R" tag)"
 
-# Config git reads before it sends anything: the allowlist refuses what could send it elsewhere,
-# run a program or carry the token (URL-specific forms outrank the command line).
-for kv in "remote.origin.uploadpack=sh -c x" "remote.origin.receivepack=sh -c x" "http.proxy=http://127.0.0.1:1" \
-          "http.https://github.com/.sslVerify=false" "url.https://example.com/.insteadOf=https://github.com/" \
-          "core.sshCommand=sh -c x" "credential.helper=!cat" "protocol.ext.allow=always" "push.followTags=true" \
-          "core.pager=sh -c x" "remote.evil.url=/tmp/x"; do
-    git -C "$W" config "${kv%%=*}" "${kv#*=}"
-    ctl push "$W" feature
-    if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q "does not run git with"; then pass "a repo config with ${kv%%=*} is refused"
-    else fail "a repo config with ${kv%%=*} was used ($OUT)"; fi
-    git -C "$W" config --unset-all "${kv%%=*}"
+# The working copy is anyone's in the session group: config planted there runs nothing on
+# gitctl's steps (the agent's bundle and import pin hooks and fsmonitor off), and gitrun never
+# runs git in it at all.
+G -C "$W" commit -q --allow-empty -m "Before the hostile config"
+mkdir -p "$S/evil-hooks"
+for h in reference-transaction post-checkout post-merge pre-push pre-auto-gc; do
+    printf '#!/bin/sh\ntouch "%s/PWNED-hook"\n' "$S" > "$S/evil-hooks/$h"; chmod +x "$S/evil-hooks/$h"
 done
-
-# .git swapped after the checks, for one whose config runs a command as soon as git connects:
-# gitctl stays in the .git it checked, so the swap changes nothing.
-cp -a "$W/.git" "$S/evil.git"
-git --git-dir="$S/evil.git" config protocol.ext.allow always
-git --git-dir="$S/evil.git" config "url.ext::sh -c touch% $S/PWNED% >&2.insteadOf" "$R"
-G -C "$W" commit -q --allow-empty -m "After the swap"
-export AIDC_GITCTL_TEST_AFTER_CHECK="mv '$W/.git' '$S/real.git' && mv '$S/evil.git' '$W/.git'"
+cp "$S/evil-hooks/"* "$W/.git/hooks/" 2>/dev/null || { mkdir -p "$W/.git/hooks"; cp "$S/evil-hooks/"* "$W/.git/hooks/"; }
+git -C "$W" config core.hooksPath "$S/evil-hooks"
+git -C "$W" config core.fsmonitor "touch $S/PWNED-fsmonitor"
+git -C "$W" config remote.origin.uploadpack "touch $S/PWNED-uploadpack"
+git -C "$W" config remote.origin.receivepack "touch $S/PWNED-receivepack"
+git -C "$W" config core.sshCommand "touch $S/PWNED-ssh"
+git -C "$W" config gc.auto 1
 ctl push "$W" feature
-unset AIDC_GITCTL_TEST_AFTER_CHECK
-mv "$W/.git" "$S/evil.git" && mv "$S/real.git" "$W/.git"
-assert_eq "a .git swapped after the checks runs nothing" no "$([ -e "$S/PWNED" ] && echo yes || echo no)"
-assert_eq "and the push used the .git that was checked" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+assert_eq "a working copy with hostile config still pushes" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+ctl fetch "$W"
+assert_eq "and fetches" 0 "$RC"
+assert_eq "and nothing planted in it ran" "" "$(find "$S" -maxdepth 1 -name 'PWNED*')"
+for k in core.hooksPath core.fsmonitor remote.origin.uploadpack remote.origin.receivepack core.sshCommand gc.auto; do
+    git -C "$W" config --unset "$k"
+done
+rm -f "$W/.git/hooks/"*
 
 # Replace refs change what git log shows, not what a push sends.
 G -C "$W" switch -q -c rp feature
@@ -201,22 +207,57 @@ echo ""
 echo "=== fetch ==="
 O="$S/other"
 G clone -q "$R" "$O" 2>/dev/null && G -C "$O" switch -q main && G -C "$O" commit -q --allow-empty -m "From elsewhere" && G -C "$O" push -q origin main 2>/dev/null
+G -C "$O" push -q origin main:refs/heads/doomed 2>/dev/null
 ctl fetch "$W"
 assert_eq "fetch brings origin's commits" "$(git -C "$R" rev-parse main)" "$(git -C "$W" rev-parse origin/main)"
+assert_eq "and its new branches" "$(git -C "$R" rev-parse main)" "$(git -C "$W" rev-parse origin/doomed 2>/dev/null)"
+git -C "$R" update-ref -d refs/heads/doomed
+ctl fetch "$W"
+assert_eq "a branch deleted on origin is pruned from the working copy" none "$(git -C "$W" rev-parse -q --verify origin/doomed || echo none)"
+assert_eq "and from gitrun's private copy" none "$(git --git-dir="$STORE/o/r.git" rev-parse -q --verify refs/heads/doomed || echo none)"
+WT="$S/wt"; G -C "$W" worktree add -q "$WT" -b wtb 2>/dev/null
+ctl fetch "$WT"; assert_eq "a worktree of the working copy can be fetched into" 0 "$RC"
+ctl fetch "$S/nope"; refused "a missing folder is refused"
+ctl fetch "$S"; refused "a folder that is no git working copy is refused"
 
 echo ""
-echo "=== the repo must be one the git container owns, with config only it can change ==="
-chmod g+w "$W/.git/config"; ctl fetch "$W"; refused "a group-writable .git/config is refused"; chmod g-w "$W/.git/config"
-chmod g+w "$W/.git"; ctl fetch "$W"; refused "a group-writable .git is refused"; chmod g-w "$W/.git"
-printf '[include]\n\tpath = /tmp/x\n' >> "$W/.git/config"; ctl fetch "$W"; refused "a config that includes another file is refused"
-sed -i '/^\[include\]/,$d' "$W/.git/config"
-L="$S/linked"; G init -q "$L"; mv "$L/.git/config" "$S/linked-config"; ln -s "$S/linked-config" "$L/.git/config"
-ctl fetch "$L"; refused "a .git/config that is a symlink is refused"
-WT="$S/wt"; G -C "$W" worktree add -q "$WT" -b wtb 2>/dev/null
-ctl fetch "$WT"; refused "a worktree (a .git file, not the main checkout) is refused"
-ctl fetch "$S/nope"; refused "a missing folder is refused"
-unset AIDC_GITCTL_ALLOW_LOCAL_ORIGIN
-ctl fetch "$W"; refused "a local-path origin is refused outside the tests"
+echo "=== bundles are data, read by gitrun on stdin and never left behind ==="
+assert_eq "no bundle is left in the agent's folder" "" "$(ls -A "$BUNDLES")"
+assert_eq "none in gitrun's store" "" "$(find "$STORE" -name 'incoming.*')"
+G -C "$W" commit -q --allow-empty -m "Bad" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+ctl push "$W" feature; refused "a refused push is refused"
+assert_eq "and leaves no bundle either side" "" "$(ls -A "$BUNDLES")$(find "$STORE" -name 'incoming.*')"
+G -C "$W" reset -q --hard HEAD~1
+touch -d '2 hours ago' "$BUNDLES/old.bundle" "$STORE/o/r.git/incoming.old"
+touch "$BUNDLES/fresh.bundle"
+ctl fetch "$W"
+assert_eq "bundles over an hour old (a killed verb's) are swept by the next verb, a fresh one kept" "fresh.bundle no" \
+    "$(ls -A "$BUNDLES") $([ -e "$STORE/o/r.git/incoming.old" ] && echo yes || echo no)"
+rm -f "$BUNDLES/fresh.bundle"
+AIDC_GITCTL_ROLE=run ctl_in "not a bundle" push o/r feature; refused "gitrun refuses stdin that is not a bundle"
+AIDC_GITCTL_ROLE=run ctl push o/r feature "$W/.git"; refused "gitrun opens no bundle path the caller names (stdin only)"
+git -C "$W" bundle create -q "$S/other.bundle" main 2>/dev/null
+: > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r feature < "$S/other.bundle" 2>&1); RC=$?; CALLS=""
+refused "a bundle without the branch is refused"
+assert_has "for that reason" "the bundle has no branch feature" "$OUT"
+G -C "$W" switch -q -c direct feature
+G -C "$W" commit -q --allow-empty -m "Direct" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+git -C "$W" bundle create -q "$S/direct.bundle" refs/heads/direct --not feature 2>/dev/null
+: > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r direct < "$S/direct.bundle" 2>&1); RC=$?
+assert_eq "called as gitrun directly (as through sudo), an attributed commit in the bundle is still refused" "1 none" "$RC $(remote_sha direct)"
+G -C "$W" switch -q feature
+chmod 0755 "$STORE"; ctl fetch "$W"; refused "a store others can enter is refused"
+chmod 0700 "$STORE"
+ctl storage
+assert_eq "storage says what the private copies and the bundles hold" yes \
+    "$(printf '%s\n' "$OUT" | grep -Eq '^copies [0-9]+$' && printf '%s\n' "$OUT" | grep -Eq '^bundles [0-9]+$' && echo yes || echo "no: $OUT")"
+ctl remove-copy o/r
+assert_eq "remove-copy deletes gitrun's private copy" "0 no" "$RC $([ -e "$STORE/o/r.git" ] && echo yes || echo no)"
+ctl fetch "$W"; assert_eq "and the next fetch makes it again" "0 yes" "$RC $([ -d "$STORE/o/r.git" ] && echo yes || echo no)"
+for a in ../x "o/r/../../x" -f "o/.."; do ctl remove-copy "$a"; refused "remove-copy '$a' is refused"; done
+
+echo ""
+echo "=== origin must be one GitHub repo ==="
 H="$S/gh-shaped"; G init -q "$H"
 for u in http://github.com/o/r.git git@github.com:o/r.git https://example.com/o/r.git 'ext::sh -c x' https://github.com/o; do
     git -C "$H" remote remove origin 2>/dev/null; git -C "$H" remote add origin "$u"
@@ -226,9 +267,6 @@ git -C "$H" remote set-url origin https://github.com/o/r.git
 git -C "$H" config url.https://example.com/.insteadOf https://github.com/
 ctl fetch "$H"; refused "an insteadOf that sends origin elsewhere is refused"
 git -C "$H" config --unset url.https://example.com/.insteadOf
-git -C "$H" remote set-url --add --push origin https://github.com/someone/else.git
-ctl fetch "$H"; refused "a push URL naming another repo is refused"
-git -C "$H" remote set-url --delete --push origin https://github.com/someone/else.git
 
 echo ""
 echo "=== pull requests: gh only ever runs with the command line gitctl builds ==="
@@ -342,8 +380,41 @@ assert_has "nothing is signed" "gpgSign = false" "$gc"
 case "$gc" in *"[credential"*|*helper*) fail "the agent's git config names no credential helper" ;; *) pass "the agent's git config names no credential helper" ;; esac
 
 echo ""
+echo "=== clone: a new working copy from gitrun's bundle ==="
+printf 'hello\n' > "$O/README"; G -C "$O" add README; G -C "$O" commit -q -m "Add a file"; G -C "$O" push -q origin main 2>/dev/null
+C="$S/disk/proj"; mkdir -p "$C"
+ctl clone o/r "$C"
+assert_eq "clone succeeds into an empty folder" 0 "$RC"
+assert_eq "an ordinary checkout of origin's default branch" "main hello" "$(git -C "$C" branch --show-current) $(cat "$C/README" 2>/dev/null)"
+assert_eq "origin is the GitHub URL (here the stand-in), and origin/HEAD is set" "$F/o/r.git refs/remotes/origin/main" \
+    "$(git -C "$C" remote get-url origin) $(git -C "$C" symbolic-ref refs/remotes/origin/HEAD)"
+assert_eq "shared with the session group (sessions and the agent both write it; 1 is git's spelling of group)" 1 "$(git -C "$C" config core.sharedRepository)"
+assert_eq "every folder in its .git is group-writable and setgid" "" \
+    "$(find "$C/.git" -type d ! -perm -2070 -print)"
+assert_eq "no bundle left behind" "" "$(ls -A "$BUNDLES")"
+G -C "$C" worktree add -q -b feat2 "$C/s1" origin/main 2>/dev/null
+assert_eq "a session's own worktree on a new branch from origin/main works" feat2 "$(git -C "$C/s1" branch --show-current 2>/dev/null)"
+ctl fetch "$C"; assert_eq "and the clone fetches like any working copy" 0 "$RC"
+ctl clone o/r "$C"; refused "a folder that is not empty is refused"
+E="$S/disk/e"; mkdir -p "$E"
+ln -s "$E" "$S/disk/link"
+ctl clone o/r "$S/disk/link"; refused "a symlink on the way is refused"
+ctl clone o/r "$S/disk/missing"; refused "a folder that does not exist is refused (aidc repo add makes it)"
+for p in disk/e "$S/disk/../disk/e" "$S/disk/e/." "$S/disk/a b" "$S/disk/e;x" ""; do
+    ctl clone o/r "$p"; refused "path '$p' is refused (absolute, plain names, no . or ..)"
+done
+for src in "$R" -u "--upload-pack=touch $S/PWNED3" "o/r/x" "ext::sh -c x" "o/.." "https://github.com/o/r" "o"; do
+    ctl clone "$src" "$E"; refused "source '$src' is refused (owner/name only; the URL is gitctl's)"
+done
+ctl clone o/nothere "$E"; refused "a repo origin does not have is refused"
+assert_eq "and the folder is left empty" "" "$(ls -A "$E")"
+ctl clone o/r "$E" extra; refused "clone takes exactly two arguments"
+AIDC_GITCTL_ROLE=run ctl clone o/r "$E"; refused "gitrun has no clone: it never writes a working copy"
+AIDC_GITCTL_ROLE=cred ctl clone o/r "$E"; refused "gitcred runs no clone"
+assert_eq "no refused clone ran a command" no "$([ -e "$S/PWNED3" ] && echo yes || echo no)"
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
-export AIDC_GITCTL_ALLOW_LOCAL_ORIGIN=1
 mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut/gitctl.sh"; }
 mut 's/gitctl_check_text "$raw" "commit ${sha:0:12}" || die/: || die/'
 G -C "$W" switch -q feature
@@ -353,31 +424,26 @@ assert_eq "with the push scan removed, the attributed commit reaches the remote 
     "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
 mut 's/\[ "$branch" = "$b" \] && die/[ "$branch" = "$b" ] \&\& :/'
 G -C "$W" switch -q main
+ctl fetch "$W"
 G -C "$W" reset -q --hard origin/main
 G -C "$W" commit -q --allow-empty -m "Straight to main"
 bash "$S/mut/gitctl.sh" push "$W" main >/dev/null 2>&1
 assert_eq "with the protected-branch guard removed, a push to main goes through" \
     "$(git -C "$W" rev-parse main)" "$(remote_sha main)"
 
-mut 's/GIT_DIR=\. GIT_CONFIG_NOSYSTEM/GIT_DIR="$GITCTL_REPO\/.git" GIT_CONFIG_NOSYSTEM/'
-G -C "$W" switch -q feature
-G -C "$W" commit -q --allow-empty -m "Swap again"
-cp -a "$W/.git" "$S/evil2.git"
-git --git-dir="$S/evil2.git" config protocol.ext.allow always
-git --git-dir="$S/evil2.git" config "url.ext::sh -c touch% $S/PWNED2% >&2.insteadOf" "$R"
-AIDC_GITCTL_TEST_AFTER_CHECK="mv '$W/.git' '$S/real.git' && mv '$S/evil2.git' '$W/.git'" \
-    bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
-mv "$W/.git" "$S/evil2.git" && mv "$S/real.git" "$W/.git"
-assert_eq "with git finding .git by path again, the swapped config runs its command (so the swap test would fail)" \
-    yes "$([ -e "$S/PWNED2" ] && echo yes || echo no)"
-mut 's/ GIT_NO_REPLACE_OBJECTS=1//'
-G -C "$W" switch -q -c rp2 feature
-G -C "$W" commit -q --allow-empty -m "Fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
-clean=$(printf 'Fix\n' | G -C "$W" commit-tree "rp2^{tree}" -p rp2~1)
-git -C "$W" replace rp2 "$clean"
-bash "$S/mut/gitctl.sh" push "$W" rp2 >/dev/null 2>&1
-assert_eq "with replace refs followed, the attributed commit reaches the remote" \
-    "$(git --no-replace-objects -C "$W" rev-parse rp2)" "$(remote_sha rp2)"
+mut 's/"$REAL_GIT" -c core.hooksPath=\/dev\/null -c core.fsmonitor=false -c gc.auto=0/"$REAL_GIT" -c gc.auto=0/'
+git -C "$W" config core.hooksPath "$S/evil-hooks"
+bash "$S/mut/gitctl.sh" fetch "$W" >/dev/null 2>&1
+git -C "$W" config --unset core.hooksPath
+assert_eq "with the agent's hook pin removed, a hook planted in the working copy runs (so the hostile-config test would fail)" yes \
+    "$([ -e "$S/PWNED-hook" ] && echo yes || echo no)"
+rm -f "$S/PWNED-hook"
+mut "s/trap 'rm -f \"\$RUN_BUNDLE\"; /trap '/"
+G -C "$W" commit -q --allow-empty -m "Left behind?"
+bash "$S/mut/gitctl.sh" push "$W" feature >/dev/null 2>&1
+assert_eq "with gitrun's bundle cleanup removed, the bundle stays (so the cleanup test would fail)" yes \
+    "$([ -n "$(find "$STORE" -name 'incoming.*')" ] && echo yes || echo no)"
+find "$STORE" -name 'incoming.*' -delete
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

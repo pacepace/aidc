@@ -192,8 +192,10 @@ out=$(K_NO_DISK=1 run create demo --backend kubernetes)
 assert_has "no user disk: says to run aidc user add" "run \`aidc user add alice\` first" "$out"
 out=$(K_EXISTS=1 run create demo --backend kubernetes)
 assert_has "an existing session is refused" "session 'demo' already exists" "$out"
-out=$(run create demo --backend kubernetes --repo /etc)
-assert_has "a repo outside the home directory is refused" "the repo must be under your home directory" "$out"
+out=$(: > "$K_APPLIED"; cd / && "$AIDC_ROOT/scripts/aidc" create demo --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
+assert_has "a create run outside the home directory is refused (the session starts at the same place on the disk)" \
+    "run aidc create from under your home directory" "$out"
+assert_eq "and applies nothing" "" "$(cat "$K_APPLIED")"
 out=$(run create demo --backend kubernetes --port 3000:3000)
 assert_has "an option the backend does not have yet is refused by name" "not supported on the kubernetes backend yet: --port" "$out"
 

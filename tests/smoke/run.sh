@@ -117,6 +117,7 @@ SG_WC="$SCRATCH/wc"
 SG_GH_WC_PATH="$SCRATCH/gh"
 GIT_OWNED=""      # 1 when this machine had no git container: the smoke removes what it made
 GIT_REPOS_NEW=""  # 1 when ~/.config/aidc/git-repos did not exist before the run
+GIT_ADDED_NEW=""  # 1 when ~/.config/aidc/git-added (the list of added repos) did not either
 SG_SESSION_MADE=""
 # shellcheck disable=SC2329  # called by git.sh
 sg_in() { docker exec -u vscode "aidc-${SG_SESSION}-dev" bash -c "$1" </dev/null; }
@@ -163,6 +164,12 @@ git_cleanup() {
         # The list of added working copies, when the run made it and left it empty.
         if [ "$GIT_REPOS_NEW" = 1 ] && [ ! -s "$HOME/.config/aidc/git-repos" ]; then
             rm -f "$HOME/.config/aidc/git-repos"
+        fi
+        # The list of added repos (git setup makes its folder), when the run made it and left
+        # it empty.
+        if [ "$GIT_ADDED_NEW" = 1 ] && [ ! -s "$HOME/.config/aidc/git-added/repos" ]; then
+            rm -f "$HOME/.config/aidc/git-added/repos"
+            rmdir "$HOME/.config/aidc/git-added" 2>/dev/null || true
         fi
         GIT_OWNED=""
     fi
@@ -941,6 +948,7 @@ else
         GIT_OWNED=1
     fi
     [ -e "$HOME/.config/aidc/git-repos" ] || GIT_REPOS_NEW=1
+    [ -e "$HOME/.config/aidc/git-added" ] || GIT_ADDED_NEW=1
     AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r' | tr '+' '_')
     sg_part_setup
     git clone -q "https://github.com/${PUBLIC_REPO}" "$SG_WC"

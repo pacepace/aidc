@@ -189,3 +189,10 @@ Sessions run only on ranch-dev01, so each user's code volume is a dataset on tha
 ZFS, mounted into the git container and the user's sessions as a local volume. Not NFS: measured
 2026-11-24, NFS cannot carry the user-ID remapping Sysbox sessions need, so files written by a
 session showed as `nobody` in every other pod (design-12, "Storage").
+
+## 2026-11-24: Claude history syncs under the Linux folder names, with Mac aliases
+
+A repo's Claude history folder is synced under its Linux name (`-home-<name>-…`), the name Linux,
+WSL and the cluster already use. On each Mac a small script creates an alias (symlink) with the
+Mac name (`-Users-<name>-…`) pointing at it inside `~/.claude/projects/`; aliases are not synced.
+Measured: Claude follows such an alias, appends to the same conversation and finds its memory.

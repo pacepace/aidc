@@ -237,7 +237,7 @@ Claude names a repo's history folder after the repo's real path, with every char
 layout below the home directory is the same everywhere, so only the home prefix differs
 (`/Users/<name>` on Mac, `/home/<name>` on Linux, WSL and the cluster).
 
-**Proposal:** sync history under the Linux name (`-home-<name>-…`). On a Mac, a small reconciler
+Ruled 2026-11-24: sync history under the Linux name (`-home-<name>-…`). On a Mac, a small reconciler
 creates an alias symlink `-Users-<name>-…` → `-home-<name>-…` inside `~/.claude/projects/`
 (measured: Claude follows a symlink there, appends to the same transcript and finds memory);
 Windows uses junctions. Aliases are excluded from sync.

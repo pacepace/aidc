@@ -15,7 +15,7 @@ from aidc_mcp import auth, publish, resources, server, tools
 TOKEN = "wire-test-token"
 # A private-interface bind (ZeroTier/Tailscale): the Host a real client sends. The
 # SDK's localhost-only allow-list would answer it with 421.
-HOST = "10.147.17.5:7878"
+HOST = "10.0.0.5:7878"
 ACCEPT = "application/json, text/event-stream"
 LEGACY_VERSION = "2025-11-25"
 

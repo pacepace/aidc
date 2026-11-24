@@ -29,10 +29,10 @@ token inside a `--dangerously-skip-permissions` sandbox would undo the sandbox.
 ## Facts measured on 2026-09-17
 
 - **A dev container reaches an MCP port on the host's overlay IP through squid.** From the
-  `measure` session, `curl http://10.23.68.16:17999/mcp` (proxy env set) returned 401 from a
+  `measure` session, `curl http://10.0.0.16:17999/mcp` (proxy env set) returned 401 from a
   scratch MCP, whose audit log recorded the request from the squid container's address. Without
   the proxy the connection failed (no route). `squid.conf` allows every destination for local
-  sources (`http_access allow localnet`), so the live MCP at `10.23.68.16:7878` is reachable
+  sources (`http_access allow localnet`), so the live MCP at `10.0.0.16:7878` is reachable
   the same way, and only its token stops a request. That contradicts MCP-12.
 - **A port published with `aidc proxy` binds `0.0.0.0:<port>` on the host**, so a process on the
   host (the MCP) can reach a service inside a dev container.
@@ -59,7 +59,7 @@ host
 ├─ test aidc-mcp (this branch, :17878)    AIDC_MCP_ALLOWED_SESSIONS=jointtest
 │    own token, state dir, audit log, config.yaml (callback_url → orchestrator)
 ├─ session `metallm-test` (dev container) orchestrator agent + MetaLLM running
-│    MetaLLM → http://10.23.68.16:17878/mcp via squid, with the test token
+│    MetaLLM → http://10.0.0.16:17878/mcp via squid, with the test token
 │    MetaLLM API published with `aidc proxy` → host 0.0.0.0:<port>
 └─ session `jointtest` (dev container)    the Claude session MetaLLM drives
 ```

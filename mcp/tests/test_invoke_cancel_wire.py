@@ -27,7 +27,7 @@ import uvicorn
 from aidc_mcp import auth, headless, server, tools
 
 TOKEN = "cancel-wire-token"
-HOST = "10.147.17.5:7878"
+HOST = "10.0.0.5:7878"
 VERSION = "2025-11-25"
 
 

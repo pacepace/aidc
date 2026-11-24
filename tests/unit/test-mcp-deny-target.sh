@@ -62,8 +62,8 @@ write_cfg() {   # dir addr port
 
 echo "== the running aidc-mcp container's binding wins"
 write_cfg "$SCRATCH/home1/.config/aidc" 10.9.9.9 1111
-assert_eq "published binding" "10.23.68.16:7878" \
-    "$(target HOME="$SCRATCH/home1" DOCKER_BINDING='10.23.68.16:7878\n')"
+assert_eq "published binding" "10.0.0.16:7878" \
+    "$(target HOME="$SCRATCH/home1" DOCKER_BINDING='10.0.0.16:7878\n')"
 assert_eq "empty HostIp means every interface" "0.0.0.0:7878" \
     "$(target HOME="$SCRATCH/home1" DOCKER_BINDING=':7878\n')"
 
@@ -71,8 +71,8 @@ echo "== no running server: the host's config"
 assert_eq "host ~/.config/aidc" "10.9.9.9:1111" "$(target HOME="$SCRATCH/home1")"
 
 echo "== no running server, inside the aidc-mcp container: the /aidc-config mount"
-write_cfg "$SCRATCH/aidc-config" 10.23.68.16 7878
-assert_eq "config mount used when HOME has none" "10.23.68.16:7878" \
+write_cfg "$SCRATCH/aidc-config" 10.0.0.16 7878
+assert_eq "config mount used when HOME has none" "10.0.0.16:7878" \
     "$(target HOME="$SCRATCH/emptyhome" AIDC_MCP_CONFIG_MOUNT="$SCRATCH/aidc-config")"
 
 echo "== nothing configured: aidc mcp's defaults"
@@ -87,10 +87,10 @@ render() {
     HOST_CLAUDE_PROJECT_DIR=/home/someone/.claude/projects/x ENCODED_REPO=x \
     env "$@" bash "$AIDC_ROOT/proxy/compose-render.sh" < "$AIDC_ROOT/proxy/compose.yaml.template"
 }
-render MCP_DENY=10.23.68.16:7878 > "$SCRATCH/rendered.yaml" 2>/dev/null
+render MCP_DENY=10.0.0.16:7878 > "$SCRATCH/rendered.yaml" 2>/dev/null
 squid_env=$(awk '/^  squid:/ { s=1; next } s && /^  [a-z]/ { s=0 } s' "$SCRATCH/rendered.yaml")
 assert_eq "AIDC_MCP_DENY set on the squid service" "1" \
-    "$(printf '%s\n' "$squid_env" | grep -c 'AIDC_MCP_DENY: "10.23.68.16:7878"')"
+    "$(printf '%s\n' "$squid_env" | grep -c 'AIDC_MCP_DENY: "10.0.0.16:7878"')"
 assert_eq "no literal placeholder left" "0" "$(grep -c 'MCP_DENY}' "$SCRATCH/rendered.yaml")"
 assert_eq "cmd-create derives MCP_DENY from aidc_mcp_deny_target" "1" \
     "$(grep -c '^MCP_DENY=\$(aidc_mcp_deny_target)$' "$AIDC_ROOT/scripts/cmd-create.sh")"
@@ -103,11 +103,11 @@ validate() {   # MCP_DENY value -> runs cmd-create.sh's validation block
         eval "$(awk "/^MCP_DENY=\\\$\\(aidc_mcp_deny_target\\)\$/{f=1; next} f && /^export MCP_DENY\$/{exit} f" "'"$AIDC_ROOT"'/scripts/cmd-create.sh")"
         echo ok'
 }
-assert_eq "valid address:port passes" "ok" "$(validate 10.23.68.16:7878)"
+assert_eq "valid address:port passes" "ok" "$(validate 10.0.0.16:7878)"
 assert_eq "hostname rejected" "die: mcp.bind_address 'mcp.example.org' is not an IP address (needed to keep sessions away from aidc-mcp)" \
     "$(validate mcp.example.org:7878)"
 assert_eq "non-numeric port rejected" "die: mcp.port '78x8' is not a port number (needed to keep sessions away from aidc-mcp)" \
-    "$(validate 10.23.68.16:78x8)"
+    "$(validate 10.0.0.16:78x8)"
 
 echo
 echo "mcp deny target: ${PASS} passed, ${FAIL} failed"

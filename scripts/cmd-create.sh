@@ -108,7 +108,7 @@ aidc create <name> [--profile P] [--repo PATH] [--workspace PATH] [--resume|--no
                 (no merging -- resolver order must be deterministic).
                 Applies to BOTH the dev container's direct lookups AND
                 squid's resolution of proxied traffic.
-                Example: --dns 10.147.17.1 --dns 9.9.9.9
+                Example: --dns 10.0.0.1 --dns 9.9.9.9
   --network     attach the dev container to an existing docker bridge network
                 so the session can reach another stack's services by container
                 name, on any port. Repeatable. Merges with the `networks:`

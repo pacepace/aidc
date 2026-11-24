@@ -330,11 +330,11 @@ By default every session resolves through Quad9 (`9.9.9.9`, `149.112.112.112`) â
 
 ```bash
 # CLI (order matters; first listed is tried first):
-aidc create myproj --dns 10.147.17.1 --dns 9.9.9.9
+aidc create myproj --dns 10.0.0.1 --dns 9.9.9.9
 
 # Or in ~/.config/aidc/config.yaml (a repo's .aidc/config.yaml needs --trust-repo-config):
 dns_servers:
-  - 10.147.17.1     # ZeroTier-managed DNS
+  - 10.0.0.1     # a private-network DNS
   - 9.9.9.9         # fall back to Quad9
 ```
 
@@ -844,7 +844,7 @@ container_only_paths:                 # paths overlaid by session-scoped Docker 
 
 dns_servers:                          # OVERRIDES Quad9 when set (no merge; order matters).
                                       # Applies to container lookups AND squid's resolution.
-  - 10.147.17.1                       #   e.g. ZeroTier-managed DNS
+  - 10.0.0.1                       #   e.g. a private-network DNS
   - 9.9.9.9                           #   explicit Quad9 fallback
 
 egress: proxied                       # proxied (default) | direct. proxied makes the

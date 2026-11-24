@@ -70,12 +70,12 @@ assert "squid started from the baked config" "[ '$CONF_USED' = '$SCRATCH/plain/s
 assert "no derived copy written" "[ ! -e '$SCRATCH/plain/derived.conf' ]"
 
 echo "== AIDC_MCP_DENY with a specific address"
-run_entry mcp AIDC_MCP_DENY=10.23.68.16:7878
+run_entry mcp AIDC_MCP_DENY=10.0.0.16:7878
 D="$SCRATCH/mcp/derived.conf"
 assert "exits 0" "[ $RC -eq 0 ]"
 assert "squid started from the derived config" "[ '$CONF_USED' = '$D' ]"
 assert "port acl present" "grep -qx 'acl aidc_mcp_port port 7878' '$D'"
-assert "dst acl present" "grep -qx 'acl aidc_mcp_dst dst 10.23.68.16' '$D'"
+assert "dst acl present" "grep -qx 'acl aidc_mcp_dst dst 10.0.0.16' '$D'"
 assert "deny rule present" "grep -qx 'http_access deny aidc_mcp_dst aidc_mcp_port' '$D'"
 assert "deny comes before allow localnet" \
     "[ \$(line_of '$D' '^http_access deny aidc_mcp') -lt \$(line_of '$D' '^http_access allow localnet') ]"
@@ -93,7 +93,7 @@ assert "port-only deny rule" "grep -qx 'http_access deny aidc_mcp_port' '$D'"
 assert "no dst acl" "! grep -q '^acl aidc_mcp_dst' '$D'"
 
 echo "== DNS override and MCP deny together"
-run_entry both AIDC_DNS_SERVERS="10.147.17.1 9.9.9.9" AIDC_MCP_DENY=10.23.68.16:7878
+run_entry both AIDC_DNS_SERVERS="10.0.0.1 9.9.9.9" AIDC_MCP_DENY=10.0.0.16:7878
 D="$SCRATCH/both/derived.conf"
 assert "exits 0" "[ $RC -eq 0 ]"
 assert "dns_nameservers removed" "! grep -q '^dns_nameservers ' '$D'"
@@ -101,25 +101,25 @@ assert "deny rule present before allow" \
     "[ \$(line_of '$D' '^http_access deny aidc_mcp') -lt \$(line_of '$D' '^http_access allow localnet') ]"
 
 echo "== DNS override alone still works"
-run_entry dns AIDC_DNS_SERVERS="10.147.17.1"
+run_entry dns AIDC_DNS_SERVERS="10.0.0.1"
 assert "exits 0" "[ $RC -eq 0 ]"
 assert "dns_nameservers removed" "! grep -q '^dns_nameservers ' '$SCRATCH/dns/derived.conf'"
 
 echo "== malformed AIDC_MCP_DENY fails loudly instead of starting an open proxy"
-run_entry badport AIDC_MCP_DENY=10.23.68.16:78x8
+run_entry badport AIDC_MCP_DENY=10.0.0.16:78x8
 assert "bad port exits non-zero" "[ $RC -ne 0 ]"
 assert "squid not started" "[ -z '$CONF_USED' ]"
-run_entry badaddr "AIDC_MCP_DENY=10.23.68.16;rm:7878"
+run_entry badaddr "AIDC_MCP_DENY=10.0.0.16;rm:7878"
 assert "bad address exits non-zero" "[ $RC -ne 0 ]"
 
 echo "== a config with no 'allow localnet' line cannot silently skip the deny"
-run_entry noallow AIDC_MCP_DENY=10.23.68.16:7878
+run_entry noallow AIDC_MCP_DENY=10.0.0.16:7878
 cp "$AIDC_ROOT/proxy/squid/squid.conf" "$SCRATCH/noallow/squid.conf"
 sed -i '/^http_access allow localnet/d' "$SCRATCH/noallow/squid.conf"
 rm -f "$SCRATCH/noallow/used"
 env AIDC_SQUID_CONF="$SCRATCH/noallow/squid.conf" AIDC_SQUID_DERIVED="$SCRATCH/noallow/derived.conf" \
     AIDC_SQUID_ENTRYPOINT="$SCRATCH/stub.sh" STUB_OUT="$SCRATCH/noallow/used" \
-    AIDC_MCP_DENY=10.23.68.16:7878 PATH="$IMAGE_BIN" "$IMAGE_BIN/sh" "$ENTRY" >/dev/null 2>&1
+    AIDC_MCP_DENY=10.0.0.16:7878 PATH="$IMAGE_BIN" "$IMAGE_BIN/sh" "$ENTRY" >/dev/null 2>&1
 assert "exits non-zero" "[ $? -ne 0 ]"
 assert "squid not started" "[ ! -e '$SCRATCH/noallow/used' ]"
 

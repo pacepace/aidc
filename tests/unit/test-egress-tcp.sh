@@ -118,9 +118,9 @@ eq "the library reports a failure itself, with no helper from another library" \
 echo "=== egress_tcp: refusals ==="
 
 refused() { aidc_egress_refusal "$@" >/dev/null; }
-ok    "aidc-mcp's own address and port"           refused 10.147.17.5 7878 10.147.17.5:7878
-notok "the same address on another port is fine"  refused 10.147.17.5 5432 10.147.17.5:7878
-notok "the same port on another address is fine"  refused 10.42.0.101 7878 10.147.17.5:7878
+ok    "aidc-mcp's own address and port"           refused 10.0.0.5 7878 10.0.0.5:7878
+notok "the same address on another port is fine"  refused 10.0.0.5 5432 10.0.0.5:7878
+notok "the same port on another address is fine"  refused 10.42.0.101 7878 10.0.0.5:7878
 ok    "aidc-mcp on 0.0.0.0: its port on any address" refused 10.42.0.101 7878 0.0.0.0:7878
 ok    "loopback"                                  refused 127.0.0.1 5432 ""
 ok    "0.0.0.0"                                   refused 0.0.0.0 5432 ""

@@ -613,21 +613,20 @@ class TestCoordinatorCallbackUrl:
         monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "nope.yaml")
         assert tools._coordinator_callback_url() == ""
 
-    def test_the_renamed_section_is_not_read_and_the_error_names_the_new_key(
+    async def test_only_the_coordinator_section_is_read_and_the_error_names_it(
             self, monkeypatch, tmp_path):
-        """No fallback: a config still using the section's former name gets an unset
-        callback_url, and the tool error says to set `coordinator.callback_url`."""
-        former = "meta" + "llm"  # built in two parts so the repo never spells the old name
+        """No fallback to any other section: a config whose settings sit under another
+        name (as an older config's do) leaves callback_url unset, and the tool's error says
+        which key to set."""
         for key in ("callback_url", "send_speaker", "turn_settle_seconds"):
-            _write_cfg(monkeypatch, tmp_path, f"{former}:\n  {key}: 5\n")
+            _write_cfg(monkeypatch, tmp_path, f"orchestrator:\n  {key}: 5\n")
             assert tools._coordinator_setting(key) is None
-        _write_cfg(monkeypatch, tmp_path, f"{former}:\n  callback_url: https://old.example.com\n")
-        assert tools._coordinator_callback_url() == ""
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://old.example.com\n")
+        res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
+        assert res["ok"] is False
+        assert "coordinator.callback_url not set" in res["error"]
         _write_cfg(monkeypatch, tmp_path, "coordinator:\n  callback_url: https://new.example.com\n")
         assert tools._coordinator_callback_url() == "https://new.example.com"
-        import inspect
-        assert "coordinator.callback_url not set" in inspect.getsource(tools)
-
 
 class TestTurnSettleSeconds:
     def test_default_when_absent(self, monkeypatch, tmp_path):

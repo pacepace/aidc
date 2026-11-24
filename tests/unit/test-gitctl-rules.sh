@@ -670,7 +670,7 @@ mv "$S/disk/d-hidden" "$S/d-hidden-on-host"
 AIDC_GITCTL_DOCKER=1 ctl tidy "$T"
 assert_has "a worktree outside the working copy that the container cannot see is named" "cannot-delete $S/disk/d-hidden not a folder tidy removes" "$OUT"
 assert_eq "its branch and its record are kept (nothing is pruned)" "yes yes" \
-    "$(git -C "$T" rev-parse -q --verify d-hidden >/dev/null && echo yes || echo no) $(ls "$T/.git/worktrees" | grep -q d-hidden && echo yes || echo no)"
+    "$(git -C "$T" rev-parse -q --verify d-hidden >/dev/null && echo yes || echo no) $([ -d "$T/.git/worktrees/d-hidden" ] && echo yes || echo no)"
 mv "$S/d-hidden-on-host" "$S/disk/d-hidden"
 mkdir -p "$S/disk/dclone"; AIDC_GITCTL_DOCKER=1 ctl clone o/r "$S/disk/dclone"
 refused "clone is refused on Docker (the git container works on the user's own working copies)"

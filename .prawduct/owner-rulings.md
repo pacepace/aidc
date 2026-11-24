@@ -229,3 +229,12 @@ entry is needed where `ranch.*` names already resolve.
 Exposing a session port on the home network does not require a login in front of it. The user
 adds protection to a page when they need it (an option at create), so a test page can come up
 open.
+
+## 2026-11-24: Cluster images are built on ranch-dev01 and kept in a private in-cluster registry
+
+aidc builds its images for the Kubernetes backend inside the cluster (a Sysbox pod on
+ranch-dev01, which runs Docker) and keeps them in a small private registry inside the cluster.
+Nothing is pushed to a public registry. REL-08 is amended accordingly: images are built locally
+and never pushed to a public registry (the Docker backend still builds on the user's machine).
+Rejected: building on the node over SSH and importing into k3s (couples aidc to node logins), and
+GitHub's registry (a public registry, against REL-08).

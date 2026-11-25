@@ -3,7 +3,7 @@
 #
 # Without these packages `npx playwright install chromium` downloads the browser but
 # launch fails with "Host system is missing dependencies to run browsers", and a
-# session can only fix that with sudo (seen live in a metallm session, 2026-10-15).
+# session can only fix that with sudo (seen live in an orchestrator session, 2026-10-15).
 # The list is Playwright 1.63's for ubuntu26.04, `tools` plus `chromium`: what
 # `npx playwright install-deps chromium` installs on the image's Ubuntu.
 #

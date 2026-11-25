@@ -5,18 +5,18 @@ The pieces that are REAL here:
   - session_send's tool body (prompt injection flow, watcher auto-registration).
   - _start_watcher + _baseline_watermark (the forward-only anchor).
   - _drain_transcript_once / _drain_once_body (the watcher's actual delivery pass).
-  - _post_turn (the outbound-to-metallm HTTP boundary, exact payload + URL).
+  - _post_turn (the outbound-to-orchestrator HTTP boundary, exact payload + URL).
 
 The pieces that are STUBBED (the non-deterministic edges):
   - the tmux/Docker boundary (_is_claude_running / _check_free / _session_instance /
     _load_and_paste / _tmux_exec / _capture_screen) — no container.
   - the background poll TIMER (_run_transcript_watcher) — replaced with an
     alive-forever no-op so the drain is driven explicitly, deterministically.
-  - the outbound httpx client — a FakeMetallm sink records every callback POST.
+  - the outbound httpx client — a FakeOrchestrator sink records every callback POST.
   - "Claude" — the agent is a fixture that appends a KNOWN reply line to the
     transcript file on disk. Deterministic, no AI.
 
-This is the exact bug that burned prod for days: a metallm session hands a prompt
+This is the exact bug that burned prod for days: an orchestrator session hands a prompt
 to aidc and either the reply never comes back, or old backlog replays. Both are
 pinned below.
 """
@@ -66,9 +66,9 @@ async def _nosleep(_seconds):
     return None
 
 
-class FakeMetallm:
-    """Stands in for metallm's callback endpoint: records every outbound POST so a
-    test can assert the EXACT payload and URL that would reach metallm."""
+class FakeOrchestrator:
+    """Stands in for the orchestrator's callback endpoint: records every outbound POST so a
+    test can assert the EXACT payload and URL that would reach the orchestrator."""
 
     def __init__(self, *, succeed=True):
         self.posts = []
@@ -99,7 +99,7 @@ class FakeMetallm:
 def harness(tmp_path, monkeypatch):
     """A round-trip rig: session_send injects with no container; the watcher's
     baseline/state are redirected to tmp dirs; the background poll timer is a
-    no-op; the outbound HTTP boundary is a FakeMetallm sink. The drain is driven
+    no-op; the outbound HTTP boundary is a FakeOrchestrator sink. The drain is driven
     explicitly by the test for determinism."""
     base = tmp_path / "transcripts"
     state = tmp_path / "watcher-state"
@@ -110,7 +110,7 @@ def harness(tmp_path, monkeypatch):
     rig = Rig()
     rig.session_state = tools.SESSION_EXISTS
     rig.instance = "id-1"
-    metallm = FakeMetallm()
+    orchestrator = FakeOrchestrator()
     paste_calls: list[str] = []
 
     async def is_running(container):
@@ -157,13 +157,13 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://metallm.local")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://orchestrator.local")
     # The session_resend TOOL passes no base dirs — it resolves the module globals
     # at call time — so point those at the tmp dirs as well. (conftest already
     # redirects _WATCHER_STATE_DIR to this same tmp_path/"watcher-state".)
     monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", base)
     monkeypatch.setattr(tools, "_load_token", lambda: "tok")
-    monkeypatch.setattr(tools.httpx, "AsyncClient", metallm.client_factory())
+    monkeypatch.setattr(tools.httpx, "AsyncClient", orchestrator.client_factory())
     monkeypatch.setattr(tools.asyncio, "sleep", _nosleep)
 
     app = MCPServer("t")
@@ -173,23 +173,23 @@ def harness(tmp_path, monkeypatch):
 
     async def drain():
         """One REAL delivery pass (what the background watcher would run), pointed
-        at the tmp dirs, using the REAL _post_turn -> FakeMetallm HTTP boundary."""
+        at the tmp dirs, using the REAL _post_turn -> FakeOrchestrator HTTP boundary."""
         await tools._drain_transcript_once(
-            "proj", "conv-1", "http://metallm.local",
+            "proj", "conv-1", "http://orchestrator.local",
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
     async def resend(turn_uuid=None, force=False):
-        """The REAL resend path, pointed at the tmp dirs + FakeMetallm boundary."""
+        """The REAL resend path, pointed at the tmp dirs + FakeOrchestrator boundary."""
         return await tools._resend_reply(
-            "proj", "conv-1", "http://metallm.local", turn_uuid=turn_uuid, force=force,
+            "proj", "conv-1", "http://orchestrator.local", turn_uuid=turn_uuid, force=force,
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
     rig.app = app
     rig.base = base
     rig.state = state
-    rig.metallm = metallm
+    rig.orchestrator = orchestrator
     rig.paste_calls = paste_calls
     rig.send = send
     rig.drain = drain
@@ -204,7 +204,7 @@ def harness(tmp_path, monkeypatch):
 async def test_fresh_session_reply_delivered_exactly_once(harness):
     """FULL round-trip on a FRESH aidc session (no transcript yet at connect):
     session_send injects the prompt and opens the webhook; the agent appends a
-    KNOWN reply; the real watcher drain delivers it back to metallm EXACTLY ONCE.
+    KNOWN reply; the real watcher drain delivers it back to the orchestrator EXACTLY ONCE.
 
     This is the 'reply never comes back' bug: on a fresh session the baseline
     anchors with an empty session_id, and the first drain used to treat the very
@@ -233,10 +233,10 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     await h.drain()
 
     # The reply came BACK — exactly one callback POST, with the exact payload/URL
-    # metallm would receive.
-    assert len(h.metallm.posts) == 1
-    post = h.metallm.posts[0]
-    assert post["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
+    # The orchestrator would receive.
+    assert len(h.orchestrator.posts) == 1
+    post = h.orchestrator.posts[0]
+    assert post["url"] == "http://orchestrator.local/api/v1/internal/callback/conv-1"
     # prompt_origin: the prompt matched the one session_send injected above, and the
     # reply names it (prompts) with the time it was pasted.
     body = dict(post["json"])
@@ -252,7 +252,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     # Exactly-once: re-draining (the watcher polls repeatedly) does NOT re-deliver.
     await h.drain()
     await h.drain()
-    assert len(h.metallm.posts) == 1
+    assert len(h.orchestrator.posts) == 1
 
 
 async def test_forward_only_backlog_not_replayed_only_new_reply(harness):
@@ -260,13 +260,13 @@ async def test_forward_only_backlog_not_replayed_only_new_reply(harness):
     NEVER delivered on (re)connect; only a NEW reply that completes AFTER the
     watermark is. This is the 'old backlog replays' half of the prod disaster."""
     h = harness
-    # The session already ran before metallm connected: two OLD turns on disk.
+    # The session already ran before the orchestrator connected: two OLD turns on disk.
     _agent_writes(h.base, "proj", "sid-A", [
         _user("u1", "old q1"), _assistant("old1", "OLD ANSWER 1"),
         _user("u2", "old q2"), _assistant("old2", "OLD ANSWER 2"),
     ])
 
-    # metallm connects and sends. The baseline must anchor PAST the backlog.
+    # The orchestrator connects and sends. The baseline must anchor PAST the backlog.
     res = await h.send(name="proj", prompt="new question", conversation_id="conv-1")
     assert res["ok"] is True
     mark = ts.load_watermark(h.state, "proj", "conv-1")
@@ -275,7 +275,7 @@ async def test_forward_only_backlog_not_replayed_only_new_reply(harness):
 
     # A drain right now must deliver NOTHING — the backlog is not caught up.
     await h.drain()
-    assert h.metallm.posts == []
+    assert h.orchestrator.posts == []
 
     # The agent answers the new prompt (appended after the backlog).
     _agent_writes(h.base, "proj", "sid-A", [
@@ -286,7 +286,7 @@ async def test_forward_only_backlog_not_replayed_only_new_reply(harness):
     await h.drain()
 
     # Only the NEW reply is delivered; the OLD backlog is never posted.
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["THE NEW ANSWER"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["THE NEW ANSWER"]
 
 
 async def test_multi_turn_back_and_forth_each_reply_once(harness):
@@ -308,7 +308,7 @@ async def test_multi_turn_back_and_forth_each_reply_once(harness):
     ])
     await h.drain()
 
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["A1", "A2"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["A1", "A2"]
 
 
 async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_conversation(harness):
@@ -343,8 +343,8 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     transcript += [_user("u2", joined), _assistant("a2", "BATCH ANSWER")]
     _agent_writes(h.base, "proj", "sid-A", transcript)
     await h.drain()
-    post = h.metallm.posts[-1]
-    assert post["url"] == "http://metallm.local/api/v1/internal/callback/conv-1"
+    post = h.orchestrator.posts[-1]
+    assert post["url"] == "http://orchestrator.local/api/v1/internal/callback/conv-1"
     body = post["json"]
     assert body["content"] == "BATCH ANSWER"
     assert (body["prompt_origin"], body["sent_by"]) == ("person", "pace")
@@ -359,21 +359,21 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     transcript += [_user("u3", _sent("q5")), _assistant("a3", "A5")]
     _agent_writes(h.base, "proj", "sid-A", transcript)
     await h.drain()
-    last = h.metallm.posts[-1]["json"]
+    last = h.orchestrator.posts[-1]["json"]
     assert last["content"] == "A5" and last["prompt_origin"] == "orchestrator"
     assert last["prompts"] == [{"prompt_id": res["data"]["prompt_id"], "sent_by": "",
                                 "conversation_id": "conv-1"}]
     assert "sent_by" not in last
-    assert len(h.metallm.posts) == 3
+    assert len(h.orchestrator.posts) == 3
 
 
 async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
-    """If metallm is unreachable, the reply is NOT silently lost: it is retried and
+    """If the orchestrator is unreachable, the reply is NOT silently lost: it is retried and
     then dead-lettered (recorded on disk), and the watermark still advances so the
     line does not wedge. (Retry sleeps are a no-op here, so the bounded backoff
     runs instantly to budget exhaustion.)"""
     h = harness
-    h.metallm.succeed = False                          # metallm returns non-2xx forever
+    h.orchestrator.succeed = False                          # the orchestrator returns non-2xx forever
     (h.base / "proj").mkdir(parents=True)
 
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
@@ -390,7 +390,7 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     """An aidc-mcp restart must not cost a reply. The webhook is saved when it opens and
     reopened at startup from its saved watermark, not re-anchored to the end of the
     transcript, so a reply written while the MCP was down is delivered exactly once.
-    (Joint test with MetaLLM, 2026-09-17: a queued prompt pasted after a restart was
+    (Joint test with the orchestrator, 2026-09-17: a queued prompt pasted after a restart was
     answered, and the answer never came back.)"""
     h = harness
     (h.base / "proj").mkdir(parents=True)
@@ -411,8 +411,8 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     await h.drain()
     await h.drain()
 
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["SEVEN"]
-    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["SEVEN"]
+    assert h.orchestrator.posts[0]["url"].endswith("/callback/conv-1")
 
 
 async def test_unwatch_forgets_the_saved_webhook(harness):
@@ -427,8 +427,8 @@ async def test_unwatch_forgets_the_saved_webhook(harness):
 
 async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness, monkeypatch):
     h = harness
-    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local")
-    ts.save_watch(h.state, "other", "conv-2", "http://metallm.local")
+    ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local")
+    ts.save_watch(h.state, "other", "conv-2", "http://orchestrator.local")
     monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
     h.session_state = tools.SESSION_GONE
 
@@ -443,7 +443,7 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
     """A session killed and created again under the same name was never asked to report
     to the old conversation."""
     h = harness
-    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = "id-2"
     await tools.resume_watchers(h.app)
     assert "proj" not in tools._session_watchers
@@ -452,23 +452,23 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
 
 async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
     h = harness
-    ts.save_watch(h.state, "proj", "conv-1", "http://metallm.local", session_instance="id-1")
+    ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = ""
     await tools.resume_watchers(h.app)
     assert "proj" in tools._session_watchers
 
 
-# --- speaker (design 10 D4), sent only with metallm.send_speaker on -------------
+# --- speaker (design 10 D4), sent only with orchestrator.send_speaker on -------------
 
 async def _deliver_turn(h, objs):
     _agent_writes(h.base, "proj", "sid-A", objs)
     await h.drain()
-    return h.metallm.posts[-1]["json"]
+    return h.orchestrator.posts[-1]["json"]
 
 
 async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: True)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
     objs = [_user("u1", _sent("from the orchestrator")), _assistant("a1", "ONE")]
@@ -485,12 +485,12 @@ async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
              _assistant("a3", "THREE")]
     body = await _deliver_turn(h, objs)
     assert (body["speaker"], body["prompt_origin"]) == ("agent", "terminal")
-    assert len(h.metallm.posts) == 3
+    assert len(h.orchestrator.posts) == 3
 
 
 async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: True)
+    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: True)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="warm up", conversation_id="conv-1")
     objs = [_user("u1", "warm up"), _assistant("a1", "OK")]
@@ -506,12 +506,12 @@ async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
 
 async def test_speaker_is_not_sent_when_disabled(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_metallm_send_speaker", lambda: False)
+    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: False)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     await _deliver_turn(h, [_user("u1", "q"), _assistant("a1", "A"),
                             _user("u2", "typed"), _assistant("a2", "B")])
-    assert all("speaker" not in p["json"] for p in h.metallm.posts)
+    assert all("speaker" not in p["json"] for p in h.orchestrator.posts)
 
 
 # --- prompt_waiting (design 10 D5, MCP-36) ---------------------------------------
@@ -537,7 +537,7 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
     tools._notify_long_waits("proj")
     await _settle_background()
 
-    bodies = [p["json"] for p in h.metallm.posts]
+    bodies = [p["json"] for p in h.orchestrator.posts]
     assert [b["content"].split("\n\n")[-1] for b in bodies] == ["first", "second"]
     first = bodies[0]
     assert {k: v for k, v in first.items() if k != "content"} == {
@@ -562,7 +562,7 @@ async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
     tools._pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
     tools._notify_long_waits("proj")
     await _settle_background()
-    assert h.metallm.posts == []
+    assert h.orchestrator.posts == []
 
 
 async def _settle_background():
@@ -583,14 +583,14 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
     await _settle_background()
 
     assert "proj" not in tools._pending_sends
-    assert [p["json"] for p in h.metallm.posts] == [{
+    assert [p["json"] for p in h.orchestrator.posts] == [{
         "content": ("[Not delivered: the session 'proj' was removed before this prompt "
                     "could be pasted. It was never seen by the agent.]\n\nreply EIGHT"),
         "ok": False, "source": "agent_watch", "session": "proj",
         "prompt_origin": "orchestrator", "interrupted": False,
         "error_code": "prompt_dropped",
         "prompts": [{"prompt_id": "p-eight", "sent_by": "", "conversation_id": "conv-1"}]}]
-    assert h.metallm.posts[0]["url"].endswith("/callback/conv-1")
+    assert h.orchestrator.posts[0]["url"].endswith("/callback/conv-1")
     assert len(list((h.state / "dead-letter").glob("send__proj__*.json"))) == 2
 
 
@@ -607,8 +607,8 @@ async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harnes
     await _settle_background()
 
     assert [q.text for q in tools._pending_sends["proj"]] == ["for the new one"]
-    assert [p["json"]["error_code"] for p in h.metallm.posts] == ["prompt_dropped"]
-    assert "for the old one" in h.metallm.posts[0]["json"]["content"]
+    assert [p["json"]["error_code"] for p in h.orchestrator.posts] == ["prompt_dropped"]
+    assert "for the old one" in h.orchestrator.posts[0]["json"]["content"]
 
 
 async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
@@ -619,20 +619,20 @@ async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
     h.instance = ""
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     assert [q.text for q in tools._pending_sends["proj"]] == ["keep"]
-    assert not h.metallm.posts
+    assert not h.orchestrator.posts
 
 
 # --- Deliverable 2: resend a lost/missed reply, WITHOUT a backlog replay -------
 #
 # The governing rule: a resend must NEVER put a second copy of a reply into the
 # conversation. The delivery ledger (confirmed 2xx acks) decides — a turn in it
-# demonstrably reached metallm, so re-POSTing it can only duplicate. A turn
+# demonstrably reached the orchestrator, so re-POSTing it can only duplicate. A turn
 # absent from it was genuinely lost, which is what this tool is for.
 
 
 async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
     """The regression this rule exists for (prod 2026-08-22 conv 01a01cf6): a
-    no-uuid resend re-POSTed a reply metallm had already acked, putting a verbatim
+    no-uuid resend re-POSTed a reply the orchestrator had already acked, putting a verbatim
     duplicate of the previous answer into the conversation. The content must come
     back to the CALLER instead, with no callback at all."""
     h = harness
@@ -645,7 +645,7 @@ async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
     await h.drain()
     # q1 was sent by the orchestrator; q2 was NOT (the "agent" fixture wrote it as
     # if a person typed it at the pane), so its reply is delivered with q2 prepended.
-    assert [p["json"]["content"] for p in h.metallm.posts] == [
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == [
         "ANSWER ONE", ts.render_delivery("ANSWER TWO", ["q2"]),
     ]
     mark_before = ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid
@@ -655,11 +655,11 @@ async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
     assert status == "already_delivered"
     assert turn.terminal_uuid == "a2"
     assert turn.text == "ANSWER TWO"          # content still available to the caller
-    assert len(h.metallm.posts) == 2          # <-- nothing new was posted
+    assert len(h.orchestrator.posts) == 2          # <-- nothing new was posted
     # And the watermark is untouched, so the watcher is undisturbed either way.
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == mark_before
     await h.drain()
-    assert len(h.metallm.posts) == 2
+    assert len(h.orchestrator.posts) == 2
 
 
 async def test_resend_tool_returns_the_text_inline_instead_of_duplicating(harness):
@@ -677,13 +677,13 @@ async def test_resend_tool_returns_the_text_inline_instead_of_duplicating(harnes
     assert res["data"]["status"] == "already_delivered"
     assert res["data"]["already_delivered"] is True
     assert res["data"]["content"] == "ANSWER"          # readable inline
-    assert len(h.metallm.posts) == 1                   # not re-delivered
+    assert len(h.orchestrator.posts) == 1                   # not re-delivered
     assert "NOT re-sent" in res["data"]["note"]
     # Steer the caller at the real cause of a "missing" reply — an un-run send.
     assert "never requested" in res["data"]["note"]
 
 
-async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
+async def test_resend_delivers_a_reply_that_never_reached_orchestrator(harness):
     """The legitimate recovery case must still work: a completed turn the watcher
     has NOT delivered is absent from the ledger, so the resend posts it."""
     h = harness
@@ -696,7 +696,7 @@ async def test_resend_delivers_a_reply_that_never_reached_metallm(harness):
 
     assert status == "resent"
     assert turn.terminal_uuid == "a1"
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["THE REPLY"]
 
 
 async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness):
@@ -720,7 +720,7 @@ async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness
     status, turn = await h.resend()
 
     assert (status, turn.terminal_uuid) == ("resent", "a1")
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["TEN"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["TEN"]
 
 
 async def test_resend_of_a_named_turn_reaches_an_earlier_transcript(harness):
@@ -756,7 +756,7 @@ async def test_resend_of_an_interrupt_keeps_its_note_and_flag(harness):
     status, turn = await h.resend()
 
     assert status == "resent" and turn.terminal_uuid == "i1"
-    [post] = h.metallm.posts
+    [post] = h.orchestrator.posts
     assert post["json"]["content"] == ts.render_delivery("", [], interrupted=True)
     assert post["json"]["interrupted"] is True
 
@@ -768,17 +768,17 @@ async def test_resend_of_a_dead_lettered_reply_still_delivers(harness):
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
-    h.metallm.succeed = False                        # every POST fails -> dead-letter
+    h.orchestrator.succeed = False                        # every POST fails -> dead-letter
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "LOST REPLY")])
     await h.drain()
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == "a1"
-    h.metallm.succeed = True
-    h.metallm.posts.clear()
+    h.orchestrator.succeed = True
+    h.orchestrator.posts.clear()
 
     status, turn = await h.resend()
 
     assert status == "resent"                        # not suppressed
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["LOST REPLY"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["LOST REPLY"]
 
 
 async def test_resend_then_watcher_does_not_double_deliver(harness):
@@ -793,26 +793,26 @@ async def test_resend_then_watcher_does_not_double_deliver(harness):
 
     status, turn = await h.resend()
     assert status == "resent" and turn.terminal_uuid == "a1"
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["THE REPLY"]
 
     await h.drain()
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["THE REPLY"]  # still one
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["THE REPLY"]  # still one
 
 
 async def test_force_reposts_an_already_delivered_reply(harness):
-    """The escape hatch for the one case the ledger cannot see: metallm acked the
+    """The escape hatch for the one case the ledger cannot see: the orchestrator acked the
     callback but lost the message downstream. Explicit, never the default."""
     h = harness
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "ANSWER")])
     await h.drain()
-    assert len(h.metallm.posts) == 1
+    assert len(h.orchestrator.posts) == 1
 
     res = await h.resend_tool(name="proj", conversation_id="conv-1", force=True)
 
     assert res["data"]["status"] == "resent"
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["ANSWER", "ANSWER"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["ANSWER", "ANSWER"]
 
 
 async def test_resend_targets_a_specific_turn_under_the_same_rule(harness):
@@ -826,16 +826,16 @@ async def test_resend_targets_a_specific_turn_under_the_same_rule(harness):
         _user("u2", "q2"), _assistant("a2", "SECOND REPLY"),
     ])
     await h.drain()
-    h.metallm.posts.clear()
+    h.orchestrator.posts.clear()
 
     status, turn = await h.resend(turn_uuid="a1")
     assert status == "already_delivered"
     assert turn.text == "FIRST REPLY"
-    assert h.metallm.posts == []
+    assert h.orchestrator.posts == []
 
     status, turn = await h.resend(turn_uuid="a1", force=True)
     assert status == "resent"
-    assert [p["json"]["content"] for p in h.metallm.posts] == ["FIRST REPLY"]
+    assert [p["json"]["content"] for p in h.orchestrator.posts] == ["FIRST REPLY"]
 
 
 async def test_resend_nothing_to_send_when_no_reply(harness):
@@ -849,7 +849,7 @@ async def test_resend_nothing_to_send_when_no_reply(harness):
     status, turn = await h.resend()
 
     assert status == "no_reply" and turn is None
-    assert h.metallm.posts == []
+    assert h.orchestrator.posts == []
 
 
 async def test_resend_tool_warns_when_the_session_is_still_working(harness, monkeypatch):
@@ -876,7 +876,7 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
 
 
 async def test_resend_tool_requires_conversation_id(harness):
-    """The session_resend TOOL refuses without a conversation_id (metallm injects
+    """The session_resend TOOL refuses without a conversation_id (the orchestrator injects
     it) rather than guessing where to deliver."""
     h = harness
     res = await h.resend_tool(name="proj")

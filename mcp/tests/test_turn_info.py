@@ -1,6 +1,6 @@
 """What a running turn is doing: what opened it, when, and its newest step.
 
-2026-10-22, metallm: an orchestrator's prompt waited 45 minutes behind one turn a
+2026-10-22, the orchestrator: an orchestrator's prompt waited 45 minutes behind one turn a
 background task's notification had opened, while session_status named, as what the
 agent was working on, the person's earlier prompt it had already answered. These tests
 pin that a caller now reads what really opened the turn (turn_info), never a system

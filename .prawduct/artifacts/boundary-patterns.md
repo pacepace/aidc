@@ -8,7 +8,7 @@ that ships separately.
 
 ### The MCP tool surface (external consumer)
 - **Producer**: `mcp/src/aidc_mcp/tools.py` (registration and envelopes), `resources.py`.
-- **Consumer**: the orchestrator (MetaLLM), over streamable HTTP with a bearer token. It is a
+- **Consumer**: the orchestrator (the orchestrator), over streamable HTTP with a bearer token. It is a
   separate product, developed by another session/agent.
 - **Contract**: every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": "...",
   "error_code": "<kind>"}`, `isError` false either way; the code set is closed
@@ -22,7 +22,7 @@ that ships separately.
 - **Consumer**: the orchestrator's callback endpoint, `POST {callback_url}/api/v1/internal/callback/{conversation_id}`.
 - **Contract**: the payload table in design 10 D5 — `content`, `ok`, `source`, `session`,
   `prompt_origin`, `interrupted`, plus `error_code` on the two callbacks that are notices rather
-  than replies, and `speaker` only when `metallm.send_speaker` is on.
+  than replies, and `speaker` only when `orchestrator.send_speaker` is on.
 - **Rule**: fields are added, never repurposed; a receiver that ignores an added field must still
   read the payload correctly. Changes are agreed with the orchestrator before they are built —
   the 2026-09-17 joint test changed this payload three times that way.

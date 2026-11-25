@@ -126,7 +126,7 @@ def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
 
 def _is_rule(text: str) -> bool:
     """A full-width `─` rule, which may carry one label set off by spaces: Claude Code
-    2.1.284 draws a named session's name into the box's top rule (`──── metallm ─`)."""
+    2.1.284 draws a named session's name into the box's top rule (`──── orchestrator ─`)."""
     m = _RULE_RE.fullmatch(text.strip())
     return m is not None and len(m.group(1)) + len(m.group(2) or "") >= _RULE_MIN_LEN
 

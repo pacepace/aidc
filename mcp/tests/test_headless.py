@@ -1,7 +1,7 @@
 """Headless runs (session_invoke, session_invoke_async): fresh, one at a time per
 session, visible, and stopped in the container when nobody waits on them.
 
-2026-10-22, metallm: two `claude --print` runs were still going 23 and 9 minutes after
+2026-10-22, the orchestrator: two `claude --print` runs were still going 23 and 9 minutes after
 their callers gave up, both editing the same spec, each resuming the resident agent's
 whole conversation, and nothing an orchestrator could call showed them. Pace's rulings
 that night: no timeout on session_invoke; one headless run at a time per dev
@@ -274,7 +274,7 @@ async def test_a_second_invoke_while_one_runs_is_refused_with_what_runs(docker):
 
 
 async def test_an_orphan_left_from_before_a_restart_holds_the_session(docker, monkeypatch):
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
     docker["found"] = [{"pid": 77, "started_at": time.time() - 600, "run_id": "",
                         "prompt": "edit the spec"}]
     for tool, args in (("session_invoke", {}), ("session_invoke_async",
@@ -303,7 +303,7 @@ async def test_another_sessions_run_does_not_hold_this_one(docker):
 
 
 async def test_an_async_invoke_claims_the_session_before_it_returns(docker, monkeypatch):
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
     fired = []
     monkeypatch.setattr(tools, "fire", lambda coro: (fired.append(coro), coro.close()))
     res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
@@ -330,7 +330,7 @@ async def test_a_cancelled_invoke_is_stopped_in_the_container(docker):
 
 
 async def test_an_async_invoke_past_its_limit_is_stopped_in_the_container(docker, monkeypatch):
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_ASYNC_INVOKE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(tools, "_load_token", lambda: "t")
     docker["release_now"] = False
@@ -513,7 +513,7 @@ async def test_a_claim_made_without_a_container_listing_is_logged(docker, monkey
 
 
 async def test_an_async_run_stopped_before_it_started_never_starts(docker, monkeypatch):
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_load_token", lambda: "t")
 
     async def tree(name):

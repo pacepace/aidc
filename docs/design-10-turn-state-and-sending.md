@@ -13,9 +13,9 @@ a dev container's tmux `claude` window:
 MCP-23; builds on `docs/done/design-09-callback-delivery.md`.
 
 **Status:** designed and built 2026-09-17 (branch `feature/turn-state`). D4's `speaker` is built
-behind `metallm.send_speaker`, off until MetaLLM's side is deployed. Transcript and screen facts measured in a dev container on Claude Code
+behind `orchestrator.send_speaker`, off until the orchestrator's side is deployed. Transcript and screen facts measured in a dev container on Claude Code
 2.1.270 and 2.1.274 the same day. D7, D8 and the dropped-prompt callback in D5 came out of the
-joint test with the metallm session that day.
+joint test with the orchestrator session that day.
 
 ---
 
@@ -35,7 +35,7 @@ defects and gaps in how aidc tracks a shared session's state.
    terminal. It is dropped as abandoned when the next prompt arrives, and the orchestrator is
    never told the work it asked for was cut off.
 3. **Who a turn belongs to is split across two unconnected fields.** aidc sends
-   `prompt_origin: "terminal"` plus a note in the content (MCP-23, 2026-09-11). MetaLLM added a
+   `prompt_origin: "terminal"` plus a note in the content (MCP-23, 2026-09-11). The orchestrator added a
    `speaker` field (2026-09-12) and never reads `prompt_origin`; aidc never sends `speaker`.
 4. **Sending still reads the screen.** Design 09 moved delivery onto the transcript, but the send
    path kept `_wait_for_idle` (pane byte-stable for 1.5s). It depends on Claude Code animating
@@ -68,7 +68,7 @@ below fails safe when a line is missing or unrecognized.
 
 | Fact | Evidence |
 |---|---|
-| A Stop-hook block writes a `user` line with `isMeta: true` and string content starting `Stop hook feedback:`, whether the hook blocks by JSON `decision: "block"` or by exit 2 | container: both kinds; host: 14 lines in the metallm project |
+| A Stop-hook block writes a `user` line with `isMeta: true` and string content starting `Stop hook feedback:`, whether the hook blocks by JSON `decision: "block"` or by exit 2 | container: both kinds; host: 14 lines in the orchestrator project |
 | The feedback line is written when the blocking hook **finishes** (8 s after the reply for a hook that runs 8 s), and is followed ~150 ms later by `system` / `stop_hook_summary` with non-empty `hookErrors`. No `turn_duration` follows a blocked stop | container: both kinds, and an 8 s hook |
 | A Stop hook that **fails without blocking** (exit 1) is also listed in `hookErrors` (`Failed with non-blocking status code: …`), but there is no feedback line, Claude stops, and `turn_duration` follows. So non-empty `hookErrors` does not mean a block | container |
 | An allowed stop writes `stop_hook_summary` with `hookErrors: []`, then `system` / `turn_duration` within a few ms. One `turn_duration` covers the whole exchange, pushbacks included | container: 5 of 5 allowed stops; host: 7 of 7; tangle's scan ~9.9k |
@@ -78,8 +78,8 @@ below fails safe when a line is missing or unrecognized.
 | Esc **before** Claude has written anything writes **nothing**: the prompt line stays with no reply, and the prompt text is put back into the input box on screen | container |
 | A background task finishing writes a `user` line `<task-notification>…` with `promptSource: "system"` and `origin.kind: "task-notification"`, and Claude runs a new turn on it | container |
 | A prompt submitted while Claude is working is not written as a `user` line. Claude Code writes a `queue-operation` enqueue carrying its text, removes it at the next tool boundary, and answers it inside the running turn | container |
-| That removal is a `queue-operation` `remove` with `reason: "absorbed_mid_turn"`, followed by an `attachment` of type `queued_command` carrying the prompt. If the turn ends first, Claude Code runs the prompt as the next turn, written as a `user` line with `promptSource: "queued"` | metallm transcript, Claude Code 2.1.300, 2026-10-22 |
-| A notification line opens with `<task-notification>`; read as local output it made a notification turn look idle until Claude's first line, and a paste in that gap joined the new turn | metallm, 2026-10-22 19:19:35-40 |
+| That removal is a `queue-operation` `remove` with `reason: "absorbed_mid_turn"`, followed by an `attachment` of type `queued_command` carrying the prompt. If the turn ends first, Claude Code runs the prompt as the next turn, written as a `user` line with `promptSource: "queued"` | The orchestrator transcript, Claude Code 2.1.300, 2026-10-22 |
+| A notification line opens with `<task-notification>`; read as local output it made a notification turn look idle until Claude's first line, and a paste in that gap joined the new turn | The orchestrator, 2026-10-22 19:19:35-40 |
 | A message from another Claude session is an `isMeta` `user` line with `origin.kind` `peer` (or `coordinator`), and Claude runs a turn on it | host transcripts, 2026-10-22 |
 
 Raw notes and captures: `.prawduct/artifacts/claude-code-measurements.md`.
@@ -122,7 +122,7 @@ the delivery ledger (MCP-17) still guards the POST.
 ### D2. The end-of-turn record skips the settle wait (MCP-25)
 
 The drain's settle gate (`_drain_once_body`, `settle_seconds`) holds delivery until the
-transcript has been quiet for `metallm.turn_settle_seconds` (default 4s). New rule: when the last
+transcript has been quiet for `orchestrator.turn_settle_seconds` (default 4s). New rule: when the last
 group's terminal is followed by a `turn_duration` line, and nothing but ignorable lines comes
 after that, deliver on this poll without waiting.
 
@@ -157,11 +157,11 @@ answering it.
 The interrupt line is delivered without waiting for the next prompt. It still goes through the
 settle gate, because Claude Code can write more lines right after an interrupt.
 
-**Why not `ok: false`.** It was the first choice, but MetaLLM renders `ok: false` as
-"Dev agent (error)" with an `[ERROR]` prefix, which reads as a crash. MetaLLM's `CallbackRequest`
-is a plain pydantic model that ignores unknown fields (confirmed by the metallm session,
-2026-09-17), so `interrupted` can ship before MetaLLM knows it: until then the turn shows as an
-ordinary reply with the note on top. MetaLLM will render `interrupted: true` as
+**Why not `ok: false`.** It was the first choice, but the orchestrator renders `ok: false` as
+"Dev agent (error)" with an `[ERROR]` prefix, which reads as a crash. The orchestrator's `CallbackRequest`
+is a plain pydantic model that ignores unknown fields (confirmed by the orchestrator session,
+2026-09-17), so `interrupted` can ship before the orchestrator knows it: until then the turn shows as an
+ordinary reply with the note on top. The orchestrator will render `interrupted: true` as
 "stopped at the terminal".
 
 ### D4. `speaker` says who the turn belongs to (MCP-27)
@@ -174,30 +174,30 @@ The payload gains `speaker`:
 
 `prompt_origin` and the content note stay as they are.
 
-**Ordering constraint.** MetaLLM today *drops* callbacks with `speaker: "human"` (not enqueued,
-BUSY not cleared). Sending the field before MetaLLM changes that would hide every person turn
-from the orchestrator. The metallm session has been asked (2026-09-17) to change the rule so a
+**Ordering constraint.** The orchestrator today *drops* callbacks with `speaker: "human"` (not enqueued,
+BUSY not cleared). Sending the field before the orchestrator changes that would hide every person turn
+from the orchestrator. The orchestrator session has been asked (2026-09-17) to change the rule so a
 human turn is shown to the orchestrator as something the person did, not answered, and not
-counted as its own task finishing. The metallm session confirmed the same day: Pace chose "record
+counted as its own task finishing. The orchestrator session confirmed the same day: Pace chose "record
 without wake" (the turn is written into the conversation, runs no turn, leaves BUSY alone, and
-renders under a distinct source). aidc starts sending `speaker` only when the metallm session
+renders under a distinct source). aidc starts sending `speaker` only when the orchestrator session
 reports that change released and deployed.
 
-**Built behind a setting** (Pace, 2026-09-17). `metallm.send_speaker: true` in the aidc config
-turns it on; off (the default) leaves the payload unchanged. The metallm session corrected an
-assumption on the way: the released MetaLLM (v0.46.0) already reads `speaker` and drops `human`
+**Built behind a setting** (Pace, 2026-09-17). `orchestrator.send_speaker: true` in the aidc config
+turns it on; off (the default) leaves the payload unchanged. The orchestrator session corrected an
+assumption on the way: the released orchestrator (v0.46.0) already reads `speaker` and drops `human`
 turns, so sending it unconditionally before its deploy would hide typed turns rather than change
-nothing. The setting lets the joint test prove the whole path against metallm's dev instance while
-the live MCP keeps it off. Turn it on only once the metallm session confirms record-without-wake
+nothing. The setting lets the joint test prove the whole path against the orchestrator's dev instance while
+the live MCP keeps it off. Turn it on only once the orchestrator session confirms record-without-wake
 is released and deployed, and the production host's running version is checked. It is not sent on
 the `prompt_dropped` and `prompt_waiting` notices, which are not replies.
 
 ### D5. The callback payload contract
 
-aidc and MetaLLM once built the same feature twice with fields neither side read (`prompt_origin`
+aidc and the orchestrator once built the same feature twice with fields neither side read (`prompt_origin`
 vs `speaker`). This table is the single description of the shared-session callback body
 (`POST {callback_url}/api/v1/internal/callback/{conversation_id}`). A change to it is agreed with
-the metallm session and written here before either side builds it.
+the orchestrator session and written here before either side builds it.
 
 | Field | Type | Values and meaning | Since |
 |---|---|---|---|
@@ -205,10 +205,10 @@ the metallm session and written here before either side builds it.
 | `ok` | bool | `false` only when the turn ended on an API error Claude Code did not recover from. An interrupt is `true`. | design 09 |
 | `source` | string | Always `"agent_watch"` for this path. | design 09 |
 | `session` | string | The aidc session that produced the turn. | design 09 |
-| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane; else `"person"` if the MCP sent one for a person (`session_send`'s `sent_by`); else `"orchestrator"` if all were sent by the MCP for the caller; `""` if the turn had no prompt and none came before it. A turn with no prompt of its own (a continuation, a task notification) carries the origin of the session's last prompted turn. MetaLLM records a `"terminal"` or `"person"` reply as addressed to that person, not as a report on its own prompt. | MCP-23 |
+| `prompt_origin` | string | `"terminal"` if any prompt the turn answers was typed at the pane; else `"person"` if the MCP sent one for a person (`session_send`'s `sent_by`); else `"orchestrator"` if all were sent by the MCP for the caller; `""` if the turn had no prompt and none came before it. A turn with no prompt of its own (a continuation, a task notification) carries the origin of the session's last prompted turn. The orchestrator records a `"terminal"` or `"person"` reply as addressed to that person, not as a report on its own prompt. | MCP-23 |
 | `sent_by` | string | Present only with `prompt_origin: "person"`: the `sent_by` the caller gave `session_send`, returned as given. The orchestrator names who the prompt was for; aidc does not read it. | 2026-10-09 |
 | `interrupted` | bool | `true` when the turn was cut off by Esc at the terminal (D3), else `false`. Always sent. | MCP-26 |
-| `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. Sent only on replies, and only with `metallm.send_speaker: true` (D4), which stays off until MetaLLM's record-without-wake change is deployed. | MCP-27 |
+| `speaker` | string | `"human"` when every prompt the turn answers was typed at the terminal, else `"agent"`. Sent only on replies, and only with `orchestrator.send_speaker: true` (D4), which stays off until the orchestrator's record-without-wake change is deployed. | MCP-27 |
 | `error_code` | string | Present only on a callback that is not a reply, naming what it is: `"prompt_dropped"` (a failure, `ok: false`) or `"prompt_waiting"` (a status, `ok: true`), both below. It never says anything `content` does not. | MCP-33, MCP-36 |
 | `prompts` | list | The `session_send` prompts the turn answers, in paste order, each `{"prompt_id", "sent_by", "conversation_id"}` (`sent_by` `""` for the caller's own; `conversation_id` the conversation that sent it, which may differ from the one this callback goes to). One entry for a prompt pasted alone, several for a batch (S7); a prompt joined into the running turn (`deliver: "join"`) follows the turn's own in the reply that turn ends with. A continuation carries its turn's. Absent when no paste of the MCP's opened the turn (a prompt typed at the pane, a task notification with nothing before it) and on `session_resend`. On `prompt_dropped` and `prompt_waiting` it names the one prompt the notice is about. | MCP-44 |
 | `pasted_at` | string | ISO UTC time the batch carrying those prompts was pasted (the latest paste, when one turn answers several). Present exactly when `prompts` is, on replies. | MCP-44 |
@@ -216,7 +216,7 @@ the metallm session and written here before either side builds it.
 **A prompt that will never be pasted** (MCP-33). A queued prompt leaves the queue unpasted only
 when its session is gone: it no longer exists, or a session of the same name is a different
 instance because it was killed and created again (S4 item 5). Each such prompt that came with a
-`conversation_id` gets one callback to that conversation (agreed with the metallm session
+`conversation_id` gets one callback to that conversation (agreed with the orchestrator session
 2026-09-17):
 
 ```json
@@ -229,7 +229,7 @@ It is retried and dead-lettered like a reply, and the prompt is also written to 
 dead-letter dir. A prompt sent without a `conversation_id` has nobody to tell; only the
 dead-letter record remains.
 
-**A prompt that has waited long** (MCP-36; proposed by the metallm session, approved by Pace
+**A prompt that has waited long** (MCP-36; proposed by the orchestrator session, approved by Pace
 2026-09-17). The orchestrator is told a queued prompt will go in when the session is free, and
 by design it does not poll, so a queue that never moves (a bug, a forgotten dialog, text left in
 the box) would otherwise leave it waiting in silence. A queued prompt with a `conversation_id` that
@@ -244,7 +244,7 @@ once, with the flag persisted in the queue file so a restart does not repeat it:
 
 `<reason>` is `session_status`'s `waiting_because` for the queue's first prompt; a prompt behind
 it reads "an earlier prompt is still waiting (held because <that reason>)". `ok` is true: nothing
-has failed, and MetaLLM renders `ok: false` as an error, which invites a resend (the metallm
+has failed, and the orchestrator renders `ok: false` as an error, which invites a resend (the orchestrator
 session's objection, accepted). The drainer checks once per round, so the notice can be up to about
 a minute late. If the prompt is pasted later, its reply follows as usual; if the session goes,
 `prompt_dropped` follows.
@@ -260,7 +260,7 @@ reported inside the envelope, not through the MCP error flag.
   sometimes with `data` for context.
 
 `error_code` lets a caller decide what to do without matching prose (MCP-32, agreed with the
-metallm session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
+the orchestrator session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
 missing a code or uses one outside the set:
 
 | Code | Meaning | Caller |
@@ -270,7 +270,7 @@ missing a code or uses one outside the set:
 | `out_of_scope` | a scoped server refusing another session (MCP-31) | tell the person, no retry |
 | `create_not_allowed` | `session_create` on a scoped server | tell the person, no retry |
 | `invalid_argument` | a required argument is missing or invalid | fix the call |
-| `not_configured` | the aidc config lacks what the call needs (`metallm.callback_url`) | tell the person |
+| `not_configured` | the aidc config lacks what the call needs (`orchestrator.callback_url`) | tell the person |
 | `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
 | `command_failed` | a command inside the session failed | tell the person |
 | `timeout` | a command inside the session ran out of time | tell the person |
@@ -283,7 +283,7 @@ missing a code or uses one outside the set:
 | `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` |
 
 `session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
-metallm side never retries a `session_send`, even after a transport failure (a retry could paste
+The orchestrator side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 
 ### D7. A webhook survives an `aidc-mcp` restart (MCP-34)
@@ -336,7 +336,7 @@ first, so a reply from before a restart can still be fetched by hand. Measured o
 `--continue` starts a new file holding only the new session's lines, not a copy of the old ones.
 
 Combinations are independent. An interrupted turn on a prompt the person typed carries
-`interrupted: true` and (once enabled) `speaker: "human"`, so MetaLLM records it without waking
+`interrupted: true` and (once enabled) `speaker: "human"`, so the orchestrator records it without waking
 the orchestrator and labels it as stopped at the terminal.
 
 ---
@@ -463,7 +463,7 @@ attributes are visible). Measured on Claude Code 2.1.270 and 2.1.274:
 
 - **The input box** is the region between the last two full-width `─` rules near the bottom of
   the pane; the status row sits directly below the second rule. From 2.1.284 the top rule of a
-  named session carries its name (`──── metallm ─`), so a rule may hold one label set off by
+  named session carries its name (`──── orchestrator ─`), so a rule may hold one label set off by
   spaces. From 2.1.300, while background agents run, a blank row and one row per agent
   (`  ● main`, `  ◯ general-purpose  <activity>`) follow the status rows; that list is set aside
   before the rows below the box are counted, and a row with an unmeasured glyph fails closed.
@@ -587,7 +587,7 @@ has had, and the last recorded waiting reason. File:
 `watcher-state/<session>.send-queue.json`, one object per session:
 
 ```json
-{ "session": "metallm",
+{ "session": "orchestrator",
   "updated_at": "2026-09-17T12:00:00Z",
   "prompts": [
     { "text": "...", "enqueued_at": "2026-09-17T11:58:02Z",
@@ -607,7 +607,7 @@ Same trust level as the existing send record and dead-letter files, which alread
 
 ### S5. What a busy session is doing, and joining its turn (MCP-40, MCP-41)
 
-2026-10-22, metallm: an orchestrator's prompt waited 45 minutes (`claude_busy`) behind one
+2026-10-22, the orchestrator: an orchestrator's prompt waited 45 minutes (`claude_busy`) behind one
 turn a background task's notification had opened, while `session_status.working_on` named the
 person's previous prompt, answered before the turn began. `working_on` was the newest prompt
 `human_prompt_text` attributes to a person, and that skips every prompt Claude Code raises
@@ -666,7 +666,7 @@ refused at the door already); or the paste failed (`paste_failing`).
 
 ### S6. Headless runs: fresh, one at a time, visible, stopped (MCP-42, MCP-43)
 
-2026-10-22, metallm: four `session_invoke` calls (22:48-23:04Z) left two `claude --print` runs
+2026-10-22, the orchestrator: four `session_invoke` calls (22:48-23:04Z) left two `claude --print` runs
 going 23 and 9 minutes later, both editing the same spec file; the caller had given up on the
 first and sent a correction. Each resumed the resident agent's whole conversation, because the
 image's `aidc-claude` wrapper added `--continue` to every launch with a conversation to resume,
@@ -708,7 +708,7 @@ invoke at a time per dev container"; long work belongs to `session_send`.
   client drops the connection. `disconnect.StopInvokeOnDisconnect` watches each `session_invoke`
   call for `http.disconnect` and stops its run (`session_invoke_client_disconnected`,
   `session_invoke_stopped_client_gone`). A client that abandons a call with none of the three
-  cannot be seen (metallm's stop button, on the evidence of 23:04Z); the one-at-a-time rule and
+  cannot be seen (the orchestrator's stop button, on the evidence of 23:04Z); the one-at-a-time rule and
   `headless_runs` are what is left for it, with `session_interrupt(target="headless")`. The
   call a stop ended says it was stopped, not that claude failed; an `invoke_busy` refusal names
   the running run's pid as well as its `run_id`.
@@ -731,7 +731,7 @@ invoke at a time per dev container"; long work belongs to `session_send`.
 
 ### S7. Batch on free, and cancel by id (MCP-44, MCP-45)
 
-2026-10-25, asked by the metallm session and approved by Pace: while a session is busy, prompts
+2026-10-25, asked by the orchestrator session and approved by Pace: while a session is busy, prompts
 from the person and the agent pile up and used to go in one per idle, each as its own turn.
 
 **Batch on free.** `session_send` still queues and answers `queued` at once. When the session
@@ -781,7 +781,7 @@ the box, and a cancel still says `already_pasted`.
 
 ### S8. A pasted prompt says who sent it
 
-2026-11-08, asked by the metallm session and approved by Pace. A pasted prompt and a typed one
+2026-11-08, asked by the orchestrator session and approved by Pace. A pasted prompt and a typed one
 look the same to the session's Claude, so an orchestrator's send, or one it made for a person,
 read as the session's own person typing at the terminal (live 2026-11-07 18:39:44Z: an agent's
 vote prompt was answered as the person's). The sender the orchestrator writes into its own text
@@ -837,7 +837,7 @@ pass it only when the aidc it talks to declares it.
 
 - A channel into Claude other than the pane. None is known that feeds a running interactive
   session; running `--print` into the same session would give one transcript two writers.
-- MetaLLM's handling of `speaker: "human"`. That change belongs to the metallm repo; this design
+- The orchestrator's handling of `speaker: "human"`. That change belongs to the orchestrator repo; this design
   only records the ordering constraint.
 - Engines other than Claude.
 - Detecting permission dialogs. aidc prevents them (`--dangerously-skip-permissions`, and
@@ -860,4 +860,4 @@ pass it only when the aidc it talks to declares it.
   `tools._claim_headless`, `tools._stop_headless`, `tools._interrupt_headless`; the wrapper in
   `.devcontainer/Dockerfile` (`aidc-claude`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.
-- MetaLLM callback contract: `api/src/api/v1/internal/callback.py` in the metallm repo.
+- The orchestrator callback contract: `api/src/api/v1/internal/callback.py` in the orchestrator repo.

@@ -14,6 +14,9 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 ## [Unreleased]
 
 ### Upgrading
+- **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,
+  rename the top-level section holding `callback_url` (and `send_speaker`,
+  `turn_settle_seconds`) to `orchestrator:`, keys unchanged, before restarting `aidc-mcp`, or callbacks stop with an error naming `orchestrator.callback_url`.
 - **Takes effect when `aidc-mcp` is updated and restarted.** Sessions need no kill or create.
   A prompt queued by the earlier `aidc-mcp` gets its header when the queue is loaded, unless it
   is already in a session's input box.

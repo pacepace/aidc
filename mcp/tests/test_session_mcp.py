@@ -278,7 +278,7 @@ def wired(box, monkeypatch):
     """The tool over the box: the real script, a configured callback address, Claude running."""
     box.installed()
     box.claude_running = True
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: BASE)
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: BASE)
     real_hand = session_mcp.hand
 
     def hand(name, **kwargs):

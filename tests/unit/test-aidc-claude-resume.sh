@@ -2,7 +2,7 @@
 # Unit test for when the dev image's aidc-claude wrapper resumes the project's
 # conversation (--continue). The interactive agent resumes; a headless run
 # (--print / -p, which is how session_invoke and session_invoke_async start Claude)
-# never does. metallm, 2026-10-22: every session_invoke resumed the resident agent's
+# never does. The orchestrator, 2026-10-22: every session_invoke resumed the resident agent's
 # conversation, a huge context, and could act on its work, while the tool promised a
 # fresh Claude.
 #

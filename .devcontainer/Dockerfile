@@ -342,7 +342,7 @@ case "$mode" in
 esac
 # A headless run (--print / -p: session_invoke, session_invoke_async) is a fresh
 # Claude, never a resume: with --continue it would load the resident agent's whole
-# conversation and could act on its work (metallm, 2026-10-22).
+# conversation and could act on its work (the orchestrator, 2026-10-22).
 resume="${AIDC_CLAUDE_RESUME:-true}"
 for arg in "$@"; do
     case "$arg" in --print|-p) resume=false ;; esac

@@ -46,14 +46,14 @@ def test_real_captures(name, expected):
 
 def test_a_rule_carrying_the_session_name_still_bounds_the_box():
     """Claude Code 2.1.284 draws a named session's name into the box's top rule
-    (`──── metallm ─`). Read as "no box", every orchestrator prompt to the session
+    (`──── orchestrator ─`). Read as "no box", every orchestrator prompt to the session
     waited in the queue as screen_unrecognized (live, 2026-09-29)."""
     screen = (SCREENS / "claude-2.1.284-idle-empty-session-name-in-rule.ansi").read_text()
     assert classify(screen) == ScreenState(EMPTY, working=False)
 
 
 @pytest.mark.parametrize("rule", [
-    "─" * 30 + " metallm ─",
+    "─" * 30 + " orchestrator ─",
     "─" * 30 + " a longer name ─" + "─" * 5,
     "── label " + "─" * 30,
 ])
@@ -153,7 +153,7 @@ def test_the_background_agent_list_under_the_status_rows_still_has_the_box():
 
 def _with_agents(rows, status="  ⏵⏵ bypass permissions on · ← for agents"):
     return "\n".join(["some reply text", "", RULE, "❯\xa0typed", RULE,
-                      "  metallm · ctx 64%", status, "", *rows, ""])
+                      "  the orchestrator · ctx 64%", status, "", *rows, ""])
 
 
 def test_any_number_of_listed_agents_is_set_aside():

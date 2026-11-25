@@ -290,7 +290,7 @@ class TestSimpleCliTools:
     def test_kill_not_advertised(self):
         """session_kill must NOT be exposed as an MCP tool.
 
-        A weak metallm client agent called it and killed a live session
+        A weak orchestrator client agent called it and killed a live session
         (prod audit 2026-07-04 17:53). Killing is operator-only via the
         ``aidc kill`` CLI; MCP clients must not be able to discover or call it.
         """
@@ -351,12 +351,12 @@ class TestSessionInvoke:
 
 class TestSessionInvokeAsync:
     async def test_requires_callback_url(self, monkeypatch):
-        monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "")
+        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is False and "callback_url" in res["error"]
 
     async def test_returns_running_immediately(self, monkeypatch):
-        monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
         fired = []
 
         def fake_fire(coro):
@@ -376,7 +376,7 @@ class TestSessionRun:
     def test_run_not_advertised(self):
         """session_run must NOT be exposed as an MCP tool.
 
-        Its synchronous, multi-turn round-trip regularly outlasts the metallm
+        Its synchronous, multi-turn round-trip regularly outlasts the orchestrator
         request window and times out the whole session (see the comment in
         tools.register). The wrapper is retained for easy re-advertisement, but
         MCP clients must not be able to discover or call it; multi-turn work is
@@ -521,7 +521,7 @@ def watch_stubs(monkeypatch):
     async def announce(app_, ctx=None):
         return None
 
-    monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_baseline_watermark", baseline)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
@@ -529,7 +529,7 @@ def watch_stubs(monkeypatch):
 
 class TestSessionWatch:
     async def test_requires_callback_url(self, monkeypatch):
-        monkeypatch.setattr(tools, "_metallm_callback_url", lambda: "")
+        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
         res = await _tool("session_watch")(name="proj", conversation_id="c1")
         assert res["ok"] is False and "callback_url" in res["error"]
 
@@ -609,7 +609,7 @@ def test_evict_session_state_evicts_settle_scoped_and_keeps_locks():
 # --- config parsing (unit) ----------------------------------------------------
 #
 # These parsers had NO direct coverage — every test monkeypatched
-# _metallm_callback_url wholesale — which is how the inline-comment bug survived
+# _orchestrator_callback_url wholesale — which is how the inline-comment bug survived
 # to production (2026-07-26). Exercise them against real config text instead.
 
 class TestYamlScalar:
@@ -619,7 +619,7 @@ class TestYamlScalar:
     def test_strips_inline_comment(self):
         # The shipped config template documents every key with a trailing
         # comment, so this is the shape a user actually edits.
-        raw = ' https://m.example.com    # base URL of your MetaLLM instance'
+        raw = ' https://m.example.com    # base URL of your orchestrator'
         assert tools._yaml_scalar(raw) == "https://m.example.com"
 
     def test_strips_quotes(self):
@@ -644,69 +644,84 @@ def _write_cfg(monkeypatch, tmp_path, text):
     return cfg
 
 
-class TestMetallmSendSpeaker:
+class TestOrchestratorSendSpeaker:
     def test_off_without_the_key_or_the_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "absent.yaml")
-        assert tools._metallm_send_speaker() is False
-        _write_cfg(monkeypatch, tmp_path, "metallm:\n  callback_url: http://m\n")
-        assert tools._metallm_send_speaker() is False
+        assert tools._orchestrator_send_speaker() is False
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: http://m\n")
+        assert tools._orchestrator_send_speaker() is False
 
     def test_on_only_for_true(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
-                   "metallm:\n  send_speaker: true    # after MetaLLM records human turns\n")
-        assert tools._metallm_send_speaker() is True
-        _write_cfg(monkeypatch, tmp_path, "metallm:\n  send_speaker: yes\n")
-        assert tools._metallm_send_speaker() is False
+                   "orchestrator:\n  send_speaker: true    # after the orchestrator records human turns\n")
+        assert tools._orchestrator_send_speaker() is True
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  send_speaker: yes\n")
+        assert tools._orchestrator_send_speaker() is False
 
     def test_a_key_under_another_section_does_not_count(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
-                   "metallm:\n  callback_url: http://m\nmcp:\n  send_speaker: true\n")
-        assert tools._metallm_send_speaker() is False
+                   "orchestrator:\n  callback_url: http://m\nmcp:\n  send_speaker: true\n")
+        assert tools._orchestrator_send_speaker() is False
 
 
-class TestMetallmCallbackUrl:
-    def test_absent_metallm_section(self, monkeypatch, tmp_path):
+class TestOrchestratorCallbackUrl:
+    def test_absent_orchestrator_section(self, monkeypatch, tmp_path):
         """The prod failure: config has only an mcp: section, so session_send
         can never open a webhook and every reply is dropped."""
         _write_cfg(monkeypatch, tmp_path, "mcp:\n  bind_address: 10.0.0.1\n  port: 7878\n")
-        assert tools._metallm_callback_url() == ""
+        assert tools._orchestrator_callback_url() == ""
 
     def test_reads_value(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
-                   "mcp:\n  port: 7878\nmetallm:\n  callback_url: https://m.example.com/\n")
-        assert tools._metallm_callback_url() == "https://m.example.com"
+                   "mcp:\n  port: 7878\norchestrator:\n  callback_url: https://m.example.com/\n")
+        assert tools._orchestrator_callback_url() == "https://m.example.com"
 
     def test_ignores_inline_comment(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
-                   'metallm:\n  callback_url: https://m.example.com   # your instance\n')
-        assert tools._metallm_callback_url() == "https://m.example.com"
+                   'orchestrator:\n  callback_url: https://m.example.com   # your instance\n')
+        assert tools._orchestrator_callback_url() == "https://m.example.com"
 
     def test_stops_at_next_top_level_key(self, monkeypatch, tmp_path):
         """A callback_url under a DIFFERENT top-level key must not be picked up."""
         _write_cfg(monkeypatch, tmp_path,
-                   "metallm:\n  turn_settle_seconds: 2\nother:\n  callback_url: https://nope\n")
-        assert tools._metallm_callback_url() == ""
+                   "orchestrator:\n  turn_settle_seconds: 2\nother:\n  callback_url: https://nope\n")
+        assert tools._orchestrator_callback_url() == ""
 
     def test_missing_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "nope.yaml")
-        assert tools._metallm_callback_url() == ""
+        assert tools._orchestrator_callback_url() == ""
+
+    async def test_only_the_orchestrator_section_is_read_and_the_error_names_it(
+            self, monkeypatch, tmp_path):
+        """No fallback to any other section: a config whose settings sit under another
+        name (as an older config's do) leaves callback_url unset, and the tool's error says
+        which key to set."""
+        for key in ("callback_url", "send_speaker", "turn_settle_seconds"):
+            _write_cfg(monkeypatch, tmp_path, f"previous_name:\n  {key}: 5\n")
+            assert tools._orchestrator_setting(key) is None
+        _write_cfg(monkeypatch, tmp_path, "previous_name:\n  callback_url: https://old.example.com\n")
+        res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
+        assert res["ok"] is False
+        assert "orchestrator.callback_url not set" in res["error"]
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://new.example.com\n")
+        assert tools._orchestrator_callback_url() == "https://new.example.com"
 
 
 class TestTurnSettleSeconds:
     def test_default_when_absent(self, monkeypatch, tmp_path):
-        _write_cfg(monkeypatch, tmp_path, "metallm:\n  callback_url: https://m\n")
-        assert tools._metallm_turn_settle_seconds(default=4.0) == 4.0
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://m\n")
+        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 4.0
 
     def test_reads_value_with_inline_comment(self, monkeypatch, tmp_path):
         # Pre-fix this parsed "2.5  # quiet window" -> ValueError -> silent
         # fallback to the default, so a configured value was ignored outright.
         _write_cfg(monkeypatch, tmp_path,
-                   "metallm:\n  turn_settle_seconds: 2.5   # quiet window\n")
-        assert tools._metallm_turn_settle_seconds(default=4.0) == 2.5
+                   "orchestrator:\n  turn_settle_seconds: 2.5   # quiet window\n")
+        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 2.5
 
     def test_falls_back_on_garbage(self, monkeypatch, tmp_path):
-        _write_cfg(monkeypatch, tmp_path, "metallm:\n  turn_settle_seconds: soon\n")
-        assert tools._metallm_turn_settle_seconds(default=4.0) == 4.0
+        _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  turn_settle_seconds: soon\n")
+        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 4.0
 
 
 # --- _session_instance: a session is its network; only "not found" ends it ------

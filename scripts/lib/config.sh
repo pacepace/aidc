@@ -122,9 +122,8 @@ mcp:
                             # mounts your home into the aidc-mcp container. Off, the tool is not
                             # offered at all.
 
-# Only relevant if an orchestrator drives sessions over MCP (the key keeps its
-# historical name): where session_invoke_async / session_send POST results back.
-metallm:
+# Only relevant if an orchestrator drives sessions over MCP: where session_invoke_async / session_send POST results back.
+orchestrator:
   callback_url: ""           # base URL of the orchestrator's callback endpoint, e.g. https://orchestrator.example.com
   send_speaker: false        # add "speaker": "human"|"agent" to session_send replies. Leave off until
                              # the orchestrator records human turns instead of dropping them.
@@ -430,7 +429,7 @@ dns_servers|list|operator|AIDC_DNS_SERVERS
 networks|list|operator|AIDC_NETWORKS
 egress_tcp|list|operator|AIDC_EGRESS_TCP
 mcp|block|global|
-metallm|block|global|
+orchestrator|block|global|
 ROWS
 }
 

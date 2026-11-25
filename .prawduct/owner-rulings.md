@@ -438,3 +438,7 @@ Before the 2.0 features are added upstream (call context, progress, error model,
 ## 2026-11-25 — Durable state moves onto an L1-on-a-file 3tears store (design-13 Q4)
 
 3tears gains an L1-only store on a file (SQLite with write-ahead logging), and aidc's MCP state (watches, send queues, the delivery ledger and the rest that must survive a restart) moves onto it in 2.0. The L1 cache size limit coming in 3tears 0.95.0 stays off for this store, and the store refuses to start with it on. TRS-25 option A is ratified.
+
+## 2026-11-25 — The 3tears packages are exempt from the 14-day cooldown (REL-09)
+
+The owner's own 3tears packages, reviewed in their own repo, may be adopted as soon as they are released. When aidc first depends on them (build-plan-3tears-adoption chunk 01), each 3tears package gets an `exclude-newer-package` entry in `mcp/pyproject.toml` with this reason beside it; every other dependency keeps the 14-day wait.

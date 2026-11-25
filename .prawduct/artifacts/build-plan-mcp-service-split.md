@@ -44,7 +44,7 @@ rev-20261125T020056Z-de0053fc to be folded in (chunk 05).
 with the service already free of MCP, W-T3 replaces only the adapters.
 
 **Architecture (what must hold):**
-- `aidc_mcp/service/` imports no `mcp` or `fastmcp` module, directly or through anything it
+- `mcp/src/aidc_mcp/service/` imports no `mcp` or `fastmcp` module, directly or through anything it
   imports (a test runs the import in a fresh interpreter and checks `sys.modules`).
 - One event loop, one process: the invariants of design-13's Shape (one drainer per session,
   per-session locks, exactly-once delivery from the watermark and ledger) are unchanged, because
@@ -85,7 +85,7 @@ every tool through its registered function, is the check, and smoke runs the rea
 ## Chunks
 
 ### Chunk 01: service skeleton, state, config, common
-- New `aidc_mcp/service/` package: `state.py` (every per-session dict, set and lock the loop
+- New `mcp/src/aidc_mcp/service/` package: `state.py` (every per-session dict, set and lock the loop
   owns, the watcher-state and transcript dirs, the forget/evict helpers), `config.py` (the
   orchestrator section of the aidc config), `common.py` (background tasks, the CLI runner,
   the envelope and `ERROR_CODES`).

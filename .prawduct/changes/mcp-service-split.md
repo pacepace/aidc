@@ -20,3 +20,6 @@ watchers, send queues, delivery, resume and session operations must not depend o
 - Tests that patched or read internals name the module that owns them; `tests/logs.py`
   captures `log_event` in every module at once. No assertion changed in meaning;
   `published-tools.json` is byte-identical.
+
+## Consumer note
+Nothing to do: the MCP tools, their arguments, results and error codes are unchanged (published-tools.json is byte-identical).

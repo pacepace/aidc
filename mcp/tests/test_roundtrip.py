@@ -30,7 +30,6 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import auth, tools
 from aidc_mcp import transcript as ts
-from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import sending as snd
@@ -574,7 +573,7 @@ async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
 
 
 async def _settle_background():
-    await asyncio.gather(*list(com.background_tasks))
+    await asyncio.gather(*list(ss.background_tasks))
 
 
 async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harness):

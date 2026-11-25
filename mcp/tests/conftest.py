@@ -4,7 +4,6 @@ import pytest
 
 from aidc_mcp import headless, session_facts, tools
 from aidc_mcp import transcript as ts
-from aidc_mcp.service import invoke as inv
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
@@ -35,10 +34,10 @@ def _no_real_docker_for_headless(monkeypatch):
     sees another test's runs."""
     monkeypatch.setattr(headless, "container_runs", no_headless_processes)
     headless._runs.clear()
-    inv.invokes_in_flight.clear()
+    ss.invokes_in_flight.clear()
     yield
     headless._runs.clear()
-    inv.invokes_in_flight.clear()
+    ss.invokes_in_flight.clear()
 
 
 @pytest.fixture

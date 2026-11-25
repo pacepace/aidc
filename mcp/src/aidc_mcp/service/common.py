@@ -13,20 +13,18 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aidc_mcp.audit import log_event
+from aidc_mcp.service import state as ss
 
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
 
-
-# Holds references to background tasks so they aren't GC'd before completion.
-background_tasks: set[asyncio.Task[None]] = set()
 
 
 def fire(coro: Any) -> None:
     """Run a coroutine in the background, keeping a reference so it is not collected.
     server.py starts the resume task with it."""
     task = asyncio.create_task(coro)
-    background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
+    ss.background_tasks.add(task)
+    task.add_done_callback(ss.background_tasks.discard)
 
 
 def run_cli(args: list[str], timeout: float = 60.0) -> dict[str, Any]:

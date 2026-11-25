@@ -538,8 +538,8 @@ def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
 
     task = asyncio.create_task(run())
     ss.pending_drainers[name] = task
-    com.background_tasks.add(task)
-    task.add_done_callback(com.background_tasks.discard)
+    ss.background_tasks.add(task)
+    task.add_done_callback(ss.background_tasks.discard)
 
 
 async def enqueue_send(name: str, container: str, prompt: ts.QueuedPrompt,

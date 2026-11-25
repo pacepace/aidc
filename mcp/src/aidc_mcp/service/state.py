@@ -12,9 +12,31 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aidc_mcp import transcript as ts
 from aidc_mcp.audit import log_event
+
+if TYPE_CHECKING:
+    from aidc_mcp import headless
+
+
+# Holds references to background tasks (common.fire) so they aren't GC'd before
+# completion.
+background_tasks: set[asyncio.Task[None]] = set()
+
+
+class InFlight(NamedTuple):
+    """A session_invoke call waiting on its run."""
+
+    container: str
+    run: headless.Run
+    proc: Any
+
+
+# The session_invoke calls in flight, by (MCP session id, JSON-RPC request id), so the
+# transport layer can stop one whose client dropped the connection (disconnect.py).
+invokes_in_flight: dict[tuple[str, str], InFlight] = {}
 
 # One headless run per session container at a time (owner ruling, 2026-10-22: "only allow one
 # session invoke at a time per dev container"). The lock makes the check and the

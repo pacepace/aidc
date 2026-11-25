@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, NamedTuple
+from typing import Any
 
 import httpx
 
@@ -72,22 +72,9 @@ def invoke_busy(name: str, tool: str, running: dict[str, Any]) -> dict[str, Any]
         {"running": running}, code="invoke_busy")
 
 
-class InFlight(NamedTuple):
-    """A session_invoke call waiting on its run."""
-
-    container: str
-    run: headless.Run
-    proc: Any
-
-
-# The session_invoke calls in flight, by (MCP session id, JSON-RPC request id), so the
-# transport layer can stop one whose client dropped the connection (disconnect.py).
-invokes_in_flight: dict[tuple[str, str], InFlight] = {}
-
-
 def stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
     """disconnect.StopInvokeOnDisconnect's callback: the client of that call is gone."""
-    entry = invokes_in_flight.pop((session_id, request_id), None)
+    entry = ss.invokes_in_flight.pop((session_id, request_id), None)
     if entry is None:
         return
     log_event("session_invoke_client_disconnected", session=entry.run.session,
@@ -135,7 +122,7 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
         try:
             if mine is not None:
                 pids += await headless.stop(container, mine)
-                _kill_host_exec(next((e.proc for e in invokes_in_flight.values()
+                _kill_host_exec(next((e.proc for e in ss.invokes_in_flight.values()
                                       if e.run is mine), None))
             elif rec["run_id"]:
                 pids += await headless.stop_tagged(container, rec["run_id"])
@@ -197,7 +184,7 @@ async def invoke(
         raise
     key = call_key
     if key is not None:
-        invokes_in_flight[key] = InFlight(container, run, proc)
+        ss.invokes_in_flight[key] = ss.InFlight(container, run, proc)
     try:
         return await _finish_invoke(container, run, proc, progress)
     except BaseException as exc:
@@ -212,7 +199,7 @@ async def invoke(
         raise
     finally:
         if key is not None:
-            invokes_in_flight.pop(key, None)
+            ss.invokes_in_flight.pop(key, None)
 
 
 async def _finish_invoke(container: str, run: headless.Run, proc: Any,

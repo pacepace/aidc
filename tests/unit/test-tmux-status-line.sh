@@ -59,9 +59,9 @@ tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
 for node in tree.body:
     if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "_WAITING_ON_INPUT_TEXT":
         print(ast.literal_eval(node.value))
-' "$AIDC_ROOT/mcp/src/aidc_mcp/tools.py")"
+' "$AIDC_ROOT/mcp/src/aidc_mcp/service/sending.py")"
 if [ -z "$MESSAGE" ]; then
-    echo "  FAIL: could not read _WAITING_ON_INPUT_TEXT from tools.py"
+    echo "  FAIL: could not read _WAITING_ON_INPUT_TEXT from service/sending.py"
     exit 1
 fi
 

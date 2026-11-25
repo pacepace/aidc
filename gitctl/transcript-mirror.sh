@@ -17,7 +17,7 @@
 # complete old file or the complete new one, never a partial one. (Prod
 # incident 2026-07-18: a torn in-place copy raced the MCP server's reconnect
 # re-anchor and caused a duplicate-delivery burst to the orchestrator; see
-# docs/done/design-09-callback-delivery.md and mcp/src/aidc_mcp/tools.py's
+# docs/done/design-09-callback-delivery.md and mcp/src/aidc_mcp/service/delivery.py's
 # _baseline_watermark, which now also refuses to act on a torn read as
 # defense in depth -- this function removes the torn read at the source.)
 

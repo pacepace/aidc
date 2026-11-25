@@ -7,7 +7,7 @@
 # destination mid-write, see a torn/truncated file, and rewind its delivery
 # watermark backward. The next drain then replayed already-delivered turns to
 # the orchestrator. See docs/done/design-09-callback-delivery.md and
-# mcp/src/aidc_mcp/tools.py's _baseline_watermark for the downstream defense;
+# mcp/src/aidc_mcp/service/delivery.py's _baseline_watermark for the downstream defense;
 # this test verifies the fix at the source -- the mirror itself never exposes
 # a partial file to a reader.
 #

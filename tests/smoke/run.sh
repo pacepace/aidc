@@ -113,8 +113,11 @@ dev_exec() {
 SG_BACKEND=docker
 SG_SESSION="${SESSION}-git"
 PUBLIC_REPO="${AIDC_SMOKE_PUBLIC_REPO:-octocat/Hello-World}"
-SG_WC="$SCRATCH/wc"
-SG_GH_WC_PATH="$SCRATCH/gh"
+# Both working copies sit in one folder, the second session's workspace, so the session sees
+# the scratch repo's working copy that the GitHub part adds after the session is made.
+SG_WS="$SCRATCH/git"
+SG_WC="$SG_WS/wc"
+SG_GH_WC_PATH="$SG_WS/gh"
 GIT_OWNED=""      # 1 when this machine had no git container: the smoke removes what it made
 GIT_REPOS_NEW=""  # 1 when ~/.config/aidc/git-repos did not exist before the run
 GIT_ADDED_NEW=""  # 1 when ~/.config/aidc/git-added (the list of added repos) did not either
@@ -964,7 +967,7 @@ else
     assert "aidc repo add takes the user's working copy of ${PUBLIC_REPO}" \
         "'$AIDC' repo add '$SG_WC' --backend docker </dev/null"
     assert "a session created after setup, on the working copy" \
-        "'$AIDC' create '$SG_SESSION' --repo '$SG_WC' --trust-repo-config </dev/null"
+        "'$AIDC' create '$SG_SESSION' --workspace '$SG_WS' --repo '$SG_WC' --trust-repo-config </dev/null"
     SG_SESSION_MADE=1
     sg_part_gitwc
     sg_part_requests

@@ -64,7 +64,7 @@ SG_OUT=""
 sg_request() {
     local envs="$1"; shift
     SG_OUT=$(sg_in "cd '${SG_WT}' && ${envs} gh $(printf '%q ' "$@")" 2>&1 || true)
-    SG_REQUEST=$(printf '%s\n' "$SG_OUT" | grep -Eo '[0-9a-f]{32}' | head -n1)
+    SG_REQUEST=$(printf '%s\n' "$SG_OUT" | grep -Eo '[0-9a-f]{32}' | head -n1) || SG_REQUEST=""
 }
 
 # The git container is set up and answers; the session made after it has what requests need.
@@ -181,13 +181,13 @@ sg_part_github() {
     br="aidc-smoke-${SG_SESSION}-gh"
     wt="${wc}/.aidc-smoke-gh"
     # The working copy has origin's default branch checked out (each make_wc leaves it so).
-    def=$(sg_in "git -C '${wc}' symbolic-ref -q --short HEAD" 2>/dev/null | tail -n1)
+    def=$(sg_in "git -C '${wc}' symbolic-ref -q --short HEAD" 2>/dev/null | tail -n1) || def=""
     assert "the session makes a worktree on a new branch from origin's ${def:-?}, and commits a file" \
         "sg_in \"cd '${wc}' && git worktree add -q -b '${br}' '${wt}' 'origin/${def}' && cd '${wt}' && mkdir -p aidc-smoke && date -u > 'aidc-smoke/${SG_SESSION}.txt' && git add aidc-smoke && git commit -q -m 'aidc smoke: ${SG_SESSION}'\""
     sg_aidc git mode "$SG_SESSION" rules >/dev/null || true
     SG_WT="$wt"
     sg_request "AIDC_GH_WAIT=${SG_WAIT_DONE}" pr create --title "aidc smoke ${SG_SESSION}" --body "aidc smoke test; merged and deleted by the smoke"
-    SG_PR=$(printf '%s\n' "$SG_OUT" | grep -Eo "github.com/${repo}/pull/[0-9]+" | head -n1 | sed 's|.*/||')
+    SG_PR=$(printf '%s\n' "$SG_OUT" | grep -Eo "github.com/${repo}/pull/[0-9]+" | head -n1 | sed 's|.*/||') || SG_PR=""
     assert "gh pr create in rules mode pushed the branch and opened a PR (#${SG_PR:-none})" "[ -n '${SG_PR}' ]"
     if [ -z "$SG_PR" ]; then printf '%s\n' "$SG_OUT" | tail -n 8 | sed 's/^/        /'; return 0; fi
     assert "the session sees it open, on its branch" \
@@ -199,8 +199,8 @@ sg_part_github() {
     assert "the session sees the PR merged" \
         "sg_in \"cd '${wc}' && gh pr view ${SG_PR} --json state --jq .state\" | grep -qx MERGED"
     sg_git gitctl fetch "$wc" >/dev/null 2>&1 || true
-    sha=$(sg_in "cd '${wc}' && git rev-parse 'origin/${def}'" 2>/dev/null | tail -n1)
-    parents=$(sg_in "cd '${wc}' && git rev-list --parents -n1 'origin/${def}'" 2>/dev/null | tail -n1 | wc -w)
+    sha=$(sg_in "cd '${wc}' && git rev-parse 'origin/${def}'" 2>/dev/null | tail -n1) || sha=""
+    parents=$(sg_in "cd '${wc}' && git rev-list --parents -n1 'origin/${def}'" 2>/dev/null | tail -n1 | wc -w) || parents=0
     assert "origin's ${def} is a merge commit (${sha:0:12}, $((parents - 1)) parents)" "[ '${parents}' = 3 ]"
     assert "the branch is gone from origin after a fetch" "! sg_in \"cd '${wc}' && git rev-parse -q --verify 'refs/remotes/origin/${br}'\""
     assert "the commit the session made, now on origin's ${def}, carries the user's identity (${SG_IDENT:-?})" \

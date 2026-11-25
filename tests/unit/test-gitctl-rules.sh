@@ -344,6 +344,20 @@ git -C "$R" update-ref -d refs/heads/doomed
 ctl fetch "$W"
 assert_eq "a branch deleted on origin is pruned from the working copy" none "$(git -C "$W" rev-parse -q --verify origin/doomed || echo none)"
 assert_eq "and from gitrun's private copy" none "$(git --git-dir="$STORE/o/r.git" rev-parse -q --verify refs/heads/doomed || echo none)"
+# A working copy made with git init and git remote add has no origin/HEAD; gh pr create's base
+# comes from it.
+git -C "$W" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null && G -C "$W" symbolic-ref --delete refs/remotes/origin/HEAD
+ctl fetch "$W"
+assert_eq "a working copy with no origin/HEAD learns origin's default branch from a fetch" \
+    "origin/main" "$(git -C "$W" symbolic-ref -q --short refs/remotes/origin/HEAD || echo none)"
+git -C "$R" update-ref refs/heads/side "$(git -C "$R" rev-parse main)"
+ctl fetch "$W"
+G -C "$W" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/side
+ctl fetch "$W"
+assert_eq "one it already has is never changed by a fetch" \
+    "origin/side" "$(git -C "$W" symbolic-ref -q --short refs/remotes/origin/HEAD || echo none)"
+G -C "$W" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$R" update-ref -d refs/heads/side
 WT="$S/wt"; G -C "$W" worktree add -q "$WT" -b wtb 2>/dev/null
 ctl fetch "$WT"; assert_eq "a worktree of the working copy can be fetched into" 0 "$RC"
 ctl fetch "$S/nope"; refused "a missing folder is refused"

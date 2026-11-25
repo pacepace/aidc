@@ -123,6 +123,32 @@ import_bundle() {
         done < <(ag -C "$wc" for-each-ref --format='%(refname)' refs/remotes/origin/)
     } | ag -C "$wc" update-ref --stdin || die "cannot update ${wc}'s origin branches"
     LISTED="$listed"
+    # origin's default branch, when the working copy does not know it yet (made with git init
+    # and git remote add, or cloned before origin had a branch): set as a clone sets it, as git
+    # fetch does since 2.48 (remote.origin.followRemoteHEAD=create). gh pr create's base comes
+    # from it. One the working copy already has is never changed.
+    if ! ag -C "$wc" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1; then
+        local def
+        def=$(bundle_default "$listed")
+        if [ -n "$def" ] && ag -C "$wc" rev-parse -q --verify "refs/remotes/origin/${def}" >/dev/null; then
+            ag -C "$wc" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/${def}" \
+                || die "cannot set ${wc}'s origin/HEAD"
+        fi
+    fi
+}
+
+# bundle_default LISTED: the branch origin's HEAD points at, from a bundle's listed refs (main or
+# master first when two branches share its commit); empty when the bundle has no HEAD.
+bundle_default() {
+    local head sha ref def=""
+    head=$(printf '%s\n' "$1" | awk '$2 == "HEAD" { print $1; exit }')
+    [ -n "$head" ] || return 0
+    while read -r sha ref; do
+        [ "$sha" = "$head" ] || continue
+        case "$ref" in refs/heads/main|refs/heads/master) def="${ref#refs/heads/}"; break ;;
+            refs/heads/*) [ -n "$def" ] || def="${ref#refs/heads/}" ;; esac
+    done <<<"$1"
+    printf '%s' "$def"
 }
 
 # clone_path_ok PATH: an absolute path of plain names (letters, digits, . _ -), none of them
@@ -150,7 +176,7 @@ clone_path_ok() {
 # (run_listed), so running clone is not a way to add a repo.
 agent_clone() {
     nargs $# 2; no_options "$@"
-    local slug="$1" path="$2" head def sha ref
+    local slug="$1" path="$2" def
     [ "$ON_DOCKER" != 1 ] || die "on Docker the git container works on your own working copies: clone it yourself, then aidc repo add <path>"
     gitctl_slug_ok "$slug" || die "$GITCTL_REASON"
     clone_path_ok "$path" || die "$GITCTL_REASON"
@@ -166,14 +192,8 @@ agent_clone() {
     { ag init -q --template= --shared=group . \
         && ag config remote.origin.url "$(forge_url "$slug")" \
         && ag config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'; } || die "cannot make the working copy"
-    head=$(ag bundle list-heads "$BUNDLE" | awk '$2 == "HEAD" { print $1 }')
     import_bundle .
-    def=""
-    while read -r sha ref; do
-        [ "$sha" = "$head" ] || continue
-        case "$ref" in refs/heads/main|refs/heads/master) def="${ref#refs/heads/}"; break ;;
-            refs/heads/*) [ -n "$def" ] || def="${ref#refs/heads/}" ;; esac
-    done <<<"$LISTED"
+    def=$(bundle_default "$LISTED")
     [ -n "$def" ] || def=$(printf '%s\n' "$LISTED" | awk '$2 ~ /^refs\/heads\// { sub("refs/heads/", "", $2); print $2; exit }')
     { ag update-ref "refs/heads/${def}" "refs/remotes/origin/${def}" \
         && ag symbolic-ref HEAD "refs/heads/${def}" \

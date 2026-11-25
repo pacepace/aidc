@@ -510,11 +510,35 @@ eq "an empty orchestrator.callback_url still warns" "3" \
 eq "no warning when orchestrator.callback_url is also set" "" \
     "$(warning 'orchestrator:\n  callback_url: https://new.example\nprevious_name:\n  callback_url: https://o.example\n')"
 eq "no warning when nothing is misplaced" "" "$(warning 'orchestrator:\n  callback_url: ""\n')"
-if grep -q 'done < <(aidc_callback_url_warning)' "$AIDC_ROOT/scripts/cmd-mcp.sh"; then
-    echo "  PASS: aidc mcp start prints aidc_callback_url_warning"; PASS=$((PASS + 1))
-else
-    echo "  FAIL: aidc mcp start prints aidc_callback_url_warning"; FAIL=$((FAIL + 1))
-fi
+# `aidc mcp start` itself, run with a docker that only records: the warning reaches the
+# user before the container starts, and nothing is said when orchestrator.callback_url is set.
+mcp_start() {
+    local home="$SCRATCH/mcp-home" stub="$SCRATCH/mcp-stub"
+    rm -rf "$home"; mkdir -p "$home/.config/aidc" "$stub"
+    printf '%b' "$1" > "$home/.config/aidc/config.yaml"
+    cat > "$stub/docker" <<'STUB'
+#!/bin/sh
+echo "docker $*" >> "$DOCKER_LOG"
+case "$1" in ps) exit 0 ;; esac
+exit 0
+STUB
+    chmod +x "$stub/docker"
+    : > "$SCRATCH/docker.log"
+    env -i PATH="$stub:$TEST_PATH" AIDC_NO_YQ="$AIDC_NO_YQ" HOME="$home" DOCKER_LOG="$SCRATCH/docker.log" \
+        AIDC_ROOT="$AIDC_ROOT" AIDC_SCRIPTS="$AIDC_ROOT/scripts" AIDC_VERSION_TAG=v0.0.0-test \
+        bash "$AIDC_ROOT/scripts/cmd-mcp.sh" start 2>&1
+}
+got=$(mcp_start 'previous_name:\n  callback_url: https://o.example\n')
+case "$got" in
+    *'error: callback_url is under `previous_name:`'*'rename that section to `orchestrator:`'*)
+        echo "  PASS: aidc mcp start prints the warning"; PASS=$((PASS + 1)) ;;
+    *) echo "  FAIL: aidc mcp start prints the warning"; echo "    got: $got"; FAIL=$((FAIL + 1)) ;;
+esac
+eq "and still starts the container" "1" "$(grep -c '^docker run -d' "$SCRATCH/docker.log")"
+got=$(mcp_start 'orchestrator:\n  callback_url: https://new.example\nprevious_name:\n  callback_url: https://o.example\n')
+eq "aidc mcp start says nothing about it when orchestrator.callback_url is set" "none" \
+    "$(printf '%s\n' "$got" | grep -c 'callback_url is under' | sed 's/^0$/none/')"
+eq "and starts the container" "1" "$(grep -c '^docker run -d' "$SCRATCH/docker.log")"
 
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"

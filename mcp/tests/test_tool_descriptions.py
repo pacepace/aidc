@@ -6,38 +6,34 @@ currently have an open webhook (an active watcher).
 """
 from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp.tools import (
-    _refresh_session_tool_descriptions,
-    _session_watchers,
-    _tool_base_desc,
-    _watching_suffix,
-)
+from aidc_mcp import tools
+from aidc_mcp.service import state as ss
 
 
 class _StubTask:
-    """Stands in for an asyncio.Task in _session_watchers (only the key matters)."""
+    """Stands in for an asyncio.Task in ss.session_watchers (only the key matters)."""
 
     def cancel(self):
         pass
 
 
 def _reset():
-    _session_watchers.clear()
-    _tool_base_desc.clear()
+    ss.session_watchers.clear()
+    tools._tool_base_desc.clear()
 
 
 class TestWatchingSuffix:
     def test_empty_when_no_watchers(self):
         _reset()
-        s = _watching_suffix()
+        s = tools._watching_suffix()
         assert "No session is being watched" in s
         assert "OPEN WEBHOOKS" not in s
 
     def test_lists_watched_sessions_sorted(self):
         _reset()
-        _session_watchers["beta"] = _StubTask()
-        _session_watchers["alpha"] = _StubTask()
-        s = _watching_suffix()
+        ss.session_watchers["beta"] = _StubTask()
+        ss.session_watchers["alpha"] = _StubTask()
+        s = tools._watching_suffix()
         assert "OPEN WEBHOOKS" in s
         # sorted, both present
         assert s.index("alpha") < s.index("beta")
@@ -58,13 +54,13 @@ class TestRefreshDescriptions:
     def test_appends_empty_state_then_session_list(self):
         _reset()
         app = self._app_with_send()
-        _refresh_session_tool_descriptions(app)
+        tools._refresh_session_tool_descriptions(app)
         d0 = app._tool_manager._tools["session_send"].description
         assert d0.startswith("Send a prompt to the session.")
         assert "No session is being watched" in d0
 
-        _session_watchers["myproj"] = _StubTask()
-        _refresh_session_tool_descriptions(app)
+        ss.session_watchers["myproj"] = _StubTask()
+        tools._refresh_session_tool_descriptions(app)
         d1 = app._tool_manager._tools["session_send"].description
         assert "myproj" in d1 and "OPEN WEBHOOKS" in d1
         assert d1.startswith("Send a prompt to the session.")
@@ -73,10 +69,10 @@ class TestRefreshDescriptions:
     def test_idempotent_base_not_doubled(self):
         _reset()
         app = self._app_with_send()
-        _session_watchers["a"] = _StubTask()
-        _refresh_session_tool_descriptions(app)
+        ss.session_watchers["a"] = _StubTask()
+        tools._refresh_session_tool_descriptions(app)
         d1 = app._tool_manager._tools["session_send"].description
-        _refresh_session_tool_descriptions(app)
+        tools._refresh_session_tool_descriptions(app)
         d2 = app._tool_manager._tools["session_send"].description
         assert d1 == d2
         assert d2.count("Send a prompt to the session.") == 1
@@ -85,11 +81,11 @@ class TestRefreshDescriptions:
     def test_reflects_removal(self):
         _reset()
         app = self._app_with_send()
-        _session_watchers["gone"] = _StubTask()
-        _refresh_session_tool_descriptions(app)
+        ss.session_watchers["gone"] = _StubTask()
+        tools._refresh_session_tool_descriptions(app)
         assert "gone" in app._tool_manager._tools["session_send"].description
-        _session_watchers.clear()
-        _refresh_session_tool_descriptions(app)
+        ss.session_watchers.clear()
+        tools._refresh_session_tool_descriptions(app)
         d = app._tool_manager._tools["session_send"].description
         assert "gone" not in d and "No session is being watched" in d
         _reset()
@@ -98,7 +94,7 @@ class TestRefreshDescriptions:
         # Only session-aware tools are touched; a missing one must not error.
         _reset()
         app = MCPServer("t")  # no session_send registered
-        _refresh_session_tool_descriptions(app)  # must not raise
+        tools._refresh_session_tool_descriptions(app)  # must not raise
         _reset()
 
 
@@ -168,7 +164,7 @@ class TestAnnounceWatchers:
         from aidc_mcp import tools
         _reset()
         app, ctx = self._app(), _Ctx()
-        _session_watchers["proj"] = _StubTask()
+        ss.session_watchers["proj"] = _StubTask()
         await tools._announce_watchers(app, ctx)
         assert ctx.session.sent == 1
         assert ctx.published == 1
@@ -179,7 +175,7 @@ class TestAnnounceWatchers:
         from aidc_mcp import audit, tools
         _reset()
         app = self._app()
-        _session_watchers["proj"] = _StubTask()
+        ss.session_watchers["proj"] = _StubTask()
         await tools._announce_watchers(app)
         assert "proj" in app._tool_manager._tools["session_send"].description
         assert "tool_list_changed_notify_failed" in audit._AUDIT_PATH.read_text()

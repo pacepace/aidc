@@ -15,6 +15,9 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import common as com
+from aidc_mcp.service import config as orc
+from aidc_mcp.service import state as ss
 
 # The wiring fixture patches asyncio.sleep MODULE-WIDE (tools.asyncio is the real
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
@@ -26,7 +29,7 @@ async def _let_drainer_run(session: str, ticks: int = 50) -> None:
     """Yield to the event loop until the drainer has emptied `session`'s queue."""
     for _ in range(ticks):
         await _REAL_SLEEP(0)
-        if session not in tools._pending_sends:
+        if session not in ss.pending_sends:
             return
 
 
@@ -121,7 +124,7 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     """Happy path: a session with an open webhook gets the prompt pasted + Enter,
     and returns a 'sent' confirmation without ever waiting for / capturing a reply."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
 
     res = await send(name="proj", prompt="line one\nline two", conversation_id="c1")
 
@@ -137,7 +140,7 @@ async def test_sent_immediately_without_blocking_when_watching(wiring):
     assert wiring.free_checks == 2
     assert wiring.captured is False
     # Until the transcript shows the prompt, a follow-up send reads the session busy.
-    assert tools._sent_awaiting_echo["proj"][0] == _f("line one line two")
+    assert ss.sent_awaiting_echo["proj"][0] == _f("line one line two")
 
 
 async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring):
@@ -145,8 +148,8 @@ async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring
     watches must not say the reply comes to B (live 2026-10-08: a project's brief was
     told so while every reply went to A). It names A and how to move the webhook."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
 
     res = await send(name="proj", prompt="hello", conversation_id="c-b")
 
@@ -162,8 +165,8 @@ async def test_a_send_from_another_conversation_says_where_the_reply_goes(wiring
 
 async def test_a_queued_send_from_another_conversation_says_where_the_reply_goes(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
     wiring.idle_ok = "claude_busy"
 
     res = await send(name="proj", prompt="hello", conversation_id="c-b")
@@ -179,8 +182,8 @@ async def test_a_queued_send_from_another_conversation_says_where_the_reply_goes
 
 async def test_a_send_from_the_watching_conversation_says_it_comes_here(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
 
     res = await send(name="proj", prompt="hello", conversation_id="c-a")
 
@@ -222,14 +225,14 @@ async def test_no_webhook_reason_names_missing_callback_url(wiring, monkeypatch)
     prod misconfiguration (2026-07-26) that dropped every reply. The reply is
     still lost, but the return now names the config key to fix."""
     app, send = _make_send()
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "")
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
     assert res["ok"] is True
     assert res["data"]["status"] == "sent"
     assert "callback_url" in res["data"]["delivery"]
-    assert "proj" not in tools._session_watchers
+    assert "proj" not in ss.session_watchers
     assert wiring.paste_calls  # the prompt still went in
 
 
@@ -247,7 +250,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     async def announce(app_, ctx=None):
         return None
 
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_baseline_watermark", baseline)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
@@ -257,13 +260,13 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     assert res["ok"] is True
     assert res["data"]["status"] == "sent"
     assert "webhook" in res["data"]["delivery"]
-    assert "proj" in tools._session_watchers
+    assert "proj" in ss.session_watchers
 
 
 async def test_errors_when_the_session_does_not_exist(wiring):
     app, send = _make_send()
     wiring.session_state = tools.SESSION_GONE
-    tools._sent_awaiting_echo["proj"] = ("from before it was killed", 0.0)
+    ss.sent_awaiting_echo["proj"] = ("from before it was killed", 0.0)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -271,17 +274,17 @@ async def test_errors_when_the_session_does_not_exist(wiring):
     assert "no session named" in res["error"]
     assert res["error_code"] == "no_such_session"
     assert not wiring.paste_calls
-    assert "proj" not in tools._pending_sends
-    assert "proj" not in tools._sent_awaiting_echo   # its send-path state is forgotten
+    assert "proj" not in ss.pending_sends
+    assert "proj" not in ss.sent_awaiting_echo   # its send-path state is forgotten
     # Checked before the webhook opens: nothing is started or saved for it.
-    assert "proj" not in tools._session_watchers
-    assert not ts.watch_path(tools._WATCHER_STATE_DIR, "proj").exists()
+    assert "proj" not in ss.session_watchers
+    assert not ts.watch_path(ss.WATCHER_STATE_DIR, "proj").exists()
 
 
 async def test_claude_not_running_holds_the_prompt_instead_of_refusing(wiring):
     """A restarting Claude is not a reason to lose the prompt."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.claude_running = False
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -302,7 +305,7 @@ async def test_queues_instead_of_dropping_when_session_busy(wiring):
     prompt that way to a turn which ran 22 minutes, and nothing on either side
     retried it. Now it queues: ok=True, status "queued", nothing pasted yet."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -313,7 +316,7 @@ async def test_queues_instead_of_dropping_when_session_busy(wiring):
     # Held, not injected into the running turn.
     assert not wiring.paste_calls
     assert not _sent_enter(wiring.tmux_calls)
-    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
     assert res["data"]["waiting_reason"] == "claude_busy"
     # The caller is told plainly not to retry — re-sending is what produced the
     # duplicate-prompt shape this replaces.
@@ -325,7 +328,7 @@ async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
     """The drainer injects the backlog once the pane frees up, oldest first, as one
     message: every prompt queued while the session was busy goes in together."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     assert (await send(name="proj", prompt="first", conversation_id="c1"))["data"][
@@ -339,29 +342,29 @@ async def test_queued_prompts_are_injected_in_order_when_the_turn_ends(wiring):
 
     assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
     assert _sent_enter(wiring.tmux_calls)
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
 
 
 async def test_send_queues_behind_a_waiting_prompt_even_when_idle(wiring):
     """Order is the whole point: with something already queued, a new send must
     NOT jump the line by pasting just because the pane looks idle right now."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    tools._pending_sends["proj"] = [ts.QueuedPrompt("earlier", "t", 0, "claude_busy")]
+    ss.session_watchers["proj"] = _StubTask()
+    ss.pending_sends["proj"] = [ts.QueuedPrompt("earlier", "t", 0, "claude_busy")]
 
     res = await send(name="proj", prompt="later", conversation_id="c1")
 
     assert res["data"]["status"] == "queued"
     assert not wiring.paste_calls
-    assert [q.text for q in tools._pending_sends["proj"]] == ["earlier", "later"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["earlier", "later"]
     assert res["data"]["waiting_reason"] == "queued_behind"
 
 
 async def test_refuses_once_the_queue_is_full(wiring):
     """A wedged session must not accumulate prompts without bound."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    tools._pending_sends["proj"] = [ts.QueuedPrompt(f"q{i}", "t")
+    ss.session_watchers["proj"] = _StubTask()
+    ss.pending_sends["proj"] = [ts.QueuedPrompt(f"q{i}", "t")
                                     for i in range(tools._PENDING_MAX_DEPTH)]
 
     res = await send(name="proj", prompt="one too many", conversation_id="c1")
@@ -369,19 +372,19 @@ async def test_refuses_once_the_queue_is_full(wiring):
     assert res["ok"] is False
     assert "queued" in res["error"]
     assert res["error_code"] == "queue_full"
-    assert len(tools._pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
+    assert len(ss.pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
 
 
 async def test_a_long_busy_turn_never_costs_the_prompt(wiring):
     """No deadline: a turn that runs for hours keeps the prompt waiting, then it lands."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     await send(name="proj", prompt="hello", conversation_id="c1")
     await _let_drainer_run("proj", ticks=500)
-    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
-    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
+    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
@@ -392,26 +395,26 @@ async def test_spawn_drainer_does_not_start_a_second_one(wiring):
     """One drainer per session. Two would race to pop the same queue head and
     could paste the same prompt twice."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     await send(name="proj", prompt="a", conversation_id="c1")
-    first = tools._pending_drainers["proj"]
+    first = ss.pending_drainers["proj"]
     await send(name="proj", prompt="b", conversation_id="c1")
 
-    assert tools._pending_drainers["proj"] is first
+    assert ss.pending_drainers["proj"] is first
 
 
 async def test_claude_stopping_holds_the_queue(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
     wiring.claude_running = False
     await _let_drainer_run("proj", ticks=200)
-    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
-    assert tools._pending_sends["proj"][0].waiting_reason == "claude_not_running"
+    assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
+    assert ss.pending_sends["proj"][0].waiting_reason == "claude_not_running"
 
     wiring.claude_running = True
     wiring.idle_ok = True
@@ -422,7 +425,7 @@ async def test_claude_stopping_holds_the_queue(wiring):
 async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
     """The only way a prompt leaves the queue unpasted, and it is still recorded."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="one", conversation_id="c1")
     await send(name="proj", prompt="two", conversation_id="c1")
@@ -430,16 +433,16 @@ async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
     wiring.session_state = tools.SESSION_GONE
     await _let_drainer_run("proj", ticks=200)
 
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     dead = sorted(json.loads(p.read_text())["prompt"] for p in
-                  (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
+                  (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
     assert dead == ["one", "two"]
-    assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
+    assert not ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj").exists()
 
 
 async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -455,69 +458,69 @@ async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
     await _let_drainer_run("proj", ticks=300)
 
     assert len(wiring.paste_calls) == 6
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     # Backoff between failed pastes: 2, 4, 8 … s, capped.
     retries = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
     assert retries == [2.0, 4.0, 8.0, 16.0, 32.0]
-    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
 
 async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "input_has_text"
     await send(name="proj", prompt="first", conversation_id="c1")
     await send(name="proj", prompt="second", conversation_id="c1")
     await _let_drainer_run("proj", ticks=20)
 
-    saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
+    saved, _ = ts.load_send_queues(ss.WATCHER_STATE_DIR)
     assert [(q.text, q.waiting_reason) for q in saved["proj"]] == [
         ("first", "input_has_text"), ("second", "queued_behind")]
     # The ids session_send returned survive the restart, so a cancel by id still works.
     assert [q.prompt_id for q in saved["proj"]] == [
-        q.prompt_id for q in tools._pending_sends["proj"]]
+        q.prompt_id for q in ss.pending_sends["proj"]]
 
     # The MCP restarts: in-memory state is gone, the file is not.
-    for task in tools._pending_drainers.values():
+    for task in ss.pending_drainers.values():
         task.cancel()
     await _REAL_SLEEP(0)
-    tools._pending_sends.clear()
-    tools._pending_drainers.clear()
-    tools._queue_loaded.clear()
+    ss.pending_sends.clear()
+    ss.pending_drainers.clear()
+    ss.queue_loaded.clear()
 
     wiring.idle_ok = True
     await tools.resume_send_queues()
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
-    assert not ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj").exists()
+    assert not ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj").exists()
 
 
 async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "gone",
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "gone",
                        [ts.QueuedPrompt("orphan", "2026-09-17T02:00:00Z")])
     wiring.session_state = tools.SESSION_GONE
     await tools.resume_send_queues()
-    assert "gone" not in tools._pending_sends
-    [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
+    assert "gone" not in ss.pending_sends
+    [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
     assert json.loads(dead.read_text())["reason"] == "session_killed"
 
 
 async def test_queued_prompts_record_the_session_they_were_accepted_for(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="hello", conversation_id="c1")
-    [q] = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+    [q] = ts.load_send_queues(ss.WATCHER_STATE_DIR)[0]["proj"]
     assert (q.conversation_id, q.session_instance) == ("c1", "id-1")
 
 
 async def test_a_prompt_sent_without_a_conversation_records_the_open_webhooks(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watched", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-watched", "http://cb")
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="hello")
-    [q] = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+    [q] = ts.load_send_queues(ss.WATCHER_STATE_DIR)[0]["proj"]
     assert q.conversation_id == "c-watched"
 
 
@@ -525,7 +528,7 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
     """The drainer checks the prompt's session again under the paste lock: the wait for
     a free session can be long enough for it to be killed and created again."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="for the old session", conversation_id="c1")
 
@@ -538,8 +541,8 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
     await _let_drainer_run("proj", ticks=100)
 
     assert not wiring.paste_calls
-    assert "proj" not in tools._pending_sends
-    [dead] = (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")
+    assert "proj" not in ss.pending_sends
+    [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")
     assert json.loads(dead.read_text())["prompt"] == "for the old session"
 
 
@@ -550,17 +553,17 @@ async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enque
     replacement = [ts.QueuedPrompt("kept", "2026-09-17T04:00:00Z", session_instance="id-1")]
 
     async def session_instance(name):
-        tools._pending_sends["proj"] = replacement
+        ss.pending_sends["proj"] = replacement
         return tools.SESSION_EXISTS, "id-1"
 
     monkeypatch.setattr(tools, "_session_instance", session_instance)
     await tools._enqueue_send("proj", "aidc-proj-dev", ts.QueuedPrompt("new", ts.now_iso()),
                               "claude_busy")
-    assert [q.text for q in tools._pending_sends["proj"]] == ["kept", "new"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["kept", "new"]
 
 
 async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
-    path = ts.send_queue_path(tools._WATCHER_STATE_DIR, "proj")
+    path = ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
     # Startup cannot tell whose it is (the name is inside the file): logged, left alone.
@@ -568,7 +571,7 @@ async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
     assert path.read_text() == "{not json"
 
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="new", conversation_id="c1")
     [aside] = path.parent.glob(f"{path.name}.unreadable-*")
@@ -585,7 +588,7 @@ async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeyp
     monkeypatch.setattr(tools, "_PROMPT_WAITING_S", 0.0)
     monkeypatch.setattr(tools, "_notify_prompts", capture)
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="stuck", conversation_id="c1")
     for _ in range(20):
@@ -596,7 +599,7 @@ async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeyp
 async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch):
     """A saved queue whose load failed (docker could not be run at startup) must still be
     read by the next send, not overwritten by it."""
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj", [
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj", [
         ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
                         conversation_id="c1", session_instance="id-1")])
     working = tools._session_instance
@@ -606,25 +609,25 @@ async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch
 
     monkeypatch.setattr(tools, "_session_instance", broken)
     await tools.resume_on_startup(MCPServer("t"))
-    assert "proj" not in tools._queue_loaded
+    assert "proj" not in ss.queue_loaded
     monkeypatch.setattr(tools, "_session_instance", working)
 
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="new", conversation_id="c1")
-    assert [q.text for q in ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]] == [
+    assert [q.text for q in ts.load_send_queues(ss.WATCHER_STATE_DIR)[0]["proj"]] == [
         "saved", "new"]
 
 
 async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring):
     """After a restart, a session_send can arrive before startup has resumed the saved
     queue. The saved prompts still go first, and resume does not load them twice."""
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj", [
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj", [
         ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
                         conversation_id="c1", session_instance="id-1")])
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
 
     res = await send(name="proj", prompt="new", conversation_id="c1")
     assert res["data"]["status"] == "queued"
@@ -636,7 +639,7 @@ async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring
 
 async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_paste(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "input_has_text"
     await send(name="proj", prompt="hello", conversation_id="c1")
     await _let_drainer_run("proj", ticks=20)
@@ -653,7 +656,7 @@ async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_past
 
 async def test_status_line_clears_when_the_wait_changes_to_another_reason(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "input_has_text"
     await send(name="proj", prompt="hello", conversation_id="c1")
     await _let_drainer_run("proj", ticks=20)
@@ -667,9 +670,9 @@ async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeyp
     app = MCPServer("t")
     tools.register(app)
     status = app._tool_manager._tools["session_status"].fn
-    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+    monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "ok", "stderr": ""})
-    tools._pending_sends["proj"] = [
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("x" * 300, "2026-09-17T02:00:00Z", 2, "paste_failing",
                         prompt_id="p-waiting")]
 
@@ -687,7 +690,7 @@ async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
     """A paste that does not land is one failed attempt, not a failed send: the prompt
     is queued and pasted once the paste works."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.paste_ok = False
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -696,11 +699,11 @@ async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
     assert res["data"]["status"] == "queued"
     assert res["data"]["waiting_reason"] == "paste_failing"
     assert not _sent_enter(wiring.tmux_calls)  # no Enter after a failed paste
-    assert tools._pending_sends["proj"][0].paste_attempts == 1   # the failed paste counts
+    assert ss.pending_sends["proj"][0].paste_attempts == 1   # the failed paste counts
 
     wiring.paste_ok = True
     await _let_drainer_run("proj", ticks=100)
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     assert [text for _, text, _ in wiring.paste_calls][-1] == _f("hello")
     assert _sent_enter(wiring.tmux_calls)
 
@@ -712,47 +715,47 @@ async def test_a_failed_paste_is_queued_and_retried_not_refused(wiring):
 
 async def test_direct_send_records_the_injected_prompt(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
 
     await send(name="proj", prompt="fix the\nfailing test", conversation_id="c1")
 
     # Recorded in its pasted (newline-folded) form; matching is whitespace-insensitive.
-    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("fix the failing test"))
+    assert ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", _f("fix the failing test"))
 
 
 async def test_queued_send_records_only_once_injected(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     await send(name="proj", prompt="later", conversation_id="c1")
-    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later"))  # not yet
+    assert not ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", _f("later"))  # not yet
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later"))
+    assert ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", _f("later"))
 
 
 async def test_a_send_for_a_person_records_who_it_was_for(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
 
     await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by=" u-1 ")
 
-    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("run the tests", sent_by="u-1")) == "u-1"
+    assert ts.take_sent_prompt(ss.WATCHER_STATE_DIR, "proj", _f("run the tests", sent_by="u-1")) == "u-1"
 
 
 async def test_a_queued_send_for_a_person_keeps_who_it_was_for(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
 
     await send(name="proj", prompt="later", conversation_id="c1", sent_by="u-1")
-    assert tools._pending_sends["proj"][0].sent_by == "u-1"
+    assert ss.pending_sends["proj"][0].sent_by == "u-1"
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
-    assert ts.take_sent_prompt(tools._WATCHER_STATE_DIR, "proj", _f("later", sent_by="u-1")) == "u-1"
+    assert ts.take_sent_prompt(ss.WATCHER_STATE_DIR, "proj", _f("later", sent_by="u-1")) == "u-1"
 
 
 async def test_inject_is_the_single_recording_point(wiring):
@@ -760,10 +763,10 @@ async def test_inject_is_the_single_recording_point(wiring):
     so no caller can forget to (the record is what keeps a reply from being
     framed as the person's)."""
     assert await tools._inject("aidc-proj-dev", "via inject", tools._SESSION_WINDOW, session="proj")
-    assert ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "via inject")
+    assert ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "via inject")
     wiring.paste_ok = False
     assert not await tools._inject("aidc-proj-dev", "lost", tools._SESSION_WINDOW, session="proj")
-    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "lost")
+    assert not ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "lost")
 
 
 async def test_failed_paste_records_nothing(wiring):
@@ -772,12 +775,12 @@ async def test_failed_paste_records_nothing(wiring):
 
     await send(name="proj", prompt="hello", conversation_id="c1")
 
-    assert not ts.consume_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "hello")
+    assert not ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "hello")
 
 
 async def test_record_write_failure_does_not_fail_the_send(wiring, monkeypatch):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
 
     def boom(*a, **k):
         raise OSError("read-only")
@@ -793,14 +796,14 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
     """Only a definite 'no such network' ends a queue. A daemon hiccup must not
     dead-letter prompts the orchestrator is waiting on."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
     wiring.session_state = tools.SESSION_UNKNOWN
     await _let_drainer_run("proj", ticks=200)
-    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
-    assert not list((tools._WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
+    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
     wiring.session_state = tools.SESSION_EXISTS
     wiring.idle_ok = True
@@ -809,19 +812,19 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
 
 
 async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj",
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj",
                        [ts.QueuedPrompt("kept", "2026-09-17T02:00:00Z")])
     wiring.session_state = tools.SESSION_UNKNOWN
     wiring.idle_ok = False
     await tools.resume_send_queues()
-    assert [q.text for q in tools._pending_sends["proj"]] == ["kept"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["kept"]
 
 
 async def test_status_line_clears_after_a_failed_paste_then_a_successful_one(wiring):
     """Waiting on typed text, the person clears it, one paste fails, the retry lands:
     the notice must not stay up."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "input_has_text"
     await send(name="proj", prompt="hello", conversation_id="c1")
     await _let_drainer_run("proj", ticks=20)
@@ -837,15 +840,15 @@ async def test_status_line_clears_after_a_failed_paste_then_a_successful_one(wir
     wiring.idle_ok = True
     await _let_drainer_run("proj", ticks=100)
 
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
     assert options[-1] == ["set-option", "-t", "main", "-u", "@aidc_waiting"]
-    assert "proj" not in tools._waiting_notice_shown
+    assert "proj" not in ss.waiting_notice_shown
 
 
 async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring, monkeypatch):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -855,7 +858,7 @@ async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring
     monkeypatch.setattr(tools, "_wait_until_free", broken)
     await _let_drainer_run("proj", ticks=60)
 
-    assert [q.text for q in tools._pending_sends["proj"]] == ["hello"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
     restarts = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
     assert restarts[:4] == [2.0, 4.0, 8.0, 16.0]
 
@@ -863,7 +866,7 @@ async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring
 async def test_resume_remembers_the_notice_is_showing_so_it_is_cleared(wiring):
     """The tmux option outlives an MCP restart. A queue saved while waiting on input
     must clear it when its prompt is pasted after resuming."""
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "proj",
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj",
                        [ts.QueuedPrompt("waiting", "2026-09-17T02:00:00Z", 0, "input_has_text")])
     wiring.idle_ok = True
     await tools.resume_send_queues()
@@ -877,22 +880,22 @@ async def test_resume_remembers_the_notice_is_showing_so_it_is_cleared(wiring):
 
 async def test_reply_goes_here_when_this_conversation_watches(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c1", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c1", "http://cb")
     res = await send(name="proj", prompt="hello", conversation_id="c1")
     assert res["data"]["reply_goes"] == "here"
 
 
 async def test_reply_goes_elsewhere_when_another_conversation_watches(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-a", "http://cb")
     res = await send(name="proj", prompt="hello", conversation_id="c-b")
     assert res["data"]["reply_goes"] == "elsewhere"
 
 
 async def test_reply_goes_nowhere_without_a_webhook(wiring, monkeypatch):
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "")
     app, send = _make_send()
     res = await send(name="proj", prompt="hello", conversation_id="c1")
     assert res["data"]["reply_goes"] == "nowhere"
@@ -918,7 +921,7 @@ def _taint_switch(monkeypatch):
 async def test_the_drainer_holds_a_prompt_once_the_session_is_tainted(wiring, monkeypatch):
     taint = _taint_switch(monkeypatch)
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     res = await send(name="proj", prompt="do the thing", conversation_id="c1")
     assert res["data"]["status"] == "queued"
@@ -927,7 +930,7 @@ async def test_the_drainer_holds_a_prompt_once_the_session_is_tainted(wiring, mo
     for _ in range(50):
         await _REAL_SLEEP(0)
     assert wiring.paste_calls == []
-    assert tools._pending_sends["proj"][0].waiting_reason == "session_tainted"
+    assert ss.pending_sends["proj"][0].waiting_reason == "session_tainted"
     assert "session_tainted" in tools._WAITING_EXPLAINED
 
 
@@ -935,7 +938,7 @@ async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, m
     """The other side of the hold: with no taint flag the queued prompt goes in."""
     _taint_switch(monkeypatch)
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="do the thing", conversation_id="c1")
     wiring.idle_ok = True
@@ -948,23 +951,23 @@ async def test_a_queued_send_names_a_headless_run_going_in_the_session(wiring):
     to wait, join or interrupt is told about it (the orchestrator, 2026-10-22)."""
     from aidc_mcp import headless
     _, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     headless.new_run("proj", "session_invoke", "edit the spec")
     res = await send(name="proj", prompt="next", conversation_id="c1")
     runs = res["data"]["headless_runs"]
     assert [(r["tool"], r["prompt"]) for r in runs] == [("session_invoke", "edit the spec")]
-    for task in tools._pending_drainers.values():
+    for task in ss.pending_drainers.values():
         task.cancel()
 
 
 async def test_a_send_with_no_headless_run_says_nothing_about_one(wiring):
     _, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     res = await send(name="proj", prompt="next", conversation_id="c1")
     assert "headless_runs" not in res["data"]
-    for task in tools._pending_drainers.values():
+    for task in ss.pending_drainers.values():
         task.cancel()
 
 
@@ -1002,7 +1005,7 @@ async def _queue_three(send):
 
 async def test_every_prompt_queued_while_busy_goes_in_as_one_paste_in_send_order(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
     assert not wiring.paste_calls
@@ -1014,11 +1017,11 @@ async def test_every_prompt_queued_while_busy_goes_in_as_one_paste_in_send_order
     assert [text for _, text, _ in wiring.paste_calls] == [joined]
     enters = [a for _, a in wiring.tmux_calls if a[0] == "send-keys" and a[-1] == "Enter"]
     assert len(enters) == 1
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     # One send record for the one paste. A person's prompt is in the batch, so the
     # reply goes back as the person's, and the batch names every prompt with its own
     # sender, in send order.
-    entry = ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", joined)
+    entry = ts.take_sent_entry(ss.WATCHER_STATE_DIR, "proj", joined)
     assert entry["by"] == "pace"
     assert entry["batch"]["prompts"] == [
         {"prompt_id": ids[0], "sent_by": "", "conversation_id": "c1"},
@@ -1031,7 +1034,7 @@ async def test_a_prompt_queued_after_a_batch_went_in_goes_in_the_next_one(wiring
     """Multi-hop: the batch that went in is gone from the queue; what queues during
     the turn it opened waits, and goes in on its own when that turn ends."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="one", conversation_id="c1")
     await send(name="proj", prompt="two", conversation_id="c1")
@@ -1046,22 +1049,22 @@ async def test_a_prompt_queued_after_a_batch_went_in_goes_in_the_next_one(wiring
 
 async def test_every_send_returns_a_stable_prompt_id(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     sent = await send(name="proj", prompt="now", conversation_id="c1")
     assert sent["data"]["status"] == "sent" and sent["data"]["prompt_id"].startswith("p-")
 
     wiring.idle_ok = False
     queued = await send(name="proj", prompt="later", conversation_id="c1")
     assert queued["data"]["status"] == "queued"
-    assert queued["data"]["prompt_id"] == tools._pending_sends["proj"][0].prompt_id
+    assert queued["data"]["prompt_id"] == ss.pending_sends["proj"][0].prompt_id
     assert queued["data"]["prompt_id"] != sent["data"]["prompt_id"]
-    for task in tools._pending_drainers.values():
+    for task in ss.pending_drainers.values():
         task.cancel()
 
 
 async def test_a_prompt_cancelled_before_the_paste_is_left_out_of_the_batch(wiring, idle_state):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
 
@@ -1076,13 +1079,13 @@ async def test_a_prompt_cancelled_before_the_paste_is_left_out_of_the_batch(wiri
     assert [text for _, text, _ in wiring.paste_calls] == [
         f"{_THREE_SENT[0]} [next message] {_THREE_SENT[2]}"]
     dead = [json.loads(p.read_text()) for p in
-            (tools._WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")]
+            (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")]
     assert [(x["prompt_id"], x["reason"]) for x in dead] == [(ids[1], "cancelled")]
 
 
 async def test_cancelling_a_prompt_already_pasted_says_too_late(wiring, idle_state):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
     wiring.idle_ok = True
@@ -1090,21 +1093,21 @@ async def test_cancelling_a_prompt_already_pasted_says_too_late(wiring, idle_sta
 
     d = (await _cancel_tool(app)(name="proj", prompt_id=ids[0]))["data"]
     assert d["outcome"] == "already_pasted" and d["cancelled"] == []
-    entry = ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", wiring.paste_calls[0][1])
+    entry = ts.take_sent_entry(ss.WATCHER_STATE_DIR, "proj", wiring.paste_calls[0][1])
     assert d["pasted_at"] == entry["batch"]["pasted_at"]
     assert d["note"].startswith("too late")
 
 
 async def test_cancelling_an_unknown_prompt_id_says_unknown(wiring, idle_state):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="waiting", conversation_id="c1")
 
     d = (await _cancel_tool(app)(name="proj", prompt_id="p-nosuchprompt00"))["data"]
     assert d["outcome"] == "unknown" and d["cancelled"] == []
-    assert [q.text for q in tools._pending_sends["proj"]] == ["waiting"]
-    for task in tools._pending_drainers.values():
+    assert [q.text for q in ss.pending_sends["proj"]] == ["waiting"]
+    for task in ss.pending_drainers.values():
         task.cancel()
 
 
@@ -1116,13 +1119,13 @@ async def test_cancel_takes_a_position_or_a_prompt_id_not_both(wiring, idle_stat
 
 async def test_cancel_by_position_still_takes_back_that_prompt(wiring, idle_state):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
     d = (await _cancel_tool(app)(name="proj", position=3))["data"]
     assert d["outcome"] == "cancelled" and [c["prompt_id"] for c in d["cancelled"]] == [ids[2]]
-    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ids[:2]
-    for task in tools._pending_drainers.values():
+    assert [q.prompt_id for q in ss.pending_sends["proj"]] == ids[:2]
+    for task in ss.pending_drainers.values():
         task.cancel()
 
 
@@ -1130,12 +1133,12 @@ async def test_cancel_all_leaves_a_batch_in_the_box_and_says_so(wiring, idle_sta
     """A batch pasted into the box and not submitted is the session's: taking back every
     waiting prompt leaves it, and the answer says it is too late, not that nothing waits."""
     app, _ = _make_send()
-    tools._queue_loaded.add("proj")
-    tools._pending_sends["proj"] = [ts.QueuedPrompt("in the box", ts.now_iso(), prompt_id="p-a")]
-    tools._unsubmitted_paste["proj"] = ("in the box", ("p-a",))
+    ss.queue_loaded.add("proj")
+    ss.pending_sends["proj"] = [ts.QueuedPrompt("in the box", ts.now_iso(), prompt_id="p-a")]
+    ss.unsubmitted_paste["proj"] = ("in the box", ("p-a",))
     d = (await _cancel_tool(app)(name="proj"))["data"]
     assert d["outcome"] == "already_pasted" and d["cancelled"] == []
-    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ["p-a"]
+    assert [q.prompt_id for q in ss.pending_sends["proj"]] == ["p-a"]
 
 
 def _in_batch_xor_cancelled(pasted: list[str], text: str, outcome: str) -> None:
@@ -1149,7 +1152,7 @@ async def test_a_cancel_arriving_during_the_paste_waits_for_it_and_says_too_late
     """The drainer holds the send lock from choosing its batch to the end of the paste;
     a cancel for a prompt in that batch waits, then finds it pasted."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
 
@@ -1179,7 +1182,7 @@ async def test_a_cancel_arriving_during_the_paste_waits_for_it_and_says_too_late
     pasted = [text for _, text, _ in wiring.paste_calls]
     assert d["outcome"] == "already_pasted"
     _in_batch_xor_cancelled(pasted, _THREE[1], d["outcome"])
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
 
 
 async def test_a_cancel_that_gets_the_lock_first_keeps_its_prompt_out_of_the_batch(
@@ -1187,11 +1190,11 @@ async def test_a_cancel_that_gets_the_lock_first_keeps_its_prompt_out_of_the_bat
     """The other order: the cancel is decided first, and the drainer chooses its batch
     only once it holds the lock, so the cancelled prompt is not in it."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
 
-    lock = tools._session_send_locks["proj"]
+    lock = ss.session_send_locks["proj"]
     await lock.acquire()
     cancel = asyncio.create_task(_cancel_tool(app)(name="proj", prompt_id=ids[1]))
     await _REAL_SLEEP(0)
@@ -1211,18 +1214,18 @@ async def test_a_cancel_that_gets_the_lock_first_keeps_its_prompt_out_of_the_bat
 
 async def test_a_failed_batch_paste_keeps_every_prompt_and_its_order(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     ids = await _queue_three(send)
     wiring.paste_ok = False
     wiring.idle_ok = True
     for _ in range(50):
         await _REAL_SLEEP(0)
-    assert [q.prompt_id for q in tools._pending_sends["proj"]] == ids
-    assert all(q.paste_attempts >= 1 for q in tools._pending_sends["proj"])
+    assert [q.prompt_id for q in ss.pending_sends["proj"]] == ids
+    assert all(q.paste_attempts >= 1 for q in ss.pending_sends["proj"])
     wiring.paste_ok = True
     await _let_drainer_run("proj", ticks=300)
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     assert wiring.paste_calls[-1][1] == " [next message] ".join(_THREE_SENT)
 
 
@@ -1245,7 +1248,7 @@ def _pasted(w):
 
 async def test_session_send_pastes_the_orchestrators_prompt_framed(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     res = await send(name="proj", prompt="line one\nline two", conversation_id="c1")
     assert res["ok"] is True
     assert _pasted(wiring) == [f"{_ORCH_C1} line one line two"]
@@ -1253,14 +1256,14 @@ async def test_session_send_pastes_the_orchestrators_prompt_framed(wiring):
 
 async def test_session_send_pastes_a_persons_prompt_framed(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="run the tests", conversation_id="c1", sent_by="pace")
     assert _pasted(wiring) == [f"{_PERSON_C1} run the tests"]
 
 
 async def test_session_send_pastes_the_callers_sender_label(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="vote e", conversation_id="c1", sent_by="pace",
                sender_label="Saoirse (an agent)")
     assert _pasted(wiring) == [f"{_SAOIRSE_C1} vote e"]
@@ -1274,7 +1277,7 @@ async def test_session_send_without_a_conversation_still_names_the_sender(wiring
 
 async def test_session_send_pastes_a_command_unframed(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="/clear", conversation_id="c1")
     assert _pasted(wiring) == ["/clear"]
 
@@ -1289,7 +1292,7 @@ async def test_session_send_declares_sender_label():
 
 async def test_a_batch_keeps_each_prompts_own_header(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="first", conversation_id="c1")
     await send(name="proj", prompt="second", conversation_id="c1", sent_by="pace")
@@ -1304,7 +1307,7 @@ async def test_a_batch_keeps_each_prompts_own_header(wiring):
 
 async def test_a_queued_prompt_is_framed_once_not_again_at_the_paste(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = False
     await send(name="proj", prompt="later", conversation_id="c1")
     wiring.idle_ok = True
@@ -1315,11 +1318,11 @@ async def test_a_queued_prompt_is_framed_once_not_again_at_the_paste(wiring):
 
 async def test_the_echo_hold_and_the_send_record_hold_the_framed_text(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="fix the parser", conversation_id="c1")
     framed = f"{_ORCH_C1} fix the parser"
-    assert tools._sent_awaiting_echo["proj"][0] == framed
-    assert ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", framed) is not None
+    assert ss.sent_awaiting_echo["proj"][0] == framed
+    assert ts.take_sent_entry(ss.WATCHER_STATE_DIR, "proj", framed) is not None
 
 
 async def test_the_paste_itself_adds_nothing(wiring):
@@ -1335,9 +1338,9 @@ async def test_a_queued_prompts_preview_is_the_prompt_not_the_header(wiring, mon
     pasted text would show only it, and every waiting prompt would look the same."""
     app, send = _make_send()
     status = app._tool_manager._tools["session_status"].fn
-    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+    monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "ok", "stderr": ""})
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     conv = "0193f3a2-7c1e-7b55-9a0d-2f4e8c6b1a77"
     wiring.idle_ok = False
     await send(name="proj", prompt="fix the parser", conversation_id=conv)
@@ -1346,7 +1349,7 @@ async def test_a_queued_prompts_preview_is_the_prompt_not_the_header(wiring, mon
     assert [e["prompt_preview"] for e in res["data"]["send_queue"]] == [
         "fix the parser", "then run the tests"]
     # What waits to be pasted is still framed.
-    assert [q.paste() for q in tools._pending_sends["proj"]][0].startswith(
+    assert [q.paste() for q in ss.pending_sends["proj"]][0].startswith(
         f"[Sent through aidc by the orchestrator, from conversation {conv}.")
 
 
@@ -1354,8 +1357,8 @@ async def test_the_header_names_the_calls_conversation_never_the_webhooks(wiring
     """A send with no conversation_id to a session another conversation watches is
     not from that conversation: the reply goes there, but it did not send it."""
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-watcher", "http://orchestrator.local")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-watcher", "http://orchestrator.local")
     await send(name="proj", prompt="hello")
     assert _pasted(wiring) == [f"{_ORCH} hello"]
     assert tools._watched_conversation("proj") == "c-watcher"
@@ -1363,6 +1366,6 @@ async def test_the_header_names_the_calls_conversation_never_the_webhooks(wiring
 
 async def test_an_empty_prompt_pastes_no_header(wiring):
     app, send = _make_send()
-    tools._session_watchers["proj"] = _StubTask()
+    ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="  \n ", conversation_id="c1")
     assert all("[Sent through aidc" not in text for text in _pasted(wiring))

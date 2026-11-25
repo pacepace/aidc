@@ -11,21 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aidc_mcp import tools
 from aidc_mcp import transcript as ts
-from aidc_mcp.tools import (
-    _LOOP_GUARD_BACKSTOP,
-    _LOOP_GUARD_IDLE_RESET_S,
-    _LOOP_GUARD_MAX_CONSECUTIVE,
-    _STALE_PIN_RECOVER_POLLS,
-    _TORN_READ_RECOVER_POLLS,
-    _baseline_watermark,
-    _consumed_idle_counts,
-    _deliver_with_retry,
-    _drain_locks,
-    _drain_transcript_once,
-    _PermanentDeliveryError,
-    _post_turn,
-)
+from aidc_mcp.service import state as ss
+from tests.logs import log_event_patched, patch_log_event
 
 
 class _EmptyStrError(Exception):
@@ -98,22 +87,22 @@ class Recorder:
         return True
 
 
-# --- _deliver_with_retry -----------------------------------------------------
+# --- tools._deliver_with_retry -----------------------------------------------------
 
 class TestDeliverWithRetry:
     async def test_succeeds_first_try(self):
         rec = Recorder()
-        assert await _deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
+        assert await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
         assert rec.calls == 1
 
     async def test_retries_then_succeeds(self):
         rec = Recorder(fail_times=2)
-        assert await _deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
+        assert await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
         assert rec.calls == 3
 
     async def test_budget_exhausted_returns_false(self):
         rec = Recorder(always_fail=True)
-        ok = await _deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep, budget=5.0)
+        ok = await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep, budget=5.0)
         assert ok is False
         assert rec.calls >= 2  # tried a couple times before the next backoff blew the budget
 
@@ -126,17 +115,17 @@ class TestDeliverWithRetry:
         async def gone(turn, attempt):
             nonlocal calls
             calls += 1
-            raise _PermanentDeliveryError(404)
+            raise tools._PermanentDeliveryError(404)
 
-        ok = await _deliver_with_retry(ts.Turn("a1", "x"), post_fn=gone, sleep_fn=_nosleep)
+        ok = await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=gone, sleep_fn=_nosleep)
         assert ok is False
         assert calls == 1  # <-- did NOT retry the dead conversation
 
 
-# --- _drain_transcript_once (forward-only: first pass baselines, no replay) ----
+# --- tools._drain_transcript_once (forward-only: first pass baselines, no replay) ----
 
 async def _drain(base, state, rec, session="sess", conv="conv"):
-    await _drain_transcript_once(session, conv, "http://cb", transcripts_base=base,
+    await tools._drain_transcript_once(session, conv, "http://cb", transcripts_base=base,
                                  state_dir=state, post_fn=rec, sleep_fn=_nosleep)
 
 
@@ -181,7 +170,7 @@ class TestDrain:
         rec = Recorder()
         await _drain(base, state, rec)              # baseline
         # Simulate restart: the watcher is gone but the mark file remains.
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         await _drain(base, state, rec)
         assert rec.delivered == []                  # still no replay
 
@@ -202,7 +191,7 @@ class TestDrain:
         ]
         _mk_transcript(base, "sess", "sid1", backlog)
         # Reconnect: the re-baseline must SKIP the gap, not deliver GAP-1/GAP-2.
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         await _drain(base, state, rec)
         assert rec.delivered == []                  # <-- backlog NOT caught up
         assert ts.load_watermark(state, "sess", "conv").last_delivered_uuid == "a3"
@@ -224,7 +213,7 @@ class TestDrain:
         mark.last_delivery_at = 12345.0
         ts.save_watermark(state, mark)
         # Reconnect re-baseline: run must survive.
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         after = ts.load_watermark(state, "sess", "conv")
         assert after.consecutive_deliveries == 7
         assert after.last_delivery_at == 12345.0
@@ -244,7 +233,7 @@ class TestDrain:
         _mk_transcript(base, "sess", "sidB",
                        [_user("x1", "z"), _assistant("b1", "SIBLING")], mtime=9000)
         # Reconnect re-baseline: must stay pinned to sidA, NOT jump to sidB.
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         mark = ts.load_watermark(state, "sess", "conv")
         assert mark.session_id == "sidA"            # pin preserved by prefer_session_id
         assert mark.last_delivered_uuid == "a1"     # anchored at sidA's end, not sidB's
@@ -272,7 +261,7 @@ class TestDrain:
         # Simulate the mirror caught mid-rewrite: the SAME session_id file now
         # reads back truncated, ending before a3 (and even before a1's line).
         _mk_transcript(base, "sess", "sid1", full[:1])  # only the leading user line
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         after_torn = ts.load_watermark(state, "sess", "conv")
         assert after_torn.last_delivered_uuid == "a3"   # NOT rewound to "" or a1/a2
         assert after_torn.session_id == "sid1"
@@ -435,7 +424,7 @@ class TestDrain:
         """A watcher pinned to a DEAD session — its transcript lingers on disk but
         the resume anchor is gone for good (torn final line / compaction) — must
         NOT torn_read_skip forever when a NEWER session transcript exists. After
-        _TORN_READ_RECOVER_POLLS consecutive misses it rotates: forward-baselines
+        tools._TORN_READ_RECOVER_POLLS consecutive misses it rotates: forward-baselines
         onto the newest session and resumes delivery there.
 
         Regression for prod 019f1fde: the faidh watcher was welded to the runaway
@@ -463,7 +452,7 @@ class TestDrain:
                        [_user("v0", "seed"), _assistant("b0", "SEED")], mtime=2000)
         # Below the threshold: keep skipping, stay pinned to A (no premature rotate,
         # so a transient torn read next to an mtime-flapped sibling can't divert us).
-        for _ in range(_TORN_READ_RECOVER_POLLS - 1):
+        for _ in range(tools._TORN_READ_RECOVER_POLLS - 1):
             await _drain(base, state, rec)
         assert ts.load_watermark(state, "sess", "conv").session_id == "A"
         assert rec.delivered == ["a1"]
@@ -504,7 +493,7 @@ class TestDrain:
         _mk_transcript(base, "sess", "B", [
             _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
         ], mtime=2000)
-        for _ in range(_TORN_READ_RECOVER_POLLS):
+        for _ in range(tools._TORN_READ_RECOVER_POLLS):
             await _drain(base, state, rec)
         await _drain(base, state, rec)
 
@@ -516,7 +505,7 @@ class TestDrain:
             _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
             _ts(_assistant("b1", "NEW"), "2026-09-17T04:05:01.000Z"),
         ], mtime=2100)
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 2):
             await _drain(base, state, rec)
         assert ts.load_watermark(state, "sess", "conv").session_id == "B"
         # B's own reply, written after this conversation connected, follows (MCP-35).
@@ -540,7 +529,7 @@ class TestDrain:
             _ts(_user("u1", "q"), "2026-09-17T04:01:00.000Z"),
             _ts(_assistant("a1", "STRANDED"), "2026-09-17T04:01:02.000Z"),
         ])
-        for _ in range(_TORN_READ_RECOVER_POLLS + 1):
+        for _ in range(tools._TORN_READ_RECOVER_POLLS + 1):
             await _drain(base, state, rec)
 
         assert rec.delivered == ["a1"]
@@ -552,7 +541,7 @@ class TestDrain:
         monkeypatch.setattr(ts, "now_iso", lambda: "2026-07-04T04:00:02Z")
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "guard", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
@@ -568,7 +557,7 @@ class TestDrain:
             _ts(_user("u2", "go"), "2026-07-04T18:00:00.000Z"),
             _ts(_assistant("b1", "NEW"), "2026-07-04T18:00:01.000Z"),
         ])
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 1):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 1):
             await _drain(base, state, rec, sess, conv)
 
         moved = ts.load_watermark(state, sess, conv)
@@ -605,7 +594,7 @@ class TestDrain:
         _mk_transcript(base, "sess", "B", [
             _ts(_user("v0", "later"), "2026-09-17T04:05:00.000Z"),
         ], mtime=2000)
-        for _ in range(_TORN_READ_RECOVER_POLLS + 1):
+        for _ in range(tools._TORN_READ_RECOVER_POLLS + 1):
             await _drain(base, state, rec)
 
         assert rec.delivered == ["a1"]                 # not sent twice
@@ -617,7 +606,7 @@ class TestDrain:
         must still progress: deliver the continuation, never wedge, never replay."""
         base = tmp_path / "t"; state = tmp_path / "s"
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         rec = Recorder()
         # Premature: only the first segment exists when we deliver (settle off).
         _mk_transcript(base, "sess", "sid1", [
@@ -647,12 +636,12 @@ class TestDrain:
         stopped growing for settle_seconds — so a still-streaming burst coalesces."""
         base = tmp_path / "t"; state = tmp_path / "s"
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
-        await _baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=base, state_dir=state)
         clock = [100.0]
         rec = Recorder()
 
         async def drain():
-            await _drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
+            await tools._drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
                                          state_dir=state, post_fn=rec, sleep_fn=_nosleep,
                                          settle_seconds=4.0, now_fn=lambda: clock[0])
 
@@ -680,7 +669,7 @@ class TestDrain:
         assert rec.delivered == ["real"]
 
 
-# --- _post_turn instrumentation (MCP-19; the original "logs why" contract) ----
+# --- tools._post_turn instrumentation (MCP-19; the original "logs why" contract) ----
 
 class TestPostTurnInstrumentation:
     async def _events_for(self, post_side_effect):
@@ -688,9 +677,9 @@ class TestPostTurnInstrumentation:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(post_side_effect)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event", side_effect=lambda k, **f: logged.append((k, f))),
+            log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
-            ok = await _post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+            ok = await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
         return ok, logged
 
     async def test_payload_carries_session_name(self):
@@ -710,9 +699,9 @@ class TestPostTurnInstrumentation:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event"),
+            log_event_patched(),
         ):
-            ok = await _post_turn("http://cb", "conv", ts.Turn("a1", "hi"),
+            ok = await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"),
                                   attempt=0, session="faidh")
 
         assert ok is True
@@ -734,9 +723,9 @@ class TestPostTurnInstrumentation:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event"),
+            log_event_patched(),
         ):
-            await _post_turn("http://cb", "conv",
+            await tools._post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="terminal"),
                              attempt=0, session="faidh")
         assert captured["prompt_origin"] == "terminal"
@@ -752,9 +741,9 @@ class TestPostTurnInstrumentation:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event"),
+            log_event_patched(),
         ):
-            await _post_turn("http://cb", "conv",
+            await tools._post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="person", sent_by="u-1"),
                              attempt=0, session="faidh")
         assert (captured["prompt_origin"], captured["sent_by"]) == ("person", "u-1")
@@ -780,7 +769,7 @@ class TestPostTurnInstrumentation:
         assert f["retryable"] is True
 
     async def test_404_raises_permanent_and_is_marked_non_retryable(self):
-        """404 conversation-gone is permanent: _post_turn raises rather than
+        """404 conversation-gone is permanent: tools._post_turn raises rather than
         returning False, so the retry loop stops instead of hammering."""
         async def gone(*a, **kw):
             return MagicMock(is_success=False, status_code=404,
@@ -790,12 +779,12 @@ class TestPostTurnInstrumentation:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(gone)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event", side_effect=lambda k, **f: logged.append((k, f))),
+            log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
             try:
-                await _post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+                await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
                 raised = False
-            except _PermanentDeliveryError as exc:
+            except tools._PermanentDeliveryError as exc:
                 raised = True
                 assert exc.status == 404
         assert raised
@@ -834,7 +823,7 @@ class TestPostTurnInstrumentation:
 
 class TestLoopGuard:
     async def _drain_at(self, base, state, rec, wall):
-        await _drain_transcript_once(
+        await tools._drain_transcript_once(
             "sess", "conv", "http://cb", transcripts_base=base, state_dir=state,
             post_fn=rec, sleep_fn=_nosleep, wall_now_fn=lambda: wall,
         )
@@ -867,13 +856,13 @@ class TestLoopGuard:
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         overflow = 5
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + overflow, state))
+        _mk_transcript(base, "sess", "sid1", self._turns(tools._LOOP_GUARD_MAX_CONSECUTIVE + overflow, state))
         await self._drain_at(base, state, rec, wall=1000.0)          # constant clock -> one run
-        assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
+        assert rec.delivered == [f"a{i}" for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
         assert len(list((state / "dead-letter").glob("*.json"))) == overflow
         mark = ts.load_watermark(state, "sess", "conv")
-        assert mark.last_delivered_uuid == f"a{_LOOP_GUARD_MAX_CONSECUTIVE + overflow}"
-        assert mark.consecutive_deliveries == _LOOP_GUARD_MAX_CONSECUTIVE + overflow
+        assert mark.last_delivered_uuid == f"a{tools._LOOP_GUARD_MAX_CONSECUTIVE + overflow}"
+        assert mark.consecutive_deliveries == tools._LOOP_GUARD_MAX_CONSECUTIVE + overflow
 
     async def test_slow_deliveries_still_trip(self, tmp_path):
         """Regression for the 019f1fde dodge: deliveries spaced far beyond the old
@@ -889,12 +878,12 @@ class TestLoopGuard:
         # One new turn per pass, each spaced a quarter of the idle reset apart:
         # far slower than the old fast gap (would have reset every time), but not
         # idle, so the run accumulates and trips.
-        slow_gap = _LOOP_GUARD_IDLE_RESET_S / 4
-        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + overflow + 1):
+        slow_gap = tools._LOOP_GUARD_IDLE_RESET_S / 4
+        for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + overflow + 1):
             _mk_transcript(base, "sess", "sid1", self._turns(i, state))     # one new turn per pass
             wall += slow_gap
             await self._drain_at(base, state, rec, wall=wall)
-        assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
+        assert rec.delivered == [f"a{i}" for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
         assert len(list((state / "dead-letter").glob("*.json"))) == overflow
 
     async def test_long_idle_resets_the_run(self, tmp_path):
@@ -908,18 +897,18 @@ class TestLoopGuard:
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         wall = 1000.0
         # Deliver right up to the cap (not over), rapid.
-        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
+        for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1):
             _mk_transcript(base, "sess", "sid1", self._turns(i, state))
             wall += 1.0
             await self._drain_at(base, state, rec, wall=wall)
-        assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
+        assert len(rec.delivered) == tools._LOOP_GUARD_MAX_CONSECUTIVE
         assert not (state / "dead-letter").exists()                  # at cap, not over
         # A long idle, then one more turn: the idle resets the run, so the turn
         # delivers instead of tripping (it would trip without the reset).
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
-        wall += _LOOP_GUARD_IDLE_RESET_S + 1
+        _mk_transcript(base, "sess", "sid1", self._turns(tools._LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
+        wall += tools._LOOP_GUARD_IDLE_RESET_S + 1
         await self._drain_at(base, state, rec, wall=wall)
-        assert rec.delivered[-1] == f"a{_LOOP_GUARD_MAX_CONSECUTIVE + 1}"
+        assert rec.delivered[-1] == f"a{tools._LOOP_GUARD_MAX_CONSECUTIVE + 1}"
         assert not (state / "dead-letter").exists()
 
     async def test_empty_turns_do_not_count(self, tmp_path):
@@ -933,14 +922,14 @@ class TestLoopGuard:
         # If empties counted, 2*MAX would trip mid-way; they don't, so all MAX
         # reals deliver.
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
-        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
+        for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1):
             objs += [_user(f"ue{i}", "x"), _assistant(f"e{i}", None)]   # empty
             objs += [_user(f"ur{i}", "y"), _assistant(f"a{i}", f"r{i}")]  # real
             ts.record_sent_prompt(state, "sess", "x")                     # the orchestrator's
             ts.record_sent_prompt(state, "sess", "y")
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
-        assert rec.delivered == [f"a{i}" for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1)]
+        assert rec.delivered == [f"a{i}" for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
         assert not (state / "dead-letter").exists()
 
     async def test_short_restart_stays_latched(self, tmp_path):
@@ -950,13 +939,13 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
+        _mk_transcript(base, "sess", "sid1", self._turns(tools._LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
         await self._drain_at(base, state, rec, wall=1000.0)          # trips on the overflow
-        assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
+        assert len(rec.delivered) == tools._LOOP_GUARD_MAX_CONSECUTIVE
         # "Restart": fresh Recorder + one more turn, gap < idle reset. The persisted
         # run is already past the cap, so the new turn is dropped — no resume.
         rec2 = Recorder()
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_MAX_CONSECUTIVE + 2, state))
+        _mk_transcript(base, "sess", "sid1", self._turns(tools._LOOP_GUARD_MAX_CONSECUTIVE + 2, state))
         await self._drain_at(base, state, rec2, wall=1001.0)         # 1s later, < idle reset
         assert rec2.delivered == []
 
@@ -976,7 +965,7 @@ class TestLoopGuard:
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
         want = []
-        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE + 1):
+        for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE + 1):
             objs += [_user(f"u{i}", f"typed {i}"), _assistant(f"a{i}", f"r{i}")]
             objs += self._notified(f"c{i}", i)
             want += [f"a{i}", f"c{i}"]
@@ -994,7 +983,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
-        half = _LOOP_GUARD_MAX_CONSECUTIVE - 2
+        half = tools._LOOP_GUARD_MAX_CONSECUTIVE - 2
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
         for i in range(1, half + 1):
             objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
@@ -1016,7 +1005,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
-        half = _LOOP_GUARD_MAX_CONSECUTIVE - 2
+        half = tools._LOOP_GUARD_MAX_CONSECUTIVE - 2
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
         for i in range(1, half + 1):
             objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
@@ -1041,13 +1030,13 @@ class TestLoopGuard:
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         overflow = 3
-        _mk_transcript(base, "sess", "sid1", self._turns(_LOOP_GUARD_BACKSTOP + overflow))  # no record
+        _mk_transcript(base, "sess", "sid1", self._turns(tools._LOOP_GUARD_BACKSTOP + overflow))  # no record
         await self._drain_at(base, state, rec, wall=1000.0)
-        assert len(rec.delivered) == _LOOP_GUARD_BACKSTOP
+        assert len(rec.delivered) == tools._LOOP_GUARD_BACKSTOP
         assert len(list((state / "dead-letter").glob("*.json"))) == overflow
         mark = ts.load_watermark(state, "sess", "conv")
         assert mark.consecutive_deliveries == 0                       # read as typed
-        assert mark.deliveries_since_idle == _LOOP_GUARD_BACKSTOP + overflow
+        assert mark.deliveries_since_idle == tools._LOOP_GUARD_BACKSTOP + overflow
 
     async def test_an_idle_gap_resets_the_backstop_too(self, tmp_path):
         """A person who pauses for longer than the idle reset starts over on the
@@ -1056,11 +1045,11 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", [_user("u0", "seed"), _assistant("a0", "SEED")])
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
-        n = _LOOP_GUARD_BACKSTOP
+        n = tools._LOOP_GUARD_BACKSTOP
         _mk_transcript(base, "sess", "sid1", self._turns(n))
         await self._drain_at(base, state, rec, wall=1000.0)          # right at the backstop
         _mk_transcript(base, "sess", "sid1", self._turns(n + 1))
-        await self._drain_at(base, state, rec, wall=1000.0 + _LOOP_GUARD_IDLE_RESET_S + 1)
+        await self._drain_at(base, state, rec, wall=1000.0 + tools._LOOP_GUARD_IDLE_RESET_S + 1)
         assert len(rec.delivered) == n + 1
         assert not (state / "dead-letter").exists()
         assert ts.load_watermark(state, "sess", "conv").deliveries_since_idle == 1
@@ -1074,13 +1063,13 @@ class TestLoopGuard:
         rec = Recorder()
         await self._drain_at(base, state, rec, wall=1000.0)          # baseline
         objs = [_user("u0", "seed"), _assistant("a0", "SEED")]
-        for i in range(1, _LOOP_GUARD_MAX_CONSECUTIVE // 2 + 2):
+        for i in range(1, tools._LOOP_GUARD_MAX_CONSECUTIVE // 2 + 2):
             objs += [_user(f"u{i}", f"orch {i}"), _assistant(f"a{i}", f"r{i}")]
             ts.record_sent_prompt(state, "sess", f"orch {i}")
             objs += self._notified(f"c{i}", i)
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
-        assert len(rec.delivered) == _LOOP_GUARD_MAX_CONSECUTIVE
+        assert len(rec.delivered) == tools._LOOP_GUARD_MAX_CONSECUTIVE
         assert (state / "dead-letter").exists()
 
     async def test_old_watermark_without_new_fields_loads(self, tmp_path):
@@ -1139,13 +1128,13 @@ class TestStalePinRotation:
         return now
 
     async def _drain_rot(self, base, state, rec, sess, conv):
-        await _drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
+        await tools._drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
                                      state_dir=state, post_fn=rec, sleep_fn=_nosleep)
 
     async def test_follows_rotation_when_pinned_fully_consumed(self, tmp_path):
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "rot", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         # OLD session, fully consumed. First watch baselines onto it (only file).
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
@@ -1162,7 +1151,7 @@ class TestStalePinRotation:
             _ts(_assistant("a2", "NEW"), "2026-07-04T18:00:01.000Z"),
         ])
         # Gated: no rotation before the sustained-poll threshold.
-        for _ in range(_STALE_PIN_RECOVER_POLLS - 1):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS - 1):
             await self._drain_rot(base, state, rec, sess, conv)
         assert ts.load_watermark(state, sess, conv).session_id == "old"
         # One more poll trips it — rotate forward onto "new".
@@ -1186,7 +1175,7 @@ class TestStalePinRotation:
         not 'empty suffix' — the bug the first fix shipped with)."""
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "tail", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
@@ -1201,7 +1190,7 @@ class TestStalePinRotation:
             _ts(_user("u3", "go"), "2026-07-04T18:00:00.000Z"),
             _ts(_assistant("a2", "NEW"), "2026-07-04T18:00:01.000Z"),
         ])
-        for _ in range(_STALE_PIN_RECOVER_POLLS):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS):
             await self._drain_rot(base, state, rec, sess, conv)
         assert ts.load_watermark(state, sess, conv).session_id == "new"
 
@@ -1210,7 +1199,7 @@ class TestStalePinRotation:
         added to survive) must NOT trigger rotation — content timestamps decide."""
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "flap", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         # Active (pinned) session has the NEWEST content, older mtime.
         _mk_transcript(base, sess, "active", [
             _ts(_user("u1", "hi"), "2026-07-04T18:00:00.000Z"),
@@ -1224,7 +1213,7 @@ class TestStalePinRotation:
             _ts(_user("u0", "old"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a0", "OLD"), "2026-07-04T04:00:01.000Z"),
         ], mtime=99999)
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 2):
             await self._drain_rot(base, state, rec, sess, conv)
         assert ts.load_watermark(state, sess, conv).session_id == "active"  # no flap rotation
 
@@ -1238,7 +1227,7 @@ class TestStalePinRotation:
         from collections import Counter
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "rot1", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
@@ -1249,7 +1238,7 @@ class TestStalePinRotation:
         new_objs = [_ts(_user("u2", "go"), "2026-07-04T18:00:00.000Z"),
                     _ts(_assistant("b1", "AT-ROTATION"), "2026-07-04T18:00:01.000Z")]
         _mk_transcript(base, sess, "new", new_objs)
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 1):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 1):
             await self._drain_rot(base, state, rec, sess, conv)
         assert ts.load_watermark(state, sess, conv).session_id == "new"
         # Then three fresh turns arrive on "new".
@@ -1268,7 +1257,7 @@ class TestStalePinRotation:
         after is delivered."""
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "hist", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
@@ -1281,7 +1270,7 @@ class TestStalePinRotation:
             _ts(_user("u2", "after the restart"), "2026-07-04T18:00:00.000Z"),
             _ts(_assistant("b1", "NEW"), "2026-07-04T18:00:01.000Z"),
         ])
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 2):
             await self._drain_rot(base, state, rec, sess, conv)
         assert rec.delivered == ["b1"]
 
@@ -1293,10 +1282,10 @@ class TestStalePinRotation:
         done before the re-watch (MCP-17), only what comes after."""
         from aidc_mcp import tools
         logged = []
-        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append((kind, f)))
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "rewatch", "c"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "old", [
             _ts(_user("u1", "hi"), "2026-07-04T04:00:00.000Z"),
             _ts(_assistant("a1", "OLD"), "2026-07-04T04:00:01.000Z"),
@@ -1307,11 +1296,11 @@ class TestStalePinRotation:
                     _ts(_assistant("b1", "UNWATCHED"), "2026-07-04T05:00:01.000Z")]
         _mk_transcript(base, sess, "new", new_objs)
         clock["iso"] = "2026-07-04T06:00:00Z"
-        await _baseline_watermark(sess, conv, transcripts_base=base, state_dir=state)
+        await tools._baseline_watermark(sess, conv, transcripts_base=base, state_dir=state)
         new_objs += [_ts(_user("u3", "after the re-watch"), "2026-07-04T07:00:00.000Z"),
                      _ts(_assistant("b2", "WATCHED"), "2026-07-04T07:00:01.000Z")]
         _mk_transcript(base, sess, "new", new_objs)
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 2):
             await self._drain_rot(base, state, rec, sess, conv)
         assert rec.delivered == ["b2"]
         [(_, fields)] = [e for e in logged if e[0] == "transcript_stale_pin_recovered"]
@@ -1327,7 +1316,7 @@ class TestStalePinRotation:
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "restart", "c"
         clock["iso"] = "2026-09-17T05:52:38Z"
-        _consumed_idle_counts.pop((sess, conv), None)
+        ss.consumed_idle_counts.pop((sess, conv), None)
         _mk_transcript(base, sess, "before", [
             _ts(_user("u1", "Reply with exactly the word SEVEN-A."), "2026-09-17T05:52:34.000Z"),
             _ts(_assistant("a1", "SEVEN-A"), "2026-09-17T05:52:37.155Z"),
@@ -1340,7 +1329,7 @@ class TestStalePinRotation:
             _ts(_user("u2", "Reply with exactly the word TEN."), "2026-09-17T05:56:51.380Z"),
             _ts(_assistant("a2", "TEN"), "2026-09-17T05:56:52.306Z"),
         ])
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 3):
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 3):
             await self._drain_rot(base, state, rec, sess, conv)
         assert rec.delivered == ["a2"]
 
@@ -1505,7 +1494,7 @@ class TestExactlyOnceUnderConcurrentPasses:
     async def test_two_overlapping_passes_deliver_turn_once(self, tmp_path):
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "dup", "c"
-        _drain_locks.pop((sess, conv), None)
+        ss._drain_locks.pop((sess, conv), None)
         hist = [_user("u1", "a"), _assistant("a1", "OLD")]
         _mk_transcript(base, sess, "sid1", hist)
 
@@ -1521,7 +1510,7 @@ class TestExactlyOnceUnderConcurrentPasses:
             return True
 
         async def drain():
-            await _drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
+            await tools._drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
                                          state_dir=state, post_fn=slow_post, sleep_fn=_nosleep)
 
         await drain()                                   # baseline past OLD
@@ -1536,12 +1525,12 @@ class TestExactlyOnceUnderConcurrentPasses:
         advanced and a later turn still delivers (exactly-once, no drop)."""
         base = tmp_path / "t"; state = tmp_path / "s"
         sess, conv = "dup2", "c"
-        _drain_locks.pop((sess, conv), None)
+        ss._drain_locks.pop((sess, conv), None)
         _mk_transcript(base, sess, "sid1", [_user("u1", "a"), _assistant("a1", "OLD")])
         rec = Recorder()
 
         async def drain():
-            await _drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
+            await tools._drain_transcript_once(sess, conv, "http://cb", transcripts_base=base,
                                          state_dir=state, post_fn=rec, sleep_fn=_nosleep)
 
         await drain()
@@ -1759,7 +1748,7 @@ class TestTerminalPromptAttribution:
         in the reply it ends with. That reply names the turn's own paste and then the
         joined prompt; the next reply does not name the joined one again."""
         from aidc_mcp import tools
-        base, state = tmp_path / "t", tools._WATCHER_STATE_DIR
+        base, state = tmp_path / "t", ss.WATCHER_STATE_DIR
         seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
         _mk_transcript(base, "sess", "sid1", seed)
         rec = ContentRecorder()
@@ -1889,7 +1878,7 @@ class TestTerminalPromptAttribution:
         ts.record_sent_prompt(state, "sess", "never matched")   # a stuck entry
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed"), _assistant("a1", "R")])
         events = []
-        with patch("aidc_mcp.tools.log_event", side_effect=lambda k, **f: events.append((k, f))):
+        with log_event_patched(side_effect=lambda k, **f: events.append((k, f))):
             await _drain(base, state, rec)
         ev = next(f for k, f in events if k == "transcript_terminal_prompt")
         assert ev["prompts"] == 1 and ev["record_remaining"] == 1
@@ -1898,7 +1887,7 @@ class TestTerminalPromptAttribution:
         base, state, _, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "typed q"), _assistant("a1", "R")])
         rec = Recorder(always_fail=True)
-        await _drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
+        await tools._drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
                                      state_dir=state, post_fn=rec, sleep_fn=_nosleep)
         dead = list((state / "dead-letter").glob("sess__conv__a1.json"))
         assert len(dead) == 1
@@ -1936,7 +1925,7 @@ def _interrupt(uuid):
 
 
 class _SettleHarness:
-    """Drives _drain_transcript_once with a settle window and a controllable clock."""
+    """Drives tools._drain_transcript_once with a settle window and a controllable clock."""
 
     def __init__(self, tmp_path, seed):
         self.base = tmp_path / "t"; self.state = tmp_path / "s"
@@ -1946,14 +1935,14 @@ class _SettleHarness:
         _mk_transcript(self.base, "sess", "sid1", self.seed)
 
     async def baseline(self):
-        await _baseline_watermark("sess", "conv", transcripts_base=self.base, state_dir=self.state)
+        await tools._baseline_watermark("sess", "conv", transcripts_base=self.base, state_dir=self.state)
 
     def write(self, extra):
         _mk_transcript(self.base, "sess", "sid1", self.seed + list(extra))
 
     async def drain(self, at):
         self.clock[0] = at
-        await _drain_transcript_once("sess", "conv", "http://cb", transcripts_base=self.base,
+        await tools._drain_transcript_once("sess", "conv", "http://cb", transcripts_base=self.base,
                                      state_dir=self.state, post_fn=self.rec, sleep_fn=_nosleep,
                                      settle_seconds=4.0, now_fn=lambda: self.clock[0])
 
@@ -2030,7 +2019,7 @@ class TestPushbackDelivery:
         # Late pushback: the read window starts after an already-delivered reply.
         _mk_transcript(base, "sess", "sid1", seed + [
             _feedback("f0"), _assistant("a1", "more")])
-        with patch("aidc_mcp.tools.log_event") as log:
+        with log_event_patched() as log:
             await _drain(base, state, rec)
         assert "transcript_late_pushback" in [c.args[0] for c in log.call_args_list]
         # Dropped: pushed back, then a new prompt with no reply in between.
@@ -2038,7 +2027,7 @@ class TestPushbackDelivery:
             _feedback("f0"), _assistant("a1", "more"),
             _user("u2", "q"), _assistant("a2", "A."), _feedback("f1"),
             _user("u3", "next"), _assistant("a3", "B.")])
-        with patch("aidc_mcp.tools.log_event") as log:
+        with log_event_patched() as log:
             await _drain(base, state, rec)
         dropped = [c.kwargs for c in log.call_args_list
                    if c.args[0] == "transcript_withdrawn_reply_dropped"]
@@ -2052,7 +2041,7 @@ class TestPushbackDelivery:
         await _drain(base, state, rec)
         _mk_transcript(base, "sess", "sid1", seed + [
             _user("u1", "q"), _assistant("a1", "A."), _assistant("a2", "B.")])
-        with patch("aidc_mcp.tools.log_event") as log:
+        with log_event_patched() as log:
             await _drain(base, state, rec)
         events = [c.args[0] for c in log.call_args_list]
         assert "transcript_terminal_superseded" in events
@@ -2140,10 +2129,10 @@ class TestInterruptDelivery:
         with (
             patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
             patch("aidc_mcp.tools._load_token", return_value="tok"),
-            patch("aidc_mcp.tools.log_event"),
+            log_event_patched(),
         ):
-            await _post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="s")
-            await _post_turn("http://cb", "conv", ts.Turn("i1", "x", interrupted=True),
+            await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="s")
+            await tools._post_turn("http://cb", "conv", ts.Turn("i1", "x", interrupted=True),
                              attempt=0, session="s")
         assert [c["interrupted"] for c in captured] == [False, True]
         assert [c["ok"] for c in captured] == [True, True]
@@ -2157,9 +2146,8 @@ class TestARewatchDoesNotStallTheServer:
     and the session_send waiting on it took 12-15 s to answer."""
 
     def _session_with_history(self, tmp_path, monkeypatch):
-        from aidc_mcp import tools
         base, state = tmp_path / "t", tmp_path / "s"
-        monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", base)
+        monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", base)
         for i in range(3):
             _mk_transcript(base, "sess", f"old{i}",
                            [_user(f"old{i}-u", "q"), _assistant(f"old{i}-a", "A")],
@@ -2170,7 +2158,6 @@ class TestARewatchDoesNotStallTheServer:
 
     async def test_unwatching_keeps_what_is_known_of_earlier_transcripts(self, tmp_path,
                                                                          monkeypatch):
-        from aidc_mcp import tools
         base, state = self._session_with_history(tmp_path, monkeypatch)
         rec = Recorder()
         await _drain(base, state, rec)      # baseline
@@ -2180,7 +2167,7 @@ class TestARewatchDoesNotStallTheServer:
         monkeypatch.setattr(ts, "parse_jsonl",
                             lambda text: parsed.append(text) or real_parse(text))
 
-        tools._evict_session_state("sess")
+        ss.evict_session_state("sess")
         await _drain(base, state, rec)
 
         assert not [t for t in parsed if "old" in t]
@@ -2235,7 +2222,7 @@ class TestAJoinedPromptsReplyIsTheJoiners:
         recorded origin, which must be the joiner's, not "terminal"."""
         from aidc_mcp import tools
         base = tmp_path / "t"; state = tmp_path / "s"
-        monkeypatch.setattr(tools, "_WATCHER_STATE_DIR", state)
+        monkeypatch.setattr(ss, "WATCHER_STATE_DIR", state)
         seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
         _mk_transcript(base, "sess", "sid1", seed)
         rec = ContentRecorder()
@@ -2279,7 +2266,7 @@ class TestAHeadlessRunsTranscriptIsNotTheSessions:
         headless = [{"type": "queue-operation", "operation": "enqueue", "content": "q"},
                     *self._cli([_user("h1", "What does f return?"),
                                 _assistant("h2", "1")], "sdk-cli", "2026-10-23T03:31:00.000Z")]
-        for _ in range(_STALE_PIN_RECOVER_POLLS + 2):   # what moving over would take
+        for _ in range(tools._STALE_PIN_RECOVER_POLLS + 2):   # what moving over would take
             _mk_transcript(base, "sess", "sid2", headless, mtime=time.time())
             await _drain(base, state, rec)
         assert rec.turns == []

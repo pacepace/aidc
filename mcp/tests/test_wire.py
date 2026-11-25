@@ -11,6 +11,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from aidc_mcp import auth, publish, resources, server, tools
+from aidc_mcp.service import common as com
 
 TOKEN = "wire-test-token"
 # A private-interface bind (ZeroTier/Tailscale): the Host a real client sends. The
@@ -108,7 +109,7 @@ def test_tools_list_on_the_wire_is_the_published_list(client):
 
 
 def test_a_tool_call_answers_with_the_envelope(client, monkeypatch):
-    monkeypatch.setattr(tools, "_run_cli",
+    monkeypatch.setattr(com, "run_cli",
                         lambda args, **kw: {"exit": 0, "stdout": "SESSION\n", "stderr": ""})
     _, sid = _initialize(client)
     msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={

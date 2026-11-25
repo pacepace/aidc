@@ -8,6 +8,7 @@ the tool bodies are pinned without a real Docker session.
 session_send has its own file (test_session_send.py); this covers the rest.
 """
 import asyncio
+import importlib
 import os
 import subprocess
 from pathlib import Path
@@ -16,6 +17,9 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import backend, scope, tools
+from aidc_mcp.service import common as com
+from aidc_mcp.service import config as orc
+from aidc_mcp.service import state as ss
 
 
 def _tool(name):
@@ -96,7 +100,7 @@ def _patch_cli(monkeypatch, result, record=None):
         if record is not None:
             record.append((args, timeout))
         return result(args) if callable(result) else result
-    monkeypatch.setattr(tools, "_run_cli", _cli)
+    monkeypatch.setattr(com, "run_cli", _cli)
 
 
 # --- session_create ----------------------------------------------------------
@@ -138,7 +142,7 @@ class TestSessionCreate:
         def boom(*a, **k):
             raise AssertionError("the CLI must not run for a refused path")
 
-        monkeypatch.setattr(tools, "_run_cli", boom)
+        monkeypatch.setattr(com, "run_cli", boom)
         create = _create_tool(monkeypatch)
         for repo in ("/mnt", "/srv/x", str(tmp_path / "elsewhere")):
             res = await create(name="proj", repo=repo, ctx=None)
@@ -154,7 +158,7 @@ class TestSessionCreate:
         def boom(*a, **k):
             raise AssertionError("the CLI must not run for a refused path")
 
-        monkeypatch.setattr(tools, "_run_cli", boom)
+        monkeypatch.setattr(com, "run_cli", boom)
         res = await _create_tool(monkeypatch)(
             name="proj", repo=str(home / "repo"), workspace="/srv", ctx=None)
         assert res["ok"] is False and res["error_code"] == "path_not_allowed"
@@ -247,7 +251,7 @@ class TestSessionCreateBackend:
         def boom(*a, **k):
             raise AssertionError("the CLI must not run for a refused create")
 
-        monkeypatch.setattr(tools, "_run_cli", boom)
+        monkeypatch.setattr(com, "run_cli", boom)
         create = _create_tool(monkeypatch)
         for kwargs in ({"repo": "/home/u/app"}, {"workspace": "/home/u"}):
             res = await create(name="proj", ctx=None, **kwargs)
@@ -351,19 +355,19 @@ class TestSessionInvoke:
 
 class TestSessionInvokeAsync:
     async def test_requires_callback_url(self, monkeypatch):
-        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
+        monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "")
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is False and "callback_url" in res["error"]
 
     async def test_returns_running_immediately(self, monkeypatch):
-        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
+        monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
         fired = []
 
         def fake_fire(coro):
             fired.append(coro)
             coro.close()  # don't actually run the background job
 
-        monkeypatch.setattr(tools, "fire", fake_fire)
+        monkeypatch.setattr(com, "fire", fake_fire)
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is True
         assert res["data"] == {"status": "running", "session": "proj", "conversation_id": "c1"}
@@ -521,7 +525,7 @@ def watch_stubs(monkeypatch):
     async def announce(app_, ctx=None):
         return None
 
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_baseline_watermark", baseline)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
@@ -529,7 +533,7 @@ def watch_stubs(monkeypatch):
 
 class TestSessionWatch:
     async def test_requires_callback_url(self, monkeypatch):
-        monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "")
+        monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "")
         res = await _tool("session_watch")(name="proj", conversation_id="c1")
         assert res["ok"] is False and "callback_url" in res["error"]
 
@@ -540,20 +544,20 @@ class TestSessionWatch:
     async def test_happy_registers_watcher(self, watch_stubs):
         res = await _tool("session_watch")(name="proj", conversation_id="c1")
         assert res["ok"] is True and res["data"]["status"] == "watching"
-        assert "proj" in tools._session_watchers
+        assert "proj" in ss.session_watchers
 
     async def test_rewatch_keeps_the_new_watcher(self, watch_stubs):
         # Re-watching cancels the old task; its (identity-guarded) done-callback
         # must NOT then evict the replacement that now holds the slot.
         watch = _tool("session_watch")
         await watch(name="proj", conversation_id="c1")
-        first = tools._session_watchers["proj"]
+        first = ss.session_watchers["proj"]
         await watch(name="proj", conversation_id="c1")
-        second = tools._session_watchers["proj"]
+        second = ss.session_watchers["proj"]
         assert first is not second
         for _ in range(5):  # let the cancelled first task's callback run
             await asyncio.sleep(0)
-        assert tools._session_watchers.get("proj") is second
+        assert ss.session_watchers.get("proj") is second
 
 
 class TestSessionUnwatch:
@@ -566,19 +570,19 @@ class TestSessionUnwatch:
             await asyncio.sleep(100)
 
         task = asyncio.create_task(_sleeper())
-        tools._session_watchers["proj"] = task
-        tools._session_send_locks["proj"] = asyncio.Lock()
-        tools._settle_state[("proj", "c1")] = (10, 1.0)
-        tools._settle_state[("other", "c1")] = (20, 2.0)
+        ss.session_watchers["proj"] = task
+        ss.session_send_locks["proj"] = asyncio.Lock()
+        ss.settle_state[("proj", "c1")] = (10, 1.0)
+        ss.settle_state[("other", "c1")] = (20, 2.0)
 
         res = await _tool("session_unwatch")(name="proj")
 
         assert res["ok"] is True and res["data"]["status"] == "stopped"
         assert task.cancelled()
-        assert "proj" not in tools._session_watchers
-        assert "proj" in tools._session_send_locks  # lock PRESERVED (may be held live)
-        assert ("proj", "c1") not in tools._settle_state
-        assert ("other", "c1") in tools._settle_state  # only the named session evicted
+        assert "proj" not in ss.session_watchers
+        assert "proj" in ss.session_send_locks  # lock PRESERVED (may be held live)
+        assert ("proj", "c1") not in ss.settle_state
+        assert ("other", "c1") in ss.settle_state  # only the named session evicted
 
     async def test_noop_when_not_watching(self, monkeypatch):
         async def announce(app_, ctx=None):
@@ -591,19 +595,19 @@ class TestSessionUnwatch:
 # --- _evict_session_state (unit) ---------------------------------------------
 
 def test_evict_session_state_evicts_settle_scoped_and_keeps_locks():
-    tools._session_send_locks["a"] = asyncio.Lock()
-    tools._session_send_locks["b"] = asyncio.Lock()
-    tools._settle_state[("a", "c1")] = (1, 1.0)
-    tools._settle_state[("a", "c2")] = (2, 2.0)
-    tools._settle_state[("b", "c1")] = (3, 3.0)
+    ss.session_send_locks["a"] = asyncio.Lock()
+    ss.session_send_locks["b"] = asyncio.Lock()
+    ss.settle_state[("a", "c1")] = (1, 1.0)
+    ss.settle_state[("a", "c2")] = (2, 2.0)
+    ss.settle_state[("b", "c1")] = (3, 3.0)
 
-    tools._evict_session_state("a")
+    ss.evict_session_state("a")
 
     # settle-state for session "a" is dropped (both conversations); "b" untouched.
-    assert not any(k[0] == "a" for k in tools._settle_state)
-    assert ("b", "c1") in tools._settle_state
+    assert not any(k[0] == "a" for k in ss.settle_state)
+    assert ("b", "c1") in ss.settle_state
     # send locks are NOT evicted (a live send may hold one) — both remain.
-    assert "a" in tools._session_send_locks and "b" in tools._session_send_locks
+    assert "a" in ss.session_send_locks and "b" in ss.session_send_locks
 
 
 # --- config parsing (unit) ----------------------------------------------------
@@ -614,54 +618,54 @@ def test_evict_session_state_evicts_settle_scoped_and_keeps_locks():
 
 class TestYamlScalar:
     def test_plain_value(self):
-        assert tools._yaml_scalar(" https://m.example.com ") == "https://m.example.com"
+        assert orc._yaml_scalar(" https://m.example.com ") == "https://m.example.com"
 
     def test_strips_inline_comment(self):
         # The shipped config template documents every key with a trailing
         # comment, so this is the shape a user actually edits.
         raw = ' https://m.example.com    # base URL of your orchestrator'
-        assert tools._yaml_scalar(raw) == "https://m.example.com"
+        assert orc._yaml_scalar(raw) == "https://m.example.com"
 
     def test_strips_quotes(self):
-        assert tools._yaml_scalar(' "https://m.example.com" ') == "https://m.example.com"
+        assert orc._yaml_scalar(' "https://m.example.com" ') == "https://m.example.com"
 
     def test_quoted_value_keeps_hash(self):
         # Inside quotes a "# " is content, not a comment.
-        assert tools._yaml_scalar('"https://m.example.com/a#b c"') == "https://m.example.com/a#b c"
+        assert orc._yaml_scalar('"https://m.example.com/a#b c"') == "https://m.example.com/a#b c"
 
     def test_unquoted_hash_without_leading_space_is_not_a_comment(self):
         # YAML opens a comment only at line start or after whitespace.
-        assert tools._yaml_scalar("https://m.example.com/a#b") == "https://m.example.com/a#b"
+        assert orc._yaml_scalar("https://m.example.com/a#b") == "https://m.example.com/a#b"
 
     def test_empty_placeholder(self):
-        assert tools._yaml_scalar('""    # fill me in') == ""
+        assert orc._yaml_scalar('""    # fill me in') == ""
 
 
 def _write_cfg(monkeypatch, tmp_path, text):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(text, encoding="utf-8")
-    monkeypatch.setattr(tools, "_CONFIG_PATH", cfg)
+    monkeypatch.setattr(orc, "_CONFIG_PATH", cfg)
     return cfg
 
 
 class TestOrchestratorSendSpeaker:
     def test_off_without_the_key_or_the_file(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "absent.yaml")
-        assert tools._orchestrator_send_speaker() is False
+        monkeypatch.setattr(orc, "_CONFIG_PATH", tmp_path / "absent.yaml")
+        assert orc.orchestrator_send_speaker() is False
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: http://m\n")
-        assert tools._orchestrator_send_speaker() is False
+        assert orc.orchestrator_send_speaker() is False
 
     def test_on_only_for_true(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
                    "orchestrator:\n  send_speaker: true    # after the orchestrator records human turns\n")
-        assert tools._orchestrator_send_speaker() is True
+        assert orc.orchestrator_send_speaker() is True
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  send_speaker: yes\n")
-        assert tools._orchestrator_send_speaker() is False
+        assert orc.orchestrator_send_speaker() is False
 
     def test_a_key_under_another_section_does_not_count(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
                    "orchestrator:\n  callback_url: http://m\nmcp:\n  send_speaker: true\n")
-        assert tools._orchestrator_send_speaker() is False
+        assert orc.orchestrator_send_speaker() is False
 
 
 class TestOrchestratorCallbackUrl:
@@ -669,27 +673,27 @@ class TestOrchestratorCallbackUrl:
         """The prod failure: config has only an mcp: section, so session_send
         can never open a webhook and every reply is dropped."""
         _write_cfg(monkeypatch, tmp_path, "mcp:\n  bind_address: 10.0.0.1\n  port: 7878\n")
-        assert tools._orchestrator_callback_url() == ""
+        assert orc.orchestrator_callback_url() == ""
 
     def test_reads_value(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
                    "mcp:\n  port: 7878\norchestrator:\n  callback_url: https://m.example.com/\n")
-        assert tools._orchestrator_callback_url() == "https://m.example.com"
+        assert orc.orchestrator_callback_url() == "https://m.example.com"
 
     def test_ignores_inline_comment(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path,
                    'orchestrator:\n  callback_url: https://m.example.com   # your instance\n')
-        assert tools._orchestrator_callback_url() == "https://m.example.com"
+        assert orc.orchestrator_callback_url() == "https://m.example.com"
 
     def test_stops_at_next_top_level_key(self, monkeypatch, tmp_path):
         """A callback_url under a DIFFERENT top-level key must not be picked up."""
         _write_cfg(monkeypatch, tmp_path,
                    "orchestrator:\n  turn_settle_seconds: 2\nother:\n  callback_url: https://nope\n")
-        assert tools._orchestrator_callback_url() == ""
+        assert orc.orchestrator_callback_url() == ""
 
     def test_missing_file(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "nope.yaml")
-        assert tools._orchestrator_callback_url() == ""
+        monkeypatch.setattr(orc, "_CONFIG_PATH", tmp_path / "nope.yaml")
+        assert orc.orchestrator_callback_url() == ""
 
     async def test_only_the_orchestrator_section_is_read_and_the_error_names_it(
             self, monkeypatch, tmp_path):
@@ -698,13 +702,13 @@ class TestOrchestratorCallbackUrl:
         which key to set."""
         for key in ("callback_url", "send_speaker", "turn_settle_seconds"):
             _write_cfg(monkeypatch, tmp_path, f"previous_name:\n  {key}: 5\n")
-            assert tools._orchestrator_setting(key) is None
+            assert orc._orchestrator_setting(key) is None
         _write_cfg(monkeypatch, tmp_path, "previous_name:\n  callback_url: https://old.example.com\n")
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is False
         assert "orchestrator.callback_url not set" in res["error"]
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://new.example.com\n")
-        assert tools._orchestrator_callback_url() == "https://new.example.com"
+        assert orc.orchestrator_callback_url() == "https://new.example.com"
 
     async def test_the_error_names_a_section_still_holding_callback_url(
             self, monkeypatch, tmp_path):
@@ -713,8 +717,8 @@ class TestOrchestratorCallbackUrl:
         _write_cfg(monkeypatch, tmp_path,
                    "mcp:\n  port: 7878\nprevious_name:  # old\n  # where results go\n"
                    "  callback_url: https://old.example.com\n  send_speaker: true\n")
-        assert tools._orchestrator_callback_url() == ""
-        assert tools._callback_url_misplaced() == "previous_name"
+        assert orc.orchestrator_callback_url() == ""
+        assert orc._callback_url_misplaced() == "previous_name"
         res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
         assert res["ok"] is False and res["error_code"] == "not_configured"
         assert "orchestrator.callback_url not set" in res["error"]
@@ -726,28 +730,28 @@ class TestOrchestratorCallbackUrl:
     def test_no_hint_when_no_section_holds_callback_url(self, monkeypatch, tmp_path):
         """Nothing misplaced (no file, an empty orchestrator section, another section's
         keys): the plain error, no rename hint."""
-        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "nope.yaml")
-        assert tools._callback_url_unset() == tools.CALLBACK_URL_UNSET
+        monkeypatch.setattr(orc, "_CONFIG_PATH", tmp_path / "nope.yaml")
+        assert orc.callback_url_unset() == orc.CALLBACK_URL_UNSET
         _write_cfg(monkeypatch, tmp_path, "mcp:\n  port: 7878\norchestrator:\n  callback_url: \"\"\n")
-        assert tools._callback_url_misplaced() is None
-        assert tools._callback_url_unset() == tools.CALLBACK_URL_UNSET
+        assert orc._callback_url_misplaced() is None
+        assert orc.callback_url_unset() == orc.CALLBACK_URL_UNSET
 
 
 class TestTurnSettleSeconds:
     def test_default_when_absent(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://m\n")
-        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 4.0
+        assert orc.orchestrator_turn_settle_seconds(default=4.0) == 4.0
 
     def test_reads_value_with_inline_comment(self, monkeypatch, tmp_path):
         # Pre-fix this parsed "2.5  # quiet window" -> ValueError -> silent
         # fallback to the default, so a configured value was ignored outright.
         _write_cfg(monkeypatch, tmp_path,
                    "orchestrator:\n  turn_settle_seconds: 2.5   # quiet window\n")
-        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 2.5
+        assert orc.orchestrator_turn_settle_seconds(default=4.0) == 2.5
 
     def test_falls_back_on_garbage(self, monkeypatch, tmp_path):
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  turn_settle_seconds: soon\n")
-        assert tools._orchestrator_turn_settle_seconds(default=4.0) == 4.0
+        assert orc.orchestrator_turn_settle_seconds(default=4.0) == 4.0
 
 
 # --- _session_instance: a session is its network; only "not found" ends it ------
@@ -810,20 +814,29 @@ async def test_session_instance_reads_the_session_network(monkeypatch):
 def test_every_error_envelope_carries_a_known_code():
     """A caller decides 'tell the person' from 'retry once' by the code, not the prose.
     `code` is a required keyword, so this pins the set and the envelope shape."""
-    env = tools._envelope_err("There is no session named 'x'", code="no_such_session")
+    env = com.envelope_err("There is no session named 'x'", code="no_such_session")
     assert env == {"ok": False, "error": "There is no session named 'x'",
                    "error_code": "no_such_session"}
     import ast
     import inspect as _inspect
-    tree = ast.parse(_inspect.getsource(tools))
+    import pkgutil
+
+    import aidc_mcp.service as service
+    # Every module that builds envelopes: the tools and the whole service package.
+    modules = [tools] + [importlib.import_module(f"aidc_mcp.service.{m.name}")
+                         for m in pkgutil.iter_modules(service.__path__)]
     used = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_envelope_err":
-            kw = {k.arg: k.value for k in node.keywords}
-            assert "code" in kw, f"_envelope_err without code at line {node.lineno}"
-            assert isinstance(kw["code"], ast.Constant), f"non-literal code at {node.lineno}"
-            used.add(kw["code"].value)
-    assert used <= tools.ERROR_CODES, used - tools.ERROR_CODES
+    for module in modules:
+        for node in ast.walk(ast.parse(_inspect.getsource(module))):
+            func = node.func if isinstance(node, ast.Call) else None
+            called = getattr(func, "id", "") or getattr(func, "attr", "")
+            if called == "envelope_err":
+                where = f"{module.__name__} line {node.lineno}"
+                kw = {k.arg: k.value for k in node.keywords}
+                assert "code" in kw, f"envelope_err without code at {where}"
+                assert isinstance(kw["code"], ast.Constant), f"non-literal code at {where}"
+                used.add(kw["code"].value)
+    assert used <= com.ERROR_CODES, used - com.ERROR_CODES
     assert {"no_such_session", "queue_full", "out_of_scope", "cli_failed"} <= used
 
 
@@ -834,5 +847,5 @@ def test_every_error_code_is_in_the_documented_table():
     from pathlib import Path
     design = (Path(__file__).resolve().parents[2]
               / "docs" / "design-10-turn-state-and-sending.md").read_text(encoding="utf-8")
-    missing = sorted(code for code in tools.ERROR_CODES if f"`{code}`" not in design)
+    missing = sorted(code for code in com.ERROR_CODES if f"`{code}`" not in design)
     assert not missing, f"error codes missing from design 10 D6: {missing}"

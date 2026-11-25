@@ -18,6 +18,8 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.screen import EMPTY, ScreenState, classify
+from aidc_mcp.service import state as ss
+from tests.logs import patch_log_event
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
 NOW = 1_789_609_900.0   # 2026-09-17T01:51:40Z
@@ -75,7 +77,7 @@ class Session:
         self.screen = _screen("idle-empty")
         self.clock = NOW
         self.instance = "net-1"
-        monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", self.base)
+        monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", self.base)
 
         async def session_instance(name):
             return tools.SESSION_EXISTS, self.instance
@@ -158,7 +160,7 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u1", RESTORED)], age=10.0)
         session.screen = _screen("esc-before-output-sent-prompt-restored")
         assert await session.check() == "input_has_text"
-        assert tools._last_free_verdict["proj"][1] == "prompt_restored"
+        assert ss.last_free_verdict["proj"][1] == "prompt_restored"
 
     async def test_a_wrapped_prompt_put_back_in_the_box_is_a_stop(self, session):
         """The box shows what was pasted, never Claude Code's paste wrapper."""
@@ -166,24 +168,24 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u1", wrapped)], age=10.0)
         session.screen = _screen("esc-before-output-sent-prompt-restored")
         assert await session.check() == "input_has_text"
-        assert tools._last_free_verdict["proj"][1] == "prompt_restored"
+        assert ss.last_free_verdict["proj"][1] == "prompt_restored"
 
     async def test_other_text_in_the_box_is_not_proof_of_a_stop(self, session):
         session.write([*FINISHED, _typed("u1", "a different prompt")], age=10.0)
         session.screen = _screen("esc-before-output-sent-prompt-restored")
         assert await session.check() == "claude_busy"
-        assert tools._last_free_verdict["proj"][1] == "status_row_unproven"
+        assert ss.last_free_verdict["proj"][1] == "status_row_unproven"
 
     async def test_the_working_text_is_remembered_across_a_restart(self, session):
         session.screen = _screen("busy-tool-empty-box")
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         assert await session.check() == "claude_busy"          # seen working
-        tools._working_indicator_seen.clear()                  # the MCP restarts
-        tools._session_instances.clear()
+        ss.working_indicator_seen.clear()                  # the MCP restarts
+        ss.session_instances.clear()
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == ""
-        assert tools._last_free_verdict["proj"][1] == "status_row_idle"
+        assert ss.last_free_verdict["proj"][1] == "status_row_idle"
 
     async def test_a_session_created_again_does_not_inherit_the_working_text(self, session):
         """Review rev-20260917T062841Z-0930096f: a marker keyed by name alone vouched
@@ -192,40 +194,40 @@ class TestCheckFree:
         session.screen = _screen("busy-tool-empty-box")
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         assert await session.check() == "claude_busy"          # seen working
-        tools._working_indicator_seen.clear()                  # the MCP restarts...
-        tools._session_instances.clear()
+        ss.working_indicator_seen.clear()                  # the MCP restarts...
+        ss.session_instances.clear()
         session.instance = "net-2"                             # ...on a new session
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == "claude_busy"
-        assert tools._last_free_verdict["proj"][1] == "status_row_unproven"
-        assert not tools._working_seen_path("proj").exists()   # the stale marker is gone
+        assert ss.last_free_verdict["proj"][1] == "status_row_unproven"
+        assert not ss.working_seen_path("proj").exists()   # the stale marker is gone
 
     async def test_a_session_created_again_while_the_mcp_runs_is_forgotten(self, session):
         session.screen = _screen("busy-tool-empty-box")
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         await session.check()
-        tools._sent_awaiting_echo["proj"] = ("old", NOW)
+        ss.sent_awaiting_echo["proj"] = ("old", NOW)
         session.instance = "net-2"
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == "claude_busy"
         assert not tools._working_indicator_known("proj")
-        assert "proj" not in tools._sent_awaiting_echo
+        assert "proj" not in ss.sent_awaiting_echo
 
     async def test_the_working_text_wins_over_an_earlier_interrupt_report(self, session):
         """A reported prompt's turn is over unless the screen positively shows Claude
         working (a person resubmitted it, and the transcript has not caught up)."""
-        tools._session_watchers["proj"] = object()
+        ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             await session.check()
             tools._record_reported_interrupt("proj", "u2")
             session.screen = _screen("busy-tool-empty-box")
             assert await session.check() == "claude_busy"
-            assert tools._last_free_verdict["proj"][1] == "status_row_working"
+            assert ss.last_free_verdict["proj"][1] == "status_row_working"
         finally:
-            tools._session_watchers.pop("proj", None)
+            ss.session_watchers.pop("proj", None)
 
     async def test_the_markers_hold_while_docker_cannot_answer(self, session, monkeypatch):
         session.screen = _screen("busy-tool-empty-box")
@@ -243,7 +245,7 @@ class TestCheckFree:
         session.screen = _screen("busy-tool-empty-box")
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         await session.check()
-        tools._forget_session_send_state("proj")
+        ss.forget_session_send_state("proj")
         assert not tools._working_indicator_known("proj")
 
     async def test_without_ever_seeing_the_working_text_a_quiet_open_turn_stays_busy(
@@ -258,17 +260,17 @@ class TestCheckFree:
         assert await session.check() == "claude_busy"
 
     async def test_stop_hook_hold_is_busy_whatever_the_screen_shows(self, session):
-        tools._working_indicator_seen.add("proj")
+        ss.working_indicator_seen.add("proj")
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=30.0)
         assert await session.check() == "claude_busy"
-        assert tools._last_free_verdict["proj"][1] == "stop_hooks_running"
+        assert ss.last_free_verdict["proj"][1] == "stop_hooks_running"
 
     async def test_past_the_stop_hook_hold_an_idle_status_row_means_free(self, session):
-        tools._working_indicator_seen.add("proj")
+        ss.working_indicator_seen.add("proj")
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
                       age=tools._STOP_HOOK_WAIT_S)
         assert await session.check() == ""
-        assert tools._last_free_verdict["proj"][1] == "status_row_idle"
+        assert ss.last_free_verdict["proj"][1] == "status_row_idle"
 
     async def test_past_the_stop_hook_hold_a_working_status_row_still_wins(self, session):
         """A Stop hook that runs longer than the hold (a long review gate) with the
@@ -277,55 +279,55 @@ class TestCheckFree:
                       age=tools._STOP_HOOK_WAIT_S + 60)
         session.screen = _screen("busy-tool-empty-box")
         assert await session.check() == "claude_busy"
-        assert tools._last_free_verdict["proj"][1] == "status_row_working"
+        assert ss.last_free_verdict["proj"][1] == "status_row_working"
 
     async def test_just_pasted_prompt_is_busy_until_the_log_shows_it(self, session):
         session.write(FINISHED)
-        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 3)
+        ss.sent_awaiting_echo["proj"] = ("next task", NOW - 3)
         assert await session.check() == "claude_busy"
         session.write([*FINISHED, _typed("u1", "next task", when=ISO_NOW)], age=1.0)
         assert await session.check() == "claude_busy"           # now busy by the log
-        assert "proj" not in tools._sent_awaiting_echo
+        assert "proj" not in ss.sent_awaiting_echo
 
     async def test_a_paste_claude_code_wrapped_clears_the_echo_hold(self, session):
         """Claude Code 2.1.277+ may transcribe a paste inside a <pasted_content> wrapper
         (live 2026-10-08); the hold must still see the prompt arrive."""
         sent = "New project on saoirsesaur/sandbox. Work in a git worktree."
         session.write(FINISHED)
-        tools._sent_awaiting_echo["proj"] = (sent, NOW - 3)
+        ss.sent_awaiting_echo["proj"] = (sent, NOW - 3)
         wrapped = f'\n\n<pasted_content id="fab9">\n{sent}\n</pasted_content id="fab9">\n'
         session.write([*FINISHED, _typed("u1", wrapped, when=ISO_NOW)], age=1.0)
         assert await session.check() == "claude_busy"           # busy by the log
-        assert "proj" not in tools._sent_awaiting_echo
-        assert tools._last_free_verdict["proj"][1] == "log_growing"
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ss.last_free_verdict["proj"][1] == "log_growing"
 
     async def test_prompt_queued_behind_a_running_turn_counts_as_arrived(self, session):
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
                                    "timestamp": ISO_NOW, "content": "next task"}])
-        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 3)
+        ss.sent_awaiting_echo["proj"] = ("next task", NOW - 3)
         assert await session.check() == ""
-        assert "proj" not in tools._sent_awaiting_echo
+        assert "proj" not in ss.sent_awaiting_echo
 
     async def test_free_after_a_clear_without_waiting_out_the_stall_window(self, session):
         """Live 2026-10-08: a prompt queued behind a pasted /clear waited 14 minutes as
         claude_busy (status_row_unproven) while Claude sat at an empty input box."""
         session.write(CLEARED, age=261.0)
         assert await session.check() == ""
-        assert tools._last_free_verdict["proj"][1] == "log_finished"
+        assert ss.last_free_verdict["proj"][1] == "log_finished"
 
     async def test_a_pasted_clear_frees_the_echo_hold_and_its_send_record(self, session):
         """No turn opens for /clear, so none would ever consume its send record."""
-        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "/clear")
+        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "/clear")
         session.write(CLEARED, age=1.0)
-        tools._sent_awaiting_echo["proj"] = ("/clear", NOW - 1)
+        ss.sent_awaiting_echo["proj"] = ("/clear", NOW - 1)
         assert await session.check() == ""
-        assert "proj" not in tools._sent_awaiting_echo
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 
     async def test_free_check_logs_each_change_of_verdict_with_its_evidence(
             self, session, monkeypatch):
         logged = []
-        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append((kind, f)))
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
         session.write(FINISHED)
         await session.check()
         await session.check()
@@ -337,7 +339,7 @@ class TestCheckFree:
 
     async def test_free_without_a_transcript_says_so(self, session, monkeypatch):
         logged = []
-        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append((kind, f)))
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
         assert await session.check() == ""
         assert logged[-1][1]["why"] == "transcript_none"
 
@@ -345,7 +347,7 @@ class TestCheckFree:
         session.write(FINISHED)
         session.screen = "some layout nobody has seen\nwith no input box\n"
         assert await session.check() == "screen_unrecognized"
-        saved = tools._WATCHER_STATE_DIR / "screens" / "proj-unrecognized.ansi"
+        saved = ss.WATCHER_STATE_DIR / "screens" / "proj-unrecognized.ansi"
         assert saved.read_text() == session.screen
 
 
@@ -368,8 +370,8 @@ class TestSessionStateSeparatesTurnFromInputBox:
         assert await tools._wait_for_turn_end("aidc-proj-dev", "proj", timeout=60) == ""
 
     async def test_send_path_waits_for_the_watcher_to_report_the_interrupt(self, session):
-        tools._working_indicator_seen.add("proj")
-        tools._session_watchers["proj"] = object()
+        ss.working_indicator_seen.add("proj")
+        ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             state = await tools._session_state("aidc-proj-dev", "proj")
@@ -378,7 +380,7 @@ class TestSessionStateSeparatesTurnFromInputBox:
             state = await tools._session_state("aidc-proj-dev", "proj")
             assert (state.turn, state.why) == (tools.TURN_IDLE, "interrupt_reported")
         finally:
-            tools._session_watchers.pop("proj", None)
+            ss.session_watchers.pop("proj", None)
 
     async def test_a_reported_interrupt_still_frees_the_session_after_a_restart(self, session):
         """Joint test, 2026-09-17: the watcher's watermark is past a prompt it reported,
@@ -386,22 +388,22 @@ class TestSessionStateSeparatesTurnFromInputBox:
         session read busy with the working text unknown, and a queued prompt waited for
         good. The report is on disk, and the turn counts as over whatever the screen
         shows, even with the prompt cleared from the box."""
-        tools._session_watchers["proj"] = object()
+        ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             await session.check()                        # learns the session instance
             tools._record_reported_interrupt("proj", "u2")
-            tools._reported_interrupts.clear()          # the MCP restarts
-            tools._session_instances.clear()
+            ss.reported_interrupts.clear()          # the MCP restarts
+            ss.session_instances.clear()
             assert await session.check() == ""
-            assert tools._last_free_verdict["proj"][1] == "interrupt_reported"
+            assert ss.last_free_verdict["proj"][1] == "interrupt_reported"
             session.write([*FINISHED, _typed("u2", "essay"), _typed("u3", "next")], age=30.0)
             assert await session.check() == "claude_busy"   # a new prompt is a new turn
         finally:
-            tools._session_watchers.pop("proj", None)
+            ss.session_watchers.pop("proj", None)
 
     async def test_without_a_watcher_there_is_no_report_to_wait_for(self, session):
-        tools._working_indicator_seen.add("proj")
+        ss.working_indicator_seen.add("proj")
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         assert await session.check() == ""
 
@@ -410,25 +412,25 @@ class TestWatchForEcho:
     async def test_a_prompt_that_never_shows_is_logged_after_a_single_send(
             self, session, monkeypatch):
         logged = []
-        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append((kind, f)))
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
 
         async def nosleep(_):
             return None
         monkeypatch.setattr(tools.asyncio, "sleep", nosleep)
         session.write(FINISHED)
-        tools._sent_awaiting_echo["proj"] = ("lost", NOW)
+        ss.sent_awaiting_echo["proj"] = ("lost", NOW)
         await tools._watch_for_echo("proj", "lost", NOW)
-        assert "proj" not in tools._sent_awaiting_echo
+        assert "proj" not in ss.sent_awaiting_echo
         [(kind, fields)] = [e for e in logged if e[0] == "session_send_not_seen_in_transcript"]
         assert fields["waited_s"] == tools._ECHO_WAIT_S
 
     async def test_seen_prompt_clears_the_hold_without_logging(self, session, monkeypatch):
         logged = []
-        monkeypatch.setattr(tools, "log_event", lambda kind, **f: logged.append(kind))
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append(kind))
         session.write([*FINISHED, _typed("u1", "next", when=ISO_NOW)])
-        tools._sent_awaiting_echo["proj"] = ("next", NOW - 1)
+        ss.sent_awaiting_echo["proj"] = ("next", NOW - 1)
         await tools._watch_for_echo("proj", "next", NOW - 1)
-        assert "proj" not in tools._sent_awaiting_echo
+        assert "proj" not in ss.sent_awaiting_echo
         assert "session_send_not_seen_in_transcript" not in logged
 
     async def test_the_free_check_also_gives_a_queued_prompts_record_back(self, session):
@@ -436,66 +438,66 @@ class TestWatchForEcho:
         free check runs every 2.5 s and _watch_for_echo every 2 s, and whichever wins
         clears the marker. If only one of them released the record, the other winning
         left it to sit for 24 h — where a person's identical words would match it."""
-        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "next task")
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
                                    "timestamp": ISO_NOW, "content": "next task"}])
-        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        ss.sent_awaiting_echo["proj"] = ("next task", NOW - 1)
         assert await session.check() == ""
-        assert "proj" not in tools._sent_awaiting_echo
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 
     async def test_a_prompt_claude_queued_gives_its_send_record_back(self, session):
         """Claude Code records a prompt pasted while it is working only as a queued
         message and answers it inside the running turn, so no turn ever claims it. Its
         send record must not sit there for 24 h, where the same words typed by a person
         would match it and be delivered as the orchestrator's own prompt."""
-        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "next task")
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
                                    "timestamp": ISO_NOW, "content": "next task"}])
-        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        ss.sent_awaiting_echo["proj"] = ("next task", NOW - 1)
         await tools._watch_for_echo("proj", "next task", NOW - 1)
-        assert "proj" not in tools._sent_awaiting_echo
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 
     async def test_a_prompt_claude_answered_normally_keeps_its_send_record(self, session):
         """A prompt that reaches the transcript as a prompt line IS claimed by the turn
         it opens, which is where its record is consumed (with the reply's attribution)."""
-        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", "next task")
+        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "next task")
         session.write([*FINISHED, _typed("u1", "next task", when=ISO_NOW)])
-        tools._sent_awaiting_echo["proj"] = ("next task", NOW - 1)
+        ss.sent_awaiting_echo["proj"] = ("next task", NOW - 1)
         await tools._watch_for_echo("proj", "next task", NOW - 1)
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 1
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 1
 
     async def test_a_later_paste_is_not_cleared_by_an_earlier_watch(self, session):
         session.write(FINISHED)
-        tools._sent_awaiting_echo["proj"] = ("second", NOW)
+        ss.sent_awaiting_echo["proj"] = ("second", NOW)
         await tools._watch_for_echo("proj", "first", NOW - 5)
-        assert tools._sent_awaiting_echo["proj"] == ("second", NOW)
+        assert ss.sent_awaiting_echo["proj"] == ("second", NOW)
 
 
 class TestEviction:
     def _fill(self):
-        tools._working_indicator_seen.add("proj")
-        tools._sent_awaiting_echo["proj"] = ("x", NOW)
+        ss.working_indicator_seen.add("proj")
+        ss.sent_awaiting_echo["proj"] = ("x", NOW)
         tools._record_reported_interrupt("proj", "u1")
-        tools._last_free_verdict["proj"] = ("", "log_finished")
+        ss.last_free_verdict["proj"] = ("", "log_finished")
 
     def test_unwatching_keeps_the_send_paths_state(self):
         """A session_unwatch must not make a prompt just pasted look unsent: that
         state belongs to the session, not to its webhook."""
         self._fill()
-        tools._evict_session_state("proj")
-        assert "proj" in tools._working_indicator_seen
-        assert tools._sent_awaiting_echo["proj"] == ("x", NOW)
-        assert "proj" in tools._last_free_verdict
+        ss.evict_session_state("proj")
+        assert "proj" in ss.working_indicator_seen
+        assert ss.sent_awaiting_echo["proj"] == ("x", NOW)
+        assert "proj" in ss.last_free_verdict
 
     def test_a_removed_session_forgets_it(self):
         self._fill()
-        tools._forget_session_send_state("proj")
-        assert "proj" not in tools._working_indicator_seen
-        assert "proj" not in tools._sent_awaiting_echo
+        ss.forget_session_send_state("proj")
+        assert "proj" not in ss.working_indicator_seen
+        assert "proj" not in ss.sent_awaiting_echo
         assert not tools._interrupt_reported("proj", "u1")
-        assert "proj" not in tools._last_free_verdict
+        assert "proj" not in ss.last_free_verdict
 
 
 class TestWaitUntilFree:
@@ -562,7 +564,7 @@ class TestInterruptedBeforeOutputDelivery:
         self.screen = ScreenState(EMPTY, working=working)
         self.posted = []
         if seen:
-            tools._working_indicator_seen.add("sess")
+            ss.working_indicator_seen.add("sess")
 
     async def _post(self, turn, attempt):
         self.posted.append(turn)
@@ -645,7 +647,7 @@ class TestInterruptedBeforeOutputDelivery:
         await self.drain()
         await self.drain()
         assert [t.terminal_uuid for t in self.posted] == ["u1", "u2"]
-        assert tools._reported_interrupts["sess"] == "u2"
+        assert ss.reported_interrupts["sess"] == "u2"
 
     async def test_a_prompt_whose_turn_ended_with_no_reply_is_not_called_interrupted(
             self, tmp_path):
@@ -691,7 +693,7 @@ class TestInterruptedBeforeOutputDelivery:
 
         async def screen_fn(session):
             calls.append(session)
-            tools._working_indicator_seen.add(session)   # what _read_screen does
+            ss.working_indicator_seen.add(session)   # what _read_screen does
             return self.screen
 
         self._screen_fn = screen_fn
@@ -700,7 +702,7 @@ class TestInterruptedBeforeOutputDelivery:
         await self.drain(quiet=1.0)
         await self.drain(quiet=1.0)
         assert calls == ["sess"]
-        assert "sess" in tools._working_indicator_seen
+        assert "sess" in ss.working_indicator_seen
 
     async def test_report_consumes_the_send_record_and_names_the_orchestrator(self, tmp_path):
         self._setup(tmp_path, [_typed("u1", "refactor the parser")])
@@ -747,7 +749,7 @@ class TestQueuedPromptOnTheAgentListScreen:
         app = MCPServer("t")
         tools.register(app)
         send = app._tool_manager._tools["session_send"].fn
-        tools._session_watchers["proj"] = Watching()
+        ss.session_watchers["proj"] = Watching()
 
         session.screen = (SCREENS / "claude-2.1.300-idle-agent-panel.ansi").read_text()
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)
@@ -759,10 +761,10 @@ class TestQueuedPromptOnTheAgentListScreen:
         session.write([*FINISHED], age=100.0)
         for _ in range(200):
             await real_sleep(0)
-            if "proj" not in tools._pending_sends:
+            if "proj" not in ss.pending_sends:
                 break
         assert pasted == [_f("please fix the other bugs")]
-        assert tools._last_free_verdict["proj"] == ("", "log_finished")
+        assert ss.last_free_verdict["proj"] == ("", "log_finished")
 
 
 POINTED = "claude-2.1.30x-idle-agent-row-pointed.ansi"
@@ -808,7 +810,7 @@ class TestSendWhileABackgroundAgentRuns:
         monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
         app = MCPServer("t")
         tools.register(app)
-        tools._session_watchers["proj"] = Watching()
+        ss.session_watchers["proj"] = Watching()
         return app._tool_manager._tools["session_send"].fn
 
     async def test_a_session_idle_at_its_prompt_takes_the_prompt_now(self, session,
@@ -826,7 +828,7 @@ class TestSendWhileABackgroundAgentRuns:
         send = self._setup(session, monkeypatch, lands=False)
         res = await send(name="proj", prompt="please look at the parser",
                          conversation_id="c1")
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert self.keys == []
         assert res["data"]["status"] == "queued"
@@ -837,7 +839,7 @@ class TestSendWhileABackgroundAgentRuns:
         send = self._setup(session, monkeypatch)
         session.screen = (SCREENS / "claude-2.1.30x-idle-agent-list-selected.ansi").read_text()
         res = await send(name="proj", prompt="x", conversation_id="c1")
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert self.pasted == [] and self.keys == []
         assert res["data"]["status"] == "queued"
@@ -856,11 +858,11 @@ class TestSendWhileABackgroundAgentRuns:
         session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         for _ in range(200):
             await asyncio.sleep(0)
-            if "proj" not in tools._pending_sends:
+            if "proj" not in ss.pending_sends:
                 break
         assert self.pasted == [_f("please look at the parser")]
         assert self.keys == ["Enter"]
-        assert "proj" not in tools._pending_sends
+        assert "proj" not in ss.pending_sends
 
     async def test_a_person_typing_after_a_lost_paste_is_still_held(self, session,
                                                                      monkeypatch):
@@ -868,7 +870,7 @@ class TestSendWhileABackgroundAgentRuns:
         await send(name="proj", prompt="please look at the parser", conversation_id="c1")
         session.screen = session.screen.replace("❯\xa0", "❯\xa0something else", 1)
         assert await session.check() == "input_has_text"
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert self.keys == []
 
@@ -877,11 +879,11 @@ class TestSendWhileABackgroundAgentRuns:
         """A caller that does not queue (session_run) gave up on paste A; when A
         shows later, a following send must not paste B after it and submit "A B"."""
         send = self._setup(session, monkeypatch)
-        tools._unsubmitted_paste["proj"] = ("the first prompt", ())
+        ss.unsubmitted_paste["proj"] = ("the first prompt", ())
         session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
         assert await session.check() == "input_has_text"
         res = await send(name="proj", prompt="the second prompt", conversation_id="c1")
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert res["data"]["status"] == "queued"
         assert self.pasted == [] and self.keys == []
@@ -889,8 +891,8 @@ class TestSendWhileABackgroundAgentRuns:
     async def test_a_late_paste_that_is_not_the_queue_head_is_held(self, session,
                                                                     monkeypatch):
         self._setup(session, monkeypatch)
-        tools._unsubmitted_paste["proj"] = ("the first prompt", ("p-first",))
-        tools._pending_sends["proj"] = [ts.QueuedPrompt(text="another prompt",
+        ss.unsubmitted_paste["proj"] = ("the first prompt", ("p-first",))
+        ss.pending_sends["proj"] = [ts.QueuedPrompt(text="another prompt",
                                                         enqueued_at=ts.now_iso())]
         session.screen = session.screen.replace("❯\xa0", "❯\xa0the first prompt", 1)
         assert await session.check() == "input_has_text"
@@ -916,7 +918,7 @@ class TestSendWhileABackgroundAgentRuns:
             await asyncio.sleep(0)
             if tools._queue_ids("proj") == [second["data"]["prompt_id"]]:
                 break
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert tools._queue_ids("proj") == [second["data"]["prompt_id"]]
         assert self.keys == ["Enter"]
@@ -932,16 +934,16 @@ class TestSendWhileABackgroundAgentRuns:
         first = await send(name="proj", prompt="please look at the parser",
                            conversation_id="c1")
         pid = first["data"]["prompt_id"]
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
-        saved = ts.load_send_queues(tools._WATCHER_STATE_DIR)[0]["proj"]
+        saved = ts.load_send_queues(ss.WATCHER_STATE_DIR)[0]["proj"]
         assert [(q.prompt_id, q.in_box) for q in saved] == [(pid, True)]
 
         # The restart: everything in memory is gone; the screen still shows the paste.
-        tools._pending_sends.clear()
-        tools._pending_drainers.clear()
-        tools._queue_loaded.clear()
-        tools._unsubmitted_paste.clear()
+        ss.pending_sends.clear()
+        ss.pending_drainers.clear()
+        ss.queue_loaded.clear()
+        ss.unsubmitted_paste.clear()
         session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         pasted_before = len(self.pasted)
 
@@ -952,11 +954,11 @@ class TestSendWhileABackgroundAgentRuns:
         assert d["outcome"] == "already_pasted" and d["cancelled"] == []
         for _ in range(300):
             await asyncio.sleep(0)
-            if "proj" not in tools._pending_sends:
+            if "proj" not in ss.pending_sends:
                 break
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
-        assert "proj" not in tools._pending_sends
+        assert "proj" not in ss.pending_sends
         assert self.keys == ["Enter"] and len(self.pasted) == pasted_before
 
     async def test_a_running_main_turn_still_queues(self, session, monkeypatch):
@@ -964,7 +966,7 @@ class TestSendWhileABackgroundAgentRuns:
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)
         res = await send(name="proj", prompt="please look at the parser",
                          conversation_id="c1")
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
         assert res["data"]["status"] == "queued"
         assert res["data"]["waiting_reason"] == "claude_busy"
@@ -1018,12 +1020,12 @@ class TestTheFreeCheckLeavesItsScreen:
         session.write(FINISHED)
         session.screen = (SCREENS / POINTED).read_text()
         assert await session.check() == ""
-        assert tools._last_screen_raw["proj"] == session.screen
+        assert ss.last_screen_raw["proj"] == session.screen
 
     async def test_no_free_verdict_without_a_screen(self, session):
         session.running = False
         assert await session.check() == "claude_not_running"
-        assert "proj" not in tools._last_screen_raw
+        assert "proj" not in ss.last_screen_raw
 
 
 BUSY = "claude-2.1.27x-busy-tool-empty-box.ansi"
@@ -1078,14 +1080,14 @@ class TestSendDeliverJoin:
         monkeypatch.setattr(tools, "_load_and_paste", load_paste)
         monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
         monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
-        monkeypatch.setattr(tools, "log_event", log)
+        patch_log_event(monkeypatch, log)
         app = MCPServer("t")
         tools.register(app)
-        tools._session_watchers["proj"] = Watching()
+        ss.session_watchers["proj"] = Watching()
         return app._tool_manager._tools["session_send"].fn
 
     def _stop_drainers(self):
-        for task in tools._pending_drainers.values():
+        for task in ss.pending_drainers.values():
             task.cancel()
 
     async def test_join_pastes_into_the_running_turn_and_says_what_it_joined(
@@ -1095,14 +1097,14 @@ class TestSendDeliverJoin:
         d = res["data"]
         assert d["status"] == "joined_turn"
         assert self.pasted == [JOIN_SENT] and self.keys == ["Enter"]
-        assert "proj" not in tools._pending_sends
+        assert "proj" not in ss.pending_sends
         assert d["started_by"] == "background_task"
         assert d["working_on"].startswith("background task completed: Agent")
         assert d["turn_started_at"] == "2026-09-17T01:40:00Z"
         assert d["last_activity"] == {"kind": "tool_use", "name": "Bash",
                                       "at": "2026-09-17T01:51:30Z"}
         assert "final answer" in d["delivery"] and "join_declined" not in d
-        assert tools._sent_awaiting_echo["proj"][0] == JOIN_SENT
+        assert ss.sent_awaiting_echo["proj"][0] == JOIN_SENT
         assert ("session_send_joined_turn", {"session": "proj", "prompt_len": len(JOIN_SENT),
                                              "why": "log_growing"}) in self.logged
 
@@ -1113,12 +1115,12 @@ class TestSendDeliverJoin:
         will claim it as its prompt (its answer is in the running turn's reply)."""
         send = self._setup(session, monkeypatch)
         await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 1
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 1
         session.write([*NOTIFIED, {"type": "queue-operation", "operation": "enqueue",
                                    "timestamp": ISO_NOW, "content": JOIN_SENT}], age=1.0)
         assert await session.check() == "claude_busy"
-        assert "proj" not in tools._sent_awaiting_echo
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
         assert [k for k, _ in self.logged].count("session_send_queued_by_claude") == 1
 
     async def test_the_default_still_queues_and_says_what_the_agent_is_busy_with(
@@ -1136,15 +1138,15 @@ class TestSendDeliverJoin:
 
     async def test_join_never_jumps_a_prompt_already_waiting(self, session, monkeypatch):
         send = self._setup(session, monkeypatch)
-        tools._queue_loaded.add("proj")
-        tools._pending_sends["proj"] = [ts.QueuedPrompt(text="earlier", enqueued_at=ts.now_iso())]
+        ss.queue_loaded.add("proj")
+        ss.pending_sends["proj"] = [ts.QueuedPrompt(text="earlier", enqueued_at=ts.now_iso())]
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
         self._stop_drainers()
         d = res["data"]
         assert d["status"] == "queued" and d["join_declined"] == "queued_behind"
         assert d["queued_behind"] == 1 and self.pasted == []
-        assert [q.text for q in tools._pending_sends["proj"]] == ["earlier", JOIN]
-        assert tools._pending_sends["proj"][1].paste() == JOIN_SENT
+        assert [q.text for q in ss.pending_sends["proj"]] == ["earlier", JOIN]
+        assert ss.pending_sends["proj"][1].paste() == JOIN_SENT
         assert d["delivery"].startswith("Not joined to the running turn: an earlier prompt")
 
     async def test_join_never_types_over_a_persons_unsent_text(self, session, monkeypatch):
@@ -1202,7 +1204,7 @@ class TestSendDeliverJoin:
         send = self._setup(session, monkeypatch)
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="now")
         assert res["ok"] is False and res["error_code"] == "invalid_argument"
-        assert self.pasted == [] and "proj" not in tools._pending_sends
+        assert self.pasted == [] and "proj" not in ss.pending_sends
 
     async def test_join_holds_for_an_interrupt_not_reported_yet(self):
         """The watcher reports an Esc pressed before Claude wrote anything from the
@@ -1231,14 +1233,14 @@ class TestPromptHeldByClaudeCode:
         """A prompt pasted as a turn ended is held by Claude Code and run next as a line
         marked promptSource "queued", which no turn attributes to anyone, so the record
         would otherwise wait out its 24 h."""
-        ts.record_sent_prompt(tools._WATCHER_STATE_DIR, "proj", JOIN)
+        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", JOIN)
         session.write([*FINISHED, {"type": "user", "uuid": "q1", "timestamp": ISO_NOW,
                                    "promptSource": "queued", "origin": {"kind": "human"},
                                    "message": {"role": "user", "content": JOIN}}], age=1.0)
-        tools._sent_awaiting_echo["proj"] = (JOIN, NOW - 1)
+        ss.sent_awaiting_echo["proj"] = (JOIN, NOW - 1)
         await tools._watch_for_echo("proj", JOIN, NOW - 1)
-        assert "proj" not in tools._sent_awaiting_echo
-        assert ts.sent_prompts_remaining(tools._WATCHER_STATE_DIR, "proj") == 0
+        assert "proj" not in ss.sent_awaiting_echo
+        assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 
 
 class TestSendDescribesATurnOnlyWhileOneRuns:

@@ -25,6 +25,7 @@ import pytest
 import uvicorn
 
 from aidc_mcp import auth, headless, server, tools
+from tests.logs import patch_log_event
 
 TOKEN = "cancel-wire-token"
 HOST = "10.0.0.5:7878"
@@ -91,7 +92,7 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(headless, "container_runs", no_runs)
     monkeypatch.setattr(headless, "stop", stop)
-    monkeypatch.setattr(tools, "log_event", log)
+    patch_log_event(monkeypatch, log)
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))

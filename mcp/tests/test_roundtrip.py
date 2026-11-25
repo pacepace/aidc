@@ -29,6 +29,9 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import common as com
+from aidc_mcp.service import config as orc
+from aidc_mcp.service import state as ss
 
 # --- transcript fixture builders (a deterministic stand-in for Claude) --------
 
@@ -157,11 +160,11 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://orchestrator.local")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://orchestrator.local")
     # The session_resend TOOL passes no base dirs — it resolves the module globals
     # at call time — so point those at the tmp dirs as well. (conftest already
     # redirects _WATCHER_STATE_DIR to this same tmp_path/"watcher-state".)
-    monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", base)
+    monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", base)
     monkeypatch.setattr(tools, "_load_token", lambda: "tok")
     monkeypatch.setattr(tools.httpx, "AsyncClient", orchestrator.client_factory())
     monkeypatch.setattr(tools.asyncio, "sleep", _nosleep)
@@ -217,7 +220,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     res = await h.send(name="proj", prompt="what does foo() do?", conversation_id="conv-1")
     assert res["ok"] is True
     assert res["data"]["status"] == "sent"
-    assert "proj" in tools._session_watchers          # webhook opened
+    assert "proj" in ss.session_watchers          # webhook opened
     assert h.paste_calls == [_sent("what does foo() do?")]    # prompt actually injected
     # Baseline anchored forward with nothing to skip (fresh session).
     mark = ts.load_watermark(h.state, "proj", "conv-1")
@@ -328,8 +331,8 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     # Three prompts waited out a turn: the orchestrator's, one it sent for a person,
     # and one from a conversation that does not hold the webhook.
     now = ts.now_iso()
-    tools._queue_loaded.add("proj")
-    tools._pending_sends["proj"] = [
+    ss.queue_loaded.add("proj")
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("[agent] two", now, conversation_id="conv-1",
                         session_instance="id-1", prompt_id="p-two"),
         ts.QueuedPrompt("[from pace] three", now, conversation_id="conv-1",
@@ -399,14 +402,14 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     assert saved["session_instance"] == "id-1"
 
     # The MCP goes down: every in-memory watcher is gone, the saved files are not.
-    for task in tools._session_watchers.values():
+    for task in ss.session_watchers.values():
         task.cancel()
-    tools._session_watchers.clear()
+    ss.session_watchers.clear()
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("reply SEVEN")),
                                             _assistant("a1", "SEVEN")])
 
     await tools.resume_on_startup(h.app)
-    assert "proj" in tools._session_watchers
+    assert "proj" in ss.session_watchers
     assert "proj" in h.app._tool_manager._tools["session_send"].description
     await h.drain()
     await h.drain()
@@ -420,9 +423,9 @@ async def test_unwatch_forgets_the_saved_webhook(harness):
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     await h.app._tool_manager._tools["session_unwatch"].fn(name="proj")
     assert not ts.watch_path(h.state, "proj").exists()
-    tools._session_watchers.clear()
+    ss.session_watchers.clear()
     await tools.resume_watchers(h.app)
-    assert "proj" not in tools._session_watchers
+    assert "proj" not in ss.session_watchers
 
 
 async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness, monkeypatch):
@@ -434,7 +437,7 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
 
     await tools.resume_watchers(h.app)
 
-    assert not tools._session_watchers
+    assert not ss.session_watchers
     assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
     assert ts.watch_path(h.state, "other").exists()      # another server's to resume
 
@@ -446,7 +449,7 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
     ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = "id-2"
     await tools.resume_watchers(h.app)
-    assert "proj" not in tools._session_watchers
+    assert "proj" not in ss.session_watchers
     assert not ts.watch_path(h.state, "proj").exists()
 
 
@@ -455,7 +458,7 @@ async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
     ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = ""
     await tools.resume_watchers(h.app)
-    assert "proj" in tools._session_watchers
+    assert "proj" in ss.session_watchers
 
 
 # --- speaker (design 10 D4), sent only with orchestrator.send_speaker on -------------
@@ -468,7 +471,7 @@ async def _deliver_turn(h, objs):
 
 async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: True)
+    monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: True)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
     objs = [_user("u1", _sent("from the orchestrator")), _assistant("a1", "ONE")]
@@ -490,7 +493,7 @@ async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
 
 async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: True)
+    monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: True)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="warm up", conversation_id="conv-1")
     objs = [_user("u1", "warm up"), _assistant("a1", "OK")]
@@ -506,7 +509,7 @@ async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
 
 async def test_speaker_is_not_sent_when_disabled(harness, monkeypatch):
     h = harness
-    monkeypatch.setattr(tools, "_orchestrator_send_speaker", lambda: False)
+    monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: False)
     (h.base / "proj").mkdir(parents=True)
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     await _deliver_turn(h, [_user("u1", "q"), _assistant("a1", "A"),
@@ -521,7 +524,7 @@ LONG_AGO = "2026-09-17T04:00:00Z"
 
 async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
     h = harness
-    tools._pending_sends["proj"] = [
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("first", LONG_AGO, waiting_reason="input_has_text",
                         conversation_id="conv-1", session_instance="id-1",
                         prompt_id="p-first"),
@@ -559,21 +562,21 @@ async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
         ts.QueuedPrompt("first", LONG_AGO, waiting_reason="claude_busy",
                         conversation_id="conv-1", session_instance="id-1",
                         waiting_notified=True)])
-    tools._pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
+    ss.pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
     tools._notify_long_waits("proj")
     await _settle_background()
     assert h.orchestrator.posts == []
 
 
 async def _settle_background():
-    await asyncio.gather(*list(tools._background_tasks))
+    await asyncio.gather(*list(com.background_tasks))
 
 
 async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harness):
     """A queued prompt that can never be pasted is reported back to the conversation
     that sent it, with its text, and recorded in the send dead-letter directory."""
     h = harness
-    tools._pending_sends["proj"] = [
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
                         session_instance="id-1", prompt_id="p-eight"),
         ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
@@ -582,7 +585,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
 
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
     assert [p["json"] for p in h.orchestrator.posts] == [{
         "content": ("[Not delivered: the session 'proj' was removed before this prompt "
                     "could be pasted. It was never seen by the agent.]\n\nreply EIGHT"),
@@ -596,7 +599,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
 
 async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harness):
     h = harness
-    tools._pending_sends["proj"] = [
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("for the old one", "2026-09-17T04:00:00Z", conversation_id="conv-1",
                         session_instance="id-1"),
         ts.QueuedPrompt("for the new one", "2026-09-17T04:00:05Z", conversation_id="conv-1",
@@ -606,19 +609,19 @@ async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harnes
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
 
-    assert [q.text for q in tools._pending_sends["proj"]] == ["for the new one"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["for the new one"]
     assert [p["json"]["error_code"] for p in h.orchestrator.posts] == ["prompt_dropped"]
     assert "for the old one" in h.orchestrator.posts[0]["json"]["content"]
 
 
 async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
     h = harness
-    tools._pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
+    ss.pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
                                                     session_instance="id-1")]
     h.session_state = tools.SESSION_UNKNOWN
     h.instance = ""
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
-    assert [q.text for q in tools._pending_sends["proj"]] == ["keep"]
+    assert [q.text for q in ss.pending_sends["proj"]] == ["keep"]
     assert not h.orchestrator.posts
 
 

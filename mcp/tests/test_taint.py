@@ -12,6 +12,8 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, tools
 from aidc_mcp import session_facts as sf
+from aidc_mcp.service import common as com
+from aidc_mcp.service import config as orc
 
 TAINT = (b'{"tainted_at":"2026-10-14T09:00:00Z","trigger":"blocklist",'
          b'"domain":"evil.example","squid_log_line":"CONNECT evil.example:443"}\n')
@@ -49,7 +51,7 @@ def nothing_runs(monkeypatch):
 
     async def aboom(*a, **k):
         raise AssertionError("a refused call reached the session")
-    monkeypatch.setattr(tools, "_run_cli", boom)
+    monkeypatch.setattr(com, "run_cli", boom)
     monkeypatch.setattr(tools.subprocess, "run", boom)
     monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", aboom)
 
@@ -68,7 +70,7 @@ def test_exactly_the_tools_that_put_work_in_are_guarded():
 @pytest.mark.parametrize("tool", sorted(tools.TAINT_GUARDED))
 async def test_a_guarded_tool_refuses_a_tainted_session(tool, tainted, nothing_runs, monkeypatch):
     fn = _app()._tool_manager._tools[tool].fn
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: "http://cb")
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     res = await fn(name="proj", **_args(fn))
     assert res["ok"] is False
     assert res["error_code"] == "tainted"

@@ -16,6 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from aidc_mcp import __version__, audit, resources, tools
+from aidc_mcp.service import common as com
 
 
 class ResumeOnStartup:
@@ -34,7 +35,7 @@ class ResumeOnStartup:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") == "lifespan" and not self.started:
             self.started = True
-            tools.fire(tools.resume_on_startup(self.mcp_app))
+            com.fire(tools.resume_on_startup(self.mcp_app))
         await self.app(scope, receive, send)
 
 

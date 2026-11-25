@@ -7,7 +7,9 @@ and more while `aidc list` is slow).
 
 import ast
 import asyncio
+import importlib
 import inspect
+import pkgutil
 import textwrap
 import threading
 import time
@@ -15,6 +17,7 @@ import time
 from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources, tools
+from aidc_mcp.service import common as com
 
 # Long enough that a stalled loop is unmistakable, short enough to keep a
 # failing run quick.
@@ -55,7 +58,7 @@ async def test_session_list_does_not_stall_the_loop(monkeypatch):
     app = _app()
 
     async def call(release):
-        monkeypatch.setattr(tools, "_run_cli", _blocking(
+        monkeypatch.setattr(com, "run_cli", _blocking(
             release, {"exit": 0, "stdout": "SESSION\n", "stderr": ""}))
         return await app.call_tool("session_list", {})
 
@@ -67,7 +70,7 @@ async def test_session_status_does_not_stall_the_loop(monkeypatch, idle_session)
     app = _app()
 
     async def call(release):
-        monkeypatch.setattr(tools, "_run_cli", _blocking(
+        monkeypatch.setattr(com, "run_cli", _blocking(
             release, {"exit": 0, "stdout": "ok", "stderr": ""}))
         return await app.call_tool("session_status", {"name": "proj"})
 
@@ -115,24 +118,45 @@ def test_every_tool_and_resource_is_a_coroutine_function():
     assert sync == []
 
 
+def _modules():
+    """tools and every service module: where the tools' bodies and their helpers live."""
+    import aidc_mcp.service as service
+    return [tools] + [importlib.import_module(f"aidc_mcp.service.{m.name}")
+                      for m in pkgutil.iter_modules(service.__path__)]
+
+
 def _loop_owned_state():
-    """Every module-level dict, list or set in tools: the per-session state the
-    event loop's watchers, drainers and senders mutate."""
-    return {n for n, v in vars(tools).items()
-            if n.startswith("_") and isinstance(v, (dict, list, set))}
+    """Every module-level dict, list or set in tools and the service, as (module, name):
+    the per-session state the event loop's watchers, drainers and senders mutate."""
+    return {(m.__name__, n) for m in _modules() for n, v in vars(m).items()
+            if not n.startswith("__") and isinstance(v, (dict, list, set))}
 
 
-def _names_reached(fn, module_funcs, seen):
-    """Global names a function's body uses, following calls into other module-level
-    functions of tools, so state reached through a helper counts too."""
+def _names_reached(fn, seen):
+    """Module-level names (module, name) a function's body uses, following calls into
+    other module-level functions of tools and the service, whether called bare
+    (`helper()`) or through a module alias (`ss.helper()`), so state reached through a
+    helper in another module counts too."""
+    module = inspect.getmodule(fn)
+    known = {m.__name__ for m in _modules()}
     tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     out = set()
+
+    def reach(owner, name):
+        out.add((owner.__name__, name))
+        target = vars(owner).get(name)
+        if inspect.isfunction(target) and target.__module__ == owner.__name__ \
+                and (owner.__name__, name) not in seen:
+            seen.add((owner.__name__, name))
+            out.update(_names_reached(target, seen))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
-            out.add(node.id)
-            if node.id in module_funcs and node.id not in seen:
-                seen.add(node.id)
-                out |= _names_reached(module_funcs[node.id], module_funcs, seen)
+            reach(module, node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            other = vars(module).get(node.value.id)
+            if inspect.ismodule(other) and other.__name__ in known:
+                reach(other, node.attr)
     return out
 
 
@@ -140,15 +164,14 @@ def test_off_loop_bodies_touch_no_state_the_loop_owns():
     """off_loop runs a body in a worker thread. A body reading or changing state the
     loop also changes (the send queues, watcher tables) would race it."""
     app = _app()
-    module_funcs = {n: f for n, f in vars(tools).items()
-                    if inspect.isfunction(f) and f.__module__ == tools.__name__}
     owned = _loop_owned_state()
-    assert "_pending_sends" in owned  # the derivation still finds the state it guards
+    # the derivation still finds the state it guards
+    assert ("aidc_mcp.service.state", "pending_sends") in owned
     fns = [t.fn for t in app._tool_manager._tools.values()]
     fns += [r.fn for r in app._resource_manager._resources.values()]
     fns += [t.fn for t in app._resource_manager._templates.values()]
     offloaded = [f for f in fns if getattr(f, "runs_off_loop", False)]
     assert offloaded, "no off_loop tool found; the check would pass vacuously"
-    touching = {f.__name__: sorted(_names_reached(inspect.unwrap(f), module_funcs, set()) & owned)
+    touching = {f.__name__: sorted(_names_reached(inspect.unwrap(f), set()) & owned)
                 for f in offloaded}
     assert {k: v for k, v in touching.items() if v} == {}

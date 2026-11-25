@@ -130,3 +130,14 @@ every tool through its registered function, is the check, and smoke runs the rea
 - Done when: the MCP suite and `tests/unit/test-config-sources.sh` (and the mcp start test) pass.
 
 ## Decisions made mid-build
+- (01) Module aliases follow the package's short-alias style (`ts`, `tv`, `sf`): `ss` state,
+  `orc` orchestrator config, `com` common, and later `tmx`, `tn`, `cbk`, `snd`, `dlv`, `sup`,
+  `inv`, `rps`, `ses`. Chosen so no alias is also a local name anywhere (checked by the move
+  tool); `cfg` was not usable, the tests use it for config paths.
+- (01) Tests that captured `tools.log_event` now capture it in tools and every service module
+  at once (`tests/logs.py`), since each module binds its own `log_event`: a capture of one
+  module would miss events logged from another, and an assertion that an event is absent
+  would then pass for the wrong reason.
+- (01) The two tests that scan source (every envelope carries a known code; off-loop bodies
+  touch no loop state) scan tools.py and the whole service, and follow `alias.name` calls
+  into other modules; each was checked to fail on a planted violation.

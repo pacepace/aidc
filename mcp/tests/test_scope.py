@@ -7,6 +7,8 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources, scope, tools
+from aidc_mcp.service import common as com
+from aidc_mcp.service import state as ss
 
 NAMED_TOOLS = ["session_status", "session_exec", "session_invoke", "session_invoke_async",
                "session_send", "session_watch", "session_resend", "session_unwatch",
@@ -56,7 +58,7 @@ def forbid_side_effects(monkeypatch):
     async def aboom(*a, **k):
         raise AssertionError("an out-of-scope call reached the session")
 
-    monkeypatch.setattr(tools, "_run_cli", boom)
+    monkeypatch.setattr(com, "run_cli", boom)
     monkeypatch.setattr(tools.subprocess, "run", boom)
     monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", aboom)
 
@@ -142,7 +144,7 @@ async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
     raw = ("SESSION   STATUS   PROFILE\n"
            "jointtest Up 1 min multi\n"
            "other     Up 2 days multi\n")
-    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+    monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": raw, "stderr": ""})
     out = (await app._tool_manager._tools["session_list"].fn())["data"]["raw"]
     assert out == "SESSION   STATUS   PROFILE\njointtest Up 1 min multi\n"
@@ -150,7 +152,7 @@ async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
 
 async def test_in_scope_calls_go_through(app, monkeypatch, idle_session):
     monkeypatch.setenv(scope.ENV, "jointtest")
-    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+    monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "status ok", "stderr": ""})
     res = await app._tool_manager._tools["session_status"].fn(name="jointtest")
     assert res["ok"] is True
@@ -174,12 +176,12 @@ async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
 async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
     from aidc_mcp import transcript as ts
     monkeypatch.setenv(scope.ENV, "jointtest")
-    ts.save_send_queue(tools._WATCHER_STATE_DIR, "orchestrator", [ts.QueuedPrompt("x", "t")])
+    ts.save_send_queue(ss.WATCHER_STATE_DIR, "orchestrator", [ts.QueuedPrompt("x", "t")])
 
     async def never(name):
         raise AssertionError("checked a session outside the scope")
 
     monkeypatch.setattr(tools, "_session_instance", never)
     await tools.resume_send_queues()
-    assert "orchestrator" not in tools._pending_sends
-    assert ts.send_queue_path(tools._WATCHER_STATE_DIR, "orchestrator").exists()
+    assert "orchestrator" not in ss.pending_sends
+    assert ts.send_queue_path(ss.WATCHER_STATE_DIR, "orchestrator").exists()

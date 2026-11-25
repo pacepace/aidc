@@ -1,4 +1,4 @@
-"""Tests for the watcher task registry (_session_watchers) lifecycle.
+"""Tests for the watcher task registry (ss.session_watchers) lifecycle.
 
 Delivery reads the JSONL transcript (test_transcript.py, test_transcript_delivery.py),
 and so does session_run's synchronous reply; nothing scrapes reply text off the
@@ -6,10 +6,10 @@ pane any more (design-10 S1).
 """
 import asyncio
 
-from aidc_mcp.tools import _session_watchers
+from aidc_mcp.service import state as ss
 
 # ---------------------------------------------------------------------------
-# _session_watchers lifecycle (claude_session_watch/unwatch)
+# ss.session_watchers lifecycle (claude_session_watch/unwatch)
 # ---------------------------------------------------------------------------
 
 class TestSessionWatchersLifecycle:
@@ -20,15 +20,15 @@ class TestSessionWatchersLifecycle:
             await sentinel.wait()
 
         task = asyncio.create_task(dummy())
-        _session_watchers["myses"] = task
+        ss.session_watchers["myses"] = task
         try:
-            assert "myses" in _session_watchers
-            assert _session_watchers["myses"] is task
+            assert "myses" in ss.session_watchers
+            assert ss.session_watchers["myses"] is task
         finally:
             sentinel.set()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            _session_watchers.pop("myses", None)
+            ss.session_watchers.pop("myses", None)
 
     async def test_cancelling_task_removes_it_via_done_callback(self):
         started = asyncio.Event()
@@ -38,14 +38,14 @@ class TestSessionWatchersLifecycle:
             await asyncio.sleep(100)
 
         task = asyncio.create_task(dummy())
-        _session_watchers["ses2"] = task
-        task.add_done_callback(lambda t: _session_watchers.pop("ses2", None))
+        ss.session_watchers["ses2"] = task
+        task.add_done_callback(lambda t: ss.session_watchers.pop("ses2", None))
 
         await started.wait()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-        assert "ses2" not in _session_watchers
+        assert "ses2" not in ss.session_watchers
 
     async def test_replacing_watcher_cancels_previous(self):
         first_cancelled = asyncio.Event()
@@ -58,16 +58,16 @@ class TestSessionWatchersLifecycle:
                 raise
 
         task1 = asyncio.create_task(first_watcher())
-        _session_watchers["ses3"] = task1
+        ss.session_watchers["ses3"] = task1
 
         await asyncio.sleep(0)
 
-        old_task = _session_watchers.get("ses3")
+        old_task = ss.session_watchers.get("ses3")
         if old_task:
             old_task.cancel()
-            _session_watchers.pop("ses3", None)
+            ss.session_watchers.pop("ses3", None)
 
         await asyncio.gather(task1, return_exceptions=True)
 
         assert first_cancelled.is_set()
-        assert "ses3" not in _session_watchers
+        assert "ses3" not in ss.session_watchers

@@ -13,6 +13,8 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import scope, session_mcp, tools
+from aidc_mcp.service import common as com
+from aidc_mcp.service import config as orc
 
 REPO = Path(__file__).resolve().parents[2]
 TOKEN = "tok-A1b2_C3d4.e5f6~g7h8+i9j0/k1l2=m3n4"
@@ -278,7 +280,7 @@ def wired(box, monkeypatch):
     """The tool over the box: the real script, a configured callback address, Claude running."""
     box.installed()
     box.claude_running = True
-    monkeypatch.setattr(tools, "_orchestrator_callback_url", lambda: BASE)
+    monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: BASE)
     real_hand = session_mcp.hand
 
     def hand(name, **kwargs):
@@ -345,7 +347,7 @@ class TestTheTool:
     async def test_no_other_tools_result_or_file_holds_the_token(self, wired, tmp_path, monkeypatch):
         """Status and the listing read the CLI; neither reads the session's Claude config."""
         await _tool("session_mcp_set")(name="sandbox", server="project", path=PATH, bearer=TOKEN)
-        monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+        monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
             "exit": 0, "stdout": "NAME STATUS\nsandbox running\n", "stderr": ""})
 
         status = await _tool("session_status")(name="sandbox")
@@ -382,7 +384,7 @@ class TestAtCreate:
             return real_run(container, payload, timeout)
 
         wired.run = run
-        monkeypatch.setattr(tools, "_run_cli", cli)
+        monkeypatch.setattr(com, "run_cli", cli)
         wired.order = order
         return wired
 

@@ -16,6 +16,8 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import repo, scope, tools
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import common as com
+from aidc_mcp.service import state as ss
 
 OLD = time.time() - 3600
 
@@ -71,10 +73,10 @@ def facts(monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "current_branch", branch)
     monkeypatch.setattr(repo, "head", head)
     monkeypatch.setattr(repo, "status", status)
-    monkeypatch.setattr(tools, "_run_cli", lambda args, timeout=60.0: {
+    monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "SESSION ...\nproj Up\nother Exited\n", "stderr": ""})
 
-    monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", tmp_path / "transcripts")
+    monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", tmp_path / "transcripts")
     path = tmp_path / "transcripts" / "proj" / "s1.jsonl"
     path.parent.mkdir(parents=True)
     lines = [
@@ -92,8 +94,8 @@ def facts(monkeypatch, tmp_path):
 
 
 async def test_status_says_what_the_agent_is_doing(facts):
-    tools._session_watchers["proj"] = _StubTask()
-    ts.save_watch(tools._WATCHER_STATE_DIR, "proj", "c-1", "http://cb")
+    ss.session_watchers["proj"] = _StubTask()
+    ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-1", "http://cb")
     res = await _tool("session_status")(name="proj")
     d = res["data"]
     assert d["working"] is True and d["turn"] == "running" and d["why"] == "log_growing"
@@ -152,7 +154,7 @@ async def test_status_carries_the_taint_as_a_typed_field(facts):
 
 async def test_list_returns_a_record_per_session(facts):
     facts["tainted"] = True
-    tools._pending_sends["proj"] = [ts.QueuedPrompt("x", "t"), ts.QueuedPrompt("y", "t")]
+    ss.pending_sends["proj"] = [ts.QueuedPrompt("x", "t"), ts.QueuedPrompt("y", "t")]
     d = (await _tool("session_list")())["data"]
     by = {s["name"]: s for s in d["sessions"]}
     assert set(by) == {"proj", "other"}
@@ -203,8 +205,8 @@ def queued(facts, monkeypatch):
     async def instance(name):
         return tools.SESSION_EXISTS, "id-1"
     monkeypatch.setattr(tools, "_session_instance", instance)
-    tools._queue_loaded.add("proj")
-    tools._pending_sends["proj"] = [
+    ss.queue_loaded.add("proj")
+    ss.pending_sends["proj"] = [
         ts.QueuedPrompt("first prompt", "2026-10-14T09:00:00Z", conversation_id="c-1",
                         prompt_id="p-1"),
         ts.QueuedPrompt("second prompt", "2026-10-14T09:01:00Z", conversation_id="c-2",
@@ -218,27 +220,27 @@ async def test_queue_cancel_takes_back_one_waiting_prompt(queued):
     assert d["outcome"] == "cancelled"
     assert d["cancelled"] == [{"prompt_id": "p-2", "position": 2, "prompt_preview": "second prompt",
                                "enqueued_at": "2026-10-14T09:01:00Z", "conversation_id": "c-2"}]
-    assert d["left"] == 1 and [q.text for q in tools._pending_sends["proj"]] == ["first prompt"]
+    assert d["left"] == 1 and [q.text for q in ss.pending_sends["proj"]] == ["first prompt"]
     assert d["running"] == {"working": True, "working_on": "fix the flaky test",
                             "started_by": "prompt", "turn_started_at": "2026-10-14T09:02:00Z",
                             "last_activity": None}
-    saved, _ = ts.load_send_queues(tools._WATCHER_STATE_DIR)
+    saved, _ = ts.load_send_queues(ss.WATCHER_STATE_DIR)
     assert [q.text for q in saved["proj"]] == ["first prompt"]
 
 
 async def test_queue_cancel_takes_back_every_waiting_prompt(queued):
     d = (await _tool("session_queue_cancel")(name="proj"))["data"]
     assert [c["position"] for c in d["cancelled"]] == [1, 2] and d["left"] == 0
-    assert "proj" not in tools._pending_sends
+    assert "proj" not in ss.pending_sends
 
 
 async def test_queue_cancel_of_an_unknown_position_lists_what_waits(queued):
     res = await _tool("session_queue_cancel")(name="proj", position=5)
     assert res["ok"] is False and res["error_code"] == "not_found"
-    assert "1: first prompt" in res["error"] and len(tools._pending_sends["proj"]) == 2
+    assert "1: first prompt" in res["error"] and len(ss.pending_sends["proj"]) == 2
 
 
 async def test_queue_cancel_with_nothing_waiting(facts, monkeypatch):
-    tools._queue_loaded.add("proj")
+    ss.queue_loaded.add("proj")
     d = (await _tool("session_queue_cancel")(name="proj"))["data"]
     assert d["cancelled"] == [] and d["note"] == "no prompt was waiting"

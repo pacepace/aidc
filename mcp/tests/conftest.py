@@ -4,6 +4,7 @@ import pytest
 
 from aidc_mcp import headless, session_facts, tools
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import state as ss
 
 
 async def no_docker(*args, timeout=20.0):
@@ -64,7 +65,7 @@ def _isolate_audit_log(tmp_path, monkeypatch):
     monkeypatch.setattr("aidc_mcp.audit._AUDIT_PATH", tmp_path / "access.log")
     # Same for the watcher-state dir, which the send-queue dead-letter writer
     # resolves at call time.
-    monkeypatch.setattr(tools, "_WATCHER_STATE_DIR", tmp_path / "watcher-state")
+    monkeypatch.setattr(ss, "WATCHER_STATE_DIR", tmp_path / "watcher-state")
 
 
 @pytest.fixture(autouse=True)
@@ -73,29 +74,29 @@ async def clean_session_watchers():
     them: watcher tasks, pending-send queues and their drainers, transcript settle
     state, send locks, and the captured tool-description bases."""
     def _reset():
-        tools._session_watchers.clear()
-        tools._pending_sends.clear()
-        tools._pending_drainers.clear()
-        tools._settle_state.clear()
-        tools._session_send_locks.clear()
+        ss.session_watchers.clear()
+        ss.pending_sends.clear()
+        ss.pending_drainers.clear()
+        ss.settle_state.clear()
+        ss.session_send_locks.clear()
         tools._tool_base_desc.clear()
-        tools._sent_awaiting_echo.clear()
-        tools._working_indicator_seen.clear()
-        tools._unanswered_polls.clear()
-        tools._reported_interrupts.clear()
-        tools._last_free_verdict.clear()
-        tools._last_screen_raw.clear()
-        tools._unsubmitted_paste.clear()
-        tools._waiting_notice_shown.clear()
-        tools._drainer_failures.clear()
-        tools._queue_loaded.clear()
-        tools._session_instances.clear()
+        ss.sent_awaiting_echo.clear()
+        ss.working_indicator_seen.clear()
+        ss.unanswered_polls.clear()
+        ss.reported_interrupts.clear()
+        ss.last_free_verdict.clear()
+        ss.last_screen_raw.clear()
+        ss.unsubmitted_paste.clear()
+        ss.waiting_notice_shown.clear()
+        ss.drainer_failures.clear()
+        ss.queue_loaded.clear()
+        ss.session_instances.clear()
         ts._parsed.clear()
         ts._newest_ts.clear()
 
     _reset()
     yield
-    for task in [*tools._session_watchers.values(), *tools._pending_drainers.values()]:
+    for task in [*ss.session_watchers.values(), *ss.pending_drainers.values()]:
         task.cancel()
         try:
             await asyncio.gather(task, return_exceptions=True)

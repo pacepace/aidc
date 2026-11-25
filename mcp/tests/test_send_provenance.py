@@ -10,9 +10,9 @@ test_session_send.py (its wiring fixture drives the tool).
 """
 import json
 
-from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
+from aidc_mcp.service import state as ss
 
 ORCH = "[Sent through aidc by the orchestrator. Not typed at this terminal.]"
 ORCH_C1 = ("[Sent through aidc by the orchestrator, from conversation c1. "
@@ -86,7 +86,7 @@ def test_the_echo_watch_finds_the_framed_prompt_in_the_transcript():
 def test_a_typed_prompt_has_no_send_record_and_is_the_persons():
     """A prompt typed at the terminal never went through aidc, so no send record
     matches it and the reply is framed as the person's own (render_delivery)."""
-    assert ts.take_sent_entry(tools._WATCHER_STATE_DIR, "proj", "typed by hand") is None
+    assert ts.take_sent_entry(ss.WATCHER_STATE_DIR, "proj", "typed by hand") is None
 
 
 # --- a queue saved before the upgrade -------------------------------------------------

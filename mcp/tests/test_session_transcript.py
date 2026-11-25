@@ -14,6 +14,7 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import tools
 from aidc_mcp import turns_view as tv
+from aidc_mcp.service import state as ss
 
 OLD = time.time() - 3600
 TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
@@ -54,7 +55,7 @@ def _turn(n, prompt, reply, *, planted=False):
 
 @pytest.fixture
 def transcript(tmp_path, monkeypatch):
-    monkeypatch.setattr(tools, "_TRANSCRIPTS_BASE", tmp_path / "transcripts")
+    monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", tmp_path / "transcripts")
 
     def write(objs):
         path = tmp_path / "transcripts" / "proj" / "s1.jsonl"

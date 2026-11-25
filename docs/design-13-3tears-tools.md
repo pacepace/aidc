@@ -207,4 +207,4 @@ agreed.
    consumes (agreed with the orchestrator, design-10 D5)?
 3. Packaging: one image with mesh support, or a light default plus a mesh variant?
 4. Durable state: an L1-on-a-file store in 3tears core (upstream item 8), or keep aidc's files?
-5. `3tears-mcp`'s SDK 1.x support: keep building each feature twice, or drop 1.x first?
+5. `3tears-mcp`'s SDK 1.x support: keep building each feature twice, or drop 1.x first? **Answered 2026-11-25: drop 1.x first** (owner-rulings).

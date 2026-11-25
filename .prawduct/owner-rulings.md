@@ -430,3 +430,7 @@ aidc users without access to testament's private repo must not be blocked. Insta
 ## 2026-11-24 — Review round budget raised for the 2.0 program
 
 The owner raised prawduct's review_round_budget (6 → 40) so the aidc 2.0 work (the Kubernetes program and the 3tears adoption, built as a stack of waves) gets a full Critic review per wave without a per-review override.
+
+## 2026-11-25 — 3tears-mcp drops MCP SDK 1.x first (design-13 Q5)
+
+Before the 2.0 features are added upstream (call context, progress, error model, resources, stateful mode), 3tears-mcp drops its MCP Python SDK 1.x support, so each feature is built and tested once against the current SDK.

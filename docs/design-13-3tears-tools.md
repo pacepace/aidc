@@ -7,10 +7,10 @@ package family: each aidc tool becomes a 3tears tool, so one implementation is r
 mesh's hub can publish them as MCP and HTTP API endpoints. Observability moves to
 `3tears-observe`.
 
-**Requirements:** owner rulings of 2026-11-24 ("aidc's MCP server becomes a 3tears tools
-server"; "2.0 is 3tears adoption"; enhance 3tears where it falls short, starting with
-`3tears-mcp`; local mode or mesh; use `3tears-observe`); MCP-01..45 constrain what must be
-preserved.
+**Requirements:** TRS-01..25 (`docs/requirements.md`), from the owner rulings of 2026-11-24
+("aidc's MCP server becomes a 3tears tools server"; "2.0 is 3tears adoption"; enhance 3tears
+where it falls short, starting with `3tears-mcp`; local mode or mesh; use `3tears-observe`) and
+2026-11-25 (drop SDK 1.x first); MCP-01..45 constrain what must be preserved.
 
 **Status:** plan, 2026-11-24. Built after the Kubernetes backend work is finished (design-12;
 owner ruling). Read against 3tears 0.95.0 (all packages alpha, version-locked to one minor) and
@@ -91,11 +91,11 @@ is not in the 3tears repo, so what it supports is unknown here.
 
 | aidc today | On 3tears | Recommendation |
 |---|---|---|
-| 23 tools | 23 `TearsTool`s over the core and service | Clean. Tool names become namespaced (`aidc.session_send`): a contract change (see "Contract"). |
+| 23 tools | 23 `TearsTool`s over the core and service | Clean. Canonical names are namespaced (`aidc.session_send`) and used on the mesh; the local MCP face keeps the 1.x names, since LLM APIs reject a dot in a tool name (TRS-15, see "Contract"). |
 | Envelope with 20 error codes | `ToolResult` with 5 platform codes | Keep the envelope as the tool's content (JSON), unchanged for callers; `success` mirrors `ok`; the aidc code also in `metadata`. Use the 5 platform codes only for their own meaning (bad arguments, permission). |
 | Progress during create and invoke | none | **Open.** Keep `ctx.info` in local mode only; on a mesh, `session_create` returns when the session is ready (as today, without phase messages), and long work goes through `session_send` / `session_invoke_async`. |
-| Resources | none in `3tears-mcp` | Their content already has tool equivalents (`session_list`, `session_status`, `audit_get`); drop the resources at the major version, or add resource support upstream in `3tears-mcp`. |
-| Dynamic descriptions + `tools/list_changed` (MCP-21) | stateless, not supported | Drop at the major version: `session_list` / `session_status` already say which sessions are watched. |
+| Resources | none in `3tears-mcp` | **Keep** (owner ruling 2026-11-24): add resource support upstream in `3tears-mcp` (item 4) and serve the same URIs through it (TRS-06). |
+| Dynamic descriptions + `tools/list_changed` (MCP-21) | stateless, not supported | **Keep** (owner ruling 2026-11-24): through upstream stateful mode (item 5) and `McpServer`'s live tool provider (TRS-07). |
 | Blocking `session_invoke` with disconnect cancel | no cancel channel | Keep it in local mode with today's disconnect watcher; on a mesh, offer `session_invoke_async` and `session_interrupt(target="headless")` (blocking calls would sit inside the registry's call deadline). |
 | Webhook delivery to the orchestrator | no push channel in the tool contract | Keep the service's webhook in both modes; **open:** add a NATS-subject delivery for mesh mode, agreed with the orchestrator (design-10 D5's rule for payload changes). |
 | Bearer token, scope env var | local: identity resolver; mesh: hub-signed caller identity and grants | Local: the bearer resolves to one admin identity, scope as today. Mesh: grants per tool decide who may call; `AIDC_MCP_ALLOWED_SESSIONS` stays as a per-install limit; `conversation_id` must be injected by the hub as the orchestrator injects it today. |
@@ -137,8 +137,10 @@ then picked up by pinning the family's new minor.
    the progress token, `report_progress`, a log channel and a cancellation signal.
 2. **`3tears-mcp`: progress and logging.** Over Streamable HTTP these ride a per-request event
    stream (`json_response=False`), which works even in stateless mode.
-3. **`3tears-mcp`: a richer error model.** Today the codes are literals in the dispatcher, and
-   several failures (identity unavailable among them) collapse into `PERMISSION_DENIED`. Add a
+3. **`3tears-mcp`: a richer error model.** Today the codes are literals in the dispatcher
+   (re-read at 0.95.0: `UNKNOWN_TOOL`, `TOOLS_UNAVAILABLE`, `IDENTITY_UNAVAILABLE`, `AUTHZ_ERROR`,
+   `PERMISSION_DENIED`, `HANDLER_ERROR`, `OUTPUT_VALIDATION_ERROR`, carried only as JSON text in
+   the content), and an argument-validation failure carries no code at all. Add a
    closed, documented code set with retryable and field metadata, an exception-to-code
    registry, and room for a server's own codes, aligned with agent-tools' `ToolResult`
    vocabulary. aidc's 20 codes then become real protocol codes, not only envelope text.
@@ -163,7 +165,17 @@ then picked up by pinning the family's new minor.
    `DataStore` methods that refuse without an L3 must not be ones aidc needs. Weigh against
    keeping aidc's temp+rename files, which work.
 9. **`3tears-agent-audit`: a durable local sink or a publish that reports failure**, so an audit
-   trail cannot drop events silently.
+   trail cannot drop events silently. (At 0.95.0 the publish is a JetStream publish awaiting the
+   broker's ack, but a failure is still only logged at WARN.)
+10. **`3tears-mcp`: an `Authorizer` that sees the call.** `Authorizer.allows(identity, permission)`
+   is given no arguments, so the taint gate and the session scope, which depend on the `session`
+   argument, cannot be authorizers today (TRS-12). Pass the tool name and arguments to an
+   authorizer that asks for them.
+11. **The `TearsTool` contract installable on its own.** `TearsTool`, `ToolResult` and
+   `MCPToolDefinition` are in `3tears-agent-tools`, whose base dependencies pull NATS, Postgres
+   drivers, LangGraph and LangChain; the module itself needs only `tool-schema`, observe and one
+   core type. A light package (or a light base with the rest as extras) keeps local mode light
+   (TRS-17).
 
 Two cross-cutting facts: `3tears-mcp` supports two MCP SDK majors (1.x and 2.x), so each feature
 is built twice unless 1.x is dropped first; and the family is alpha, with no compatibility
@@ -171,9 +183,14 @@ across minor versions, so aidc pins one minor and moves with it.
 
 ## Contract
 
-Namespaced tool names, dropped resources and dropped dynamic descriptions are breaking changes,
-so the rebuild is aidc **2.0**, announced in the CHANGELOG, with `published-tools.json`
-regenerated. The callback payload (design-10 D5) does not change unless a mesh delivery is
+Resources and dynamic descriptions are kept (owner ruling). Tool names: the canonical 3tears
+name is `aidc.<tool>`, used on the mesh; the local MCP face keeps the 1.x names, because the
+Anthropic and OpenAI tool APIs reject a dot in a tool name (3tears' own `tool_name_translation`
+exists for this) and an MCP client already prefixes a tool with its server's name. So an existing
+orchestrator needs no change of tool names and there is nothing to alias; `published-tools.json`
+gains a `mesh_name` per tool (TRS-15). The transport, the protocol error codes and any schema
+change from flattening are still caller-visible, so the rebuild is aidc **2.0**, announced in the
+CHANGELOG, with `published-tools.json` regenerated (TRS-16). The callback payload (design-10 D5) does not change unless a mesh delivery is
 agreed.
 
 ## Packaging
@@ -186,7 +203,8 @@ agreed.
 
 ## Work, in order
 
-1. **Upstream, `3tears-mcp`**: items 1-5 above, as 3tears releases.
+1. **Upstream, `3tears-mcp`**: SDK 1.x dropped first (Q5), then items 1-6, 10 and 11 above, as
+   3tears releases (7-9 before the waves that need them).
 2. **Separate the service from the transport** in aidc: watchers, queues, delivery and resume
    out of `tools.py` into a service module with no MCP types; tools become thin. Behaviour
    preserved; the large internal suites carry over. (Can start in parallel with step 1.)

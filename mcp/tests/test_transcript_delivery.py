@@ -2295,3 +2295,50 @@ class TestAHeadlessRunsTranscriptIsNotTheSessions:
         _mk_transcript(tmp_path / "t", "sess", "sid1", [_user("u0", "q")])
         assert ts.transcript_kind(d / "sid1.jsonl") == "unknown"
         assert ts.resolve_active_transcript(d).stem == "sid1"
+
+
+class TestStateDirsResolveAtCallTime:
+    """The base dirs are looked up when a delivery function runs, not bound as def-time
+    defaults: patching ss.WATCHER_STATE_DIR / ss.TRANSCRIPTS_BASE (as a test or a
+    restart with new settings does) must redirect start_watcher's baseline and the
+    drain, which pass neither, as it already did resend_reply."""
+
+    async def test_start_watcher_baselines_into_the_patched_dirs(self, tmp_path, monkeypatch):
+        base, state = tmp_path / "t", tmp_path / "s"
+        monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", base)
+        monkeypatch.setattr(ss, "WATCHER_STATE_DIR", state)
+        _mk_transcript(base, "sess", "sid1", [_user("u1", "a"), _assistant("a1", "DONE")])
+
+        async def instance(name):
+            return None, "inst-1"
+
+        async def fake_watcher(*a, **k):
+            await asyncio.Event().wait()
+
+        async def announce():
+            return None
+
+        monkeypatch.setattr(tn, "session_instance", instance)
+        monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
+        await dlv.start_watcher("sess", "conv", "http://cb", announce)
+        ss.session_watchers.pop("sess").cancel()
+
+        assert ts.watermark_exists(state, "sess", "conv")
+        mark = ts.load_watermark(state, "sess", "conv")
+        assert mark.last_delivered_uuid == "a1"
+        assert mark.session_id == "sid1"
+
+    async def test_the_drain_reads_and_writes_the_patched_dirs(self, tmp_path, monkeypatch):
+        base, state = tmp_path / "t", tmp_path / "s"
+        monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", base)
+        monkeypatch.setattr(ss, "WATCHER_STATE_DIR", state)
+        p = _mk_transcript(base, "sess", "sid1", [_user("u1", "a"), _assistant("a1", "OLD")])
+        rec = Recorder()
+        await dlv._drain_transcript_once("sess", "conv", "http://cb", post_fn=rec,
+                                         sleep_fn=_nosleep)
+        assert ts.watermark_exists(state, "sess", "conv")
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(_user("u2", "b")) + "\n" + json.dumps(_assistant("a2", "NEW")) + "\n")
+        await dlv._drain_transcript_once("sess", "conv", "http://cb", post_fn=rec,
+                                         sleep_fn=_nosleep)
+        assert rec.delivered == ["a2"]

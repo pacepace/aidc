@@ -155,8 +155,8 @@ async def resume_watches(on_resumed: Callable[[], None]) -> None:
 
 
 async def _baseline_watermark(session: str, conversation_id: str, *,
-                              transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                              state_dir: Path = ss.WATCHER_STATE_DIR) -> None:
+                              transcripts_base: Path | None = None,
+                              state_dir: Path | None = None) -> None:
     """Forward-only anchor on EVERY watcher (re)start (MCP-17, forward-only-on-connect).
 
     Re-anchor ``last_delivered_uuid`` to the current LAST completed turn of the
@@ -183,6 +183,10 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 
     Called synchronously at watch registration so the anchor is set before any
     prompt is injected; _drain_transcript_once also self-baselines defensively."""
+    # The base dirs resolve at call time (not as def-time defaults), as in resend_reply,
+    # so patching ss.WATCHER_STATE_DIR / ss.TRANSCRIPTS_BASE redirects start_watcher too.
+    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
+    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
     # Preserve the durable loop-guard run across the re-anchor — load the existing
     # mark rather than minting a fresh (zeroed) one.
     mark = (
@@ -431,8 +435,8 @@ async def _screen_for_watcher(session: str) -> scr.ScreenState | None:
 
 
 async def _drain_transcript_once(session: str, conversation_id: str, callback_base: str, *,
-                                 transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                                 state_dir: Path = ss.WATCHER_STATE_DIR,
+                                 transcripts_base: Path | None = None,
+                                 state_dir: Path | None = None,
                                  post_fn=None, sleep_fn=asyncio.sleep,
                                  settle_seconds: float = 0.0,
                                  now_fn=time.monotonic,
@@ -446,6 +450,8 @@ async def _drain_transcript_once(session: str, conversation_id: str, callback_ba
     same turn (delivering every turn twice), so the whole load->deliver->advance
     body runs under a per-key mutex — the second pass then sees the advanced mark
     and dedups. See _drain_locks."""
+    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
+    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
     async with ss.drain_lock((session, conversation_id)):
         await _drain_once_body(
             session, conversation_id, callback_base,
@@ -456,8 +462,8 @@ async def _drain_transcript_once(session: str, conversation_id: str, callback_ba
 
 
 async def _drain_once_body(session: str, conversation_id: str, callback_base: str, *,
-                           transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                           state_dir: Path = ss.WATCHER_STATE_DIR,
+                           transcripts_base: Path | None = None,
+                           state_dir: Path | None = None,
                            post_fn=None, sleep_fn=asyncio.sleep,
                            settle_seconds: float = 0.0,
                            now_fn=time.monotonic,
@@ -471,6 +477,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     current end and deliver nothing — never replay pre-existing history. The
     mark advances past a turn only after it is confirmed delivered, empty, or
     dead-lettered — never while a delivery is still being retried (MCP-17/18)."""
+    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
+    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
     if not ts.watermark_exists(state_dir, session, conversation_id):
         await _baseline_watermark(session, conversation_id,
                                   transcripts_base=transcripts_base, state_dir=state_dir)

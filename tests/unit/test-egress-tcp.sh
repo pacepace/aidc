@@ -65,7 +65,7 @@ has() {
 echo "=== egress_tcp: parsing ==="
 
 parsed() { aidc_egress_parse "$1" 2>/dev/null && printf '%s|%s' "$AIDC_EGRESS_HOST" "$AIDC_EGRESS_PORT"; }
-eq "host:port" "yuga.ranch.example.org|5433" "$(parsed yuga.ranch.example.org:5433)"
+eq "host:port" "db.site.example.org|5433" "$(parsed db.site.example.org:5433)"
 eq "the host is lower-cased (DNS is case-blind; the alias must match)" "db.example|5432" \
     "$(parsed DB.Example:5432)"
 eq "an IPv4 host" "10.42.0.101|5433" "$(parsed 10.42.0.101:5433)"
@@ -93,7 +93,7 @@ notok "an aidc container name"   aidc_egress_parse aidc-other-dev:22
 echo "=== egress_tcp: names ==="
 
 # Two hosts must never share a container name: replacing one relay would remove the other.
-eq "a dot becomes a hyphen" "yuga-example" "$(aidc_egress_slug yuga.example)"
+eq "a dot becomes a hyphen" "dbhost-example" "$(aidc_egress_slug dbhost.example)"
 eq "a hyphen doubles" "a--b-example" "$(aidc_egress_slug a-b.example)"
 if [ "$(aidc_egress_slug a-b.example)" != "$(aidc_egress_slug a.b-example)" ]; then
     echo "  PASS: a-b.example and a.b-example get different names"; PASS=$((PASS + 1))
@@ -131,31 +131,31 @@ echo "=== egress_tcp: one relay per host ==="
 
 grouped=$(printf '%s\n' \
     "db.example 5432 10.0.0.5" \
-    "yuga.example 5433 10.42.0.101" \
+    "dbhost.example 5433 10.42.0.101" \
     "db.example 6432 10.0.0.5" \
     "db.example 5432 10.0.0.5" | aidc_egress_group)
 eq "ports of one host share a line, deduped, in first-seen order" \
     "db.example 10.0.0.5 5432 6432
-yuga.example 10.42.0.101 5433" "$grouped"
+dbhost.example 10.42.0.101 5433" "$grouped"
 
 echo "=== egress_tcp: the relay ==="
 
-script=$(aidc_egress_script yuga.example 10.42.0.101 5433 15433)
+script=$(aidc_egress_script dbhost.example 10.42.0.101 5433 15433)
 has "forwards to the resolved address, not the name" "TCP:10.42.0.101:5433" "$script"
 case "$script" in
-    *TCP:yuga*) echo "  FAIL: never to the name (its own alias)"; FAIL=$((FAIL + 1)) ;;
+    *TCP:dbhost*) echo "  FAIL: never to the name (its own alias)"; FAIL=$((FAIL + 1)) ;;
     *) echo "  PASS: never to the name (its own alias)"; PASS=$((PASS + 1)) ;;
 esac
 has "one listener per port" "TCP-LISTEN:15433,fork,reuseaddr TCP:10.42.0.101:15433" "$script"
-has "each port logs to the audit dir" "-lf /var/aidc/audit/egress-yuga-example-5433.log" "$script"
+has "each port logs to the audit dir" "-lf /var/aidc/audit/egress-dbhost-example-5433.log" "$script"
 has "a dead listener takes the container down, to be restarted" "wait -n; exit 1" "$script"
 
-svc=$(aidc_egress_render_service s1 /home/u/aidc-audit/s1-x v9.9.9 yuga.example 10.42.0.101 5433)
-has "service name"             "  egress-yuga-example:" "$svc"
-has "container name"           "container_name: aidc-s1-egress-yuga-example" "$svc"
+svc=$(aidc_egress_render_service s1 /home/u/aidc-audit/s1-x v9.9.9 dbhost.example 10.42.0.101 5433)
+has "service name"             "  egress-dbhost-example:" "$svc"
+has "container name"           "container_name: aidc-s1-egress-dbhost-example" "$svc"
 has "forwarder image"          "image: aidc/forwarder:v9.9.9" "$svc"
 has "alias = the real name"    "        aliases:
-          - yuga.example" "$svc"
+          - dbhost.example" "$svc"
 has "on the egress network"    "      egress: {}" "$svc"
 has "audit dir mounted"        "- /home/u/aidc-audit/s1-x:/var/aidc/audit:rw" "$svc"
 has "labelled declared"        'aidc.egress: "declared"' "$svc"
@@ -172,8 +172,8 @@ case "$ipsvc" in
 esac
 eq "and is reached by the relay's name" "aidc-s1-egress-10-42-0-101" \
     "$(aidc_egress_reach_as s1 10.42.0.101)"
-eq "a named destination is reached by its name" "yuga.example" \
-    "$(aidc_egress_reach_as s1 yuga.example)"
+eq "a named destination is reached by its name" "dbhost.example" \
+    "$(aidc_egress_reach_as s1 dbhost.example)"
 
 echo "=== egress_tcp: the rendered compose file ==="
 
@@ -187,10 +187,10 @@ if python3 -c 'import yaml' 2>/dev/null; then
     got=$(printf '%s' "$rendered" | python3 -c '
 import sys, yaml
 d = yaml.safe_load(sys.stdin)
-s = d["services"]["egress-yuga-example"]
+s = d["services"]["egress-dbhost-example"]
 print(s["networks"]["default"]["aliases"][0], sorted(s["networks"]), s["entrypoint"])')
     eq "and parses as the service it should be" \
-        "yuga.example ['default', 'egress'] ['/bin/sh', '-c']" "$got"
+        "dbhost.example ['default', 'egress'] ['/bin/sh', '-c']" "$got"
 else
     echo "  SKIP: PyYAML not installed; YAML parse not checked"
 fi

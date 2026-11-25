@@ -111,8 +111,8 @@ esac
 # spelling there makes a container-local directory the host never sees, and the session
 # then binds a path nothing created. AIDC_MCP_MOUNTS is the one list `aidc mcp start`
 # builds the -v flags from, so the two cannot disagree.
-STATE_MOUNTS="/home/pace/.local/state/aidc-mcp|/var/log/aidc-mcp,/home/pace/aidc-audit|/var/aidc-audit"
-HOME_MOUNTS="${STATE_MOUNTS},/home/pace|/home/pace"
+STATE_MOUNTS="/home/u/.local/state/aidc-mcp|/var/log/aidc-mcp,/home/u/aidc-audit|/var/aidc-audit"
+HOME_MOUNTS="${STATE_MOUNTS},/home/u|/home/u"
 
 local_path() {
     # $1 = host path, $2 = AIDC_MCP_MOUNTS ("" for a host run)
@@ -125,19 +125,19 @@ local_path() {
             if aidc_resolve_local "$1"; then printf "%s" "$AIDC_LOCAL_PATH"; else printf "unreachable"; fi' _ "$1"
 }
 
-eq "on the host a path is itself" "/home/pace/.local/state/aidc-mcp/transcripts/x" \
-    "$(local_path /home/pace/.local/state/aidc-mcp/transcripts/x)"
+eq "on the host a path is itself" "/home/u/.local/state/aidc-mcp/transcripts/x" \
+    "$(local_path /home/u/.local/state/aidc-mcp/transcripts/x)"
 eq "inside aidc-mcp it maps onto the mount" "/var/log/aidc-mcp/transcripts/x" \
-    "$(local_path /home/pace/.local/state/aidc-mcp/transcripts/x "$STATE_MOUNTS" /home/pace)"
+    "$(local_path /home/u/.local/state/aidc-mcp/transcripts/x "$STATE_MOUNTS" /home/u)"
 eq "a host path with no mount is unreachable there" "unreachable" \
-    "$(local_path /srv/somewhere-else "$STATE_MOUNTS" /home/pace)"
+    "$(local_path /srv/somewhere-else "$STATE_MOUNTS" /home/u)"
 # The defect three reviewers found in the first cut: the operator turned the home mount
 # on and Claude's per-project memory was still reported as unreachable.
 eq "with the home mount, the memory dir is reachable at its own path" \
-    "/home/pace/.claude/projects/x" \
-    "$(local_path /home/pace/.claude/projects/x "$HOME_MOUNTS" /home/pace)"
+    "/home/u/.claude/projects/x" \
+    "$(local_path /home/u/.claude/projects/x "$HOME_MOUNTS" /home/u)"
 eq "and without it, it is not" "unreachable" \
-    "$(local_path /home/pace/.claude/projects/x "$STATE_MOUNTS" /home/pace)"
+    "$(local_path /home/u/.claude/projects/x "$STATE_MOUNTS" /home/u)"
 
 # mcp.session_create: off by default, and what it adds to `docker run` when on.
 create_args() {
@@ -252,7 +252,7 @@ mkdir -p "$STUB_STATE"
 mkdir -p "$SCRATCH/mnt"
 : > "$STUB_STATE/chowns"
 out=$(mkdir_host "/host/state/transcripts/sess" \
-    "/host/state|$SCRATCH/mnt" /home/pace)
+    "/host/state|$SCRATCH/mnt" /home/u)
 eq "it creates the path through the mount" "$SCRATCH/mnt/transcripts/sess owner=4242:4242" "$out"
 eq "and hands over the topmost dir it created, not just the leaf" \
     "4242:4242 $SCRATCH/mnt/transcripts" "$(head -1 "$STUB_STATE/chowns")"
@@ -260,10 +260,10 @@ eq "the directory exists" "yes" \
     "$([ -d "$SCRATCH/mnt/transcripts/sess" ] && echo yes || echo no)"
 
 out=$(mkdir_host "/host/state/other" "/host/state|$SCRATCH/mnt" \
-    /home/pace fail 2>/dev/null)
+    /home/u fail 2>/dev/null)
 eq "a chown it cannot do stops the create instead of leaving it unwritable" "refused" "$out"
 
-out=$(mkdir_host "/elsewhere/x" "/host/state|$SCRATCH/mnt" /home/pace)
+out=$(mkdir_host "/elsewhere/x" "/host/state|$SCRATCH/mnt" /home/u)
 eq "a path outside every mount is refused" "refused" "$out"
 
 # aidc_fix_host_owner takes the HOST path and must chown where this process reaches it.
@@ -281,7 +281,7 @@ fix_owner() {
 }
 mkdir -p "$SCRATCH/mnt/audit/s1"
 : > "$STUB_STATE/chowns"
-out=$(fix_owner "/host/audit/s1" "/host/audit|$SCRATCH/mnt/audit" /home/pace)
+out=$(fix_owner "/host/audit/s1" "/host/audit|$SCRATCH/mnt/audit" /home/u)
 eq "fix_host_owner succeeds for a mapped host path" "ok" "$out"
 eq "and chowns where it is mounted, not the host spelling" \
     "4242:4242 $SCRATCH/mnt/audit/s1" "$(head -1 "$STUB_STATE/chowns")"
@@ -365,8 +365,8 @@ eq "tightening settings apply without the flag, and nothing is reported" \
     "$(trust_load "$REPO_TIGHTEN" false '$AIDC_PROFILE|$AIDC_CLAUDE_MODE|$AIDC_EGRESS|$AIDC_SHARE_MEMORY|$AIDC_SHARE_PLUGINS|$AIDC_SHARE_SCRATCHPAD|$AIDC_TLD_TAINTS|$AIDC_TAINT_RESPONSE|$AIDC_BLOCKLIST_ADDITIONS|$AIDC_CONTAINER_ONLY_PATHS|$AIDC_REPO_REQUESTED')"
 
 # The operator's own config is trusted: the same keys there apply.
-printf 'egress: direct\negress_tcp:\n  - yuga.example:5433\n' > "$SCRATCH/trust/home/.config/aidc/config.yaml"
-eq "the operator's config sets them freely" "direct|yuga.example:5433|" \
+printf 'egress: direct\negress_tcp:\n  - dbhost.example:5433\n' > "$SCRATCH/trust/home/.config/aidc/config.yaml"
+eq "the operator's config sets them freely" "direct|dbhost.example:5433|" \
     "$(trust_load '' false '$AIDC_EGRESS|$AIDC_EGRESS_TCP|$AIDC_REPO_REQUESTED')"
 
 # A workspace config is as writable from inside as a repo's.

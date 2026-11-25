@@ -155,7 +155,7 @@ echo "[2c/3] aidc_has_resumable_conversation"
 # nothing to continue exits with "No conversation found to continue" instead of
 # opening a session. A transcript holding only bookkeeping (cost, mode, a
 # file-history snapshot) is what a Claude that could not write all session leaves
-# behind on exit once the dir becomes writable — the 2026-10-19 handmcp stub.
+# behind on exit once the dir becomes writable — a 2026-10-19 session's stub.
 CONV="$SCRATCH/conv"; mkdir -p "$CONV"
 assert "an empty project dir has nothing to resume" \
     "! aidc_has_resumable_conversation '$CONV'"
@@ -217,7 +217,7 @@ echo "[2f/3] aidc_claude_project_name"
 # memory mount, the resume check and the transcript mirror all point at a dir Claude
 # never writes.
 assert "slashes and dots, as before" \
-    "[ \"\$(aidc_claude_project_name /home/pace/crypt/pub/dev-wsl/vscode/3tears/handmcp)\" = -home-pace-crypt-pub-dev-wsl-vscode-3tears-handmcp ]"
+    "[ \"\$(aidc_claude_project_name /home/u/src/work/tools/app.v2)\" = -home-u-src-work-tools-app-v2 ]"
 assert "an underscore, a space and other punctuation too" \
     "[ \"\$(aidc_claude_project_name '/work/my_repo/a b+c@1.2')\" = -work-my-repo-a-b-c-1-2 ]"
 echo

@@ -22,5 +22,7 @@ watchers, send queues, delivery, resume and session operations must not depend o
   binding and reaches every module's events, auth.py's and session_facts.py's included. No
   assertion changed in meaning; `published-tools.json` is byte-identical.
 
+**Proof:** `AIDC_SMOKE_GIT=0 make smoke` from a separate checkout with a test version tag: 122 of 123 on c4e5200, and again on the tree of eabd93c; the one failure is the test-tag version line. Unit and MCP suites recorded against eabd93c's tree: 4001 passed, 0 failed.
+
 ## Consumer note
 Nothing to do: the MCP tools, their arguments, results and error codes are unchanged (published-tools.json is byte-identical).

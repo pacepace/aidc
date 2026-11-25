@@ -472,3 +472,5 @@ The owner's other products and projects are never named in code, tests or docs o
 - 2026-11-25 (3tears models and evals drop MCP SDK 1.x): yes. Like 3tears-mcp, 3tears-models and the evals fastmcp extra require mcp 2.x. Projects still on 1.x upgrade before taking the next 3tears release. The change lands with U01 on feat/mcp-drop-sdk1.
 
 - 2026-11-25 (3tears test order): merge the 3tears branches together before running the full integration suite. Refined the same day: "targeted tests, full suite at the end". Each branch runs only the tests for what it changed. The full unit suite and the integration suites (integration, yugabyte, timing) run once, at the end, on the branch that merges them all. A cumulative Critic review of that merged branch follows and stands in for the per-branch verify passes.
+
+- 2026-11-25 (3tears MCP logging capability, U02 R-5): yes. 3tears-mcp declares the `logging` capability on the handshake-era protocols and serves logging/setLevel, so clients can choose a level and strict clients don't drop log entries. It is removed when the protocols that need it are no longer supported.

@@ -454,3 +454,5 @@ The local server does not serve an HTTP API in 2.0 (upstream U10 and adoption ch
 ## 2026-11-25 — The durable store is SQLite as a proper 3tears L3 (refines design-13 Q4)
 
 3tears' L1 is a cache, so it cannot be the record. aidc's single durable file is SQLite as a first-class 3tears L3 (durable store) beside the Postgres one, with no L2 and L1 as the normal cache in front: the full durable-store contract, so any collection that works on Postgres works on SQLite and a deployment switches by configuration. On a mesh the L3 becomes Postgres and an L2 is added. This replaces the 2026-11-25 "L1 on a file" wording; the intent (one file, no services) is unchanged.
+
+Also (owner, same day): the git store becomes a proper L3 on the same footing: one shared L3 contract suite runs against Postgres, SQLite and git, and all three are documented as supported L3s.

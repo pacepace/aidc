@@ -14,10 +14,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from aidc_mcp import backend, headless, repo, scope, session_mcp
+from aidc_mcp import audit, backend, headless, repo, scope, session_mcp
 from aidc_mcp import session_facts as sf
 from aidc_mcp import turns_view as tv
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
@@ -89,14 +88,14 @@ async def hand_session_mcp(name: str, server: str, path: str, bearer: str) -> di
     except session_mcp.SessionMcpError as exc:
         # Nothing the caller gave is logged on a refusal: an argument in the wrong
         # place could be the token.
-        log_event("tool_call", tool="session_mcp_set", session=name, ok=False,
+        audit.log_event("tool_call", tool="session_mcp_set", session=name, ok=False,
                   error_code=exc.code)
         return session_mcp_refusal(exc)
     running = await tmx.is_claude_running(backend.target(name))
     needs_restart = handed.entry == session_mcp.ENTRY_ADDED and running
     applies = (_MCP_NEEDS_RESTART.format(name=name) if needs_restart
                else _MCP_LIVE if running else _MCP_ON_START)
-    log_event("tool_call", tool="session_mcp_set", session=name, server=handed.server,
+    audit.log_event("tool_call", tool="session_mcp_set", session=name, server=handed.server,
               url=handed.url, entry=handed.entry, needs_claude_restart=needs_restart)
     return com.envelope_ok({"session": name, "server": handed.server, "url": handed.url,
                          "entry": handed.entry, "needs_claude_restart": needs_restart,
@@ -187,14 +186,14 @@ async def create(
         except session_mcp.SessionMcpError as exc:
             return session_mcp_refusal(exc)
     if (why := scope.create_refusal()) is not None:
-        log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
+        audit.log_event("tool_call", tool="session_create", session=name, refused="out_of_scope")
         return com.envelope_err(why, code="create_not_allowed")
     # The backend the CLI will create on, decided here and passed to it explicitly, so
     # the arguments built below are the ones that backend takes.
     create_backend = backend.create_backend()
     if backend.is_kubernetes(create_backend):
         if repo or workspace:
-            log_event("tool_call", tool="session_create", session=name,
+            audit.log_event("tool_call", tool="session_create", session=name,
                       refused="repo_on_kubernetes")
             return com.envelope_err(
                 "the configured backend is kubernetes, where a session is not given a "
@@ -203,7 +202,7 @@ async def create(
                 "worktree add); call session_create again without repo and workspace",
                 code="invalid_argument")
         args = ["create", name, "--profile", profile, "--backend", create_backend]
-        log_event("tool_call", tool="session_create", session=name, profile=profile,
+        audit.log_event("tool_call", tool="session_create", session=name, profile=profile,
                   backend=create_backend)
         return await create_session(name, args, progress, wants_mcp, mcp_server, mcp_path,
                                     mcp_bearer)
@@ -220,7 +219,7 @@ async def create(
     if exposed:
         for label, value in (("repo", repo), ("workspace", workspace or "")):
             if value and not under(exposed, value):
-                log_event("tool_call", tool="session_create", session=name,
+                audit.log_event("tool_call", tool="session_create", session=name,
                           refused="path_not_allowed", path=value)
                 return com.envelope_err(
                     f"{label} must be inside {exposed} (the directory this server was "
@@ -229,7 +228,7 @@ async def create(
     if workspace:
         args += ["--workspace", workspace]
     args += ["--backend", create_backend]
-    log_event("tool_call", tool="session_create", session=name, profile=profile, repo=repo)
+    audit.log_event("tool_call", tool="session_create", session=name, profile=profile, repo=repo)
     return await create_session(name, args, progress, wants_mcp, mcp_server, mcp_path,
                                 mcp_bearer)
 
@@ -237,7 +236,7 @@ async def create(
 async def list_sessions() -> dict[str, Any]:
     """The session_list tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="session_list")
+    audit.log_event("tool_call", tool="session_list")
     # The CLI runs in a thread; the per-session facts below read state the event
     # loop owns (send queues, watchers), so they are gathered here on the loop.
     result, rows = await asyncio.gather(asyncio.to_thread(com.run_cli, ["list"]),
@@ -262,7 +261,7 @@ async def list_sessions() -> dict[str, Any]:
 async def status(name: str) -> dict[str, Any]:
     """The session_status tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="session_status", session=name)
+    audit.log_event("tool_call", tool="session_status", session=name)
     # The CLI call runs in a thread; the send queue below is read back here on
     # the event loop, the only thread that changes it.
     result = await asyncio.to_thread(com.run_cli, ["status", name])
@@ -285,7 +284,7 @@ async def status(name: str) -> dict[str, Any]:
 def kill(name: str) -> dict[str, Any]:
     """The session_kill tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="session_kill", session=name)
+    audit.log_event("tool_call", tool="session_kill", session=name)
     result = com.run_cli(["kill", name], timeout=120.0)
     if result["exit"] != 0:
         return com.envelope_err(result["stderr"] or "kill failed", result, code="cli_failed")
@@ -295,7 +294,7 @@ def kill(name: str) -> dict[str, Any]:
 def exec_command(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, Any]:
     """The session_exec tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="session_exec", session=name, cmd_redacted=cmd[:50])
+    audit.log_event("tool_call", tool="session_exec", session=name, cmd_redacted=cmd[:50])
     container = backend.target(name)
     argv = backend.exec_argv(container, ["bash", "-lc", cmd], user="vscode")
     try:
@@ -323,7 +322,7 @@ async def transcript(name: str, last_n: int = 5, since_uuid: str = "") -> dict[s
         return com.envelope_err(
             f"'{since_uuid}' is not a completed turn in the session's transcript; omit "
             "since_uuid for the newest turns", code="invalid_argument")
-    log_event("tool_call", tool="session_transcript", session=name,
+    audit.log_event("tool_call", tool="session_transcript", session=name,
               turns=len(view["turns"]), cut=view["cut"])
     data: dict[str, Any] = {"session": name, **view, "untrusted": True}
     if status == "none":
@@ -346,7 +345,7 @@ async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, A
     objs, _, _ = tn.session_transcript(name)
     tree = await rps.tree(name)
     if not (state.claude_running and state.turn == tn.TURN_RUNNING):
-        log_event("tool_call", tool="session_interrupt", session=name, interrupted=False,
+        audit.log_event("tool_call", tool="session_interrupt", session=name, interrupted=False,
                   why=state.why)
         return com.envelope_ok({"session": name, "interrupted": False, "was_running": None,
                              "tree": tree, "note": "nothing was running"})
@@ -354,10 +353,10 @@ async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, A
     rc = await tmx.tmux_exec(container,
                              ["send-keys", "-t", f"main:{tmx.SESSION_WINDOW}", "Escape"])
     if rc != 0:
-        log_event("tool_call", tool="session_interrupt", session=name, ok=False, rc=rc)
+        audit.log_event("tool_call", tool="session_interrupt", session=name, ok=False, rc=rc)
         return com.envelope_err(f"the Esc could not be sent to the session (tmux exited {rc})",
                                 {"was_running": was, "tree": tree}, code="command_failed")
-    log_event("tool_call", tool="session_interrupt", session=name, interrupted=True,
+    audit.log_event("tool_call", tool="session_interrupt", session=name, interrupted=True,
               why=state.why)
     return com.envelope_ok({"session": name, "interrupted": True, "was_running": was,
                          "tree": tree})
@@ -366,7 +365,7 @@ async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, A
 def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str, Any]:
     """The file_put tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="file_put", session=name, path=path,
+    audit.log_event("tool_call", tool="file_put", session=name, path=path,
               bytes=len(content), mode=mode)
     container = backend.target(name)
     # Stream content via stdin to a `tee` inside the container.
@@ -387,7 +386,7 @@ async def audit_get(name: str, since: str | None = None, kind: str | None = None
     and the guards around it."""
     # NB: log_event's first positional param is itself named `kind`; pass the
     # audit filter as `filter_kind` so it doesn't collide.
-    log_event("tool_call", tool="audit_get", session=name, since=since, filter_kind=kind)
+    audit.log_event("tool_call", tool="audit_get", session=name, since=since, filter_kind=kind)
     try:
         events = await sf.policy_events(name)
     except sf.TaintUnknown as exc:

@@ -9,7 +9,13 @@
 # waits a little longer each time (up to 10 s). TERM stops the forward and the supervisor.
 # When the session itself is gone (its dev StatefulSet not found, a few checks running: an
 # `aidc kill` made on another machine), the supervisor stops by itself; a restart or upgrade keeps
-# the StatefulSet, and a read that fails (the cluster not answering) is never "gone".
+# the StatefulSet, and a read that fails (the cluster not answering) is never "gone"; nor is it a
+# pod change: a forward that is up stays up while the dev pod cannot be read.
+#
+# Its log (the pid file's name, .log: tunnel.sh opened it for appending) is capped while it runs:
+# past AIDC_K8S_TUNNEL_LOG_BYTES (1 MiB) it is copied to .log.1 and emptied in place (every
+# writer appends, so the next line lands at its start). When the session is gone the supervisor
+# deletes its pid file, spec and logs.
 
 set -uo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
@@ -19,6 +25,9 @@ set -uo pipefail
 NS="$1" S="$2" H="$3" C="$4" PIDFILE="$5"
 POD="${S}-dev-0"
 CHECK="${AIDC_K8S_TUNNEL_CHECK:-5}"
+LOG="${PIDFILE%.pid}.log"
+LOG_BYTES="${AIDC_K8S_TUNNEL_LOG_BYTES:-1048576}"
+case "$LOG_BYTES" in ''|*[!0-9]*) LOG_BYTES=1048576 ;; esac
 k8s_load_settings
 printf '%s\n' "$$" > "$PIDFILE"
 
@@ -35,11 +44,23 @@ stop() {
 }
 trap stop TERM INT HUP
 
-# pod_uid: the dev pod's uid when it is running and not being deleted, else "".
+# cap_log: past LOG_BYTES, the log is copied aside (.log.1, the one before replaced) and emptied.
+cap_log() {
+    local n
+    n=$(wc -c < "$LOG" 2>/dev/null | tr -d ' ') || return 0
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -gt "$LOG_BYTES" ] || return 0
+    cp -f -- "$LOG" "${LOG}.1" 2>/dev/null && : > "$LOG"
+    say "log capped at ${LOG_BYTES} bytes; the older lines are in ${LOG##*/}.1"
+}
+
+# pod_uid: the dev pod's uid when it is running and not being deleted, else "" (no such pod, or
+# not running). Returns 1 when the read failed (the cluster did not answer): not known.
 pod_uid() {
-    k8s_kubectl -n "$NS" get pod "$POD" --request-timeout=10s \
-        -o jsonpath='{.metadata.uid}|{.status.phase}|{.metadata.deletionTimestamp}' </dev/null 2>/dev/null \
-        | awk -F'|' '$2 == "Running" && $3 == "" { print $1 }'
+    local out
+    out=$(k8s_kubectl -n "$NS" get pod "$POD" --ignore-not-found --request-timeout=10s \
+        -o jsonpath='{.metadata.uid}|{.status.phase}|{.metadata.deletionTimestamp}' </dev/null 2>/dev/null) || return 1
+    printf '%s\n' "$out" | awk -F'|' '$2 == "Running" && $3 == "" { print $1 }'
 }
 
 # session_gone: 0 when the API says the dev StatefulSet does not exist; 1 when it exists or the
@@ -54,17 +75,18 @@ session_gone() {
 # nap <seconds>: a sleep TERM interrupts (a foreground sleep would hold the trap until it ends).
 nap() { sleep "$1" & wait $! 2>/dev/null; }
 
-wait_s=1 gone=0
+wait_s=1 gone=0 unread=0
 GONE_CHECKS="${AIDC_K8S_TUNNEL_GONE_CHECKS:-3}"
 say "started"
 while :; do
-    uid=$(pod_uid)
+    cap_log
+    uid=$(pod_uid) || uid=""
     if [ -z "$uid" ]; then
         if session_gone; then
             gone=$((gone + 1))
             if [ "$gone" -ge "$GONE_CHECKS" ]; then
                 say "the session is gone (no ${S}-dev StatefulSet); stopping"
-                rm -f "$PIDFILE" "${PIDFILE%.pid}.spec"
+                rm -f "$PIDFILE" "${PIDFILE%.pid}.spec" "$LOG" "${LOG}.1"
                 exit 0
             fi
         else
@@ -80,7 +102,15 @@ while :; do
     while kill -0 "$pf" 2>/dev/null; do
         nap "$CHECK"
         kill -0 "$pf" 2>/dev/null || break
-        now=$(pod_uid)
+        cap_log
+        # A read that failed tells nothing about the pod: the forward is kept.
+        if ! now=$(pod_uid); then
+            [ "$unread" = 1 ] || say "the dev pod could not be read; keeping the forward"
+            unread=1
+            continue
+        fi
+        [ "$unread" = 0 ] || say "the dev pod can be read again"
+        unread=0
         if [ "$now" != "$uid" ]; then
             say "the dev pod changed (${uid} -> ${now:-none}); reconnecting"
             end_pf

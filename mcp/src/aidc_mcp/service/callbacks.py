@@ -12,9 +12,8 @@ from pathlib import Path
 
 import httpx
 
-from aidc_mcp import auth
+from aidc_mcp import audit, auth
 from aidc_mcp import transcript as ts
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import config as orc
 
 _DELIVERY_BUDGET_S = 1800.0
@@ -54,7 +53,7 @@ async def post_turn(
     (non-retryable). Fully instrumented (MCP-19): logs attempt, ok/non-2xx/
     exception with status, timing, type+repr."""
     full_url = f"{callback_base}/api/v1/internal/callback/{conversation_id}"
-    log_event("transcript_callback_attempt", conversation_id=conversation_id, url=full_url,
+    audit.log_event("transcript_callback_attempt", conversation_id=conversation_id, url=full_url,
               turn_uuid=turn.terminal_uuid, content_len=len(turn.text), attempt=attempt)
     start = time.monotonic()
     try:
@@ -94,12 +93,12 @@ async def post_turn(
             )
         elapsed_s = round(time.monotonic() - start, 3)
         if resp.is_success:
-            log_event("transcript_callback_ok", conversation_id=conversation_id,
+            audit.log_event("transcript_callback_ok", conversation_id=conversation_id,
                       turn_uuid=turn.terminal_uuid, status=resp.status_code,
                       elapsed_s=elapsed_s, attempt=attempt)
             return True
         retryable = _is_retryable_status(resp.status_code)
-        log_event("transcript_callback_http_error", conversation_id=conversation_id,
+        audit.log_event("transcript_callback_http_error", conversation_id=conversation_id,
                   turn_uuid=turn.terminal_uuid, status=resp.status_code, elapsed_s=elapsed_s,
                   body=resp.text[:500], attempt=attempt, retryable=retryable)
         if not retryable:
@@ -110,7 +109,7 @@ async def post_turn(
     except _PermanentDeliveryError:
         raise
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- log why + retry
-        log_event("transcript_callback_failed", conversation_id=conversation_id,
+        audit.log_event("transcript_callback_failed", conversation_id=conversation_id,
                   turn_uuid=turn.terminal_uuid, elapsed_s=round(time.monotonic() - start, 3),
                   error_type=type(exc).__name__, error=repr(exc), attempt=attempt)
         return False

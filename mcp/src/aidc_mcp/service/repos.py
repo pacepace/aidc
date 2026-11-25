@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from aidc_mcp import repo
+from aidc_mcp import audit, repo
 from aidc_mcp import session_facts as sf
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import common as com
 
 
@@ -34,15 +33,16 @@ async def in_repo(name: str, tool: str, run: Any) -> dict[str, Any]:
     marked untrusted: it is the repository's text, not instructions."""
     repo_dir = await sf.repo_path(name)
     if repo_dir is None:
-        log_event("tool_call", tool=tool, session=name, ok=False, error_code="no_such_session")
+        audit.log_event("tool_call", tool=tool, session=name, ok=False,
+                        error_code="no_such_session")
         return com.envelope_err(f"There is no session named '{name}' (or its dev container is "
                                 "gone). Check session_list.", code="no_such_session")
     try:
         data = await run(repo_dir)
     except repo.RepoRefusal as exc:
-        log_event("tool_call", tool=tool, session=name, ok=False, error_code=exc.code)
+        audit.log_event("tool_call", tool=tool, session=name, ok=False, error_code=exc.code)
         return _repo_refusal(exc)
-    log_event("tool_call", tool=tool, session=name, ok=True, cut=bool(data.get("cut")))
+    audit.log_event("tool_call", tool=tool, session=name, ok=True, cut=bool(data.get("cut")))
     return com.envelope_ok({"session": name, **data, "untrusted": True})
 
 

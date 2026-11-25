@@ -66,6 +66,8 @@
 #   git-requests sync                 "<session> <token>" lines on stdin, every session there is:
 #                                     each registered, every other record pruned
 #   git-requests first-use <repo>     GitHub's protections of the repo, once per repo
+#   git-requests pr-base <repo> [<base>]   the base a pull request from <repo> is opened
+#                                     against (<base>, else origin's default), or refused
 set -u
 self=$(readlink -f "${BASH_SOURCE[0]}")
 GITCTL_LIB=$(dirname "$self")
@@ -180,6 +182,20 @@ origin_url() {
 # A read in a working copy: gitctl's own pinned invocation (gitctl-rules.sh), which keeps the
 # system config, so its safe.directory lets the agent read a copy the session user owns.
 agit() { gitctl_agent_git "$REAL_GIT" "$@"; }
+
+# pr_base REPO BASE: the base a pull request from REPO is opened against, printed: BASE when
+# given, else origin's default branch as the working copy knows it (origin/HEAD); 1 when there
+# is none, or it is not a branch name. The one owner of "settle the base, then push, then open
+# the pull request": a request's run (below) and `aidc git pr` (git-requests pr-base) both ask it
+# before anything is pushed, so a pull request that cannot be opened pushes nothing. (A push
+# fetches nothing, so origin/HEAD is the same before it as after.)
+pr_base() {
+    local base="$2"
+    [ -n "$base" ] || base=$(agit -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    [ -n "$base" ] || return 1
+    gitctl_branch_ok "$REAL_GIT" "$base" 2>/dev/null || return 1
+    printf '%s\n' "$base"
+}
 
 ALLOWED='["version","id","session","action","repo","worktree","branch","base","title","body","number","state","head","created","token"]'
 FIELDS=(version id session action repo worktree branch base title body number state head token)
@@ -410,14 +426,10 @@ run() {
     rc=0
     case "$Q_action" in
         push|pr-create)
-            # A pull request's base is settled before anything is pushed: a request that cannot
-            # open its pull request pushes nothing. (The push fetches nothing, so the working
-            # copy's origin/HEAD is the same before it as after.)
-            local base="$Q_base"
+            # A pull request's base is settled before anything is pushed (pr_base).
+            local base=""
             if [ "$Q_action" = pr-create ]; then
-                [ -n "$base" ] || base=$(agit -C "$Q_repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-                gitctl_branch_ok "$REAL_GIT" "$base" 2>/dev/null || base=""
-                if [ -z "$base" ]; then
+                if ! base=$(pr_base "$Q_repo" "$Q_base"); then
                     R_OUTPUT="no base branch given and origin has no default (gitctl fetch the working copy, or gh pr create --base): nothing pushed"
                     result "$id" failed "$R_OUTPUT"; rmdir -- "work/${id}.lock" 2>/dev/null || true; return 1
                 fi
@@ -760,6 +772,12 @@ EOF
         [ $# = 1 ] || die "usage: git-requests first-use <repo>"
         path_ok "$1" || [ "$INSTALLED" = 0 ] || die "${1}: not a folder on the user's disk"
         first_use "$1" ;;
+    pr-base)
+        # Asked by `aidc git pr` before it pushes: no base, nothing pushed.
+        [ $# = 1 ] || [ $# = 2 ] || die "usage: git-requests pr-base <repo> [<base>]"
+        path_ok "$1" || [ "$INSTALLED" = 0 ] || die "${1}: not a folder on the user's disk"
+        pr_base "$1" "${2:-}" || die "no base branch given and origin has no default (or it is not a branch name)"
+        ;;
     ""|-h|--help|help) usage ;;
     *) die "${cmd}: not a git-requests command (git-requests --help)" ;;
 esac

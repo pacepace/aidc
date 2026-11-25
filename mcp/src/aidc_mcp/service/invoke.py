@@ -13,8 +13,7 @@ from typing import Any
 
 import httpx
 
-from aidc_mcp import auth, backend, headless
-from aidc_mcp.audit import log_event
+from aidc_mcp import audit, auth, backend, headless
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import repos as rps
@@ -51,7 +50,7 @@ async def claim_headless(name: str, tool: str, prompt: str
         if found is None and not running:
             # The run's own docker exec fails the same way if the container is down;
             # if it is only slow to answer, an orphan may go uncounted.
-            log_event("headless_claim_without_listing", session=name, tool=tool)
+            audit.log_event("headless_claim_without_listing", session=name, tool=tool)
         running = headless.merge(name, found)
         if running:
             return None, running[0]
@@ -59,7 +58,7 @@ async def claim_headless(name: str, tool: str, prompt: str
 
 
 def invoke_busy(name: str, tool: str, running: dict[str, Any]) -> dict[str, Any]:
-    log_event("tool_call", tool=f"{tool}_refused", session=name, reason="invoke_busy",
+    audit.log_event("tool_call", tool=f"{tool}_refused", session=name, reason="invoke_busy",
               running_tool=running.get("tool"), running_since=running.get("started_at"),
               orphan=running.get("orphan"))
     return com.envelope_err(
@@ -77,7 +76,7 @@ def stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
     entry = ss.invokes_in_flight.pop((session_id, request_id), None)
     if entry is None:
         return
-    log_event("session_invoke_client_disconnected", session=entry.run.session,
+    audit.log_event("session_invoke_client_disconnected", session=entry.run.session,
               run_id=entry.run.run_id)
     com.fire(stop_headless(entry.container, entry.run, entry.proc,
                             "session_invoke_stopped_client_gone"))
@@ -111,7 +110,7 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
         note = ("no headless run was going" if found is not None else
                 "the container's processes could not be read (is the session running?), "
                 "so no headless run could be found")
-        log_event("tool_call", tool="session_interrupt", session=name, target="headless",
+        audit.log_event("tool_call", tool="session_interrupt", session=name, target="headless",
                   interrupted=False, listed=found is not None)
         return com.envelope_ok({**base, "interrupted": False, "stopped": [], "pids": [],
                              "note": note})
@@ -130,9 +129,9 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
                 pids += await headless.stop_tree(container, rec["pid"])
         except headless.DockerFailed as exc:
             failed.append(str(exc))
-            log_event("headless_stop_failed", session=name, run_id=rec["run_id"],
+            audit.log_event("headless_stop_failed", session=name, run_id=rec["run_id"],
                       pid=rec["pid"], error=str(exc))
-    log_event("tool_call", tool="session_interrupt", session=name, target="headless",
+    audit.log_event("tool_call", tool="session_interrupt", session=name, target="headless",
               interrupted=not failed, runs=[r["run_id"] for r in running], pids=pids)
     data = {**base, "interrupted": not failed, "stopped": running, "pids": pids}
     if failed:
@@ -149,13 +148,13 @@ async def stop_headless(container: str, run: headless.Run, proc: Any, event: str
     try:
         pids = await headless.stop(container, run)
     except headless.DockerFailed as exc:
-        log_event("headless_stop_failed", session=run.session, run_id=run.run_id,
+        audit.log_event("headless_stop_failed", session=run.session, run_id=run.run_id,
                   reason=event, ran_s=ran_s, error=str(exc))
         return
     finally:
         _kill_host_exec(proc)
         headless.forget(run)
-    log_event(event, session=run.session, run_id=run.run_id, pids=pids, ran_s=ran_s)
+    audit.log_event(event, session=run.session, run_id=run.run_id, pids=pids, ran_s=ran_s)
 
 
 async def invoke(
@@ -167,7 +166,7 @@ async def invoke(
 ) -> dict[str, Any]:
     """The session_invoke tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
-    log_event("tool_call", tool="session_invoke", session=name, prompt_len=len(prompt))
+    audit.log_event("tool_call", tool="session_invoke", session=name, prompt_len=len(prompt))
     container = backend.target(name)
     run, running = await claim_headless(name, "session_invoke", prompt)
     if run is None:
@@ -263,7 +262,7 @@ async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str
         )
 
     callback_url = f"{base_url}/api/v1/internal/callback/{conversation_id}"
-    log_event(
+    audit.log_event(
         "tool_call",
         tool="session_invoke_async",
         session=name,
@@ -315,7 +314,7 @@ async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str
         finally:
             headless.forget(run)
 
-        log_event("tool_call", tool="session_invoke_async_complete", session=name, ok=ok)
+        audit.log_event("tool_call", tool="session_invoke_async_complete", session=name, ok=ok)
         # Same delivery path, same instrumentation rationale as the watcher:
         # log the HTTP outcome (non-2xx included), timing, and the exception
         # type + repr so a failed callback says *why*, not just that it failed.
@@ -331,7 +330,7 @@ async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str
                 )
             elapsed_s = round(time.monotonic() - start, 3)
             if resp.is_success:
-                log_event(
+                audit.log_event(
                     "tool_call",
                     tool="session_invoke_async_callback_ok",
                     session=name,
@@ -341,7 +340,7 @@ async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str
                     content_len=content_len,
                 )
             else:
-                log_event(
+                audit.log_event(
                     "tool_call",
                     tool="session_invoke_async_callback_http_error",
                     session=name,
@@ -352,7 +351,7 @@ async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str
                     body=resp.text[:500],
                 )
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- log why, don't crash
-            log_event(
+            audit.log_event(
                 "tool_call",
                 tool="session_invoke_async_callback_failed",
                 session=name,

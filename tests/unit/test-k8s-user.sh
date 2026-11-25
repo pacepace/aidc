@@ -269,6 +269,71 @@ rm -f "$KC"
 out=$(K_CTX=aidc-u-alice creds alice 2>&1); rc=$?
 assert_has "a user renewing with their own kubeconfig renews it in place" "): $SCRATCH/mine.kubeconfig" "$out"
 assert_eq "and writes nothing else" "absent" "$([ -e "$KC" ] && echo present || echo absent)"
+# A kubeconfig merged with another cluster's (~/.kube/config, say): renewing in place changes
+# only alice's entries and keeps the other context, its cluster and its credential.
+M="$SCRATCH/merged.kubeconfig"
+cat > "$M" <<'KC'
+apiVersion: v1
+kind: Config
+clusters:
+  - name: work
+    cluster:
+      server: https://work.example:6443
+  - name: lab
+    cluster:
+      server: https://old.example:6443
+      certificate-authority: /nonexistent/old-ca.crt
+      insecure-skip-tls-verify: true
+      proxy-url: socks5://localhost:1080
+users:
+  - name: work-admin
+    user:
+      token: WORK-TOKEN
+  - name: alice-sa
+    user:
+      token: OLD-TOKEN
+contexts:
+  - name: work
+    context:
+      cluster: work
+      user: work-admin
+  - name: aidc-u-alice
+    context:
+      cluster: lab
+      user: alice-sa
+      namespace: aidc-u-alice
+current-context: aidc-u-alice
+KC
+chmod 0600 "$M"
+printf 'kubernetes:\n  storage_class: shared-disk\n  user: alice\n  kubeconfig: %s\n' "$M" > "$HOME/.config/aidc/config.yaml"
+out=$(K_CTX=aidc-u-alice creds alice 2>&1); rc=$?
+assert_eq "a merged kubeconfig: renewed in place, exit 0" "0" "$rc"
+assert_eq "  both contexts are still there" "work aidc-u-alice" "$(yq -r '[.contexts[].name] | join(" ")' "$M")"
+assert_eq "  the other context's credential and cluster are untouched" "WORK-TOKEN|https://work.example:6443" \
+    "$(yq -r '[(.users[] | select(.name == "work-admin") | .user.token), (.clusters[] | select(.name == "work") | .cluster.server)] | join("|")' "$M")"
+assert_eq "  alice's user entry (the one her context names) holds the new token" "${TOKEN}" \
+    "$(yq -r '.users[] | select(.name == "alice-sa") | .user.token' "$M")"
+assert_eq "  and her cluster entry the cluster's server and CA" "https://k.example:6443|Q0EtREFUQQ==" \
+    "$(yq -r '.clusters[] | select(.name == "lab") | [.cluster.server, .cluster["certificate-authority-data"]] | join("|")' "$M")"
+assert_eq "  what else her cluster entry said is kept; the old CA file and insecure flag give way" "socks5://localhost:1080||" \
+    "$(yq -r '.clusters[] | select(.name == "lab") | [.cluster["proxy-url"], (.cluster["certificate-authority"] // ""), (.cluster["insecure-skip-tls-verify"] // "")] | join("|")' "$M")"
+assert_eq "  nothing added: two clusters, two users, the current context kept" "2|2|aidc-u-alice" \
+    "$(yq -r '[(.clusters | length), (.users | length), .["current-context"]] | join("|")' "$M")"
+assert_has "  and it says the other context was kept" "1 other context(s)" "$out"
+assert_eq "  still 0600, no temp file left beside it" "600|0" \
+    "$(stat -c %a "$M" 2>/dev/null || stat -f %Lp "$M")|$(find "$SCRATCH" -maxdepth 1 -name '.aidc-kubeconfig*' | wc -l | tr -d ' ')"
+# --out at a file holding someone else's context only: alice's is added, theirs kept.
+yq -i 'del(.contexts[1]) | del(.users[1]) | del(.clusters[1]) | .["current-context"] = "work"' "$M"
+out=$(creds alice --out "$M" 2>&1); rc=$?
+assert_eq "--out at a kubeconfig without alice: her context is added beside the other" "0|work aidc-u-alice|work" \
+    "${rc}|$(yq -r '[.contexts[].name] | join(" ")' "$M")|$(yq -r '.["current-context"]' "$M")"
+assert_eq "  named after her context, with the new token" "${TOKEN}|WORK-TOKEN" \
+    "$(yq -r '[(.users[] | select(.name == "aidc-u-alice") | .user.token), (.users[] | select(.name == "work-admin") | .user.token)] | join("|")' "$M")"
+assert_has "  and it says how to reach it" "kubectl --context aidc-u-alice" "$out"
+printf 'not: [a, kubeconfig\n' > "$SCRATCH/junk.kubeconfig"
+out=$(creds alice --out "$SCRATCH/junk.kubeconfig" 2>&1); rc=$?
+assert_eq "a file there that is not a kubeconfig is refused and left as it was" "1|not: [a, kubeconfig" \
+    "${rc}|$(cat "$SCRATCH/junk.kubeconfig")"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab

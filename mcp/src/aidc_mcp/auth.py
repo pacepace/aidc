@@ -18,7 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from aidc_mcp.audit import log_event
+from aidc_mcp import audit
 
 _TOKEN_PATH = Path(os.environ.get("AIDC_MCP_TOKEN_FILE", "/aidc-config/mcp-token"))
 
@@ -61,7 +61,7 @@ class BearerAuthMiddleware:
         auth_header = request.headers.get("authorization", "")
 
         if not auth_header.startswith("Bearer "):
-            log_event("auth_reject", peer=peer, method=method, path=path, reason="no_bearer")
+            audit.log_event("auth_reject", peer=peer, method=method, path=path, reason="no_bearer")
             response = JSONResponse(
                 {"error": "missing or malformed Authorization header"}, status_code=401
             )
@@ -70,10 +70,10 @@ class BearerAuthMiddleware:
 
         presented = auth_header[len("Bearer "):].strip()
         if not hmac.compare_digest(presented, self._token):
-            log_event("auth_reject", peer=peer, method=method, path=path, reason="bad_token")
+            audit.log_event("auth_reject", peer=peer, method=method, path=path, reason="bad_token")
             response = JSONResponse({"error": "invalid bearer token"}, status_code=401)
             await response(scope, receive, send)
             return
 
-        log_event("auth_ok", peer=peer, method=method, path=path)
+        audit.log_event("auth_ok", peer=peer, method=method, path=path)
         await self.app(scope, receive, send)

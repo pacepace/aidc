@@ -12,7 +12,7 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aidc_mcp.audit import log_event
+from aidc_mcp import audit
 from aidc_mcp.service import state as ss
 
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
@@ -53,7 +53,7 @@ async def run_cli_streaming(
     the corresponding name and the line (the MCP tool passes its Context's info).
     """
     cmd = [AIDC, *args]
-    log_event("cli_exec_streaming", argv=cmd)
+    audit.log_event("cli_exec_streaming", argv=cmd)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,

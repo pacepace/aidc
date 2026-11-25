@@ -337,7 +337,17 @@ AIDC_GIT_MODE=rules bash "$GR" once >/dev/null 2>&1
 assert_eq "no base and no origin/HEAD: the request fails and nothing is pushed" "failed|" "$(state "$id")|$(calls)"
 assert_has "and the result says so" "origin has no default" "$(jq -r .message "$REQ/results/$id.json")"
 assert_has "and that nothing was pushed" "nothing pushed" "$(jq -r .message "$REQ/results/$id.json")"
+# aidc git pr asks the same rule (git-requests pr-base) before it pushes.
+gr pr-base "$P"
+assert_eq "pr-base with no base and no origin/HEAD is refused" "1" "$RC"
+assert_has "..." "origin has no default" "$OUT"
 git -C "$P" symbolic-ref refs/remotes/origin/HEAD "$G_HEAD"
+gr pr-base "$P"
+assert_eq "pr-base with no base: origin's default" "0|main" "$RC|$OUT"
+gr pr-base "$P" release
+assert_eq "pr-base with a base: that one" "0|release" "$RC|$OUT"
+gr pr-base "$P" -x
+assert_eq "pr-base with a base that is not a branch name: refused" "1" "$RC"
 
 echo ""
 echo "=== every field is checked; a bad request is refused, never run ==="

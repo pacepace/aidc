@@ -848,9 +848,10 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   port-forward` with your own cluster credentials, on 127.0.0.1, and starts it again when it
   drops or the dev pod is replaced (restart, upgrade, a node reboot). `aidc proxy <name>
   add|rm|ls|clear` manages tunnels on this machine; `aidc proxy <name> up` starts the session's
-  declared ports on another machine. Logs: `~/.local/state/aidc/tunnels/`. `aidc kill` stops
-  them, and `aidc status` lists them; a tunnel on another machine stops by itself once the
-  session is gone.
+  declared ports on another machine. Logs: `~/.local/state/aidc/tunnels/` (capped at 1 MiB
+  plus one older copy, and deleted with the tunnel). `aidc kill` stops them, and `aidc status`
+  lists them; a tunnel on another machine stops by itself once the session is gone. A moment
+  when the cluster does not answer keeps a working tunnel up.
 - **A page on your network:** `--expose <port>` serves the port through the cluster's ingress at
   `<name>-<user>.<domain>` (a further port: `<name>-<port>-<user>.<domain>`), only the ingress
   controller's pods being let in to it. No login unless you add `--login`, which prints a

@@ -71,3 +71,48 @@ def test_importing_the_whole_service_loads_no_mcp_package():
 def test_the_import_check_sees_mcp_when_it_is_there():
     # The fresh-interpreter check above can tell: the tools module does load the SDK.
     assert "mcp" in _modules_loaded_by_importing(["aidc_mcp.tools"])
+
+
+def _package_modules():
+    import aidc_mcp
+    return ["aidc_mcp", *(f"aidc_mcp.{m.name}" for m in pkgutil.iter_modules(aidc_mcp.__path__)),
+            *_service_modules()]
+
+
+def test_no_module_imports_log_event_by_name():
+    """Every module logs through `audit.log_event`, the one binding, so tests/logs.py's single
+    patch catches every event: a `from aidc_mcp.audit import log_event` would hold a second
+    binding the patch misses, and a test asserting an event is absent would pass wrongly."""
+    by_name = sorted(name for name in _package_modules()
+                     if "aidc_mcp.audit.log_event" in _imported(name))
+    assert by_name == []
+
+
+async def test_the_log_event_patch_catches_auth_and_session_facts(monkeypatch):
+    """The two modules outside tools and the service that log are reached by it too: an
+    auth rejection and an unreadable taint flag, each logged by its own module."""
+    from aidc_mcp import auth, session_facts
+    from tests.logs import patch_log_event
+    seen = []
+    patch_log_event(monkeypatch, lambda kind, **fields: seen.append(kind))
+
+    async def unreadable(name):
+        raise session_facts.TaintUnknown("probe")
+    monkeypatch.setattr(session_facts, "read_taint", unreadable)
+    assert await session_facts.taint_or_none("s1") is None
+
+    async def app(scope, receive, send):
+        raise AssertionError("a request with no bearer reaches the app")
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+    scope = {"type": "http", "method": "GET", "path": "/mcp", "headers": [],
+             "query_string": b"", "client": ("127.0.0.1", 1), "server": ("x", 80),
+             "scheme": "http", "root_path": ""}
+    monkeypatch.setattr(auth, "load_token", lambda: "t")
+    await auth.BearerAuthMiddleware(app)(scope, receive, send)
+    assert seen == ["session_taint_unreadable", "auth_reject"]

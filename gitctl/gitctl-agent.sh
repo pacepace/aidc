@@ -126,8 +126,10 @@ import_bundle() {
     # origin's default branch, when the working copy does not know it yet (made with git init
     # and git remote add, or cloned before origin had a branch): set as a clone sets it, as git
     # fetch does since 2.48 (remote.origin.followRemoteHEAD=create). gh pr create's base comes
-    # from it. One the working copy already has is never changed.
-    if ! ag -C "$wc" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1; then
+    # from it. One the working copy already has is never changed: a symbolic one (even one
+    # whose branch is gone) or a plain ref some other tool wrote.
+    if ! ag -C "$wc" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1 \
+            && ! ag -C "$wc" show-ref --verify -q refs/remotes/origin/HEAD >/dev/null 2>&1; then
         local def
         def=$(bundle_default "$listed")
         if [ -n "$def" ] && ag -C "$wc" rev-parse -q --verify "refs/remotes/origin/${def}" >/dev/null; then
@@ -192,12 +194,17 @@ agent_clone() {
     { ag init -q --template= --shared=group . \
         && ag config remote.origin.url "$(forge_url "$slug")" \
         && ag config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'; } || die "cannot make the working copy"
+    # import_bundle sets origin/HEAD from the bundle's HEAD (origin's default branch). A bundle
+    # with no HEAD leaves it unset, and the branch checked out here, the first one, is taken as
+    # origin's default then: origin/HEAD has one writer for each case, never two.
     import_bundle .
     def=$(bundle_default "$LISTED")
     [ -n "$def" ] || def=$(printf '%s\n' "$LISTED" | awk '$2 ~ /^refs\/heads\// { sub("refs/heads/", "", $2); print $2; exit }')
+    if [ -n "$def" ] && ! ag symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1; then
+        ag symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/${def}" || die "cannot set origin/HEAD"
+    fi
     { ag update-ref "refs/heads/${def}" "refs/remotes/origin/${def}" \
         && ag symbolic-ref HEAD "refs/heads/${def}" \
-        && ag symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/${def}" \
         && ag config "branch.${def}.remote" origin && ag config "branch.${def}.merge" "refs/heads/${def}" \
         && ag reset -q --hard; } || die "cannot check out ${def}"
     echo "cloned $(forge_url "$slug") into ${path} (${def})"

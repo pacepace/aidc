@@ -53,6 +53,7 @@ assert_not_has() {
 #   K_NO_DISK=1      the user has no disk claim
 #   K_NO_POD=1       no running git pod (the Deployment exists unless K_NO_DEP=1)
 #   K_EXEC_FAIL=1    exec into the git pod fails (container not ready, exec refused)
+#   K_NO_BASE=1      git-requests pr-base finds no base (origin has no default branch)
 #   K_GH=yes|stored|no   what gh says inside (default no)
 #   K_WAITING=n      requests waiting for approval (default 0)
 #   K_UNCHANGED=1    apply reports the Deployment unchanged
@@ -96,6 +97,9 @@ case "$*" in
         printf '%b' "${K_PROT:-repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nsquash allowed\nrebase allowed\n}"; echo end ;;
     *"exec git-7d9f-abc -c git -- gitctl tidy"*) printf 'deleted-remote feat\nremoved-worktree /home/alice/r/wt\nunpushed 2 other\norphaned /home/alice/r/old\nend\n' ;;
     *"exec git-7d9f-abc -c git -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
+    *"exec git-7d9f-abc -c git -- git-requests pr-base"*)
+        [ "${K_NO_BASE:-}" = 1 ] && { echo 'git-requests: no base branch given and origin has no default' >&2; exit 1; }
+        echo main ;;
     *"exec git-7d9f-abc -c git -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
     *"exec -i git-7d9f-abc -c git -- git-requests mode"*) cat > "$K_STDIN"; echo "mode set" ;;
     *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_NO_SESSION:-}" = 1 ] || echo "dev statefulset.apps/demo-dev" | pick ;;
@@ -419,6 +423,14 @@ assert_has "pr: pushes first" "gitctl push /home/alice/r feat" "$(xl)"
 assert_has "then opens the PR with the body on stdin and the title as an argument" "exec -i git-7d9f-abc -c git -- bash -c" "$(xl)"
 assert_has "..." "gitctl pr-create" "$(cat "$K_LOG")"
 assert_has "exit 0" "exit=0" "$out"
+assert_eq "the base is settled first, then the push" "pr-base|push" \
+    "$(xl | grep -oE 'git-requests pr-base|gitctl push' | sed 's/.* //' | head -n2 | paste -sd'|')"
+: > "$K_LOG"
+out=$(K_NO_BASE=1 run git pr "$HOME/r" feat --title "Add it" --body-file "$SCRATCH/body.md")
+assert_has "no base and no origin default: refused, saying nothing was pushed" "nothing pushed" "$out"
+assert_has "..." "exit=1" "$out"
+assert_not_has "and nothing is pushed" "gitctl push" "$(xl)"
+assert_not_has "nor a pull request asked for" "bash -c" "$(xl)"
 out=$(run git pr "$HOME/r" feat --title "Add it")
 assert_has "pr needs a body file" "usage: aidc git pr" "$out"
 out=$(run git merge "$HOME/r" 12)

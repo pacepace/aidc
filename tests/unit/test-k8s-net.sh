@@ -59,6 +59,9 @@ assert_not_has() {
 #   names         what the names responder was last given (exec -i ... -c names)
 #   pf.<n>        each port-forward the supervisor started
 #   sts_gone      present: the dev StatefulSet is not found (the session was killed elsewhere)
+#   pod_fail      present: reading the dev pod fails (the cluster not answering)
+#   expose_fail   n: the next n reads of the session's pages (Ingresses) fail
+# K_SECRET_FAIL=1 deleting a page's certificate Secret fails.
 # K_EXISTS=1 the session demo exists (its dev StatefulSet). K_RELAY_LEFT=1 a relay Deployment of
 # demo is left (app=egress). The workload lookup honours the selector's `app in (...)` clause, as
 # the API does. K_LEFT what clean-env's listing answers. K_EXPOSE_JSON what the session's pages
@@ -102,7 +105,11 @@ case "$*" in
           [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
     *"get deployment,service,networkpolicy,configmap,ingress,pvc -l aidc/session=demo "*) printf '%s' "${K_LEFT:-}" ;;
     *"get pvc -l aidc/session=demo,aidc/kept=audit -o name"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
-    *"get ingress -l aidc/session=demo,app=expose -o json"*) printf '%s' "${K_EXPOSE_JSON:-}" ;;
+    *"get ingress -l aidc/session=demo,app=expose -o json"*)
+        n=$(cat "$K_STATE/expose_fail" 2>/dev/null || echo 0)
+        if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$K_STATE/expose_fail"; echo 'Unable to connect to the server' >&2; exit 1; fi
+        printf '%s' "${K_EXPOSE_JSON:-}" ;;
+    *"delete secret demo-expose-"*) [ "${K_SECRET_FAIL:-}" = 1 ] && { echo 'Error from server (Forbidden)' >&2; exit 1; } ;;
     *"get ingress demo-expose-"*"loadBalancer"*) printf '%s' "${K_LB:-}" ;;
     *"get deployment,statefulset -l"*) : ;;
     *"get statefulset demo-dev -o jsonpath={.metadata.annotations.aidc/audit}"*) printf 'demo-audit-20261124050000' ;;
@@ -115,7 +122,9 @@ case "$*" in
     *"get pod -l aidc/session=demo,app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec -i pod/demo-proxy-abc -c names"*) cat > "$K_STATE/names" ;;
     *"exec demo-dev-0 -c dev -- getent hosts"*) exit 0 ;;
-    *"get pod demo-dev-0"*"jsonpath="*) u=$(cat "$K_STATE/uid" 2>/dev/null || echo uid1)
+    *"get pod demo-dev-0"*"jsonpath="*)
+        [ -e "$K_STATE/pod_fail" ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        u=$(cat "$K_STATE/uid" 2>/dev/null || echo uid1)
         [ "$u" = none ] || printf '%s|Running|' "$u" ;;
     *"port-forward pod/demo-dev-0"*)
         n=$(ls "$K_STATE" | grep -c '^pf\.')
@@ -384,11 +393,39 @@ assert_has "  and the log says why" "the dev pod changed (uid1 -> uid2); reconne
 pkill -f "sleep 300" 2>/dev/null
 for _ in $(seq 1 20); do [ -e "$K_STATE/pf.2" ] && break; sleep 0.5; done
 assert_eq "a port-forward that ends is started again" "yes" "$([ -e "$K_STATE/pf.2" ] && echo yes)"
+# The dev pod cannot be read for a while (the cluster not answering): that is not a pod change,
+# and the working forward is kept.
+for _ in $(seq 1 20); do pgrep -f 'sleep 300' >/dev/null && break; sleep 0.5; done
+fwd=$(pgrep -f 'sleep 300' | head -n1)
+touch "$K_STATE/pod_fail"; sleep 3
+assert_eq "a failed read of the dev pod keeps the forward (no new port-forward)" "no|running" \
+    "$([ -e "$K_STATE/pf.3" ] && echo yes || echo no)|$(kill -0 "$fwd" 2>/dev/null && echo running || echo gone)"
+TD=$(k8s_tunnel_dir aidc-u-alice)
+assert_has "  and the log says so, once" "the dev pod could not be read; keeping the forward" "$(cat "$TD/demo-18080.log")"
+assert_eq "  ..." "1" "$(grep -c 'could not be read' "$TD/demo-18080.log")"
+rm -f "$K_STATE/pod_fail"; sleep 2
+assert_eq "  when it can be read again (the same pod), still the same forward" "no|running" \
+    "$([ -e "$K_STATE/pf.3" ] && echo yes || echo no)|$(kill -0 "$fwd" 2>/dev/null && echo running || echo gone)"
 k8s_tunnel_stop aidc-u-alice demo 18080
 assert_eq "stop ends the supervisor" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+assert_eq "  and deletes its log" "" "$(ls "$TD" | grep '^demo-18080\.' || true)"
 sleep 0.5
 assert_eq "  and its port-forward" "" "$(pgrep -f 'sleep 300' || true)"
 assert_eq "  and forgets the tunnel" "" "$(k8s_tunnels aidc-u-alice demo)"
+# The log is capped while the tunnel runs: a busy port's "Handling connection" lines do not
+# pile up. And a new supervisor starts a fresh log, the last one kept once.
+set_uid uid1; rm -f "$K_STATE"/pf.*
+printf 'an old line\n' > "$TD/demo-18080.log"
+AIDC_K8S_TUNNEL_LOG_BYTES=2000 k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
+assert_eq "a new supervisor's log starts fresh; the last one is kept as .log.1" "0|an old line" \
+    "$(grep -c 'an old line' "$TD/demo-18080.log")|$(cat "$TD/demo-18080.log.1")"
+head -c 5000 /dev/zero | tr '\0' 'x' >> "$TD/demo-18080.log"
+for _ in $(seq 1 20); do grep -q 'log capped' "$TD/demo-18080.log" 2>/dev/null && break; sleep 0.5; done
+assert_has "past the cap the log is emptied, saying so" "log capped at 2000 bytes" "$(cat "$TD/demo-18080.log")"
+assert_eq "  well under the cap now; the older lines are in .log.1" "yes|yes" \
+    "$([ "$(wc -c < "$TD/demo-18080.log")" -lt 2000 ] && echo yes)|$(grep -q xxxxx "$TD/demo-18080.log.1" && echo yes)"
+k8s_tunnel_stop aidc-u-alice demo 18080
+assert_eq "  stop deletes both" "" "$(ls "$TD" | grep '^demo-18080\.' || true)"
 out=$(K_PF_BUSY=1 k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1); rc=$?
 assert_has "a host port in use here is said so" "localhost:18080 is taken on this machine" "$out"
 assert_eq "  start fails" 1 "$rc"
@@ -411,8 +448,9 @@ rm -f "$K_STATE/sts_fail"; touch "$K_STATE/sts_gone"
 for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
 assert_eq "the StatefulSet not found (aidc kill on another machine): the supervisor stops by itself" "gone" \
     "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
-assert_has "  saying why" "the session is gone (no demo-dev StatefulSet); stopping" "$(cat "$(k8s_tunnel_dir aidc-u-alice)/demo-18080.log")"
 assert_eq "  and the tunnel is forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
+assert_eq "  its pid, spec and log all deleted (the session is gone: nothing left to read)" "" \
+    "$(ls "$(k8s_tunnel_dir aidc-u-alice)" | grep '^demo-18080\.' || true)"
 rm -f "$K_STATE/sts_gone"; unset AIDC_K8S_TUNNEL_GONE_CHECKS
 
 run() { : > "$K_APPLIED"; : > "$K_LOG"; (cd "$HOME" && "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null); echo "exit=$?"; }
@@ -569,10 +607,16 @@ echo "=== kill on Kubernetes: the pages and this machine's tunnels ==="
 set_uid uid1; rm -f "$K_STATE"/pf.*
 k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
 pid=$(k8s_tunnel_pid aidc-u-alice demo 18080) || pid=""
+# A log left by a supervisor that ended without a stop (a reboot), and another session's
+# (demo-x) whose name starts with this one's.
+printf 'left\n' > "$TD/demo-19090.log"; printf 'theirs\n' > "$TD/demo-x-18080.log"
 out=$(K_EXISTS=1 run kill demo --backend kubernetes)
 assert_has "kill says which tunnels it stopped" "stopped this machine's tunnels on localhost:18080" "$out"
 assert_eq "  the supervisor is gone" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
 assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
+assert_eq "  every tunnel file of the session deleted, a leftover log too; demo-x's kept" "demo-x-18080.log" \
+    "$(ls "$TD" | grep '^demo-' || true)"
+rm -f "$TD/demo-x-18080.log"
 assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one" \
 "-n aidc-u-alice delete ingress -l aidc/session=demo,app=expose --ignore-not-found
 -n aidc-u-alice delete middlewares.traefik.io demo-login --ignore-not-found --wait=false
@@ -581,6 +625,29 @@ assert_eq "kill removes the pages, login and certificate, then the session, then
 -n aidc-u-alice delete statefulset,deployment,service,networkpolicy,configmap -l aidc/session=demo --wait=true
 -n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --wait=false" \
     "$(grep ' delete ' "$K_LOG")"
+
+echo "=== removing pages when the cluster does not answer: no certificate left unsaid ==="
+export AIDC_K8S_READ_WAIT=0
+echo 1 > "$K_STATE/expose_fail"; : > "$K_LOG"
+out=$(k8s_expose_remove aidc-u-alice demo 2>&1); rc=$?
+assert_eq "one failed read of the pages is tried again, then all is removed" "0|2" \
+    "${rc}|$(grep -c 'get ingress -l aidc/session=demo,app=expose -o json' "$K_LOG")"
+assert_has "  the certificate the pages name included" "delete secret demo-expose-8080-tls" "$(cat "$K_LOG")"
+echo 3 > "$K_STATE/expose_fail"; : > "$K_LOG"
+out=$(k8s_expose_remove aidc-u-alice demo 2>&1); rc=$?
+assert_eq "a read that keeps failing: returns 1, and removes nothing (the pages are how the certificates are found)" "1|" \
+    "${rc}|$(grep ' delete ' "$K_LOG" || true)"
+assert_has "  saying so" "cannot read demo's pages" "$out"
+echo 3 > "$K_STATE/expose_fail"; : > "$K_LOG"
+out=$(K_EXISTS=1 run kill demo --backend kubernetes)
+assert_has "aidc kill says the pages were not removed" "WARNING: the session's pages could not be removed" "$out"
+assert_has "  and why" "left them all in place" "$out"
+assert_not_has "  their Ingresses kept for a later kill or clean-env" "delete ingress" "$(cat "$K_LOG")"
+rm -f "$K_STATE/expose_fail"; : > "$K_LOG"
+out=$(K_SECRET_FAIL=1 k8s_expose_remove aidc-u-alice demo 2>&1); rc=$?
+assert_eq "a certificate that cannot be deleted: returns 1" "1" "$rc"
+assert_has "  naming it" "could not delete demo's page certificate(s): demo-expose-8080-tls" "$out"
+unset AIDC_K8S_READ_WAIT
 unset K_EXPOSE_JSON K_LEFT
 
 echo

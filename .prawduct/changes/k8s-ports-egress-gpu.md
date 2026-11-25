@@ -16,7 +16,12 @@ working ports) was mapped to this wave.
   add|rm|ls|clear|up`. One local supervisor per port runs `kubectl port-forward` to the dev pod
   on 127.0.0.1, starts it again when it ends, and restarts it when the dev pod is replaced.
   Declared ports are recorded on the StatefulSet's metadata; `up` starts them on another
-  machine; kill stops this machine's; status lists them.
+  machine; kill stops this machine's; status lists them. A failed read of the dev pod keeps
+  a working forward. Each tunnel's log starts fresh with its supervisor, is capped at 1 MiB
+  (one older copy) and is deleted with the tunnel (rm, clear, kill, or the session gone).
+  Removing a session's pages reads their Ingresses first (retried); when that read keeps
+  failing nothing is removed and the command says so, so no certificate Secret is left
+  unnamed.
 - LAN pages (K8S-15): `--expose <port> [--login]`: a Service, an Ingress per port at
   `<session>-<user>.<domain>`, a NetworkPolicy letting only the ingress controller in, and with
   `--login` a generated username and password printed once (an apr1 hash in a Secret) through a

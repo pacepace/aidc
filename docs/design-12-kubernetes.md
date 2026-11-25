@@ -595,7 +595,9 @@ names, such as `$HOME` or `/tmp`, is left as it is), never inside a git work tre
 `aidc user creds <name> --token` prints the bare token to stdout on request, and nothing else
 does. The admin hands the file over privately; the user points `kubernetes.kubeconfig` at it.
 `aidc user creds <name>` renews it (the admin, or the user with their own still-valid
-kubeconfig, which is renewed in place); `--revoke` (admin) replaces the ServiceAccount, which
+kubeconfig, which is renewed in place: in a file that holds other clusters' contexts too, only
+this user's context, user and cluster entries change and every other one is kept; a file
+there that is not a kubeconfig is refused, never replaced); `--revoke` (admin) replaces the ServiceAccount, which
 invalidates every token issued before. Tradeoff accepted: a stolen kubeconfig can renew itself
 until it is revoked. A user may instead bring their own kubeconfig; `aidc k8s check` says what
 it may and may not do.
@@ -837,7 +839,11 @@ Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeat
   <s> ls` and `ps`, logging to `~/.local/state/aidc/tunnels/<namespace>/`): it runs `kubectl
   port-forward` to the dev pod with the user's own cluster credentials on 127.0.0.1, starts it
   again when it exits, and restarts it when the dev pod's uid changes (a port-forward to a pod
-  that is gone does not always exit by itself). Works from anywhere the user reaches the cluster.
+  that is gone does not always exit by itself); a read of the pod that fails is not a change,
+  and the forward is kept. Each tunnel's log starts fresh with its supervisor (the one before
+  kept once), is capped while it runs (`AIDC_K8S_TUNNEL_LOG_BYTES`, 1 MiB, then one older
+  copy), and goes with the tunnel: `aidc proxy <s> rm|clear`, `aidc kill`, and the supervisor
+  finding the session gone delete it. Works from anywhere the user reaches the cluster.
   The declared ports are recorded on the dev StatefulSet's metadata (`aidc/ports`), so `aidc
   proxy <s> up` starts them on another machine (K8S-21) and `aidc status` lists them with this
   machine's tunnels; `aidc kill` stops this machine's, and a supervisor elsewhere stops by itself

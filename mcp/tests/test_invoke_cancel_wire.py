@@ -24,7 +24,7 @@ import httpx
 import pytest
 import uvicorn
 
-from aidc_mcp import auth, headless, server, tools
+from aidc_mcp import audit, auth, headless, server, tools
 from tests.logs import patch_log_event
 
 TOKEN = "cancel-wire-token"
@@ -83,7 +83,7 @@ def served(tmp_path, monkeypatch):
         state["stopped"].set()
         return [4242]
 
-    real_log = tools.log_event
+    real_log = audit.log_event
 
     def log(kind, **fields):
         state["events"].append((kind, fields))

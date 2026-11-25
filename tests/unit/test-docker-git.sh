@@ -46,6 +46,7 @@ assert_not_has() {
 #   D_SEEN=dev:ino    the device and inode the git container sees at a mounted path (default: the host's)
 #   D_REQERR=text     git-requests list fails in the status probe, with this reason
 #   D_GITCT=false     the git container is not running (docker inspect of aidc-git-dev for kill/create)
+#   D_NO_BASE=1       git-requests pr-base finds no base (origin has no default branch)
 cat > "$SCRATCH/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$D_LOG"
@@ -97,6 +98,9 @@ case "$a" in
     "exec -u git aidc-git-dev gitctl "*) exit 0 ;;
     "exec -u git aidc-git-dev git-requests list") printf 'ID  RECEIVED\nabc\033[31m  x\n'; exit 0 ;;
     "exec -u git aidc-git-dev git-requests first-use "*) exit 0 ;;
+    "exec -u git aidc-git-dev git-requests pr-base "*)
+        [ "${D_NO_BASE:-}" = 1 ] && { echo "git-requests: no base branch given and origin has no default" >&2; exit 1; }
+        set -- $a; [ $# = 8 ] && echo "$8" || echo main; exit 0 ;;
     "exec -u git aidc-git-dev git-requests "*) echo "ok"; exit 0 ;;
     "exec -i -u git aidc-git-dev git-requests mode "*) cat > "$D_STDIN"; echo "mode set"; exit 0 ;;
     "exec -i -u git aidc-git-dev git-requests sync") cat > "$D_STDIN"; echo "sessions: 1 registered, 0 gone pruned"; exit 0 ;;
@@ -310,6 +314,18 @@ printf 'The body\n' > "$SCRATCH/body"
 out=$(run git pr "$WC" feat --title "Add it" --body-file "$SCRATCH/body")
 assert_has "pr pushes, then opens the pull request with the body on stdin" "https://github.com/o/r/pull/7" "$out"
 assert_eq "the body went in on stdin" "The body" "$(cat "$D_STDIN")"
+assert_has "the base is settled before the push" "exec -u git aidc-git-dev git-requests pr-base ${WC}" "$(calls | grep -E 'pr-base|gitctl push' | head -n1)"
+assert_has "and handed to pr-create: origin's default" "bash ${WC} feat main Add it" "$(calls)"
+: > "$D_LOG"
+out=$(run git pr "$WC" feat --base release --title "Add it" --body-file "$SCRATCH/body")
+assert_has "a --base given goes through the same check" "git-requests pr-base ${WC} release" "$(calls)"
+assert_has "..." "bash ${WC} feat release Add it" "$(calls)"
+: > "$D_LOG"
+out=$(D_NO_BASE=1 run git pr "$WC" feat --title "Add it" --body-file "$SCRATCH/body"; echo "exit=$?")
+assert_has "no base and no origin default: refused, saying nothing was pushed" "nothing pushed" "$out"
+assert_has "..." "exit=1" "$out"
+assert_not_has "and nothing is pushed" "gitctl push" "$(calls)"
+assert_not_has "nor a pull request asked for" "bash -c" "$(calls)"
 out=$(run git merge "$WC" 7)
 assert_has "merge merges, then tidies" "gitctl pr-merge ${WC} 7" "$(calls)"
 assert_has "and reports what is left" "unpushed: other (2 commit(s) on no GitHub branch)" "$out"

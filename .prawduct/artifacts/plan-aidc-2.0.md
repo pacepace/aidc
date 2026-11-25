@@ -6,6 +6,9 @@ running on it). Sources: `docs/requirements.md`, `docs/design-12-kubernetes.md`,
 2.0"), `.prawduct/.handoff-notes.md`, the three build plans, `.prawduct/changes/*`,
 `docs/security-model.md`, `.prawduct/backlog.md` (empty), `gh issue list -R pacepace/aidc`
 (8 open), and the code. Status was checked against code, not only against plan text.
+§1 and §2 re-checked against the code 2026-11-25 (`feature/k8s-git-container` @ c4e5200 and
+the fixes of review rev-20261125T032044Z-7d575994): W-K1, W-K2, W-K5, W-K6, W-N and W-T2 are
+built, and W-K0-02 (live GitHub, both backends) passed.
 
 Scope (owner, 2026-11-24): 2.0 = the whole Kubernetes program + the 3tears adoption, released
 together. Nothing may be deferred to a backlog item or a later release. Below, every leftover is
@@ -23,32 +26,32 @@ Status key: **LIVE** = done and checked live · **DONE-UNLIVE** = done, not chec
 
 | ID | Status | Evidence | What is missing |
 |---|---|---|---|
-| K8S-01 second backend, same commands + MCP | **PARTIAL** | dispatcher `scripts/aidc` L77-148; `scripts/k8s/session-{create,attach,kill,list,logs,status,where}.sh`; `mcp/src/aidc_mcp/backend.py` is Docker-only (`is_kubernetes` is only used to refuse `--repo`, tools.py L3268) | The MCP server cannot reach cluster sessions at all (no kubectl backend, no kubectl in the image). CLI verbs with no k8s version: `claude-token` (the dispatcher says "not available on the kubernetes backend yet"); `restart`, `upgrade`, `refresh` came in W-K1, `proxy`, `egress`, `network`, `clean-env` and create's `--port --expose --egress-tcp --dns --network --gpu` in W-K2 (`build-plan-k8s-ports-egress-gpu.md`). |
+| K8S-01 second backend, same commands + MCP | **PARTIAL** | dispatcher `scripts/aidc`; `scripts/k8s/session-{create,attach,kill,list,logs,status,where,restart,upgrade,refresh,proxy,egress,network,clean-env}.sh`; `mcp/src/aidc_mcp/backend.py` is Docker-only (`backend.is_kubernetes`, backend.py L181, is only used to refuse a repo, `service/sessions.py` L194) | The MCP server cannot reach cluster sessions at all (no kubectl backend, no kubectl in the image): W-M1. CLI verbs with no k8s version: `claude-token` (the dispatcher says "not available on the kubernetes backend yet"; K8S-16). Built since: `restart`, `upgrade`, `refresh` (W-K1), `proxy`, `egress`, `network`, `clean-env` and create's `--port --expose --egress-tcp --dns --network --gpu` (W-K2, `archive/build-plan-k8s-ports-egress-gpu.md`). |
 | K8S-02 per-user disk | **LIVE** | `scripts/k8s/user-add.sh`; smoke `tests/smoke/k8s.sh` L214 (the disk outlives the session); wave 2 chunk 03 live | The registry PVC on the owner's cluster is still on the scratch class "while testing" (handoff). That is an ops item, see W-K7. |
 | K8S-03 own worktree (amended: the session makes it) | **LIVE** (amended form) | create refuses `--repo` (`session-create.sh` L40); `aidc repo add` live; smoke L98 | Nothing in code. Session instructions on where repos live and how to name worktrees are not checked by a live session agent. |
-| K8S-04 only the git container pushes; one gh login | **DONE-UNLIVE** for GitHub; refusals and token isolation LIVE | `gitctl/`, `scripts/{k8s,docker}/git-*.sh`; plan (02)-(07); k8s smoke 61/61, Docker smoke 151/152 | A real push, PR or merge with a login was never run (gated `AIDC_SMOKE_GIT_REPO`). The identity file has not been seen live. |
-| K8S-05 git mode ask..rules, per-session | **LIVE** (without a login) | `git-requests.sh`; `aidc git mode`; plan (04), (05), (07) live notes | With a login: an approve that really pushes. |
+| K8S-04 only the git container pushes; one gh login | **LIVE** | `gitctl/`, `scripts/{k8s,docker}/git-*.sh`; W-K0-02 live GitHub smokes on a scratch repo, both backends: Kubernetes 101/0 (PRs #1, #2), Docker 165/166 (PRs #3, #4; the one fail is the test-tag version line, P21); identities seen (session commits carry the user's identity, the git container's is noreply) | none |
+| K8S-05 git mode ask..rules, per-session | **LIVE** | `git-requests.sh`; `aidc git mode`; W-K0-02: an ask-mode request approved by hand pushed and opened its PR | none (the orchestrator's answer path is K8S-06) |
 | K8S-06 orchestrator approves via the user's MCP | **PARTIAL** | Docker: the transcript mirror reaches the MCP (plan (07); a planted transcript was parsed) | Docker: a real question from a logged-in agent was never answered by `session_send`. The MCP's notes doubt that the AskUserQuestion widget takes paste+Enter. Kubernetes: nothing. Needs K8S-07. The ruling makes this a 2.0 ship blocker. |
 | K8S-07 per-user MCP server in the cluster | **NOT STARTED** | none (no manifest, no k8s backend.py) | Everything. See W-M1..M5. |
-| K8S-08 git container deletes merged, flags the rest | **DONE-UNLIVE** (GitHub side) | `gitctl tidy`, `delete-branch`; local tidy LIVE (plan (04), (07)) | `delete-branch` on GitHub, and tidy after a real merge. |
+| K8S-08 git container deletes merged, flags the rest | **LIVE** | `gitctl tidy`, `delete-branch`; W-K0-02: two-parent merges, branches deleted on GitHub, worktrees tidied | none |
 | K8S-09 VS Code attached to a pod with the disk | **NOT STARTED** | none | Design is not settled (§3, Q-K4). |
 | K8S-10 Docker in sessions, no privileged mode | **LIVE** | smoke L118-132; Sysbox pod, MTU | none |
 | K8S-11 GPU only with `--gpu` | **LIVE** (W-K2-04) | `nvidia.com/gpu: 1` when asked; live `nvidia-smi -L` with, none without | none |
 | K8S-12 egress only via own Squid; no DNS, no SA token | **LIVE** | `manifests.sh`; smoke L111-115 | none |
-| K8S-13 no reach to MCP, git, API, nodes, LAN, VPN, except the taint webhook | **PARTIAL** | NetworkPolicy LIVE (design-12 table); git pod measured | (a) The one allowed path, policy sidecar to the per-user MCP taint webhook, does not exist (no MCP). (b) Design-12 "still to check": the session Squid's own deny of private destinations. `AIDC_PUBLIC_ONLY=1` exists now but only the Docker git proxy uses it. The k8s session proxy does not (manifests.sh L372). (c) "A root process in a Sysbox session cannot change node-side rules" has not been measured. |
-| K8S-14 port tunnel with the user's credentials | **LIVE** (W-K2-01) | `scripts/k8s/tunnel*.sh`, `session-proxy.sh`; live: answers locally, comes back after restart; #74 fixed on Docker | "the user's own cluster credentials" is the kubeconfig the user's config names (per-user credentials: W-K5) |
+| K8S-13 no reach to MCP, git, API, nodes, LAN, VPN, except the taint webhook | **PARTIAL** | NetworkPolicy LIVE (design-12 table); git pod measured; the session proxy sets `AIDC_PUBLIC_ONLY=1` (`manifests.sh`, W-K1-02, D8) and squid answers 403 to private destinations (smoke step 3); Sysbox root cannot open the node's rules (measured 2026-11-24, design-12, D9) | The one allowed path, policy sidecar to the per-user MCP taint webhook, does not exist (no MCP): W-M4. |
+| K8S-14 port tunnel with the user's credentials | **LIVE** (W-K2-01) | `scripts/k8s/tunnel*.sh`, `session-proxy.sh`; live: answers locally, comes back after restart; #74 fixed on Docker; the kubeconfig is the user's own, made by `aidc user add` (W-K5) | none |
 | K8S-15 LAN Ingress at `<session>-<user>.<domain>`, optional login | **LIVE** (W-K2-02) | `scripts/k8s/expose.sh`; live on Traefik with and without `--login` | ingress-nginx login rendered and unit-tested, not live (no such cluster at hand) |
 | K8S-16 Claude login once per user | **NOT STARTED** (only the fallback, by hand) | k8s sessions get no credential (`manifests.sh` sets only `CLAUDE_CONFIG_DIR`). `aidc claude-token`'s long-lived token is not wired to k8s. | The broker (design-12) and how accounts are added. Today each k8s session needs its own `/login`. |
 | K8S-17 account switch with no loss; cycle; per-account threshold | **NOT STARTED** | design only (measured rename swap) | The broker, statusline usage wrapper, `StopFailure` hook, `claude_accounts` config, auto/wait setting. Open item: behaviour at real token expiry. |
 | K8S-18 one history per repo, Syncthing | **NOT STARTED** | design only | A Syncthing pod, the laptop side, Mac alias reconciler, lease. As built, each session has its OWN home claim, so its `projects/` is per session, not per repo. That conflicts with the design (Q-K2). |
-| K8S-19 2/8Gi guaranteed, burst 16/32Gi, settable at create | **PARTIAL** | defaults from config (`scripts/k8s/lib.sh` L112-115, `manifests.sh` L474) | Not settable at create (`--cpu/--memory` refused as unknown flags). |
-| K8S-20 `aidc user add` | **LIVE** (admin half) | `user-add.sh`; plan wave 2 chunk 03 | The user's own Claude accounts depend on K8S-16. Per-user cluster credentials (RBAC) are not built: the CLI uses the admin kubeconfig (wave 2 tradeoff). K8S-14 says "the user's own cluster credentials" (Q-K6). No second user has been added live. |
+| K8S-19 2/8Gi guaranteed, burst 16/32Gi, settable at create | **LIVE** (W-K1-04) | defaults from config (`scripts/k8s/lib.sh`); `aidc create --cpu --memory --cpu-limit --memory-limit` (`session-create.sh`); live 2026-11-24: the pod got exactly what was asked (`archive/build-plan-k8s-hardening.md` decision (04)) | none |
+| K8S-20 `aidc user add` | **LIVE** (W-K5) | `user-add.sh`, `user-creds.sh`, `user-remove.sh`, `user-allow-network.sh`; Roles, ClusterRoles, admission policies, baseline Pod Security; `tests/unit/test-k8s-rbac.sh`; change record `changes/k8s-user-creds.md`; requirement amended as built; live: a test user's isolation probed, and the owner's namespace moved onto its own credentials (k8s smoke as the user 93/0) | The user's own Claude accounts depend on K8S-16 (W-K3). |
 | K8S-21 drive from any machine | **DONE-UNLIVE** | `session-where.sh` (lookup by label) | Live: create on one machine, attach from a second one. |
 | K8S-22 come back after a node reboot | **DONE-UNLIVE** (by construction) | StatefulSet + claims; `AIDC_CLAUDE_RESUME=true` | No reboot test. The registry must be up before pulls (imagePullPolicy Always plus a registry on the same node: ordering after a reboot is unproven). The taint claim survives. |
-| K8S-23 check protections, offer them | **DONE-UNLIVE** | `gitctl protection/protect`; first-push marker (plan (04)) | Live with a login (`AIDC_SMOKE_GIT_PROTECT=1`). |
+| K8S-23 check protections, offer them | **LIVE** | `gitctl protection/protect`; first-push marker; W-K0-02: protections read and a ruleset applied on the scratch repo | none |
 | K8S-24 hard rules in code | **LIVE** for refusals | gitctl fixed verbs; plan (02) live in pod | Residuals listed in §2 (R-G*) need the owner's acceptance. |
-| K8S-25 testament in sessions, pinned | **NOT STARTED** | `git grep testament` is docs only | Install (release binary, pinned, checksum, 14-day cooldown) in the dev image, plus a smoke check. Needs its release source/URL (Q-K7). |
-| K8S-26 audit list/trim + 100 MB warning | **NOT STARTED** | no `cmd-audit.sh`; issue #77 | All of it, on both backends. |
+| K8S-25 testament in sessions (amended: latest release, optional) | **DONE** (W-K1-05) | `scripts/lib/testament.sh` (newest tag built on the user's machine, 14-day cooldown), dev-base build context, `aidc upgrade` install; `tests/unit/test-testament.sh`; k8s smoke asserts `testament --version` when `testament.repo` is configured | A live run with `testament.repo` configured is not recorded here. |
+| K8S-26 audit list/trim + 100 MB warning | **LIVE** (W-K6, k8s) | `scripts/cmd-audit.sh`, `scripts/k8s/audit.sh`, `scripts/lib/audit.sh`; change record `changes/k8s-audit-trim.md`; live: six test claims trimmed 2026-11-24 with the owner's OK | A live trim on Docker is not recorded here (unit-tested). |
 
 ### GIT (touched by the git container)
 
@@ -56,7 +59,7 @@ Status key: **LIVE** = done and checked live · **DONE-UNLIVE** = done, not chec
 |---|---|---|---|
 | GIT-01 | LIVE | sessions commit in worktrees (smoke/git.sh) | none |
 | GIT-02 push/pull/fetch fail in sessions | LIVE | `git-remote-aidc.sh` pushInsteadOf; pre-push hook | Fetch over https still works in sessions by design (public repos through Squid). That is not a change: GIT-02 has always said "fail", so the owner should confirm fetch stays allowed (it was so before k8s too). |
-| GIT-03 (amended) gh stand-in | LIVE | `.devcontainer/gh-standin.sh` | `gh pr status` shows a request whose files the 30-day sweep removed as "sent, not taken yet" (handoff chunk-04 leftover, still in code L313). `/prawduct:pr` run end to end in a session (it pushes before `gh pr create`) has not been checked live. |
+| GIT-03 (amended) gh stand-in | LIVE | `.devcontainer/gh-standin.sh`; an expired request is reported honestly (W-K1-08) | `/prawduct:pr` run end to end in a session (it pushes before `gh pr create`) has not been checked live (W-K0-04). |
 | GIT-04/05 | LIVE | | none |
 | GIT-06 host keeps full git | LIVE | | none |
 
@@ -75,11 +78,11 @@ Status key: **LIVE** = done and checked live · **DONE-UNLIVE** = done, not chec
 | MCP-12 sessions can't reach the MCP | done on Docker | On k8s, NetworkPolicy plus the taint-webhook exception (K8S-13). |
 | MCP-13 tools shell out to the `aidc` CLI | done | The in-cluster MCP needs the CLI, kubectl, yq and in-cluster RBAC (Q-M2). |
 | MCP-14 access log file | done | Kept as a file sink under 3tears-observe. In-cluster: on a claim. |
-| MCP-15..19, 23-26, 28-30, 33-37, 40-45 delivery, queues, turns | done (Docker) | Carried through the service split (design-13 step 2), with behaviour preserved. In-cluster: transcripts must reach the MCP pod (Q-M3). State must be on a claim. |
+| MCP-15..19, 23-26, 28-30, 33-37, 40-45 delivery, queues, turns | done (Docker) | Carried through the service split (W-T2 done: `mcp/src/aidc_mcp/service/`, `changes/mcp-service-split.md`), with behaviour preserved. In-cluster: transcripts must reach the MCP pod (Q-M3). State must be on a claim. |
 | MCP-20 no "claude" in names | done | Namespacing keeps it. |
 | MCP-21 dynamic descriptions + `tools/list_changed` | done | Same contradiction as MCP-09: keep, via upstream stateful mode (item 5). |
 | MCP-22 descriptions for small models | done | Carried over verbatim. |
-| MCP-27, MCP-39 the old orchestrator config name keys | done | Renamed to `orchestrator.*` on `chore/coordinator-naming` (unmerged). Fold into 2.0. |
+| MCP-27, MCP-39 the old orchestrator config name keys | done | Renamed to `orchestrator.*` (`changes/orchestrator-naming.md`), merged into the 2.0 stack by W-N (not to develop on its own). |
 | MCP-31 scope env var | done | Kept. On a mesh: grants plus the env var (design-13 table). |
 | MCP-32 error codes | done (envelope) | Become real protocol codes (upstream item 3). |
 | MCP-38 session_create opt-in + path check | done (Docker). On k8s it refuses repo/workspace (plan (03, Critic)) | In-cluster create via the CLI, under RBAC (Q-M2). |
@@ -96,15 +99,15 @@ Wave codes are defined in §3.
 
 | # | Item | Wave |
 |---|---|---|
-| H1 | Chunk 06 cumulative Critic round (forced, owner-approved), running now | W-K0 |
-| H2 | Owner logs in (`aidc git login`, git agent's Claude) for the gated smoke parts | W-K0 (owner) |
+| H1 | Chunk 06 cumulative Critic round (forced, owner-approved) | Done (W-K0-01: its findings fixed and verified) |
+| H2 | Owner logs in (`aidc git login`, git agent's Claude) for the gated smoke parts | Done for GitHub on both backends' git containers (W-K0-02); the git agent's Claude part continues in W-K0-03 |
 | H3 | Live: a logged-in git agent's question reaches an orchestrator, and `session_send` answers an AskUserQuestion (Docker) | W-K0 |
-| H4 | Smokes' GitHub part on a scratch repo (push, PR, merge, tidy, protect) | W-K0 |
+| H4 | Smokes' GitHub part on a scratch repo (push, PR, merge, tidy, protect) | Done (W-K0-02: Kubernetes PRs #1, #2; Docker PRs #3, #4) |
 | H5 | macOS: Docker git container volume ownership and the mount check | W-K0 (owner's Mac) |
-| H6 | the old orchestrator config name still in 41 files; rename belongs with `chore/coordinator-naming` | W-N |
+| H6 | the old orchestrator config name in current files | Done in W-N (merged into the stack); history files (CHANGELOG, change logs, archives, docs/done) are the owner's call |
 | H7 | Owner OK to delete test audit claims: seam1/2/3-audit, smoke-*, locktest-audit-20261124083532, bundletest-audit-20261124085514, c3fix-audit-20261124091751, ch04-audit-20261124101744, c5mode-audit-20261124115121, smoke-528025-audit-20261124134734 (claim, PV, dataset; Retain class) | W-K7 (owner), and done by hand with `aidc audit trim` once W-K6 exists (uses the new command for real) |
-| H8 | The owner's `~/.config/aidc/config.yaml` must rename the old orchestrator config name` → `orchestrator:` before an aidc-mcp built with the rename restarts | W-N (owner) |
-| H9 | Wave 2 leftover: `session-create.sh` L68 reads a failed cluster read as "no disk"; `session-status.sh` L33 reads it as "NOT ENFORCED" (verified in code) | W-K1 |
+| H8 | The owner's `~/.config/aidc/config.yaml` must rename the old orchestrator config section to `orchestrator:` before an aidc-mcp built with the rename restarts | Owner, before that restart (the rename itself is built, W-N) |
+| H9 | Wave 2 leftover: `session-create.sh` read a failed cluster read as "no disk"; `session-status.sh` read it as "NOT ENFORCED" | Done in W-K1-01 (failed reads say unknown; `k8s_get`) |
 | H10 | Wave 2 leftover: the first-session plan repeats its two chunk-05 paragraphs and has a stale "same scripts" line | W-R (archive plans) |
 | H11 | Wave 2 leftover: the audit sidecar fix is proven only on k8s; Docker needs `aidc rebuild` + `make smoke` | W-R (release smoke) |
 | H12 | `build-plan.md` (wave 1) is still `lifecycle: active`; archive it | W-R |
@@ -124,23 +127,23 @@ Wave codes are defined in §3.
 | P6 | (02) A commit's diff is not scanned for attribution; the attribution list is a list of names | Built in W-K1: gitctl scans each pushed commit's added lines by shape; see the hardening plan's decision "(03, P6, narrowed)" (`archive/build-plan-k8s-hardening.md`) |
 | P7 | (02)/(04) A fine-grained token without admin scope + branch protection as backstop | Documented. W-K0 live protect |
 | P8 | (03) Residual: session-written working-copy config can steer the agent's own git (uid 2000; gitwc on Docker) | R-G4, accept (W-K0) |
-| P9 | (03) `gc --auto` in private copies is not proven to pack in a test | W-K1 (a test with enough loose objects, or a live check) |
+| P9 | (03) `gc --auto` in private copies is not proven to pack in a test | Done in W-K1-03 (`tests/unit/test-gitctl-rules.sh`: gitrun packs a private copy past gc.auto) |
 | P10 | (03, Critic) Residual: busybox `find -delete` could be redirected by a mid-walk symlink swap (reach: the user's disk) | R-G5, accept (W-K0) |
 | P11 | (04) Filters: a driver added between the read and the call | R-G6, accept (W-K0) |
-| P12 | (04) `cannot-delete` for files made with another umask (kubectl exec shells, Docker-in-session builds) | W-K1: decide whether the git agent may fix group-write through a gitwc-like path on k8s. Otherwise accept |
+| P12 | (04) `cannot-delete` for files made with another umask (kubectl exec shells, Docker-in-session builds) | Done in W-K1-03: no gitwc-like path on k8s; shells from outside a session get umask 002 and tidy says how to clear what is left (`archive/build-plan-k8s-hardening.md` decision (03, P12)) |
 | P13 | (04, Critic) tidy: a path component swapped between the check and `worktree remove` | R-G7, accept |
 | P14 | (04, Critic) Residual: the agent can sudo to gitcred's PR verbs on any repo | Closed (06, cumulative Critic): gitcred asks gitrun `has-copy` itself before any gh call that names a repo |
 | P15 | (05) Per-session mode can only loosen; `mode <s> ask` under rules is refused (the plan says "owner may want it otherwise") | Closed (06, cumulative Critic): per the 2026-11-23 ruling both ways; every mode decision is keyed on the session's registered token |
 | P16 | (05) Residuals: a line pasted while the user types joins their text; a request answered outside the question waits for the next look | R-G9, accept, or W-M3 if the orchestrator answer path changes |
 | P17 | (05, Critic) `Bash(git *)` allow list is a courtesy; only the instructions stop self-approval; prawduct skills kept out only by CLAUDE.md | R-G10/11/12. Owner accepts, or 2.0 adds an approval binding (e.g. `git-requests approve` requires a nonce shown only in the user's terminal or MCP answer). Recommend asking (Q-K8) |
-| P18 | (07, Critic) Off-Docker gitwc refusal and the sudo switch reached only in the installed image (no unit test) | Live-checked in chunk 06. W-K1 adds an image-level test in the smoke |
+| P18 | (07, Critic) Off-Docker gitwc refusal and the sudo switch reached only in the installed image (no unit test) | Done in W-K1-03: image-level checks in `tests/smoke/git.sh` (`sg_part_gitwc`), run by both smokes |
 | P19 | (07) A host user whose uid is not 1000 has the same mismatch Docker sessions already have | Accept (pre-existing Docker behaviour), stated in README. W-K0 owner OK |
 | P20 | (07) No device+inode recorded at `repo add` | Accepted by Critic reasoning; owner OK in W-K0 |
 | P21 | (06) Docker smoke 151/152: the version-tag artifact (MCP reports pyproject's version) | W-R: fix the smoke so a test tag also sets the MCP version, or compare to pyproject. No weakening of the test |
 | P22 | (06) Older runs' empty transcript folders on the owner's machine | W-K7 (owner: delete by hand) |
 | P23 | (06) Claude part of the smoke automated only up to the question; the answer is by hand | W-M3 makes it automatic once the answer path is known |
 | P24 | Wave 2 tradeoff: taint response is record-and-report only on k8s ("before any untrusted workload") | W-K4 (taint freeze) |
-| P25 | Wave 2 tradeoff: the CLI uses the user's own (admin) kubeconfig; per-user RBAC "with `aidc user add`'s second half" | W-K5 (Q-K6) |
+| P25 | Wave 2 tradeoff: the CLI used the user's own (admin) kubeconfig | Done in W-K5 (per-user credentials, `aidc user add`/`creds`; see K8S-20) |
 | P26 | Wave 1: `file_put` overwrite fails in Ubuntu 26.04 sessions (issue #76) | W-T3 (it is an MCP tool being rebuilt). Fix it before then if it bites |
 
 ### From design-12 "Open items" and "Still to check"
@@ -152,21 +155,21 @@ Wave codes are defined in §3.
 | D3 | Mac alias symlinks: purge, retention, `/resume` picker, long hashed names | W-K3b (owner's Mac) |
 | D4 | Git agent's question answered by `session_send` (Docker) | W-K0 |
 | D5 | Git agent's question reaching an orchestrator on k8s ("owner ruling; 2.0's per-user MCP"): settled by the 2026-11-24 ruling (must route before 2.0 ships) | W-M3 |
-| D6 | Real push/PR/merge/tidy/protect | W-K0 |
+| D6 | Real push/PR/merge/tidy/protect | Done (W-K0-02, both backends) |
 | D7 | Docker git container on macOS | W-K0 |
 | D8 | Squid's own deny of private destinations on k8s sessions (defence in depth) | W-K1: set `AIDC_PUBLIC_ONLY=1` on the k8s session proxy (done). `--egress-tcp` relays (W-K2-03) are planned to be reached by the dev pod directly, by their own egress rule, not through squid, so they need no squid allow; W-K2-03 checks it |
-| D9 | A root process in a Sysbox session cannot change node-side NetworkPolicy rules | W-K1 (live probe: iptables/nft from session root) |
+| D9 | A root process in a Sysbox session cannot change node-side NetworkPolicy rules | Done in W-K1-02: measured 2026-11-24 (design-12; k8s smoke step 3 repeats it) |
 | D10 | Design-12 header "Status" is stale (says the git container is not built) | Closed (06, cumulative Critic) |
-| D11 | Design-12 "Shape" tree still marks git container/aidc-mcp/syncthing "(later)" | W-K1 docs (and finished as each is built) |
+| D11 | Design-12 "Shape" tree marked git container/aidc-mcp/syncthing "(later)" | Done in W-K1-07 for what is built; aidc-mcp and Syncthing follow as W-M2 and W-K3b build them |
 
 ### Open GitHub issues
 
 | Issue | Belongs to | Wave |
 |---|---|---|
-| #77 audit list/trim + warning | K8S-26 | W-K6 |
+| #77 audit list/trim + warning | K8S-26 | Built in W-K6 (`aidc audit list|trim`) |
 | #76 `file_put` overwrite fails | MCP tool (rebuilt in 2.0) | W-T3 |
-| #74 status 'declared: (none)' for dfwd-published ports | ports (Docker side of K8S-14 parity) | W-K2: fix with the port work, so `aidc status` lists ports right on both backends |
-| #60 status does not show a lost malware feed | both backends' status (k8s smoke already asserts the feeds) | W-K1 (status parity) |
+| #74 status 'declared: (none)' for dfwd-published ports | ports (Docker side of K8S-14 parity) | Fixed in W-K2 |
+| #60 status does not show a lost malware feed | both backends' status (k8s smoke already asserts the feeds) | Fixed in W-K1-07 (feed state file; status reports a feed at 0 or stale) |
 | #35 symlink in bridged memory dir can leak host files | Syncthing syncs `projects/`, so the same symlink risk is cross-machine | W-K3b: must be settled there (a synced memory dir is the bridge's case, multiplied). Its stage is `design` |
 | #72 share_plugins EROFS, #73 container_only_paths slug, #55 /tmp root-owned after reboot | Docker host bridge, not Kubernetes or 3tears | Not 2.0 scope under the ruling's words. Owner decides: ship in 2.0's release PR (all S) or leave on the tracker. Listed so nothing is silent |
 
@@ -195,7 +198,7 @@ W-K7 ops (any time, owner) ; W-R release last
 ```
 
 ### W-K0: close the git container wave (branch `feature/k8s-git-container`)
-- Status: the git container build plan's chunks are all built and reviewed, and that plan is archived (`archive/build-plan-k8s-git-container.md`, completed). Its only open items, the owner-login live GitHub and Claude tests, continue here as 02 and 03.
+- Status: the git container build plan's chunks are all built and reviewed, and that plan is archived (`archive/build-plan-k8s-git-container.md`, completed). Its only open items, the owner-login live GitHub and Claude tests, continue here as 02 and 03. 01 and 02 are done (02: Kubernetes smoke 101/0 with PRs #1, #2; Docker 165/166 with PRs #3, #4, the one fail the test-tag line, P21); 03-06 are open.
 - 01 Critic round finishes. Fix its findings. Goal: the wave is reviewed. Done when: verify clean.
 - 02 Owner logs in (`aidc git login`, git agent's Claude). Run the smokes' GitHub and Claude parts on a scratch repo (`AIDC_SMOKE_GIT_REPO`, `_CLAUDE`, `_PROTECT`). Done when: PR merged with two parents, branch deleted on GitHub, worktree tidied, identity seen, protections read and applied.
 - 03 Docker: a real AskUserQuestion from the git agent reaches an MCP watcher, and `session_send` answers it. Done when: the answer is seen in the transcript, or the failure is recorded (which triggers Q-M5).
@@ -205,6 +208,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Owner's hands: GitHub login, Claude login, scratch repo, a Mac.
 
 ### W-K1: Kubernetes hardening and parity fixes
+- Status: done (`archive/build-plan-k8s-hardening.md`).
 - 01 Failed cluster reads say unknown (H9): `session-create` disk check and `session-status` policy read. Done when: unit tests with a failing kubectl stub.
 - 02 k8s session proxy `AIDC_PUBLIC_ONLY=1` (D8) and the Sysbox root vs node-rules probe (D9). Done when: smoke asserts that a private address is 403 at squid, and the probe is recorded.
 - 03 Accepted-for-fix residuals from W-K0 (likely P6 diff scan, P14 gitcred repo check, P9 gc test, P18 image test, P12). Done when: tests plus mutations.
@@ -216,6 +220,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Depends: W-K0. Owner: none. Q-K7 (testament source) before 05.
 
 ### W-K2: ports, `--egress-tcp`, GPU
+- Status: done (`archive/build-plan-k8s-ports-egress-gpu.md`, `changes/k8s-ports-egress-gpu.md`).
 - 01 Tunnel (K8S-14): `aidc create --port` and `aidc proxy <s> add|rm|ls` on k8s via `kubectl port-forward`, kept alive with reconnect by a local supervisor. Status lists them (and fixes #74 on Docker). Done when: from a second machine the port answers, and it survives a pod restart.
 - 02 LAN Ingress (K8S-15): `--expose <port>` gives an Ingress at `<session>-<user>.<domain>`, an ingress NetworkPolicy from the ingress controller only, the wildcard certificate (config names its Secret/issuer), removed at kill. Optional login per Q-K5. Done when: a phone on the VPN loads a page. kill removes it.
 - 03 `--egress-tcp` and `aidc egress` on k8s (NET-15): a socat relay pod per host, a ClusterIP Service, an egress rule for the /32:port; names through the session's own names responder, not hostAliases, so runtime add/rm restarts nothing (Q-K9 as decided in §5). It must coexist with K1-02's public-only squid (relays are reached directly, not through squid: check). Done when: a session reaches a LAN database and nothing else on the LAN.
@@ -228,15 +233,18 @@ W-K7 ops (any time, owner) ; W-R release last
 - Depends: the mechanism. If it uses the MCP webhook (K8S-13's exception), it needs W-M4. A policy-sidecar-only design can go earlier.
 
 ### W-K5: per-user cluster credentials
+- Status: done (`archive/build-plan-k8s-user-creds.md`, `changes/k8s-user-creds.md`).
 - 01 Per Q-K6: `aidc user add` second half: a namespace-scoped Role/RoleBinding for the user and for their MCP ServiceAccount, and a kubeconfig handed to the user (or documented use of their own). Done when: a user's kubeconfig can do everything aidc needs in their namespace and nothing in another user's (probe).
 - Depends: K0. Needed by M1/M2.
 
 ### W-K6: audit trim (K8S-26, #77)
+- Status: done (`build-plan-k8s-audit-trim.md`, `changes/k8s-audit-trim.md`).
 - 01 `aidc audit list|trim [--older-than D] [names]` on both backends, never a running session's trail. Done when: unit tests on both backends, and a live trim of the test claims (H7, with the owner's OK).
 - 02 The 100 MB warning on every command (Docker: cheap `du`; k8s: only during cluster commands, cached about a day). Done when: tests for the cache and the threshold. Commands are not slowed (timed).
 - Depends: K0. Owner: OK to delete the listed claims.
 
 ### W-N: naming 
+- Status: done: merged into the 2.0 stack (`changes/orchestrator-naming.md`), not into develop on its own; H8 is the owner's.
 - 01 Merge `chore/coordinator-naming` into develop (PR, owner), then merge develop into the k8s stack (merge commit, no rebase). Resolve the 11 overlapping files. Done when: `git grep -niw the old orchestrator config name lists only history files (or none).
 - 02 Clean the rest in current files (the list is kept outside the repo, in the main agent's forward notes). Done when: the grep is clean of current docs/code/tests, and the owner has decided what to do with history-type files.
 - Owner: PR approval; rename their own config section (H8) before restarting aidc-mcp.
@@ -252,6 +260,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Owner's hands: 3tears releases (PyPI), the decision on dropping SDK 1.x (Q5).
 
 ### W-T2: service split in aidc (can run alongside T1)
+- Status: done (`build-plan-mcp-service-split.md`, `changes/mcp-service-split.md`).
 - 01 Watchers, queues, delivery and resume move out of `tools.py` into a service module with no MCP types. Done when: the MCP suite is unchanged and green, and `make smoke` passes.
 
 ### W-T3: tools as TearsTools, local face

@@ -244,13 +244,33 @@ k8s_exposed() {
 
 # k8s_expose_remove <namespace> <session>: what --expose made (the Ingresses, the login, and any
 # certificate cert-manager made for them; the Service and policy go with the session's others).
-# Secrets are removed by name: the login's, and the certificates the Ingresses name.
+# Secrets are removed by name: the login's, and the certificates the Ingresses name. The
+# Ingresses are the only record of those names, so they are read first (a few tries,
+# AIDC_K8S_READ_TRIES, AIDC_K8S_READ_WAIT s apart); when the read keeps failing nothing is
+# removed, the pages stay where a later aidc kill or clean-env finds them, and this says so on
+# stderr and returns 1. A certificate that cannot be deleted is named, and returns 1 too.
 k8s_expose_remove() {
-    local ns="$1" s="$2" certs
-    certs=$(k8s_kubectl -n "$ns" get ingress -l "aidc/session=${s},app=expose" -o json 2>/dev/null \
-        | jq -r '.items[] | select(.metadata.annotations["cert-manager.io/cluster-issuer"]) | .spec.tls[]?.secretName // empty' 2>/dev/null || true)
+    local ns="$1" s="$2" certs json tries=0
+    while :; do
+        if json=$(k8s_kubectl -n "$ns" get ingress -l "aidc/session=${s},app=expose" -o json 2>/dev/null) \
+                && certs=$(printf '%s' "$json" \
+                    | jq -r '.items[] | select(.metadata.annotations["cert-manager.io/cluster-issuer"]) | .spec.tls[]?.secretName // empty' 2>/dev/null); then
+            break
+        fi
+        tries=$((tries + 1))
+        if [ "$tries" -ge "${AIDC_K8S_READ_TRIES:-3}" ]; then
+            printf "cannot read %s's pages (its Ingresses in %s) to find their certificates: left them all in place; run the command again when the cluster answers\n" "$s" "$ns" >&2
+            return 1
+        fi
+        sleep "${AIDC_K8S_READ_WAIT:-2}"
+    done
     k8s_kubectl -n "$ns" delete ingress -l "aidc/session=${s},app=expose" --ignore-not-found >&2 || return 1
     k8s_expose_login_remove "$ns" "$s" || return 1
+    [ -n "$certs" ] || return 0
     # shellcheck disable=SC2086  # one secret name per word
-    [ -z "$certs" ] || k8s_kubectl -n "$ns" delete secret $certs --ignore-not-found --wait=false >&2 || true
+    if ! k8s_kubectl -n "$ns" delete secret $certs --ignore-not-found --wait=false >&2; then
+        printf "could not delete %s's page certificate(s): %s (kubectl -n %s delete secret %s)\n" \
+            "$s" "$(printf '%s' "$certs" | paste -sd' ' -)" "$ns" "$(printf '%s' "$certs" | paste -sd' ' -)" >&2
+        return 1
+    fi
 }

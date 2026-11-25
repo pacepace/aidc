@@ -72,7 +72,7 @@ if [ "$YES" != 1 ]; then
     case "$REPLY" in y|Y) ;; *) info "aborted"; exit 0 ;; esac
 fi
 k8s_tunnels_stop_all "$ns" "$NAME" >/dev/null
-k8s_expose_remove "$ns" "$NAME" || true
+k8s_expose_remove "$ns" "$NAME" || info "WARNING: the session's pages could not all be removed (above); run aidc clean-env ${NAME} again"
 k8s_kubectl -n "$ns" delete deployment,service,networkpolicy,configmap -l "$sel" --ignore-not-found >&2 \
     || die "the cluster did not remove everything; run aidc clean-env ${NAME} again"
 k8s_kubectl -n "$ns" delete pvc -l "${sel},aidc/kept!=audit" --ignore-not-found --wait=false >&2 \

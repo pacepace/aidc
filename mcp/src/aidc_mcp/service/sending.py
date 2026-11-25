@@ -15,12 +15,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from aidc_mcp import backend, headless, scope
+from aidc_mcp import audit, backend, headless, scope
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
@@ -138,7 +137,7 @@ def _save_unrecognized_screen(name: str) -> None:
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{ts.slug(name)}-unrecognized.ansi").write_text(raw, encoding="utf-8")
     except OSError as exc:
-        log_event("session_screen_save_failed", session=name, error_type=type(exc).__name__)
+        audit.log_event("session_screen_save_failed", session=name, error_type=type(exc).__name__)
 
 
 async def _check_free(container: str, name: str) -> str:
@@ -153,7 +152,7 @@ async def _check_free(container: str, name: str) -> str:
     verdict = (reason, state.why)
     if ss.last_free_verdict.get(name) != verdict:
         ss.last_free_verdict[name] = verdict
-        log_event("session_free_check", session=name, reason=reason, turn=state.turn,
+        audit.log_event("session_free_check", session=name, reason=reason, turn=state.turn,
                   why=state.why)
         if reason == "screen_unrecognized":
             _save_unrecognized_screen(name)
@@ -198,14 +197,14 @@ async def join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt) 
     if not refusal and await sf.taint_or_none(name) is not None:
         refusal = "session_tainted"
     if refusal:
-        log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
+        audit.log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
         return refusal
     if not await inject(container, prompt.paste(), tmx.SESSION_WINDOW, session=name,
                          sent_by=prompt.sent_by, prompts=[prompt]):
-        log_event("session_send_join_declined", session=name, reason="paste_failing",
+        audit.log_event("session_send_join_declined", session=name, reason="paste_failing",
                   why=state.why)
         return "paste_failing"
-    log_event("session_send_joined_turn", session=name, prompt_len=len(prompt.paste()),
+    audit.log_event("session_send_joined_turn", session=name, prompt_len=len(prompt.paste()),
               why=state.why)
     return "joined"
 
@@ -254,7 +253,7 @@ def write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -
             encoding="utf-8",
         )
     except OSError as exc:
-        log_event("session_send_dead_letter_failed", session=session, reason=reason,
+        audit.log_event("session_send_dead_letter_failed", session=session, reason=reason,
                   error_type=type(exc).__name__)
 
 
@@ -268,7 +267,7 @@ def _record_sent(name: str, text: str, sent_by: str = "",
     try:
         ts.record_sent_prompt(ss.WATCHER_STATE_DIR, name, text, sent_by=sent_by, batch=batch)
     except OSError as exc:
-        log_event("session_send_record_failed", session=name, prompt_len=len(text),
+        audit.log_event("session_send_record_failed", session=name, prompt_len=len(text),
                   error_type=type(exc).__name__, error=repr(exc))
     if not batch:
         return
@@ -277,7 +276,7 @@ def _record_sent(name: str, text: str, sent_by: str = "",
         ts.record_pasted_ids(ss.WATCHER_STATE_DIR, name,
                              [p["prompt_id"] for p in batch["prompts"]], batch["pasted_at"])
     except OSError as exc:
-        log_event("session_send_pasted_ids_failed", session=name,
+        audit.log_event("session_send_pasted_ids_failed", session=name,
                   error_type=type(exc).__name__, error=repr(exc))
 
 
@@ -303,7 +302,7 @@ async def inject(container: str, text: str, window: str, *, session: str,
     raw = ss.last_screen_raw.get(session)
     screen = scr.classify(raw) if raw is not None else None
     if ss.unsubmitted_paste.get(session) == (text, ids) and _own_unsent_text(session, screen):
-        log_event("session_send_late_paste_submitted", session=session,
+        audit.log_event("session_send_late_paste_submitted", session=session,
                   prompt_len=len(text))
     else:
         if not await tmx.load_and_paste(container, text, window):
@@ -314,7 +313,7 @@ async def inject(container: str, text: str, window: str, *, session: str,
             # anything else means the screen changed under the paste.
             box = scr.classify(ss.last_screen_raw.get(session, "")).input_box
             ss.unsubmitted_paste[session] = (text, ids)
-            log_event("session_send_paste_not_in_box", session=session,
+            audit.log_event("session_send_paste_not_in_box", session=session,
                       prompt_len=len(text), input_box=box,
                       waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
             return False
@@ -354,7 +353,7 @@ async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
     to answer removes nothing."""
     state, current = await tn.session_instance(name)
     if state == tn.SESSION_UNKNOWN:
-        log_event("session_send_queue_session_unknown", session=name)
+        audit.log_event("session_send_queue_session_unknown", session=name)
         return
     queue = ss.pending_sends.get(name, [])
     if state == tn.SESSION_GONE:
@@ -384,7 +383,7 @@ def persist_queue(name: str) -> None:
     try:
         ts.save_send_queue(ss.WATCHER_STATE_DIR, name, ss.pending_sends.get(name, []))
     except OSError as exc:
-        log_event("session_send_queue_persist_failed", session=name,
+        audit.log_event("session_send_queue_persist_failed", session=name,
                   error_type=type(exc).__name__, error=repr(exc))
 
 
@@ -401,7 +400,7 @@ async def _set_waiting_reason(container: str, name: str, reason: str) -> None:
     for q, r in zip(queue, wanted, strict=True):
         q.waiting_reason = r
     persist_queue(name)
-    log_event("session_send_queue_waiting", session=name, reason=reason, depth=len(queue))
+    audit.log_event("session_send_queue_waiting", session=name, reason=reason, depth=len(queue))
 
 
 async def show_waiting_on_input(container: str, name: str, show: bool) -> None:
@@ -473,7 +472,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     # (which hands the queue to the dead-letter dir and tells its
                     # conversation). Checked here, under the lock, right before the paste.
                     await _set_waiting_reason(container, name, "session_tainted")
-                    log_event("session_send_queue_held_tainted", session=name,
+                    audit.log_event("session_send_queue_held_tainted", session=name,
                               depth=len(queue))
                     retry_in = _QUEUE_POLL_S
                 elif await inject(container, text, tmx.SESSION_WINDOW, session=name,
@@ -487,7 +486,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     else:
                         queue[0].waiting_reason = ""
                     persist_queue(name)
-                    log_event("session_send_queued_injected", session=name,
+                    audit.log_event("session_send_queued_injected", session=name,
                               prompt_len=len(text), batch=len(batch),
                               prompt_ids=[q.prompt_id for q in batch],
                               remaining=len(queue), paste_attempts=head.paste_attempts)
@@ -498,14 +497,14 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     persist_queue(name)
                     await _set_waiting_reason(container, name, "paste_failing")
                     retry_in = min(_PASTE_RETRY_MAX_S, 2.0 ** min(head.paste_attempts, 6))
-                    log_event("session_send_queued_paste_retry", session=name,
+                    audit.log_event("session_send_queued_paste_retry", session=name,
                               attempts=head.paste_attempts, retry_in_s=retry_in)
             await asyncio.sleep(retry_in)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- drainer must survive
         failed = True
-        log_event("session_send_queue_error", session=name,
+        audit.log_event("session_send_queue_error", session=name,
                   error_type=type(exc).__name__, error=repr(exc))
     finally:
         if ss.pending_drainers.get(name) is asyncio.current_task():
@@ -578,7 +577,7 @@ def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
     com.fire(_notify_prompts(name, [(q, _DROPPED_NOTE.format(session=name)) for q in prompts],
                           "prompt_dropped"))
     ss.forget_session_send_state(name)
-    log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
+    audit.log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
               reason="session_killed")
 
 
@@ -595,7 +594,7 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
     for q, note in notices:
         if not q.conversation_id or not base:
             # Sent without a webhook: nobody to tell beyond the log.
-            log_event(event, session=name, delivered=False,
+            audit.log_event(event, session=name, delivered=False,
                       reason="no_conversation" if base else "no_callback_url")
             continue
         digest = hashlib.sha256(f"{q.enqueued_at}\n{q.text}".encode()).hexdigest()[:16]
@@ -612,12 +611,12 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- report, don't crash
-            log_event(f"session_send_{error_code}_notify_error", session=name,
+            audit.log_event(f"session_send_{error_code}_notify_error", session=name,
                       error_type=type(exc).__name__, error=repr(exc))
             delivered = False
         if not delivered:
             cbk.write_dead_letter(Path(ss.WATCHER_STATE_DIR), name, q.conversation_id, turn)
-        log_event(event, session=name, conversation_id=q.conversation_id,
+        audit.log_event(event, session=name, conversation_id=q.conversation_id,
                   delivered=delivered)
 
 
@@ -661,7 +660,7 @@ def _notify_long_waits(name: str) -> None:
             session=name, why=why,
             minutes=f"{minutes} minute{'s' if minutes != 1 else ''}" if minutes
             else f"{waited} seconds")))
-        log_event("session_send_prompt_waiting", session=name, waited_s=waited,
+        audit.log_event("session_send_prompt_waiting", session=name, waited_s=waited,
                   reason=q.waiting_reason or "queued_behind")
     com.fire(_notify_prompts(name, notices, "prompt_waiting"))
 
@@ -695,10 +694,10 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
         try:
             path.rename(aside)
         except OSError as exc:
-            log_event("session_send_queue_unreadable", path=str(path), kept_as="",
+            audit.log_event("session_send_queue_unreadable", path=str(path), kept_as="",
                       error_type=type(exc).__name__)
         else:
-            log_event("session_send_queue_unreadable", path=str(path), kept_as=str(aside))
+            audit.log_event("session_send_queue_unreadable", path=str(path), kept_as=str(aside))
         return
     saved = queues.get(name, [])
     if not saved:
@@ -724,7 +723,7 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
         ss.waiting_notice_shown.add(name)
     persist_queue(name)
     _spawn_drainer(container, name)
-    log_event("session_send_queue_resumed", session=name, depth=len(saved))
+    audit.log_event("session_send_queue_resumed", session=name, depth=len(saved))
 
 
 async def resume_send_queues() -> None:
@@ -732,7 +731,7 @@ async def resume_send_queues() -> None:
     queue files are logged and left for a person."""
     queues, unreadable = ts.load_send_queues(ss.WATCHER_STATE_DIR)
     for path in unreadable:
-        log_event("session_send_queue_unreadable", path=str(path))
+        audit.log_event("session_send_queue_unreadable", path=str(path))
     for name in queues:
         if scope.refusal(name) is not None:
             continue   # another server's session: leave its queue file alone
@@ -777,7 +776,7 @@ async def send(
     # report on its own prompt.
     sent_by = (sent_by or "").strip()
     deliver = (deliver or DELIVER_QUEUE).strip()
-    log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
+    audit.log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
               sent_by=sent_by, sender_label=ts.clean_sender_label(sender_label),
               deliver=deliver)
     if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
@@ -791,7 +790,7 @@ async def send(
         # these paths used to return silently, so the ONLY trace of a dropped send
         # was the ABSENCE of the session_send_sent line below — which is how prod
         # 2026-08-22 conv 01a01cf6 lost a prompt with nothing in the log naming it.
-        log_event("tool_call", tool="session_send_failed", session=name,
+        audit.log_event("tool_call", tool="session_send_failed", session=name,
                   prompt_len=len(prompt), reason="no_such_session")
         ss.forget_session_send_state(name)
         return com.envelope_err(
@@ -821,7 +820,7 @@ async def send(
             )
         else:
             await dlv.start_watcher(name, conversation_id, base_url, announce)
-            log_event("tool_call", tool="session_send_auto_watch", session=name,
+            audit.log_event("tool_call", tool="session_send_auto_watch", session=name,
                       conversation_id=conversation_id)
 
     lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
@@ -894,13 +893,13 @@ async def send(
             # session: queue it, and the drainer retries with backoff.
             wait_reason = "paste_failing"
             attempts = 1
-            log_event("tool_call", tool="session_send_paste_failed", session=name,
+            audit.log_event("tool_call", tool="session_send_paste_failed", session=name,
                       prompt_len=len(prompt))
         if wait_reason:
             this_prompt.paste_attempts = attempts
             queued_depth = await enqueue_send(name, container, this_prompt, wait_reason)
             if queued_depth == 0:
-                log_event("tool_call", tool="session_send_failed", session=name,
+                audit.log_event("tool_call", tool="session_send_failed", session=name,
                           prompt_len=len(prompt), reason="queue_full",
                           depth=PENDING_MAX_DEPTH)
                 return com.envelope_err(
@@ -909,13 +908,13 @@ async def send(
                     "wedged or the agent is not consuming them. Stop sending and "
                     "tell the user to check the session.", code="queue_full"
                 )
-            log_event("tool_call", tool="session_send_queued", session=name,
+            audit.log_event("tool_call", tool="session_send_queued", session=name,
                       prompt_len=len(prompt), depth=queued_depth, reason=wait_reason)
 
     # Non-blocking: the reply is delivered by the transcript watcher, not returned
     # here. If no watcher is open, the reply has nowhere to go — say so plainly.
     watching = name in ss.session_watchers
-    log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
+    audit.log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
               no_watch_reason=no_watch_reason, queued_depth=queued_depth)
     waiting_why = WAITING_EXPLAINED.get(wait_reason, wait_reason)
     # One webhook per session: a caller that did not open it does not get the
@@ -1019,7 +1018,7 @@ async def run_turns(
         return com.envelope_err("turns must be a non-empty list of prompt strings",
                                 code="invalid_argument")
 
-    log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
+    audit.log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
     label = ts.clean_sender_label(sender_label)
 
     # NB: session_run does NOT auto-start a transcript watcher (contrast
@@ -1077,7 +1076,7 @@ async def run_turns(
 
             transcript.append({"turn": i + 1, "prompt": turn_prompt, "response": response})
 
-    log_event("tool_call", tool="session_run_complete", session=name, turns=len(transcript))
+    audit.log_event("tool_call", tool="session_run_complete", session=name, turns=len(transcript))
     return com.envelope_ok({"transcript": transcript, "session": name,
                             "window": tmx.SESSION_WINDOW})
 
@@ -1144,7 +1143,7 @@ async def queue_cancel(
     cancelled = [{"prompt_id": q.prompt_id, "position": i, "prompt_preview": q.text[:120],
                   "enqueued_at": q.enqueued_at, "conversation_id": q.conversation_id}
                  for i, q in taken]
-    log_event("tool_call", tool="session_queue_cancel", session=name, outcome=outcome,
+    audit.log_event("tool_call", tool="session_queue_cancel", session=name, outcome=outcome,
               prompt_id=prompt_id, cancelled=len(cancelled), left=len(queue))
     data: dict[str, Any] = {
         "session": name, "outcome": outcome, "cancelled": cancelled, "left": len(queue),

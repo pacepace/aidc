@@ -32,7 +32,9 @@ pushes and opens PRs for sessions, by rules enforced in code.
   keyed on a token only it holds (a request without it always waits for the user).
 - `aidc git push | pr | merge | tidy | protect | log`: the same from the terminal; tidy deletes merged
   branches (GitHub and local) and their worktrees and lists every leftover; protections are
-  read on first use and turned on only with the user's yes.
+  read on first use and turned on only with the user's yes. A pull request's base is settled
+  before anything is pushed, by one rule both `aidc git pr` and a session's `gh pr create`
+  go through (`git-requests pr-base`): with no base given and none known, nothing is pushed.
 - The git agent is the session named `git`: `aidc list`, `attach`, `status`, `logs`; `kill` and
   `create` refuse it. Its Claude runs with managed instructions and a fixed allow list; on
   Docker its transcript reaches `aidc mcp` like any session's.

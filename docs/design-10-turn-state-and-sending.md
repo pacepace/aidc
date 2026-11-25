@@ -260,7 +260,7 @@ reported inside the envelope, not through the MCP error flag.
   sometimes with `data` for context.
 
 `error_code` lets a caller decide what to do without matching prose (MCP-32, agreed with the
-the orchestrator session 2026-09-17). The set is `tools.ERROR_CODES`, and a test fails if any failure path is
+orchestrator session 2026-09-17). The set is `ERROR_CODES` in `mcp/src/aidc_mcp/service/common.py`, and a test fails if any failure path is
 missing a code or uses one outside the set:
 
 | Code | Meaning | Caller |
@@ -856,9 +856,9 @@ pass it only when the aidc it talks to declares it.
   `watch_for_echo`); `service/startup.py` (`resume`); `mcp/src/aidc_mcp/screen.py` (`classify`).
   `mcp/src/aidc_mcp/tools.py` holds the MCP tools over them.
 - Turn info and join (S5): `transcript.open_turn`, `turns_view.turn_info`,
-  `tools._join_running_turn`, `tools._join_refusal`.
+  `service/sending.py` (`join_running_turn`, `_join_refusal`).
 - Headless runs (S6): `mcp/src/aidc_mcp/headless.py`, `mcp/src/aidc_mcp/disconnect.py`,
-  `tools._claim_headless`, `tools._stop_headless`, `tools._interrupt_headless`; the wrapper in
+  `service/invoke.py` (`claim_headless`, `stop_headless`, `interrupt_headless`); the wrapper in
   `.devcontainer/Dockerfile` (`aidc-claude`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.
 - The orchestrator callback contract: `api/src/api/v1/internal/callback.py` in the orchestrator repo.

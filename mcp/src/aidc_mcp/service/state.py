@@ -14,8 +14,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from aidc_mcp import audit
 from aidc_mcp import transcript as ts
-from aidc_mcp.audit import log_event
 
 if TYPE_CHECKING:
     from aidc_mcp import headless
@@ -158,7 +158,7 @@ def forget_session_send_state(name: str) -> None:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
-            log_event("session_state_forget_failed", session=name, path=str(path),
+            audit.log_event("session_state_forget_failed", session=name, path=str(path),
                       error_type=type(exc).__name__)
 
 

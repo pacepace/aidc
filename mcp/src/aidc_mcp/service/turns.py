@@ -13,10 +13,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from aidc_mcp import backend
+from aidc_mcp import audit, backend
 from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 
@@ -94,7 +93,7 @@ def _write_marker(name: str, path: Path, **fields: str) -> None:
         path.write_text(json.dumps({"session_instance": ss.session_instances.get(name, ""),
                                     **fields}), encoding="utf-8")
     except OSError as exc:
-        log_event("session_marker_persist_failed", session=name, path=str(path),
+        audit.log_event("session_marker_persist_failed", session=name, path=str(path),
                   error_type=type(exc).__name__)
 
 
@@ -140,7 +139,7 @@ async def _sync_session_markers(name: str) -> None:
                 ss.working_indicator_seen.add(name)
             reported = _read_marker(ss.reported_interrupt_path(name), current)
         except OSError as exc:
-            log_event("session_marker_read_failed", session=name,
+            audit.log_event("session_marker_read_failed", session=name,
                       error_type=type(exc).__name__)
             return
         if reported is not None and isinstance(reported.get("prompt_uuid"), str):
@@ -329,11 +328,11 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
             if joined and entry.get("batch"):
                 ts.record_joined_batch(ss.WATCHER_STATE_DIR, session, entry["batch"])
     except OSError as exc:
-        log_event("session_send_record_release_failed", session=session,
+        audit.log_event("session_send_record_release_failed", session=session,
                   error_type=type(exc).__name__, error=repr(exc))
     else:
         if by is not None:
-            log_event(event, session=session, prompt_len=len(text))
+            audit.log_event(event, session=session, prompt_len=len(text))
     return True
 
 
@@ -353,7 +352,7 @@ async def watch_for_echo(session: str, text: str, sent_at: float) -> None:
         await asyncio.sleep(_ECHO_POLL_S)
     if ss.sent_awaiting_echo.get(session) == entry:
         ss.sent_awaiting_echo.pop(session, None)
-        log_event("session_send_not_seen_in_transcript", session=session,
+        audit.log_event("session_send_not_seen_in_transcript", session=session,
                   prompt_len=len(text), waited_s=_ECHO_WAIT_S)
 
 

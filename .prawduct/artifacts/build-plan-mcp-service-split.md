@@ -19,7 +19,7 @@ governed_by:
       - "Contracts: the envelope and callback payload change only by agreement → conforms: neither changes; published-tools.json stays byte-identical"
       - "no private names in the repo → conforms: moved comments that named a person now say 'owner ruling'"
       - "ruff, mypy clean; tests are sentences about behaviour → conforms"
-  - artifact: .claude/rules/learnings/core.md
+  - artifact: .claude/rules/learnings/core
     dispositions:
       - "a value produced in one place and consumed in another must resolve in the same namespace and lifetime → applies: state moves between Python modules, so every reader must read the one module that owns it at call time (no `from x import name` copies, which a test's patch or a reassignment would not reach)"
       - "run the real path once before calling it done → applies: `make smoke` on Docker from a separate checkout closes the wave"
@@ -138,6 +138,10 @@ every tool through its registered function, is the check, and smoke runs the rea
   at once (`tests/logs.py`), since each module binds its own `log_event`: a capture of one
   module would miss events logged from another, and an assertion that an event is absent
   would then pass for the wrong reason.
+  Superseded by the review fixes of rev-20261125T032044Z-7d575994: every module now
+  imports `audit` and calls `audit.log_event(...)` (the package's alias rule), so
+  `tests/logs.py` patches the one binding, which reaches auth.py and session_facts.py too;
+  test_service_boundary fails on any `from aidc_mcp.audit import log_event`.
 - (01) The two tests that scan source (every envelope carries a known code; off-loop bodies
   touch no loop state) scan tools.py and the whole service, and follow `alias.name` calls
   into other modules; each was checked to fail on a planted violation.

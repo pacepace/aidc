@@ -7,6 +7,11 @@
 # when the dev pod is replaced (restart, upgrade, a node reboot), so the port comes back by
 # itself. Each supervisor keeps a pid file and a log in this machine's state directory:
 #   ${XDG_STATE_HOME:-~/.local/state}/aidc/tunnels/<namespace>/<session>-<host port>.{pid,log,spec}
+# The log is the supervisor's and kubectl's output while the tunnel runs: a new supervisor starts
+# it afresh (the one before is kept once, as .log.1), the supervisor caps it while it runs
+# (AIDC_K8S_TUNNEL_LOG_BYTES, then one older copy), and it goes with the tunnel: stopping it
+# (k8s_tunnel_stop, aidc proxy rm, aidc kill) or the supervisor finding the session gone
+# deletes the log and its older copy. Nothing piles up for a busy port or a killed session.
 # The ports a session was created with are also recorded on its StatefulSet (aidc/ports), so
 # `aidc proxy <s> up` starts them on another machine.
 #
@@ -71,7 +76,7 @@ k8s_tunnels() {
 # wait until the port answers here. Returns 1, saying why on stderr, when it does not (the
 # supervisor is stopped again then).
 k8s_tunnel_start() {
-    local ns="$1" s="$2" h="$3" c="$4" d log pid i from
+    local ns="$1" s="$2" h="$3" c="$4" d log pid i
     d=$(k8s_tunnel_dir "$ns")
     mkdir -p "$d" || { printf 'cannot make %s\n' "$d" >&2; return 1; }
     if pid=$(k8s_tunnel_pid "$ns" "$s" "$h"); then
@@ -79,20 +84,20 @@ k8s_tunnel_start() {
         return 0
     fi
     log="$d/${s}-${h}.log"
-    # The log is kept across tunnels on the same port: only what this one writes counts.
-    from=1
-    [ ! -f "$log" ] || from=$(( $(wc -l < "$log") + 1 ))
+    # A fresh log for this supervisor (none runs on this port: checked above); the last one's
+    # is kept once, for a look at why it ended.
+    if [ -f "$log" ]; then mv -f "$log" "${log}.1" 2>/dev/null || : > "$log"; fi
     printf '%s %s\n' "$h" "$c" > "$d/${s}-${h}.spec"
     # Detached from this shell (nohup; setsid is not on every Mac), so it outlives the command.
     nohup bash "$AIDC_SCRIPTS/k8s/tunnel-supervisor.sh" "$ns" "$s" "$h" "$c" "$d/${s}-${h}.pid" \
         </dev/null >>"$log" 2>&1 &
     for i in $(seq 1 "${AIDC_K8S_TUNNEL_WAIT:-30}"); do
-        if tail -n "+${from}" "$log" 2>/dev/null | grep -q "address already in use\|unable to listen"; then
+        if grep -q "address already in use\|unable to listen" "$log" 2>/dev/null; then
             k8s_tunnel_stop "$ns" "$s" "$h" >/dev/null 2>&1
             printf 'localhost:%s is taken on this machine; pick another host port (HOST:CONTAINER)\n' "$h" >&2
             return 1
         fi
-        if k8s_tunnel_pid "$ns" "$s" "$h" >/dev/null && tail -n "+${from}" "$log" 2>/dev/null | grep -q 'Forwarding from'; then
+        if k8s_tunnel_pid "$ns" "$s" "$h" >/dev/null && grep -q 'Forwarding from' "$log" 2>/dev/null; then
             return 0
         fi
         sleep 1
@@ -103,7 +108,7 @@ k8s_tunnel_start() {
 }
 
 # k8s_tunnel_stop <namespace> <session> <host port>: stop the supervisor (it stops its
-# port-forward) and forget the tunnel.
+# port-forward) and forget the tunnel: its pid, spec and logs go.
 k8s_tunnel_stop() {
     local ns="$1" s="$2" h="$3" d pid i
     d=$(k8s_tunnel_dir "$ns")
@@ -111,13 +116,15 @@ k8s_tunnel_stop() {
         kill "$pid" 2>/dev/null || true
         for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; : "$i"; done
     fi
-    rm -f "$d/${s}-${h}.pid" "$d/${s}-${h}.spec"
+    rm -f "$d/${s}-${h}.pid" "$d/${s}-${h}.spec" "$d/${s}-${h}.log" "$d/${s}-${h}.log.1"
 }
 
 # k8s_tunnels_stop_all <namespace> <session>: stop every tunnel of the session on this machine;
-# prints the host ports it stopped.
+# prints the host ports it stopped. Then any file of the session's tunnels still there (the log
+# of one whose supervisor ended without a stop: a reboot, a crash) goes too, and only the
+# session's: <session>-<host port>.*, the port all digits, so session a never takes a-b's.
 k8s_tunnels_stop_all() {
-    local h c pid
+    local h c pid d f rest
     while read -r h c pid; do
         [ -n "$h" ] || continue
         k8s_tunnel_stop "$1" "$2" "$h"
@@ -126,6 +133,14 @@ k8s_tunnels_stop_all() {
     done <<EOF_T
 $(k8s_tunnels "$1" "$2")
 EOF_T
+    d=$(k8s_tunnel_dir "$1")
+    [ -d "$d" ] || return 0
+    for f in "$d/${2}"-*; do
+        [ -f "$f" ] || continue
+        rest="${f##*/}"; rest="${rest#"${2}"-}"
+        case "${rest%%.*}" in ''|*[!0-9]*) continue ;; esac
+        case "${rest#*.}" in pid|spec|log|log.1) rm -f -- "$f" ;; esac
+    done
 }
 
 # k8s_declared_ports <namespace> <session>: the ports the session was created with ("H:C" per

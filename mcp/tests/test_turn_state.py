@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from mcp.server.mcpserver import MCPServer
 
+from aidc_mcp import audit, tools
 from aidc_mcp import session_facts as sf
-from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.screen import EMPTY, ScreenState, classify
 from aidc_mcp.service import delivery as dlv
@@ -1077,7 +1077,7 @@ class TestSendDeliverJoin:
             def cancel(self):
                 pass
 
-        real_log = tools.log_event
+        real_log = audit.log_event
 
         def log(kind, **fields):
             self.logged.append((kind, fields))

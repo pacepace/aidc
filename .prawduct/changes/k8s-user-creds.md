@@ -21,7 +21,9 @@ per-user MCP server (W-M1/M2) needs the same model (Q-M2).
   mode 0600. Options `--out`, `--duration`.
 - `aidc user creds <name> [--out F] [--duration D] [--token] [--revoke]`: renew (admin or the
   user, in place), print only the token on request, revoke every earlier token. Refuses a path
-  inside a git work tree that the repo does not ignore.
+  inside a git work tree that the repo does not ignore. A kubeconfig that holds other
+  clusters' contexts keeps them: only this user's context, user and cluster entries change;
+  a file there that is not a kubeconfig is refused, never replaced.
 - `aidc user remove <name> [--yes]`: refuses while the user has sessions, asks for the name,
   sets the namespace's volumes to Delete, deletes the namespace, waits for the volumes, deletes
   the user's bindings and, with the last user, the shared objects.

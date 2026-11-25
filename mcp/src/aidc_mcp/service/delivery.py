@@ -13,10 +13,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from aidc_mcp import backend, scope
+from aidc_mcp import audit, backend, scope
 from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
-from aidc_mcp.audit import log_event
 from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
@@ -43,7 +42,7 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...],
         try:
             entry = ts.take_sent_entry(state_dir, session, prompt)
         except OSError as exc:
-            log_event("transcript_sent_record_failed", session=session,
+            audit.log_event("transcript_sent_record_failed", session=session,
                       error_type=type(exc).__name__, error=repr(exc))
             continue
         if entry is None:
@@ -57,6 +56,16 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...],
     return typed, sent_by, batch
 
 
+def _dirs(transcripts_base: Path | None, state_dir: Path | None) -> tuple[Path, Path]:
+    """The transcripts base and watcher-state dirs a delivery entry point works in: the ones
+    given, else ss.TRANSCRIPTS_BASE and ss.WATCHER_STATE_DIR as they are NOW. Every entry point
+    takes them as None-defaulted parameters and resolves them here, at call time, never as
+    def-time defaults (which would freeze the value seen at import, so patching ss would miss
+    that path)."""
+    return (ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base,
+            ss.WATCHER_STATE_DIR if state_dir is None else state_dir)
+
+
 def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | None:
     """`batch` with every prompt joined into the turn since (deliver="join") after its
     own, each once; they are answered in this reply. The turn's continuations then name
@@ -64,7 +73,7 @@ def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | No
     try:
         joined = ts.take_joined_batches(state_dir, session)
     except OSError as exc:
-        log_event("transcript_joined_record_failed", session=session,
+        audit.log_event("transcript_joined_record_failed", session=session,
                   error_type=type(exc).__name__, error=repr(exc))
         return batch
     if not joined:
@@ -81,7 +90,7 @@ def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | No
     try:
         ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=merged)
     except OSError as exc:
-        log_event("transcript_origin_record_failed", session=session,
+        audit.log_event("transcript_origin_record_failed", session=session,
                   error_type=type(exc).__name__, error=repr(exc))
     return merged
 
@@ -103,7 +112,7 @@ def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
         try:
             ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=batch)
         except OSError as exc:
-            log_event("transcript_origin_record_failed", session=session,
+            audit.log_event("transcript_origin_record_failed", session=session,
                       error_type=type(exc).__name__, error=repr(exc))
         return origin, sent_by, batch
     return (*ts.last_prompt_origin(state_dir, session),
@@ -127,7 +136,7 @@ async def resume_watches(on_resumed: Callable[[], None]) -> None:
     the tool descriptions that list them)."""
     watches, unreadable = ts.load_watches(ss.WATCHER_STATE_DIR)
     for path in unreadable:
-        log_event("session_watch_unreadable", path=str(path))
+        audit.log_event("session_watch_unreadable", path=str(path))
     resumed = False
     for w in watches:
         name = w["session"]
@@ -142,11 +151,11 @@ async def resume_watches(on_resumed: Callable[[], None]) -> None:
             # session under the same name has not been asked to report to it.
             ts.remove_watch(ss.WATCHER_STATE_DIR, name)
             ss.forget_session_send_state(name)
-            log_event("session_watch_dropped", session=name,
+            audit.log_event("session_watch_dropped", session=name,
                       reason="session_killed" if gone else "session_recreated")
             continue
         _register_watcher(name, w["conversation_id"], w["callback_base"])
-        log_event("session_watch_resumed", session=name, conversation_id=w["conversation_id"])
+        audit.log_event("session_watch_resumed", session=name, conversation_id=w["conversation_id"])
         resumed = True
     if resumed:
         # No client is connected this early, so there is nobody to notify: each one
@@ -183,10 +192,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
 
     Called synchronously at watch registration so the anchor is set before any
     prompt is injected; _drain_transcript_once also self-baselines defensively."""
-    # The base dirs resolve at call time (not as def-time defaults), as in resend_reply,
-    # so patching ss.WATCHER_STATE_DIR / ss.TRANSCRIPTS_BASE redirects start_watcher too.
-    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
-    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
+    transcripts_base, state_dir = _dirs(transcripts_base, state_dir)
     # Preserve the durable loop-guard run across the re-anchor — load the existing
     # mark rather than minting a fresh (zeroed) one.
     mark = (
@@ -226,7 +232,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
             # in this read, treat it as torn and leave the mark untouched — a
             # later, complete read will re-anchor correctly.
             if ts.objs_after_uuid(objs, mark.last_delivered_uuid) is None:
-                log_event("transcript_baseline_torn_read_skipped", session=session,
+                audit.log_event("transcript_baseline_torn_read_skipped", session=session,
                           conversation_id=conversation_id, session_id=active.stem,
                           last_delivered_uuid=mark.last_delivered_uuid)
                 ts.save_watermark(state_dir, mark)
@@ -236,7 +242,7 @@ async def _baseline_watermark(session: str, conversation_id: str, *,
         mark.byte_offset = len(data.encode("utf-8"))
         mark.last_delivered_uuid = turns[-1].terminal_uuid if turns else ""
     ts.save_watermark(state_dir, mark)
-    log_event("transcript_baseline", session=session, conversation_id=conversation_id,
+    audit.log_event("transcript_baseline", session=session, conversation_id=conversation_id,
               session_id=mark.session_id, last_delivered_uuid=mark.last_delivered_uuid,
               consecutive_deliveries=mark.consecutive_deliveries)
 
@@ -376,7 +382,7 @@ async def _rotate_if_stale_pin(session: str, conversation_id: str,
     ts.save_watermark(state_dir, mark)
     ss.settle_state.pop(key, None)
     ss.consumed_idle_counts.pop(key, None)
-    log_event("transcript_stale_pin_recovered", session=session,
+    audit.log_event("transcript_stale_pin_recovered", session=session,
               conversation_id=conversation_id, dead_session_id=sid,
               new_session_id=best_stem, reason="fully_consumed_idle",
               **_resume_fields(mark, seen))
@@ -421,7 +427,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
         return None
     ss.unanswered_polls.pop(key, None)
     tn.record_reported_interrupt(session, turn.terminal_uuid)
-    log_event("transcript_interrupted_before_output", session=session,
+    audit.log_event("transcript_interrupted_before_output", session=session,
               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
               quiet_s=round(quiet, 1), why=why)
     return turn
@@ -450,8 +456,7 @@ async def _drain_transcript_once(session: str, conversation_id: str, callback_ba
     same turn (delivering every turn twice), so the whole load->deliver->advance
     body runs under a per-key mutex — the second pass then sees the advanced mark
     and dedups. See _drain_locks."""
-    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
-    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
+    transcripts_base, state_dir = _dirs(transcripts_base, state_dir)
     async with ss.drain_lock((session, conversation_id)):
         await _drain_once_body(
             session, conversation_id, callback_base,
@@ -477,8 +482,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     current end and deliver nothing — never replay pre-existing history. The
     mark advances past a turn only after it is confirmed delivered, empty, or
     dead-lettered — never while a delivery is still being retried (MCP-17/18)."""
-    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
-    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
+    transcripts_base, state_dir = _dirs(transcripts_base, state_dir)
     if not ts.watermark_exists(state_dir, session, conversation_id):
         await _baseline_watermark(session, conversation_id,
                                   transcripts_base=transcripts_base, state_dir=state_dir)
@@ -511,7 +515,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(objs, seen)
         ts.save_watermark(state_dir, mark)
         ss.settle_state.pop(key, None)
-        log_event("transcript_rotated", session=session, conversation_id=conversation_id,
+        audit.log_event("transcript_rotated", session=session, conversation_id=conversation_id,
                   session_id=sid, **_resume_fields(mark, seen))
         return
 
@@ -529,7 +533,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # real stem — so this can never fire on a session that actually had history.
         mark.session_id = sid
         ts.save_watermark(state_dir, mark)
-        log_event("transcript_first_pin", session=session, conversation_id=conversation_id,
+        audit.log_event("transcript_first_pin", session=session, conversation_id=conversation_id,
                   session_id=sid)
 
     # Resume anchored on the last-delivered LINE (stable under coalescing).
@@ -575,7 +579,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 ts.save_watermark(state_dir, mark)
                 ss.settle_state.pop(key, None)
                 ss.torn_read_counts.pop(key, None)
-                log_event("transcript_torn_read_reanchored", session=session,
+                audit.log_event("transcript_torn_read_reanchored", session=session,
                           conversation_id=conversation_id, session_id=sid,
                           newer_session_id=newest.stem if newest is not None else "",
                           torn_read_polls=torn, undelivered_turns=len(undelivered),
@@ -593,12 +597,12 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 ts.save_watermark(state_dir, mark)   # loop-guard run kept, as above
                 ss.settle_state.pop(key, None)
                 ss.torn_read_counts.pop(key, None)
-                log_event("transcript_stale_pin_recovered", session=session,
+                audit.log_event("transcript_stale_pin_recovered", session=session,
                           conversation_id=conversation_id, dead_session_id=sid,
                           new_session_id=newest.stem, torn_read_polls=torn,
                           **_resume_fields(mark, ts.seen_until(objs, mark)))
                 return
-        log_event("transcript_torn_read_skip", session=session,
+        audit.log_event("transcript_torn_read_skip", session=session,
                   conversation_id=conversation_id,
                   last_delivered_uuid=mark.last_delivered_uuid, torn_read_count=torn)
         return
@@ -648,7 +652,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         drop_key = (session, conversation_id, uid)
         if drop_key not in ss.logged_withdrawn_drops:
             ss.logged_withdrawn_drops.add(drop_key)
-            log_event("transcript_withdrawn_reply_dropped", session=session,
+            audit.log_event("transcript_withdrawn_reply_dropped", session=session,
                       conversation_id=conversation_id, turn_uuid=uid)
     if not new:
         # No deliverable turns remain in the pinned session (its tail may hold
@@ -723,7 +727,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
             # record_remaining is the health signal: entries that keep piling up
             # while replies arrive mean matching has drifted (every reply would then
             # carry the note), which a real typed prompt never causes.
-            log_event("transcript_terminal_prompt", session=session,
+            audit.log_event("transcript_terminal_prompt", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                       prompts=len(terminal_prompts),
                       prompt_len=sum(len(p) for p in terminal_prompts),
@@ -732,16 +736,16 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
             # A reply followed by more assistant work with no Stop-hook pushback or
             # prompt between them. A block that leaves no trace looks like this,
             # and its first half may have been delivered as the finished reply.
-            log_event("transcript_terminal_superseded", session=session,
+            audit.log_event("transcript_terminal_superseded", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                       superseded=turn.superseded)
         if turn.late_pushback and not already_delivered:
             # The reply before this pushback already went out as finished: its Stop
             # hook ran longer than the watcher held it. This delivery is the rest.
-            log_event("transcript_late_pushback", session=session,
+            audit.log_event("transcript_late_pushback", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         if not deliverable:
-            log_event("transcript_empty_turn", session=session,
+            audit.log_event("transcript_empty_turn", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         else:
             if already_delivered:
@@ -749,7 +753,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 # watermark bug re-surfaced it; drop it at the door. This is NOT a
                 # loop-guard event (it is a re-read, not a fresh echo) and is never
                 # re-POSTed — only the watermark advances past it below.
-                log_event("transcript_delivery_deduped", session=session,
+                audit.log_event("transcript_delivery_deduped", session=session,
                           conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                           fingerprint=fingerprint)
             else:
@@ -778,7 +782,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 if (mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
                         or mark.deliveries_since_idle > _LOOP_GUARD_BACKSTOP):
                     cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
-                    log_event("transcript_delivery_loop_guard_tripped", session=session,
+                    audit.log_event("transcript_delivery_loop_guard_tripped", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                               consecutive_deliveries=mark.consecutive_deliveries,
                               deliveries_since_idle=mark.deliveries_since_idle,
@@ -792,7 +796,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                     ts.record_delivered(state_dir, session, conversation_id, fingerprint)
                 else:
                     cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
-                    log_event("transcript_delivery_abandoned", session=session,
+                    audit.log_event("transcript_delivery_abandoned", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         mark.last_delivered_uuid = turn.terminal_uuid
         mark.byte_offset = end_offset
@@ -840,11 +844,9 @@ async def resend_reply(session: str, conversation_id: str, callback_base: str, *
       - ``"no_reply"``          — nothing resendable (``turn`` is None);
       - ``"failed"``            — POSTed but never acked.
 
-    The base dirs resolve at CALL time (not as def-time defaults) so patching the
-    module globals redirects this path too — the session_resend tool passes neither.
+    The base dirs resolve at call time (_dirs) — the session_resend tool passes neither.
     """
-    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
-    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
+    transcripts_base, state_dir = _dirs(transcripts_base, state_dir)
     mark = (
         ts.load_watermark(state_dir, session, conversation_id)
         if ts.watermark_exists(state_dir, session, conversation_id)
@@ -862,7 +864,7 @@ async def resend_reply(session: str, conversation_id: str, callback_base: str, *
         try:
             data = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            log_event("transcript_resend_unreadable", session=session,
+            audit.log_event("transcript_resend_unreadable", session=session,
                       conversation_id=conversation_id, session_id=path.stem,
                       error_type=type(exc).__name__)
             continue
@@ -887,7 +889,7 @@ async def resend_reply(session: str, conversation_id: str, callback_base: str, *
     # by default and let the caller read the content from the tool result instead.
     fingerprint = ts.delivery_fingerprint(target)
     if not force and fingerprint in ts.load_delivered(state_dir, session, conversation_id):
-        log_event("transcript_resend_suppressed", session=session,
+        audit.log_event("transcript_resend_suppressed", session=session,
                   conversation_id=conversation_id, turn_uuid=target.terminal_uuid,
                   content_len=len(target.text), fingerprint=fingerprint)
         return ("already_delivered", target)
@@ -906,7 +908,7 @@ async def resend_reply(session: str, conversation_id: str, callback_base: str, *
         # delivers it (a double-send). Once it lands, the exactly-once invariant
         # must hold for every other delivery path too.
         ts.record_delivered(state_dir, session, conversation_id, fingerprint)
-    log_event("transcript_resend", session=session, conversation_id=conversation_id,
+    audit.log_event("transcript_resend", session=session, conversation_id=conversation_id,
               turn_uuid=target.terminal_uuid, content_len=len(target.text), ok=ok,
               forced=force, session_id=source,
               from_earlier_transcript=bool(prefer) and source != prefer)
@@ -931,7 +933,7 @@ async def _run_transcript_watcher(session: str, conversation_id: str, callback_b
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- watcher must survive
-            log_event("transcript_watcher_error", session=session,
+            audit.log_event("transcript_watcher_error", session=session,
                       conversation_id=conversation_id, error_type=type(exc).__name__,
                       error=repr(exc))
 
@@ -983,7 +985,7 @@ async def start_watcher(name: str, conversation_id: str, base_url: str,
         ts.save_watch(ss.WATCHER_STATE_DIR, name, conversation_id, base_url,
                       session_instance=instance)
     except OSError as exc:
-        log_event("session_watch_persist_failed", session=name, error_type=type(exc).__name__)
+        audit.log_event("session_watch_persist_failed", session=name, error_type=type(exc).__name__)
     # Baseline forward-only AFTER registering. The watcher sleeps one poll interval
     # before its first drain and _drain_transcript_once self-baselines defensively,
     # and this await completes before the caller injects any prompt, so the anchor
@@ -1012,7 +1014,8 @@ async def watch(
     # start_watcher atomically cancels any existing watcher and installs the
     # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
     await start_watcher(name, conversation_id, base_url, announce)
-    log_event("tool_call", tool="session_watch", session=name, conversation_id=conversation_id)
+    audit.log_event("tool_call", tool="session_watch", session=name,
+                    conversation_id=conversation_id)
     return com.envelope_ok(
         {"status": "watching", "session": name, "conversation_id": conversation_id}
     )
@@ -1035,7 +1038,7 @@ async def resend(
     if not base_url:
         return com.envelope_err(orc.callback_url_unset(),
                                 code="not_configured")
-    log_event("tool_call", tool="session_resend", session=name,
+    audit.log_event("tool_call", tool="session_resend", session=name,
               conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)
     # Is the agent mid-turn right now? If so, the newest COMPLETED turn cannot
     # be the answer to the prompt still in flight — the caller must be told, or
@@ -1079,7 +1082,7 @@ async def resend(
             "that it was never requested: check that your session_send actually "
             "ran rather than assuming it did."
         )
-    log_event("transcript_resend_result", session=name,
+    audit.log_event("transcript_resend_result", session=name,
               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
               status=status, session_busy=busy, forced=force)
     return com.envelope_ok(
@@ -1105,5 +1108,5 @@ async def unwatch(name: str, *, announce: Callable[[], Awaitable[None]]) -> dict
     # sessions come and go (the done-callback also does this on natural exit).
     ss.evict_session_state(name)
     await announce()
-    log_event("tool_call", tool="session_unwatch", session=name)
+    audit.log_event("tool_call", tool="session_unwatch", session=name)
     return com.envelope_ok({"status": "stopped", "session": name})

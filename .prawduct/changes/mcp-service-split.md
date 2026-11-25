@@ -17,9 +17,10 @@ watchers, send queues, delivery, resume and session operations must not depend o
 - `tools.py` keeps each tool's schema, description and guards and calls the service; the
   request's Context reaches the service as plain hooks (`progress`, `announce`, `call_key`).
 - Names now shared between modules are public; `auth.load_token` likewise.
-- Tests that patched or read internals name the module that owns them; `tests/logs.py`
-  captures `log_event` in every module at once. No assertion changed in meaning;
-  `published-tools.json` is byte-identical.
+- Tests that patched or read internals name the module that owns them. Every module logs
+  through `audit.log_event` (none imports it by name), so `tests/logs.py` patches that one
+  binding and reaches every module's events, auth.py's and session_facts.py's included. No
+  assertion changed in meaning; `published-tools.json` is byte-identical.
 
 ## Consumer note
 Nothing to do: the MCP tools, their arguments, results and error codes are unchanged (published-tools.json is byte-identical).

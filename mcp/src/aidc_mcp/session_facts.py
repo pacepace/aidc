@@ -17,8 +17,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from aidc_mcp import backend
-from aidc_mcp.audit import log_event
+from aidc_mcp import audit, backend
 
 # Where proxy/policy/policy.sh writes the flag, inside the policy sidecar.
 TAINT_FILE = "/var/state/tainted"
@@ -105,7 +104,7 @@ async def taint_or_none(name: str) -> dict[str, str] | None:
     try:
         return await read_taint(name)
     except TaintUnknown as exc:
-        log_event("session_taint_unreadable", session=name, error=str(exc)[:300])
+        audit.log_event("session_taint_unreadable", session=name, error=str(exc)[:300])
         return None
 
 

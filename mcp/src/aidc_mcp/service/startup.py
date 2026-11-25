@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from aidc_mcp.audit import log_event
+from aidc_mcp import audit
 from aidc_mcp.service import sending as snd
 
 
@@ -21,5 +21,5 @@ async def resume(resume_watchers: Callable[[], Awaitable[None]]) -> None:
             await run()
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- keep resuming
             # One failing step must not keep the other from running.
-            log_event("startup_resume_failed", step=step,
+            audit.log_event("startup_resume_failed", step=step,
                       error_type=type(exc).__name__, error=repr(exc))

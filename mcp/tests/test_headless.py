@@ -21,7 +21,7 @@ import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import auth, headless, tools
+from aidc_mcp import audit, auth, headless, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import invoke as inv
@@ -232,7 +232,7 @@ def docker(monkeypatch):
         state["stopped"].append(("pid", pid))
         return [pid]
 
-    real_log = tools.log_event
+    real_log = audit.log_event
 
     def log(kind, **fields):
         state["events"].append((kind, fields))

@@ -356,6 +356,13 @@ G -C "$W" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/side
 ctl fetch "$W"
 assert_eq "one it already has is never changed by a fetch" \
     "origin/side" "$(git -C "$W" symbolic-ref -q --short refs/remotes/origin/HEAD || echo none)"
+# One some other tool wrote as a plain ref (not symbolic) is left alone too.
+G -C "$W" symbolic-ref --delete refs/remotes/origin/HEAD
+G -C "$W" update-ref --no-deref refs/remotes/origin/HEAD "$(git -C "$W" rev-parse origin/side)"
+ctl fetch "$W"
+assert_eq "a plain-ref origin/HEAD is never replaced by a fetch" "plain $(git -C "$W" rev-parse origin/side)" \
+    "$(git -C "$W" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null && echo symbolic || echo plain) $(git -C "$W" rev-parse refs/remotes/origin/HEAD)"
+G -C "$W" update-ref -d --no-deref refs/remotes/origin/HEAD
 G -C "$W" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 git -C "$R" update-ref -d refs/heads/side
 WT="$S/wt"; G -C "$W" worktree add -q "$WT" -b wtb 2>/dev/null

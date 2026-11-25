@@ -125,19 +125,54 @@ elif [ "$outdir" = "${XDG_CONFIG_HOME:-$HOME/.config}/aidc/users" ]; then
     chmod 0700 "$outdir" 2>/dev/null || true
 fi
 tmp=$(umask 077 && mktemp "$(dirname "$OUT")/.aidc-kubeconfig.XXXXXX")
-trap 'rm -f "$errf" "$tmp"' EXIT
-jq -n --arg ctx "$ctx" --arg ns "$ns" --arg server "$server" --arg ca "$ca" \
-    --arg tlsname "$tlsname" --argjson insecure "$insecure" --rawfile token /dev/stdin '{
-    apiVersion: "v1", kind: "Config", preferences: {},
-    clusters: [{name: $ctx, cluster: ({server: $server}
+old=$(umask 077 && mktemp "$(dirname "$OUT")/.aidc-kubeconfig-old.XXXXXX")
+trap 'rm -f "$errf" "$tmp" "$old"' EXIT
+# A file that is there already may hold other clusters' contexts and credentials (a kubeconfig
+# merged into ~/.kube/config, say): only this user's entries change and every other one is kept.
+# The context named <prefix>-u-<name> is updated, with the user and cluster entries it names (or
+# added, named after it); a file that is not a kubeconfig is refused, never replaced. A file
+# holding only this user's context comes out as a new one would. The existing file is read
+# through a 0600 file beside it, never the command line, as the new token is (stdin).
+others=0
+if [ -s "$OUT" ]; then
+    { yq -o=json '.' "$OUT" > "$old" 2>/dev/null \
+        && jq -e 'type == "object" and ((.kind // "Config") == "Config")' "$old" >/dev/null 2>&1; } \
+        || die "${OUT} is there and is not a kubeconfig: nothing written (move it, or write elsewhere with --out)"
+    others=$(jq --arg ctx "$ctx" '[(.contexts // [])[] | select(.name != $ctx)] | length' "$old")
+else
+    echo '{}' > "$old"
+fi
+jq --arg ctx "$ctx" --arg ns "$ns" --arg server "$server" --arg ca "$ca" \
+    --arg tlsname "$tlsname" --argjson insecure "$insecure" --rawfile token /dev/stdin '
+    def upsert($name; $key; $val):
+        if any(.[]; .name == $name) then map(if .name == $name then .[$key] = $val else . end)
+        else . + [{name: $name, ($key): $val}] end;
+    # A cluster entry keeps what else it says (a proxy-url, extensions): only the server and
+    # the trust settings are set: a CA file it named gives way to the CA data written, and an
+    # insecure flag the credentials in use do not have is dropped.
+    def cluster_of($cl; $new):
+        (first(.[] | select(.name == $cl) | .cluster) // {}) + $new
+        | if has("certificate-authority-data") then del(.["certificate-authority"]) else . end
+        | if ($new | has("insecure-skip-tls-verify")) then . else del(.["insecure-skip-tls-verify"]) end;
+    (first((.contexts // [])[] | select(.name == $ctx)) // {}) as $c
+    | ($c.context.cluster // $ctx) as $cl | ($c.context.user // $ctx) as $u
+    | .apiVersion = "v1" | .kind = "Config" | .preferences = (.preferences // {})
+    | .clusters = ((.clusters // []) | upsert($cl; "cluster"; cluster_of($cl; {server: $server}
         + (if $ca != "" then {"certificate-authority-data": $ca} else {} end)
         + (if $insecure then {"insecure-skip-tls-verify": true} else {} end)
-        + (if $tlsname != "" then {"tls-server-name": $tlsname} else {} end))}],
-    users: [{name: $ctx, user: {token: ($token | rtrimstr("\n"))}}],
-    contexts: [{name: $ctx, context: {cluster: $ctx, user: $ctx, namespace: $ns}}],
-    "current-context": $ctx}' <<<"$token" | yq -P '.' > "$tmp"
+        + (if $tlsname != "" then {"tls-server-name": $tlsname} else {} end))))
+    | .users = ((.users // []) | upsert($u; "user"; {token: ($token | rtrimstr("\n"))}))
+    | .contexts = ((.contexts // []) | upsert($ctx; "context"; ($c.context // {}) + {cluster: $cl, user: $u, namespace: $ns}))
+    | .["current-context"] = (if (.["current-context"] // "") == "" then $ctx else .["current-context"] end)
+    ' "$old" <<<"$token" | yq -P '.' > "$tmp"
 chmod 0600 "$tmp"
 mv -f "$tmp" "$OUT"
+rm -f "$old"
+if [ "$others" -gt 0 ]; then
+    info "${OUT} holds ${others} other context(s): only ${ctx}'s entries were changed, the others are as they were"
+    cur=$(yq -r '.["current-context"] // ""' "$OUT")
+    [ "$cur" = "$ctx" ] || info "its current context stays ${cur}: use ${ctx} with kubectl --context ${ctx}"
+fi
 
 info "kubeconfig for ${USER_NAME} (ServiceAccount ${K8S_USER_SA} in ${ns}${until:+, valid until ${until}}): ${OUT}"
 if [ "$OUT" != "$AIDC_K8S_KUBECONFIG" ]; then

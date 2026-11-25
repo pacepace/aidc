@@ -31,7 +31,8 @@ aidc user <add|creds|allow-network|remove> <name> [options]
            720h, or --duration) and the cluster's server and CA from the credentials in
            use. Written mode 0600 to ~/.config/aidc/users/<name>.kubeconfig (or --out;
            renewed in place when aidc is configured with <name>'s own kubeconfig); never
-           inside a git work tree. The token is printed only with --token (then no file).
+           inside a git work tree. A file there already keeps its other contexts: only
+           <name>'s context, user and cluster entries change. The token is printed only with --token (then no file).
            An admin or <name> may renew; --revoke (admin) invalidates every earlier token.
   allow-network <name> [<namespace>] [--remove]
            (admin) Let <name> give their sessions another namespace (aidc create

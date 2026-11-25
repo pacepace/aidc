@@ -18,11 +18,10 @@ from typing import Annotated, Any
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from aidc_mcp import repo, scope
+from aidc_mcp import audit, repo, scope
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
-from aidc_mcp.audit import log_event
 from aidc_mcp.offload import off_loop
 from aidc_mcp.service import common as com
 from aidc_mcp.service import delivery as dlv
@@ -125,18 +124,18 @@ async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
     """
     _refresh_session_tool_descriptions(app)
     if ctx is None:
-        log_event("tool_list_changed_notify_failed", error_type="NoRequestContext",
+        audit.log_event("tool_list_changed_notify_failed", error_type="NoRequestContext",
                   error="no request context to notify")
         return
     try:
         await ctx.session.send_tool_list_changed()
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- best-effort notify
-        log_event("tool_list_changed_notify_failed",
+        audit.log_event("tool_list_changed_notify_failed",
                   error_type=type(exc).__name__, error=repr(exc))
     try:
         await ctx.notify_tools_changed()
     except Exception as exc:  # prawduct:allow prawduct/broad-except -- best-effort notify
-        log_event("tool_list_changed_publish_failed",
+        audit.log_event("tool_list_changed_publish_failed",
                   error_type=type(exc).__name__, error=repr(exc))
 
 
@@ -162,7 +161,7 @@ def _scoped(fn: Any) -> Any:
         why = scope.refusal(name)
         if why is None:
             return None
-        log_event("tool_call", tool=fn.__name__, session=name, refused="out_of_scope")
+        audit.log_event("tool_call", tool=fn.__name__, session=name, refused="out_of_scope")
         return com.envelope_err(why, code="out_of_scope")
 
     if inspect.iscoroutinefunction(fn):
@@ -217,11 +216,11 @@ def _untainted(fn: Any) -> Any:
             try:
                 taint = await sf.read_taint(name)
             except sf.TaintUnknown as exc:
-                log_event("session_taint_unreadable", session=name, tool=fn.__name__,
+                audit.log_event("session_taint_unreadable", session=name, tool=fn.__name__,
                           error=str(exc)[:300])
                 taint = None
             if taint is not None:
-                log_event("tool_call", tool=fn.__name__, session=name, refused="tainted",
+                audit.log_event("tool_call", tool=fn.__name__, session=name, refused="tainted",
                           tainted_at=taint.get("at", ""), trigger=taint.get("trigger", ""))
                 return _taint_refusal(name, taint)
         return await fn(*args, **kwargs)

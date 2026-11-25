@@ -2342,3 +2342,24 @@ class TestStateDirsResolveAtCallTime:
         await dlv._drain_transcript_once("sess", "conv", "http://cb", post_fn=rec,
                                          sleep_fn=_nosleep)
         assert rec.delivered == ["a2"]
+
+
+def test_delivery_dirs_resolve_at_call_time(monkeypatch, tmp_path):
+    """_dirs, which every delivery entry point resolves its dirs through, reads ss as it is
+    at the call (a patched dir is seen), and a dir given wins."""
+    monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", tmp_path / "t")
+    monkeypatch.setattr(ss, "WATCHER_STATE_DIR", tmp_path / "w")
+    assert dlv._dirs(None, None) == (tmp_path / "t", tmp_path / "w")
+    assert dlv._dirs(tmp_path / "a", tmp_path / "b") == (tmp_path / "a", tmp_path / "b")
+
+
+def test_no_delivery_entry_point_defaults_a_dir_at_def_time():
+    """No function in delivery.py takes ss.TRANSCRIPTS_BASE or ss.WATCHER_STATE_DIR as a
+    parameter default (frozen at import): each defaults to None and calls _dirs."""
+    import inspect
+    for name, fn in inspect.getmembers(dlv, inspect.isfunction):
+        if fn.__module__ != dlv.__name__:
+            continue
+        for p in inspect.signature(fn).parameters.values():
+            if p.name in ("transcripts_base", "state_dir") and p.default is not p.empty:
+                assert p.default is None, f"{name}({p.name}=...) defaults at def time"

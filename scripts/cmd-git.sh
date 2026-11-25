@@ -44,7 +44,8 @@ aidc git <subcommand>
            Push a branch of a working copy on your disk (fast-forward only; never main,
            master or develop; commits with AI attribution refused).
   pr <repo> <branch> [--base B] --title T --body-file F
-           Push the branch and open a pull request (base: origin's default branch).
+           Push the branch and open a pull request (base: origin's default branch). The
+           base is settled first: with none given or known, nothing is pushed.
   merge <repo> <pr-number>
            Merge a pull request, always with a merge commit, then tidy the repo.
   tidy [<repo>]

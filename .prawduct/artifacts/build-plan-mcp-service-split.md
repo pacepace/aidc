@@ -122,8 +122,8 @@ every tool through its registered function, is the check, and smoke runs the rea
 ### Chunk 05: review observations (rev-20261125T020056Z-de0053fc)
 - `aidc mcp start` warns about a misplaced `callback_url` only when `orchestrator.callback_url`
   is unset.
-- Shell and Python agree on what counts as a `callback_url` key: `callback_url:` followed by
-  whitespace or the end of the line (YAML: `callback_url:"x"` is a plain scalar, not a key).
+- Shell and Python agree on what counts as a `callback_url` key when naming a misplaced
+  section (see decision (05)).
 - Assertions for the rename hint at session_resend, session_send's no-watch reason, the
   session_create refusal and the `aidc mcp start` warning.
 - design-11's opening loses the redundant "(the orchestrator)".
@@ -163,3 +163,10 @@ every tool through its registered function, is the check, and smoke runs the rea
 - (04) Docs that named tools.py internals now name the service modules (design-10 cross
   references, design-13's Shape, boundary-patterns' producers, project-preferences' module
   split). boundary-patterns also lost a redundant "(the orchestrator)", like design-11's.
+- (05) `callback_url:"x"` (no space after the colon): both now take it as the key when naming
+  a misplaced section, as the Python check already did. Chosen over the YAML rule (a plain
+  scalar, not a key) because both readers of `orchestrator.callback_url`, the shell's
+  `_aidc_yaml_nested` and aidc-mcp's `_orchestrator_setting`, already read it as the key: the
+  misplaced check now matches what the readers would do with the same line.
+- (05) The `aidc mcp start` warning is `aidc_callback_url_warning` in lib/config.sh (printing
+  its lines; cmd-mcp.sh sends them to err), so a unit test can call it without docker.

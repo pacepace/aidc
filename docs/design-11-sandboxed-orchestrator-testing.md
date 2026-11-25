@@ -1,6 +1,6 @@
 # Design 11 — Testing an Orchestrator That Runs Inside a Dev Container
 
-**What this covers.** How an orchestrator under development (the orchestrator) runs inside an aidc dev
+**What this covers.** How an orchestrator under development runs inside an aidc dev
 container, iterating on its own code, while it drives another aidc session through an `aidc-mcp`
 server. It also covers what keeps that from handing the sandboxed agent control of every session
 on the host.

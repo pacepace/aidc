@@ -414,6 +414,25 @@ class TestAtCreate:
         assert (res["ok"], res["error_code"]) == (False, "invalid_argument")
         assert created.order == []
 
+    async def test_a_refusal_for_a_missing_callback_url_names_the_section_to_rename(
+            self, created, monkeypatch, tmp_path):
+        """The session's server needs the callback URL's host. Unset, session_create
+        refuses before creating anything, and says which section to rename when the URL
+        sits under another one."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("previous_name:\n  callback_url: https://old.example.com\n", encoding="utf-8")
+        monkeypatch.setattr(orc, "_CONFIG_PATH", cfg)
+        monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "")
+
+        res = await _tool("session_create")(
+            name="sandbox", repo="/code/app", mcp_server="project", mcp_path=PATH, mcp_bearer=TOKEN)
+
+        assert (res["ok"], res["error_code"]) == (False, "not_configured")
+        assert "orchestrator.callback_url not set" in res["error"]
+        assert "`previous_name:`" in res["error"]
+        assert "rename that section to `orchestrator:`" in res["error"]
+        assert created.order == []
+
     async def test_without_the_option_nothing_is_handed(self, created):
         res = await _tool("session_create")(name="sandbox", repo="/code/app")
 

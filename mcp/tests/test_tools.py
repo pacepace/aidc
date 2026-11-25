@@ -20,6 +20,7 @@ from aidc_mcp import backend, scope, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
@@ -728,6 +729,47 @@ class TestOrchestratorCallbackUrl:
         assert "rename that section to `orchestrator:`" in res["error"]
         res = await _tool("session_watch")(name="proj", conversation_id="c1")
         assert "`previous_name:`" in res["error"]
+        res = await _tool("session_resend")(name="proj", conversation_id="c1")
+        assert (res["ok"], res["error_code"]) == (False, "not_configured")
+        assert "`previous_name:`" in res["error"]
+        assert "rename that section to `orchestrator:`" in res["error"]
+
+    async def test_a_send_with_nowhere_to_deliver_names_the_section_to_rename(
+            self, monkeypatch, tmp_path):
+        """session_send still sends (ok, never an error a caller would retry), and its
+        no-watch reason carries the same hint, so the caller can tell the person what to
+        fix rather than only that replies will not come."""
+        _write_cfg(monkeypatch, tmp_path, "previous_name:\n  callback_url: https://old.example.com\n")
+
+        async def exists(name):
+            return tn.SESSION_EXISTS, "instance-1"
+
+        async def free(container, name, timeout):
+            return ""
+
+        async def pasted(container, text, window, **kw):
+            return True
+
+        async def nothing_saved(container, name):
+            return None
+
+        monkeypatch.setattr(tn, "session_instance", exists)
+        monkeypatch.setattr(snd, "wait_until_free", free)
+        monkeypatch.setattr(snd, "inject", pasted)
+        monkeypatch.setattr(snd, "load_persisted_queue", nothing_saved)
+        res = await _tool("session_send")(name="proj", prompt="hello", conversation_id="c1")
+        assert res["ok"] is True and res["data"]["reply_goes"] == "nowhere"
+        assert "orchestrator.callback_url not set" in res["data"]["delivery"]
+        assert "`previous_name:`" in res["data"]["delivery"]
+        assert "rename that section to `orchestrator:`" in res["data"]["delivery"]
+
+    def test_a_key_without_a_space_after_the_colon_is_still_named(self, monkeypatch, tmp_path):
+        """`callback_url:"x"` is the key, as the reader takes it under orchestrator:, and as
+        the shell's aidc_callback_url_misplaced does (tests/unit/test-config-sources.sh)."""
+        _write_cfg(monkeypatch, tmp_path, 'previous_name:\n  callback_url:"https://old.example.com"\n')
+        assert orc._callback_url_misplaced() == "previous_name"
+        _write_cfg(monkeypatch, tmp_path, 'orchestrator:\n  callback_url:"https://new.example.com"\n')
+        assert orc.orchestrator_callback_url() == "https://new.example.com"
 
     def test_no_hint_when_no_section_holds_callback_url(self, monkeypatch, tmp_path):
         """Nothing misplaced (no file, an empty orchestrator section, another section's

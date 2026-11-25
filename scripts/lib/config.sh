@@ -688,8 +688,10 @@ _aidc_global_config_file() {
 
 # aidc_callback_url_misplaced [file]: the top-level section, other than `orchestrator:`, that
 # holds a callback_url key (a config written before the section was renamed), echoed; returns
-# 1 when there is none. aidc-mcp reads only `orchestrator:` (no fallback), so `aidc mcp start`
-# warns with this instead of starting a server whose callbacks all fail.
+# 1 when there is none. aidc-mcp reads only `orchestrator:` (no fallback). A key is
+# `callback_url:` at the start of an indented line, with or without a space after the colon:
+# the same test aidc-mcp's _callback_url_misplaced makes, and the readers of both (this file's
+# _aidc_yaml_nested, aidc-mcp's _orchestrator_setting) take `callback_url:"x"` as a key too.
 aidc_callback_url_misplaced() {
     local file="${1:-$(_aidc_global_config_file)}"
     [ -n "$file" ] && [ -f "$file" ] || return 1
@@ -698,10 +700,25 @@ aidc_callback_url_misplaced() {
         /^[[:space:]]*(#|$)/ { next }
         /^[^[:space:]]/ { s = $0; sub(/[[:space:]]*(#.*)?$/, "", s)
                           if (s ~ /:$/) { sub(/:$/, "", s); sec = s } else sec = ""; next }
-        sec != "" && sec != "orchestrator" && $1 == "callback_url:" { print sec; exit }
+        sec != "" && sec != "orchestrator" && $0 ~ /^[[:space:]]+callback_url:/ { print sec; exit }
     ' "$file")
     [ -n "$section" ] || return 1
     printf '%s\n' "$section"
+}
+
+# aidc_callback_url_warning [file]: what `aidc mcp start` says, one line each, when
+# callback_url sits under another section AND orchestrator.callback_url is unset, so every
+# callback aidc-mcp makes would fail; nothing otherwise. With orchestrator.callback_url set,
+# the other section is only a leftover: callbacks work and there is nothing to warn about.
+aidc_callback_url_warning() {
+    local file="${1:-$(_aidc_global_config_file)}" misplaced
+    [ -n "$file" ] || return 0
+    [ -z "$(_aidc_yaml_nested "$file" orchestrator callback_url)" ] || return 0
+    misplaced=$(aidc_callback_url_misplaced "$file") || return 0
+    printf '%s\n' \
+        "callback_url is under \`${misplaced}:\` in ~/.config/aidc/config.yaml, which aidc-mcp does not read:" \
+        "rename that section to \`orchestrator:\` (keys unchanged), or every callback fails with" \
+        "'orchestrator.callback_url not set'"
 }
 
 mcp_load_settings() {

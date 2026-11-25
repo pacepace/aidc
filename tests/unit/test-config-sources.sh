@@ -484,6 +484,37 @@ eq "under orchestrator: it is not misplaced" "none" \
 eq "a top-level callback_url is no section's" "none" \
     "$(misplaced 'callback_url: https://o.example\n')"
 eq "another section's keys alone are not" "none" "$(misplaced 'mcp:\n  port: 7878\n')"
+# Without a space after the colon it is still the key, as aidc-mcp reads it
+# (test_tools: TestOrchestratorSection).
+eq "callback_url:\"x\" (no space) under another section is named" "previous_name" \
+    "$(misplaced 'previous_name:\n  callback_url:"https://o.example"\n')"
+
+# `aidc mcp start` warns only when the misplaced setting is the one callbacks would need:
+# orchestrator.callback_url unset. With it set, the old section is a leftover.
+warning() {
+    printf '%b' "$1" > "$SCRATCH/warning.yaml"
+    env -i PATH="$TEST_PATH" AIDC_ROOT="$AIDC_ROOT" HOME="$SCRATCH/none" bash -c '
+        . "$AIDC_ROOT/scripts/lib/config.sh"
+        aidc_callback_url_warning "$1"' _ "$SCRATCH/warning.yaml"
+}
+got=$(warning 'previous_name:\n  callback_url: https://o.example\n')
+case "$got" in
+    *'callback_url is under `previous_name:`'*'rename that section to `orchestrator:`'*"'orchestrator.callback_url not set'"*)
+        echo "  PASS: mcp start warns, naming the section, when orchestrator.callback_url is unset"
+        PASS=$((PASS + 1)) ;;
+    *) echo "  FAIL: mcp start warns, naming the section, when orchestrator.callback_url is unset"
+       echo "    got: $got"; FAIL=$((FAIL + 1)) ;;
+esac
+eq "an empty orchestrator.callback_url still warns" "3" \
+    "$(warning 'orchestrator:\n  callback_url: ""\nprevious_name:\n  callback_url: https://o.example\n' | wc -l | tr -d ' ')"
+eq "no warning when orchestrator.callback_url is also set" "" \
+    "$(warning 'orchestrator:\n  callback_url: https://new.example\nprevious_name:\n  callback_url: https://o.example\n')"
+eq "no warning when nothing is misplaced" "" "$(warning 'orchestrator:\n  callback_url: ""\n')"
+if grep -q 'done < <(aidc_callback_url_warning)' "$AIDC_ROOT/scripts/cmd-mcp.sh"; then
+    echo "  PASS: aidc mcp start prints aidc_callback_url_warning"; PASS=$((PASS + 1))
+else
+    echo "  FAIL: aidc mcp start prints aidc_callback_url_warning"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"

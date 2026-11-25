@@ -13,7 +13,9 @@ import pytest
 
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import turns as tn
 from tests.logs import log_event_patched, patch_log_event
 
 
@@ -87,22 +89,22 @@ class Recorder:
         return True
 
 
-# --- tools._deliver_with_retry -----------------------------------------------------
+# --- cbk.deliver_with_retry -----------------------------------------------------
 
 class TestDeliverWithRetry:
     async def test_succeeds_first_try(self):
         rec = Recorder()
-        assert await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
+        assert await cbk.deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
         assert rec.calls == 1
 
     async def test_retries_then_succeeds(self):
         rec = Recorder(fail_times=2)
-        assert await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
+        assert await cbk.deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep) is True
         assert rec.calls == 3
 
     async def test_budget_exhausted_returns_false(self):
         rec = Recorder(always_fail=True)
-        ok = await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep, budget=5.0)
+        ok = await cbk.deliver_with_retry(ts.Turn("a1", "x"), post_fn=rec, sleep_fn=_nosleep, budget=5.0)
         assert ok is False
         assert rec.calls >= 2  # tried a couple times before the next backoff blew the budget
 
@@ -115,9 +117,9 @@ class TestDeliverWithRetry:
         async def gone(turn, attempt):
             nonlocal calls
             calls += 1
-            raise tools._PermanentDeliveryError(404)
+            raise cbk._PermanentDeliveryError(404)
 
-        ok = await tools._deliver_with_retry(ts.Turn("a1", "x"), post_fn=gone, sleep_fn=_nosleep)
+        ok = await cbk.deliver_with_retry(ts.Turn("a1", "x"), post_fn=gone, sleep_fn=_nosleep)
         assert ok is False
         assert calls == 1  # <-- did NOT retry the dead conversation
 
@@ -669,17 +671,17 @@ class TestDrain:
         assert rec.delivered == ["real"]
 
 
-# --- tools._post_turn instrumentation (MCP-19; the original "logs why" contract) ----
+# --- cbk.post_turn instrumentation (MCP-19; the original "logs why" contract) ----
 
 class TestPostTurnInstrumentation:
     async def _events_for(self, post_side_effect):
         logged = []
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(post_side_effect)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(post_side_effect)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
-            ok = await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+            ok = await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
         return ok, logged
 
     async def test_payload_carries_session_name(self):
@@ -697,11 +699,11 @@ class TestPostTurnInstrumentation:
             return MagicMock(is_success=True, status_code=202, text="")
 
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(),
         ):
-            ok = await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"),
+            ok = await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"),
                                   attempt=0, session="faidh")
 
         assert ok is True
@@ -721,11 +723,11 @@ class TestPostTurnInstrumentation:
             return MagicMock(is_success=True, status_code=202, text="")
 
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(),
         ):
-            await tools._post_turn("http://cb", "conv",
+            await cbk.post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="terminal"),
                              attempt=0, session="faidh")
         assert captured["prompt_origin"] == "terminal"
@@ -739,11 +741,11 @@ class TestPostTurnInstrumentation:
             return MagicMock(is_success=True, status_code=202, text="")
 
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(),
         ):
-            await tools._post_turn("http://cb", "conv",
+            await cbk.post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="person", sent_by="u-1"),
                              attempt=0, session="faidh")
         assert (captured["prompt_origin"], captured["sent_by"]) == ("person", "u-1")
@@ -769,7 +771,7 @@ class TestPostTurnInstrumentation:
         assert f["retryable"] is True
 
     async def test_404_raises_permanent_and_is_marked_non_retryable(self):
-        """404 conversation-gone is permanent: tools._post_turn raises rather than
+        """404 conversation-gone is permanent: cbk.post_turn raises rather than
         returning False, so the retry loop stops instead of hammering."""
         async def gone(*a, **kw):
             return MagicMock(is_success=False, status_code=404,
@@ -777,14 +779,14 @@ class TestPostTurnInstrumentation:
 
         logged = []
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(gone)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(gone)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
             try:
-                await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+                await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
                 raised = False
-            except tools._PermanentDeliveryError as exc:
+            except cbk._PermanentDeliveryError as exc:
                 raised = True
                 assert exc.status == 404
         assert raised
@@ -1747,7 +1749,6 @@ class TestTerminalPromptAttribution:
         """deliver="join" pastes into the running turn, which answers the joined prompt
         in the reply it ends with. That reply names the turn's own paste and then the
         joined prompt; the next reply does not name the joined one again."""
-        from aidc_mcp import tools
         base, state = tmp_path / "t", ss.WATCHER_STATE_DIR
         seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
         _mk_transcript(base, "sess", "sid1", seed)
@@ -1762,7 +1763,7 @@ class TestTerminalPromptAttribution:
         queued = {"type": "queue-operation", "operation": "enqueue",
                   "content": "also check the docs"}
         running = seed + [_typed("u1", "open the task"), queued]
-        assert tools._prompt_arrived("sess", "also check the docs", 0.0, running)
+        assert tn._prompt_arrived("sess", "also check the docs", 0.0, running)
 
         _mk_transcript(base, "sess", "sid1", running + [_assistant("a1", "Done, docs too.")])
         await _drain(base, state, rec)
@@ -1898,7 +1899,7 @@ class TestTerminalPromptAttribution:
         updated the prompt is treated as the MCP's own (no note)."""
         base, state, rec, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
-        with patch("aidc_mcp.tools.ts.take_sent_entry", side_effect=OSError("ro")):
+        with patch("aidc_mcp.transcript.take_sent_entry", side_effect=OSError("ro")):
             await _drain(base, state, rec)
         assert rec.turns[0].text == "R"
         assert rec.turns[0].prompt_origin == "orchestrator"
@@ -1991,7 +1992,7 @@ class TestPushbackDelivery:
     async def test_reply_with_no_stop_record_is_delivered_after_the_hook_wait(self, tmp_path):
         """If the stop record never comes, the reply still goes out once the hook
         wait has passed: a missing record costs time, never the reply."""
-        from aidc_mcp.tools import _STOP_HOOK_WAIT_S
+        from aidc_mcp.service.turns import STOP_HOOK_WAIT_S as _STOP_HOOK_WAIT_S
         h = _SettleHarness(tmp_path, [_user("u0", "seed"), _assistant("a0", "SEED"),
                                       _summary(), _TURN_DURATION])
         await h.baseline()
@@ -2127,12 +2128,12 @@ class TestInterruptDelivery:
             return MagicMock(is_success=True, status_code=202, text="")
 
         with (
-            patch("aidc_mcp.tools.httpx.AsyncClient", return_value=_http_client(ok_post)),
-            patch("aidc_mcp.tools._load_token", return_value="tok"),
+            patch("httpx.AsyncClient", return_value=_http_client(ok_post)),
+            patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(),
         ):
-            await tools._post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="s")
-            await tools._post_turn("http://cb", "conv", ts.Turn("i1", "x", interrupted=True),
+            await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="s")
+            await cbk.post_turn("http://cb", "conv", ts.Turn("i1", "x", interrupted=True),
                              attempt=0, session="s")
         assert [c["interrupted"] for c in captured] == [False, True]
         assert [c["ok"] for c in captured] == [True, True]
@@ -2220,7 +2221,6 @@ class TestAJoinedPromptsReplyIsTheJoiners:
         """A person typed the turn before; the orchestrator then joined the next one (a
         notification's). That turn has no prompt of its own and takes the session's
         recorded origin, which must be the joiner's, not "terminal"."""
-        from aidc_mcp import tools
         base = tmp_path / "t"; state = tmp_path / "s"
         monkeypatch.setattr(ss, "WATCHER_STATE_DIR", state)
         seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
@@ -2240,7 +2240,7 @@ class TestAJoinedPromptsReplyIsTheJoiners:
                          "</status>\\n</task-notification>"}},
             _assistant("a2", None, stop="tool_use"),
             {"type": "queue-operation", "operation": "enqueue", "content": joined}]
-        assert tools._prompt_arrived("sess", joined, time.time(), running)
+        assert tn._prompt_arrived("sess", joined, time.time(), running)
         _mk_transcript(base, "sess", "sid1", running + [_assistant("a3", "Parser checked.")])
         await _drain(base, state, rec)
         assert rec.turns[-1].text.endswith("Parser checked.")

@@ -24,14 +24,17 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import tools
+from aidc_mcp import auth, tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import tmux as tmx
+from aidc_mcp.service import turns as tn
 
 # --- transcript fixture builders (a deterministic stand-in for Claude) --------
 
@@ -111,7 +114,7 @@ def harness(tmp_path, monkeypatch):
         pass
 
     rig = Rig()
-    rig.session_state = tools.SESSION_EXISTS
+    rig.session_state = tn.SESSION_EXISTS
     rig.instance = "id-1"
     orchestrator = FakeOrchestrator()
     paste_calls: list[str] = []
@@ -147,16 +150,16 @@ def harness(tmp_path, monkeypatch):
     async def baseline_tmp(name, conversation_id):
         await real_baseline(name, conversation_id, transcripts_base=base, state_dir=state)
 
-    monkeypatch.setattr(tools, "_is_claude_running", is_running)
+    monkeypatch.setattr(tmx, "is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
 
     async def session_instance(name):
         return rig.session_state, rig.instance
 
-    monkeypatch.setattr(tools, "_session_instance", session_instance)
-    monkeypatch.setattr(tools, "_load_and_paste", load_paste)
-    monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-    monkeypatch.setattr(tools, "_capture_screen", capture)
+    monkeypatch.setattr(tn, "session_instance", session_instance)
+    monkeypatch.setattr(tmx, "load_and_paste", load_paste)
+    monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
@@ -165,9 +168,9 @@ def harness(tmp_path, monkeypatch):
     # at call time — so point those at the tmp dirs as well. (conftest already
     # redirects _WATCHER_STATE_DIR to this same tmp_path/"watcher-state".)
     monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", base)
-    monkeypatch.setattr(tools, "_load_token", lambda: "tok")
-    monkeypatch.setattr(tools.httpx, "AsyncClient", orchestrator.client_factory())
-    monkeypatch.setattr(tools.asyncio, "sleep", _nosleep)
+    monkeypatch.setattr(auth, "load_token", lambda: "tok")
+    monkeypatch.setattr(httpx, "AsyncClient", orchestrator.client_factory())
+    monkeypatch.setattr(asyncio, "sleep", _nosleep)
 
     app = MCPServer("t")
     tools.register(app)
@@ -433,7 +436,7 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
     ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local")
     ts.save_watch(h.state, "other", "conv-2", "http://orchestrator.local")
     monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
-    h.session_state = tools.SESSION_GONE
+    h.session_state = tn.SESSION_GONE
 
     await tools.resume_watchers(h.app)
 
@@ -580,7 +583,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
         ts.QueuedPrompt("reply EIGHT", "2026-09-17T04:00:00Z", conversation_id="conv-1",
                         session_instance="id-1", prompt_id="p-eight"),
         ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
-    h.session_state = tools.SESSION_GONE
+    h.session_state = tn.SESSION_GONE
 
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
@@ -618,7 +621,7 @@ async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
     h = harness
     ss.pending_sends["proj"] = [ts.QueuedPrompt("keep", "2026-09-17T04:00:00Z",
                                                     session_instance="id-1")]
-    h.session_state = tools.SESSION_UNKNOWN
+    h.session_state = tn.SESSION_UNKNOWN
     h.instance = ""
     await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     assert [q.text for q in ss.pending_sends["proj"]] == ["keep"]
@@ -866,9 +869,9 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
     await h.drain()
 
     async def busy(container, name):
-        return tools.SessionState(True, None, tools.TURN_RUNNING, "log_growing")
+        return tn.SessionState(True, None, tn.TURN_RUNNING, "log_growing")
 
-    monkeypatch.setattr(tools, "_session_state", busy)
+    monkeypatch.setattr(tn, "session_state", busy)
     res = await h.resend_tool(name="proj", conversation_id="conv-1")
 
     assert res["ok"] is True

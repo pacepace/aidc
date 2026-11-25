@@ -18,8 +18,10 @@ from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import tmux as tmx
+from aidc_mcp.service import turns as tn
 
-# The wiring fixture patches asyncio.sleep MODULE-WIDE (tools.asyncio is the real
+# The wiring fixture patches asyncio.sleep MODULE-WIDE (asyncio is the real
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
 # hand control to a background task. Capture the genuine one at import time.
 _REAL_SLEEP = asyncio.sleep
@@ -56,7 +58,7 @@ class Wiring:
 
     def __init__(self):
         self.claude_running = True
-        self.session_state = tools.SESSION_EXISTS
+        self.session_state = tn.SESSION_EXISTS
         self.instance = "id-1"
         self.idle_ok = True
         self.paste_ok = True
@@ -83,7 +85,7 @@ def wiring(monkeypatch):
         return w.idle_ok or "claude_busy"   # a reason string, or False for busy
 
     async def session_instance(name):
-        return w.session_state, (w.instance if w.session_state == tools.SESSION_EXISTS else "")
+        return w.session_state, (w.instance if w.session_state == tn.SESSION_EXISTS else "")
 
     async def load_paste(container, text, window):
         w.paste_calls.append((container, text, window))
@@ -105,13 +107,13 @@ def wiring(monkeypatch):
         w.sleeps.append(seconds)
         await _REAL_SLEEP(0)
 
-    monkeypatch.setattr(tools, "_is_claude_running", is_running)
+    monkeypatch.setattr(tmx, "is_claude_running", is_running)
     monkeypatch.setattr(tools, "_check_free", check_free)
-    monkeypatch.setattr(tools, "_session_instance", session_instance)
-    monkeypatch.setattr(tools, "_load_and_paste", load_paste)
-    monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-    monkeypatch.setattr(tools, "_capture_screen", capture)
-    monkeypatch.setattr(tools.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(tn, "session_instance", session_instance)
+    monkeypatch.setattr(tmx, "load_and_paste", load_paste)
+    monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     return w
 
 
@@ -265,7 +267,7 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
 
 async def test_errors_when_the_session_does_not_exist(wiring):
     app, send = _make_send()
-    wiring.session_state = tools.SESSION_GONE
+    wiring.session_state = tn.SESSION_GONE
     ss.sent_awaiting_echo["proj"] = ("from before it was killed", 0.0)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -430,7 +432,7 @@ async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
     await send(name="proj", prompt="one", conversation_id="c1")
     await send(name="proj", prompt="two", conversation_id="c1")
 
-    wiring.session_state = tools.SESSION_GONE
+    wiring.session_state = tn.SESSION_GONE
     await _let_drainer_run("proj", ticks=200)
 
     assert "proj" not in ss.pending_sends
@@ -453,14 +455,14 @@ async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
         fails["left"] -= 1
         return fails["left"] < 0
 
-    tools._load_and_paste = flaky_paste   # restored by monkeypatch at teardown
+    tmx.load_and_paste = flaky_paste   # restored by monkeypatch at teardown
     wiring.idle_ok = True
     await _let_drainer_run("proj", ticks=300)
 
     assert len(wiring.paste_calls) == 6
     assert "proj" not in ss.pending_sends
     # Backoff between failed pastes: 2, 4, 8 … s, capped.
-    retries = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
+    retries = [x for x in wiring.sleeps if x not in (0.0, tn.FREE_POLL_S)]
     assert retries == [2.0, 4.0, 8.0, 16.0, 32.0]
     assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
@@ -498,7 +500,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
 async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
     ts.save_send_queue(ss.WATCHER_STATE_DIR, "gone",
                        [ts.QueuedPrompt("orphan", "2026-09-17T02:00:00Z")])
-    wiring.session_state = tools.SESSION_GONE
+    wiring.session_state = tn.SESSION_GONE
     await tools.resume_send_queues()
     assert "gone" not in ss.pending_sends
     [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
@@ -554,9 +556,9 @@ async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enque
 
     async def session_instance(name):
         ss.pending_sends["proj"] = replacement
-        return tools.SESSION_EXISTS, "id-1"
+        return tn.SESSION_EXISTS, "id-1"
 
-    monkeypatch.setattr(tools, "_session_instance", session_instance)
+    monkeypatch.setattr(tn, "session_instance", session_instance)
     await tools._enqueue_send("proj", "aidc-proj-dev", ts.QueuedPrompt("new", ts.now_iso()),
                               "claude_busy")
     assert [q.text for q in ss.pending_sends["proj"]] == ["kept", "new"]
@@ -602,15 +604,15 @@ async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch
     ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj", [
         ts.QueuedPrompt("saved", "2026-09-17T02:00:00Z", waiting_reason="claude_busy",
                         conversation_id="c1", session_instance="id-1")])
-    working = tools._session_instance
+    working = tn.session_instance
 
     async def broken(name):
         raise OSError("spawn failed")
 
-    monkeypatch.setattr(tools, "_session_instance", broken)
+    monkeypatch.setattr(tn, "session_instance", broken)
     await tools.resume_on_startup(MCPServer("t"))
     assert "proj" not in ss.queue_loaded
-    monkeypatch.setattr(tools, "_session_instance", working)
+    monkeypatch.setattr(tn, "session_instance", working)
 
     app, send = _make_send()
     ss.session_watchers["proj"] = _StubTask()
@@ -762,10 +764,10 @@ async def test_inject_is_the_single_recording_point(wiring):
     """Every paste path goes through _inject, and _inject records on success —
     so no caller can forget to (the record is what keeps a reply from being
     framed as the person's)."""
-    assert await tools._inject("aidc-proj-dev", "via inject", tools._SESSION_WINDOW, session="proj")
+    assert await tools._inject("aidc-proj-dev", "via inject", tmx.SESSION_WINDOW, session="proj")
     assert ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "via inject")
     wiring.paste_ok = False
-    assert not await tools._inject("aidc-proj-dev", "lost", tools._SESSION_WINDOW, session="proj")
+    assert not await tools._inject("aidc-proj-dev", "lost", tmx.SESSION_WINDOW, session="proj")
     assert not ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "lost")
 
 
@@ -800,12 +802,12 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
     wiring.idle_ok = False
     await send(name="proj", prompt="hello", conversation_id="c1")
 
-    wiring.session_state = tools.SESSION_UNKNOWN
+    wiring.session_state = tn.SESSION_UNKNOWN
     await _let_drainer_run("proj", ticks=200)
     assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
     assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
 
-    wiring.session_state = tools.SESSION_EXISTS
+    wiring.session_state = tn.SESSION_EXISTS
     wiring.idle_ok = True
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [_f("hello")]
@@ -814,7 +816,7 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
 async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
     ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj",
                        [ts.QueuedPrompt("kept", "2026-09-17T02:00:00Z")])
-    wiring.session_state = tools.SESSION_UNKNOWN
+    wiring.session_state = tn.SESSION_UNKNOWN
     wiring.idle_ok = False
     await tools.resume_send_queues()
     assert [q.text for q in ss.pending_sends["proj"]] == ["kept"]
@@ -836,7 +838,7 @@ async def test_status_line_clears_after_a_failed_paste_then_a_successful_one(wir
         fails["left"] -= 1
         return fails["left"] < 0
 
-    tools._load_and_paste = flaky_paste
+    tmx.load_and_paste = flaky_paste
     wiring.idle_ok = True
     await _let_drainer_run("proj", ticks=100)
 
@@ -859,7 +861,7 @@ async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring
     await _let_drainer_run("proj", ticks=60)
 
     assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
-    restarts = [x for x in wiring.sleeps if x not in (0.0, tools._FREE_POLL_S)]
+    restarts = [x for x in wiring.sleeps if x not in (0.0, tn.FREE_POLL_S)]
     assert restarts[:4] == [2.0, 4.0, 8.0, 16.0]
 
 
@@ -986,8 +988,8 @@ def _cancel_tool(app):
 def idle_state(monkeypatch):
     """session_queue_cancel reports what the agent is doing; nothing is running."""
     async def state(container, name):
-        return tools.SessionState(True, None, tools.TURN_IDLE, "turn_ended")
-    monkeypatch.setattr(tools, "_session_state", state)
+        return tn.SessionState(True, None, tn.TURN_IDLE, "turn_ended")
+    monkeypatch.setattr(tn, "session_state", state)
 
 
 _THREE = ["[from the agent] first", "[from pace] second", "[from the agent] third"]
@@ -1163,7 +1165,7 @@ async def test_a_cancel_arriving_during_the_paste_waits_for_it_and_says_too_late
         in_paste.set()
         await release.wait()
         return True
-    monkeypatch.setattr(tools, "_load_and_paste", slow_paste)
+    monkeypatch.setattr(tmx, "load_and_paste", slow_paste)
 
     wiring.idle_ok = True
     for _ in range(200):
@@ -1328,7 +1330,7 @@ async def test_the_echo_hold_and_the_send_record_hold_the_framed_text(wiring):
 async def test_the_paste_itself_adds_nothing(wiring):
     """Framing happens where a caller's prompt is accepted. The paste path writes what
     it is given, so nothing that reaches the terminal by any other way is changed."""
-    await tools._inject("aidc-proj-dev", "typed at the terminal", tools._SESSION_WINDOW,
+    await tools._inject("aidc-proj-dev", "typed at the terminal", tmx.SESSION_WINDOW,
                         session="proj")
     assert _pasted(wiring) == ["typed at the terminal"]
 

@@ -18,6 +18,8 @@ from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import tmux as tmx
+from aidc_mcp.service import turns as tn
 
 OLD = time.time() - 3600
 
@@ -57,9 +59,9 @@ def facts(monkeypatch, tmp_path):
 
     async def session_state(container, name):
         if name == "proj" and state["working"]:
-            return tools.SessionState(True, None, tools.TURN_RUNNING, "log_growing")
-        return tools.SessionState(name == "proj", None, tools.TURN_IDLE, "log_finished")
-    monkeypatch.setattr(tools, "_session_state", session_state)
+            return tn.SessionState(True, None, tn.TURN_RUNNING, "log_growing")
+        return tn.SessionState(name == "proj", None, tn.TURN_IDLE, "log_finished")
+    monkeypatch.setattr(tn, "session_state", session_state)
 
     async def branch(name, repo_dir):
         return "project/fix-1234abcd"
@@ -177,7 +179,7 @@ async def test_interrupt_says_what_was_running_and_the_state_of_the_tree(facts, 
     async def tmux(container, args):
         sent.append((container, args))
         return 0
-    monkeypatch.setattr(tools, "_tmux_exec", tmux)
+    monkeypatch.setattr(tmx, "tmux_exec", tmux)
     d = (await _tool("session_interrupt")(name="proj"))["data"]
     assert d["interrupted"] is True
     assert d["was_running"] == {"why": "log_growing", "working_on": "fix the flaky test",
@@ -194,7 +196,7 @@ async def test_interrupt_with_nothing_running_does_nothing(facts, monkeypatch):
 
     async def tmux(container, args):
         raise AssertionError("an idle session was sent Esc")
-    monkeypatch.setattr(tools, "_tmux_exec", tmux)
+    monkeypatch.setattr(tmx, "tmux_exec", tmux)
     d = (await _tool("session_interrupt")(name="proj"))["data"]
     assert d["interrupted"] is False and d["was_running"] is None
     assert d["note"] == "nothing was running"
@@ -203,8 +205,8 @@ async def test_interrupt_with_nothing_running_does_nothing(facts, monkeypatch):
 @pytest.fixture
 def queued(facts, monkeypatch):
     async def instance(name):
-        return tools.SESSION_EXISTS, "id-1"
-    monkeypatch.setattr(tools, "_session_instance", instance)
+        return tn.SESSION_EXISTS, "id-1"
+    monkeypatch.setattr(tn, "session_instance", instance)
     ss.queue_loaded.add("proj")
     ss.pending_sends["proj"] = [
         ts.QueuedPrompt("first prompt", "2026-10-14T09:00:00Z", conversation_id="c-1",

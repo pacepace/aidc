@@ -29,17 +29,19 @@ import httpx
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from aidc_mcp import backend, headless, repo, scope, session_mcp
+from aidc_mcp import auth, backend, headless, repo, scope, session_mcp
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
 from aidc_mcp.audit import log_event
-from aidc_mcp.auth import _load_token
 from aidc_mcp.offload import off_loop
+from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import tmux as tmx
+from aidc_mcp.service import turns as tn
 
 # Reused param descriptions (surfaced in the MCP tool schema). Trigger-/usage-oriented
 # so smaller models supply them correctly — especially: never invent conversation_id.
@@ -243,43 +245,11 @@ async def _stop_headless(container: str, run: headless.Run, proc: Any, event: st
 
 # ---- shared claude session helpers -----------------------------------------
 
-_SESSION_WINDOW = "claude"
 
-# Foreground pane commands that mean Claude is NOT running (a bare shell / idle).
-_SHELL_COMMANDS = frozenset({"bash", "sh", "zsh", "fish", "dash", ""})
-
-# Whether Claude is busy comes from its transcript (design-10 S1), which the dev
-# container mirrors for the MCP about every 2 s. A turn the transcript shows in
-# progress is only checked against the screen once the transcript has been quiet for
-# longer than that copy lag.
-_LOG_QUIET_S = 6.0
-# An Esc pressed before Claude writes anything leaves the transcript showing a turn in
-# progress forever. The screen settles it (design 10 S1 step 4): the prompt put back in
-# the input box, or the status row's `esc to interrupt`, whose absence is trusted once
-# the MCP has seen that text on the session. Until then, a transcript quiet for this
-# long with no working text on screen counts as stopped.
-_LOG_STALL_S = 600.0
-# After a paste, the session counts as busy until the transcript shows the prompt
-# arrived, for at most this long. A prompt that never shows is logged, not re-sent:
-# a paste that returned success almost always landed, and a second copy is worse.
-_ECHO_WAIT_S = 30.0
-# Poll interval for the free check. Two consecutive free readings are required, so a
-# turn that starts the moment another ends (a background task's notification) is not
-# mistaken for a free session; the readings are spaced past the mirror's copy interval
-# so they cannot both come from the same stale copy.
-_FREE_POLL_S = 2.5
-_ECHO_POLL_S = 2.0
 # How often, and how far apart, the input box is read after a paste that has to be
 # confirmed there before Enter (see _inject): long enough for Claude Code to draw it.
 _PASTE_CONFIRM_POLLS = 5
 _PASTE_CONFIRM_POLL_S = 0.3
-
-TURN_RUNNING = "running"
-TURN_IDLE = "idle"
-# The idle verdicts that come from the screen rather than the transcript: a turn the
-# transcript still shows open, judged stopped. The send path and the watcher both
-# treat exactly these as "Claude stopped with that prompt unanswered".
-_STOPPED_BY_SCREEN = frozenset({"prompt_restored", "status_row_idle", "log_stalled"})
 
 
 # What joins the prompts of one batch (every prompt queued while the session was busy,
@@ -383,261 +353,6 @@ async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
                   error_type=type(exc).__name__, error=repr(exc))
 
 
-async def _tmux_exec(container: str, args: list[str]) -> int:
-    """Run a tmux command inside the container as vscode user. Returns exit code."""
-    proc = await asyncio.create_subprocess_exec(
-        *backend.exec_argv(container, ["tmux", *args], user="vscode"),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    return await proc.wait()
-
-
-async def _capture_screen(container: str, window: str) -> str:
-    """The visible pane with its escape sequences (-e), wrapped lines joined (-J)."""
-    proc = await asyncio.create_subprocess_exec(
-        *backend.exec_argv(container, ["tmux", "capture-pane", "-t", f"main:{window}", "-p",
-                                       "-e", "-J"], user="vscode"),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await proc.communicate()
-    return stdout.decode("utf-8", errors="replace")
-
-
-async def _pane_current_command(container: str, window: str) -> str:
-    """Return the current foreground command name running in a tmux pane."""
-    proc = await asyncio.create_subprocess_exec(
-        *backend.exec_argv(container, ["tmux", "display-message", "-t", f"main:{window}", "-p",
-                                       "#{pane_current_command}"], user="vscode"),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await proc.communicate()
-    return stdout.decode().strip().lower()
-
-
-async def _window_exists(container: str, window: str) -> bool:
-    """Return True if a tmux window with the given name exists in the main session."""
-    proc = await asyncio.create_subprocess_exec(
-        *backend.exec_argv(container, ["tmux", "list-windows", "-t", "main", "-F",
-                                       "#{window_name}"], user="vscode"),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await proc.communicate()
-    return window in stdout.decode().splitlines()
-
-
-async def _is_claude_running(container: str) -> bool:
-    """Return True if Claude is the foreground process in the claude tmux window."""
-    if not await _window_exists(container, _SESSION_WINDOW):
-        return False
-    cmd = await _pane_current_command(container, _SESSION_WINDOW)
-    return cmd not in _SHELL_COMMANDS
-
-
-@dataclasses.dataclass(frozen=True)
-class SessionState:
-    """What the MCP knows about a session right now (design-10 S1/S2).
-
-    `turn` is Claude's turn state alone (TURN_RUNNING or TURN_IDLE), with `why` naming
-    the evidence. The input box is a separate matter, in `screen`: whether a prompt may
-    be pasted combines both (_paste_reason), while "is Claude still working?" reads
-    only `turn`.
-    """
-    claude_running: bool
-    screen: scr.ScreenState | None
-    turn: str
-    why: str
-
-
-def _working_indicator_known(name: str) -> bool:
-    """Whether the MCP has seen this session instance's status row say Claude is
-    working, in this process or before a restart (loaded by _sync_session_markers)."""
-    return name in ss.working_indicator_seen
-
-
-def _interrupt_reported(name: str, prompt_uuid: str) -> bool:
-    return ss.reported_interrupts.get(name) == prompt_uuid
-
-
-def _write_marker(name: str, path: Path, **fields: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"session_instance": ss.session_instances.get(name, ""),
-                                    **fields}), encoding="utf-8")
-    except OSError as exc:
-        log_event("session_marker_persist_failed", session=name, path=str(path),
-                  error_type=type(exc).__name__)
-
-
-def _read_marker(path: Path, instance: str) -> dict[str, Any] | None:
-    """The marker's fields when it belongs to `instance`; otherwise None, and a marker
-    that exists but belongs to another instance (or cannot be read) is removed."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError):
-        data = None
-    if isinstance(data, dict) and data.get("session_instance") == instance:
-        return data
-    path.unlink(missing_ok=True)
-    return None
-
-
-def _record_reported_interrupt(name: str, prompt_uuid: str) -> None:
-    # Only the latest unanswered prompt can be waiting on this report, so one per
-    # session is all that is kept.
-    ss.reported_interrupts[name] = prompt_uuid
-    _write_marker(name, ss.reported_interrupt_path(name), prompt_uuid=prompt_uuid)
-
-
-async def _sync_session_markers(name: str) -> None:
-    """Tie the session's markers to the session instance that exists now. The first
-    time in this process, load the ones on disk that belong to it. When the instance has
-    changed since (killed and created again), forget everything about the old one. When
-    docker cannot say, change nothing and try again next time."""
-    state, current = await _session_instance(name)
-    if state != SESSION_EXISTS or not current:
-        return
-    known = ss.session_instances.get(name)
-    if known == current:
-        return
-    if known is not None:
-        ss.forget_session_send_state(name)
-    ss.session_instances[name] = current
-    if known is None:
-        try:
-            if _read_marker(ss.working_seen_path(name), current) is not None:
-                ss.working_indicator_seen.add(name)
-            reported = _read_marker(ss.reported_interrupt_path(name), current)
-        except OSError as exc:
-            log_event("session_marker_read_failed", session=name,
-                      error_type=type(exc).__name__)
-            return
-        if reported is not None and isinstance(reported.get("prompt_uuid"), str):
-            ss.reported_interrupts[name] = reported["prompt_uuid"]
-
-
-async def _read_screen(container: str, name: str) -> scr.ScreenState:
-    await _sync_session_markers(name)
-    raw = await _capture_screen(container, _SESSION_WINDOW)
-    ss.last_screen_raw[name] = raw
-    state = scr.classify(raw)
-    if state.working and not _working_indicator_known(name):
-        ss.working_indicator_seen.add(name)
-        _write_marker(name, ss.working_seen_path(name))
-    return state
-
-
-def _session_transcript(name: str) -> tuple[list[dict], float, str]:
-    """The session's active mirrored transcript, its last-modified time, and whether
-    it could be read: "ok", "none" (nobody has prompted the session yet) or
-    "unreadable"."""
-    active = ts.resolve_active_transcript(Path(ss.TRANSCRIPTS_BASE) / name)
-    if active is None:
-        return [], 0.0, "none"
-    try:
-        objs, _ = ts.read_transcript(active)
-        mtime = active.stat().st_mtime
-    except OSError:
-        return [], 0.0, "unreadable"
-    return objs, mtime, "ok"
-
-
-def _turn_verdict(name: str, objs: list[dict], quiet: float,
-                  screen: scr.ScreenState | None) -> tuple[str, str]:
-    """Is Claude working on a turn? (TURN_RUNNING | TURN_IDLE, why). The one rule both
-    the send path and the watcher use.
-
-    The transcript decides. When it shows a turn in progress that has gone quiet, a
-    reply still waiting on its Stop hooks is held for _STOP_HOOK_WAIT_S whatever the
-    screen shows. Past that hold, and for every other quiet open turn, the status row's
-    working text settles it: shown means working; absent means stopped, trusted once
-    the MCP has seen the text on the session, else only after _LOG_STALL_S. An input box
-    holding exactly the prompt the transcript shows unanswered also means stopped: Claude
-    Code puts the prompt back after an Esc pressed before it wrote anything. Design 10
-    S1 step 4 gives the order of these checks.
-    """
-    if not ts.log_shows_turn_in_progress(objs):
-        return TURN_IDLE, "log_finished"
-    if quiet < _LOG_QUIET_S:
-        return TURN_RUNNING, "log_growing"
-    if ts.awaiting_stop_hooks(objs, objs) and quiet < _STOP_HOOK_WAIT_S:
-        return TURN_RUNNING, "stop_hooks_running"
-    if screen is None:
-        return TURN_RUNNING, "screen_unread"
-    if screen.working:
-        return TURN_RUNNING, "status_row_working"
-    if screen.input_box == scr.HAS_TEXT:
-        unanswered = ts.unanswered_prompt_turn(objs)
-        if unanswered is not None and any(scr.same_text(screen.typed, p)
-                                           for p in unanswered.prompts):
-            return TURN_IDLE, "prompt_restored"
-    if _working_indicator_known(name):
-        return TURN_IDLE, "status_row_idle"
-    if quiet >= _LOG_STALL_S:
-        return TURN_IDLE, "log_stalled"
-    return TURN_RUNNING, "status_row_unproven"
-
-
-async def _session_state(container: str, name: str) -> SessionState:
-    if not await _is_claude_running(container):
-        return SessionState(False, None, TURN_IDLE, "claude_not_running")
-    screen = await _read_screen(container, name)
-    objs, mtime, status = _session_transcript(name)
-    awaiting = ss.sent_awaiting_echo.get(name)
-    if awaiting is not None:
-        if _prompt_arrived(name, awaiting[0], awaiting[1], objs):
-            ss.sent_awaiting_echo.pop(name, None)
-        else:
-            return SessionState(True, screen, TURN_RUNNING, "sent_prompt_not_in_log")
-    if status != "ok":
-        return SessionState(True, screen, TURN_IDLE, f"transcript_{status}")
-    cut_off = ts.unanswered_prompt_turn(objs)
-    if (cut_off is not None and not (screen is not None and screen.working)
-            and _interrupt_reported(name, cut_off.terminal_uuid)):
-        # Already reported to the orchestrator as stopped before Claude wrote anything:
-        # that turn is over. Anything Claude does next writes to the transcript, and a
-        # new prompt changes the tail, so neither is mistaken for this.
-        return SessionState(True, screen, TURN_IDLE, "interrupt_reported")
-    turn, why = _turn_verdict(name, objs, time.time() - mtime, screen)
-    if (turn == TURN_IDLE and why in _STOPPED_BY_SCREEN and cut_off is not None
-            and name in ss.session_watchers):
-        return SessionState(True, screen, TURN_RUNNING, "interrupt_not_reported_yet")
-    return SessionState(True, screen, turn, why)
-
-
-def _paste_reason(state: SessionState) -> str:
-    """"" when a prompt may be pasted now, else why not:
-
-      claude_not_running    the claude window is at a shell
-      claude_not_at_prompt  a dialog (e.g. folder trust, login) instead of the input box
-      screen_unrecognized   neither the input box nor a known dialog: a layout aidc
-                            does not recognize (a screen excerpt is saved)
-      claude_busy           Claude is working on a turn, or a prompt just pasted has
-                            not shown up in the transcript yet
-      agent_list_selected   the background-agent list has the keyboard (a person is
-                            in it), where typed keys are list commands
-      input_has_text        a person has unsent text in the input box
-    """
-    if not state.claude_running or state.screen is None:
-        return "claude_not_running"
-    if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return "claude_not_at_prompt"
-    if state.screen.input_box == scr.UNRECOGNIZED:
-        return "screen_unrecognized"
-    if state.turn == TURN_RUNNING:
-        return "claude_busy"
-    if state.screen.list_focused:
-        return "agent_list_selected"
-    if state.screen.input_box == scr.HAS_TEXT:
-        return "input_has_text"
-    return ""
-
-
 def _own_unsent_text(name: str, screen: scr.ScreenState | None) -> bool:
     """Whether the input box holds the batch _inject pasted and left unsubmitted, and
     that batch's prompts still open the queue, so the drainer is the one that comes
@@ -704,8 +419,8 @@ async def _check_free(container: str, name: str) -> str:
     _paste_reason). Every change of verdict is logged with its evidence, so a "free"
     reached without transcript evidence (no transcript, a stalled one, the status
     row) is on record."""
-    state = await _session_state(container, name)
-    reason = _paste_reason(state)
+    state = await tn.session_state(container, name)
+    reason = tn.paste_reason(state)
     if reason == "input_has_text" and _own_unsent_text(name, state.screen):
         reason = ""
     verdict = (reason, state.why)
@@ -718,7 +433,7 @@ async def _check_free(container: str, name: str) -> str:
     return reason
 
 
-def _join_refusal(name: str, state: SessionState) -> str:
+def _join_refusal(name: str, state: tn.SessionState) -> str:
     """Why a prompt may not be pasted into the turn running now (session_send's
     deliver="join"), or "". The screen rules of _paste_reason all hold: the turn
     being busy is the one they skip. And an Esc the watcher has not reported yet: a
@@ -749,8 +464,8 @@ async def _join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt)
     Claude Code holds a prompt pasted mid-turn as a queue-operation and hands it to the
     turn at its next tool boundary (or runs it next, if the turn ends first);
     _prompt_arrived recognizes that arrival."""
-    state = await _session_state(container, name)
-    if state.claude_running and state.turn != TURN_RUNNING:
+    state = await tn.session_state(container, name)
+    if state.claude_running and state.turn != tn.TURN_RUNNING:
         return "idle"
     refusal = _join_refusal(name, state)
     if not refusal and await sf.taint_or_none(name) is not None:
@@ -758,7 +473,7 @@ async def _join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt)
     if refusal:
         log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
         return refusal
-    if not await _inject(container, prompt.paste(), _SESSION_WINDOW, session=name,
+    if not await _inject(container, prompt.paste(), tmx.SESSION_WINDOW, session=name,
                          sent_by=prompt.sent_by, prompts=[prompt]):
         log_event("session_send_join_declined", session=name, reason="paste_failing",
                   why=state.why)
@@ -777,7 +492,7 @@ async def _wait_until_free(container: str, name: str, timeout: float) -> str:
     poll count still caps it, so the loop ends under a patched sleep too."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    polls = max(2, int(timeout / _FREE_POLL_S))
+    polls = max(2, int(timeout / tn.FREE_POLL_S))
     streak = 0
     reason = ""
     for i in range(polls):
@@ -789,133 +504,10 @@ async def _wait_until_free(container: str, name: str, timeout: float) -> str:
         took = loop.time() - started
         # A free reading always gets the second one it needs, even past the deadline:
         # stopping there would report a free session as busy.
-        if i == polls - 1 or (streak == 0 and loop.time() + _FREE_POLL_S + took > deadline):
+        if i == polls - 1 or (streak == 0 and loop.time() + tn.FREE_POLL_S + took > deadline):
             break
-        await asyncio.sleep(_FREE_POLL_S)
+        await asyncio.sleep(tn.FREE_POLL_S)
     return reason or "claude_busy"
-
-
-async def _wait_for_turn_end(container: str, name: str, timeout: float) -> str:
-    """Poll until Claude's turn is over on two consecutive readings (""), ignoring the
-    input box: a person's unsent text, or a prompt Esc put back there, does not keep a
-    turn running. Returns "claude_not_running" or "claude_busy" when it does not end."""
-    polls = max(2, int(timeout / _FREE_POLL_S))
-    streak = 0
-    for i in range(polls):
-        state = await _session_state(container, name)
-        if not state.claude_running:
-            return "claude_not_running"
-        streak = 0 if state.turn == TURN_RUNNING else streak + 1
-        if streak >= 2:
-            return ""
-        if i < polls - 1:
-            await asyncio.sleep(_FREE_POLL_S)
-    return "claude_busy"
-
-
-def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -> bool:
-    """Whether the transcript shows a pasted prompt arrived — and, when no turn will
-    ever claim it, give its send record back.
-
-    Claude Code records a prompt pasted while it is working only as a `queue-operation`
-    and answers it inside the running turn, so it never becomes a prompt line; if the
-    turn ends first, it runs it next as a prompt line marked `promptSource: "queued"`,
-    which no turn attributes (human_prompt_text). A local slash command (/clear,
-    /model) arrives as a prompt line, but Claude Code runs it itself and no turn opens
-    for it. In each case no turn can claim the prompt, and its
-    record would wait out its 24 h, where the same words typed by a person would match
-    it and be delivered as the orchestrator's own prompt. Both watchers of a pasted
-    prompt (the free check and _watch_for_echo) come through here, because either can
-    be the one that sees it first.
-    """
-    index = ts.prompt_index_since(objs, text, sent_at)
-    if index is None:
-        return False
-    line = objs[index]
-    if line.get("type") == "queue-operation" or (
-            line.get("type") == "user" and not ts.human_prompt_text(line)
-            and not ts.is_local_command(objs, index)):
-        # Taken into a running turn, or held while one ran and then run as a prompt
-        # line no turn attributes to anyone (promptSource "queued").
-        event = "session_send_queued_by_claude"
-    elif ts.is_local_command(objs, index):
-        event = "session_send_ran_as_local_command"
-    else:
-        return True
-    try:
-        entry = ts.take_sent_entry(ss.WATCHER_STATE_DIR, session, text)
-        by = None if entry is None else entry["by"]
-        if entry is not None and by is not None and event == "session_send_queued_by_claude":
-            # The answer comes in a turn with no prompt of its own (the running one, or
-            # the next one Claude Code runs it in), which takes the session's recorded
-            # origin: make that this prompt's, not the earlier turn's. Taken into the
-            # running turn, that turn keeps the batch it opened with, and the reply it
-            # ends with names the joined prompt after its own (_with_joined); run next
-            # on its own, the next turn answers this prompt alone.
-            joined = line.get("type") == "queue-operation"
-            ts.record_prompt_origin(
-                ss.WATCHER_STATE_DIR, session, "person" if by else "orchestrator", sent_by=by,
-                batch=(ts.last_prompt_batch(ss.WATCHER_STATE_DIR, session) if joined
-                       else entry.get("batch")))
-            if joined and entry.get("batch"):
-                ts.record_joined_batch(ss.WATCHER_STATE_DIR, session, entry["batch"])
-    except OSError as exc:
-        log_event("session_send_record_release_failed", session=session,
-                  error_type=type(exc).__name__, error=repr(exc))
-    else:
-        if by is not None:
-            log_event(event, session=session, prompt_len=len(text))
-    return True
-
-
-async def _watch_for_echo(session: str, text: str, sent_at: float) -> None:
-    """Clear the busy hold a paste set once the transcript shows the prompt, or after
-    _ECHO_WAIT_S, logging a prompt that never showed. Runs on its own so the log line
-    does not depend on something else checking the session again."""
-    entry = (text, sent_at)
-    for _ in range(max(1, int(_ECHO_WAIT_S / _ECHO_POLL_S))):
-        if ss.sent_awaiting_echo.get(session) != entry:
-            return   # seen by a free check, or superseded by a later paste
-        objs, _, _ = _session_transcript(session)
-        if _prompt_arrived(session, text, sent_at, objs):
-            if ss.sent_awaiting_echo.get(session) == entry:
-                ss.sent_awaiting_echo.pop(session, None)
-            return
-        await asyncio.sleep(_ECHO_POLL_S)
-    if ss.sent_awaiting_echo.get(session) == entry:
-        ss.sent_awaiting_echo.pop(session, None)
-        log_event("session_send_not_seen_in_transcript", session=session,
-                  prompt_len=len(text), waited_s=_ECHO_WAIT_S)
-
-
-def _reply_from_transcript(name: str, prompt: str, sent_at: float) -> str:
-    """The reply text to `prompt`, sent at `sent_at`, from the session's transcript:
-    every completed turn after the prompt's line, interrupted ones with their note.
-    "" when the prompt or its reply is not there (interrupted before Claude wrote
-    anything, or folded into a turn that was already running)."""
-    objs, _, _ = _session_transcript(name)
-    start = ts.prompt_index_since(objs, prompt, sent_at)
-    if start is None:
-        return ""
-    turns = ts.extract_completed_turns(objs[start:])
-    return "\n\n".join(ts.render_delivery(t.text, [], interrupted=t.interrupted)
-                       for t in turns if t.text or t.interrupted)
-
-
-async def _load_and_paste(container: str, text: str, window: str) -> bool:
-    """Load text into a tmux paste buffer and paste it into the window. Returns True on success."""
-    proc = await asyncio.create_subprocess_exec(
-        *backend.exec_argv(container, ["tmux", "load-buffer", "-b", "aidc-send", "-"],
-                           user="vscode", stdin=True),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.communicate(text.encode("utf-8"))
-    if proc.returncode != 0:
-        return False
-    rc = await _tmux_exec(container, ["paste-buffer", "-b", "aidc-send", "-t", f"main:{window}"])
-    return rc == 0
 
 
 def _write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -> None:
@@ -1072,7 +664,7 @@ async def _inject(container: str, text: str, window: str, *, session: str,
         log_event("session_send_late_paste_submitted", session=session,
                   prompt_len=len(text))
     else:
-        if not await _load_and_paste(container, text, window):
+        if not await tmx.load_and_paste(container, text, window):
             return False
         if screen is not None and screen.agent_pointed and not await _paste_in_box(
                 container, window, session):
@@ -1085,7 +677,7 @@ async def _inject(container: str, text: str, window: str, *, session: str,
                       waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
             return False
     ss.unsubmitted_paste.pop(session, None)
-    await _tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
+    await tmx.tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
     batch = ({"pasted_at": ts.now_iso(),
               "prompts": [q.batch_entry() for q in prompts]}
              if prompts else None)
@@ -1095,7 +687,7 @@ async def _inject(container: str, text: str, window: str, *, session: str,
     # and in that gap it still shows the previous, finished turn.
     sent_at = time.time()
     ss.sent_awaiting_echo[session] = (text, sent_at)
-    com.fire(_watch_for_echo(session, text, sent_at))
+    com.fire(tn.watch_for_echo(session, text, sent_at))
     return True
 
 
@@ -1104,7 +696,7 @@ async def _paste_in_box(container: str, window: str, session: str) -> bool:
     times while Claude Code draws it. Any text counts: Claude Code shows a long paste
     as a placeholder (`[Pasted text #1]`), not as the words."""
     for i in range(_PASTE_CONFIRM_POLLS):
-        raw = await _capture_screen(container, window)
+        raw = await tmx.capture_screen(container, window)
         ss.last_screen_raw[session] = raw
         if scr.classify(raw).input_box == scr.HAS_TEXT:
             return True
@@ -1113,52 +705,17 @@ async def _paste_in_box(container: str, window: str, session: str) -> bool:
     return False
 
 
-SESSION_EXISTS = "exists"
-SESSION_GONE = "gone"
-SESSION_UNKNOWN = "unknown"
-
-
-async def _session_instance(name: str) -> tuple[str, str]:
-    """Whether session `name` exists (SESSION_EXISTS, SESSION_GONE or SESSION_UNKNOWN),
-    and its instance id ("" unless it exists).
-
-    A session is identified by its network, aidc-<name>-net: `aidc create` makes it,
-    `aidc kill` removes it, and `aidc upgrade` / `aidc restart` keep it while they
-    replace or restart the dev container. So the id tells a session killed and created
-    again under the same name from the same session upgraded, and a dev container
-    briefly missing in the middle of an upgrade is not a gone session. `aidc kill`
-    makes sure the network is removed even when something outside the session is
-    attached to it. Only docker saying that network does not exist is gone; any other
-    failure (a daemon restart, a socket error, a missing docker context) is unknown,
-    and queues keep holding.
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *backend.instance_argv(name),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError:
-        return SESSION_UNKNOWN, ""
-    stdout, stderr = await proc.communicate()
-    if proc.returncode == 0:
-        return SESSION_EXISTS, stdout.decode("utf-8", errors="replace").strip()
-    if backend.instance_gone(name, stderr.decode("utf-8", errors="replace")):
-        return SESSION_GONE, ""
-    return SESSION_UNKNOWN, ""
-
-
 async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
     """Take out of `name`'s queue every prompt whose session no longer exists: all of
     them when the session is gone, and, when a session of the same name has a different
     instance (killed and created again), those accepted for the old one. Docker failing
     to answer removes nothing."""
-    state, current = await _session_instance(name)
-    if state == SESSION_UNKNOWN:
+    state, current = await tn.session_instance(name)
+    if state == tn.SESSION_UNKNOWN:
         log_event("session_send_queue_session_unknown", session=name)
         return
     queue = ss.pending_sends.get(name, [])
-    if state == SESSION_GONE:
+    if state == tn.SESSION_GONE:
         dropped, kept = queue, []
     else:
         if not current:
@@ -1212,7 +769,7 @@ async def _show_waiting_on_input(container: str, name: str, show: bool) -> None:
         return
     args = (["set-option", "-t", "main", "@aidc_waiting", _WAITING_ON_INPUT_TEXT] if show
             else ["set-option", "-t", "main", "-u", "@aidc_waiting"])
-    await _tmux_exec(container, args)
+    await tmx.tmux_exec(container, args)
     if show:
         ss.waiting_notice_shown.add(name)
     else:
@@ -1277,7 +834,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                     log_event("session_send_queue_held_tainted", session=name,
                               depth=len(queue))
                     retry_in = _QUEUE_POLL_S
-                elif await _inject(container, text, _SESSION_WINDOW, session=name,
+                elif await _inject(container, text, tmx.SESSION_WINDOW, session=name,
                                    sent_by=_batch_sent_by(batch), prompts=batch):
                     pasted = {id(q) for q in batch}
                     queue[:] = [q for q in queue if id(q) not in pasted]
@@ -1353,7 +910,7 @@ async def _enqueue_send(name: str, container: str, prompt: ts.QueuedPrompt,
     # Read before touching the queue: nothing may await between taking the list and
     # appending to it, or the drainer can replace the list meanwhile and the prompt
     # would land in one nobody reads.
-    _, instance = await _session_instance(name)
+    _, instance = await tn.session_instance(name)
     queue = ss.pending_sends.setdefault(name, [])
     if len(queue) >= _PENDING_MAX_DEPTH:
         return 0
@@ -1406,10 +963,10 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
                        batch=(q.batch_entry(),))
 
         async def post_fn(t: ts.Turn, attempt: int, cid: str = q.conversation_id) -> bool:
-            return await _post_turn(base, cid, t, attempt=attempt, session=name)
+            return await cbk.post_turn(base, cid, t, attempt=attempt, session=name)
 
         try:
-            delivered = await _deliver_with_retry(turn, post_fn=post_fn)
+            delivered = await cbk.deliver_with_retry(turn, post_fn=post_fn)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- report, don't crash
@@ -1417,7 +974,7 @@ async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
                       error_type=type(exc).__name__, error=repr(exc))
             delivered = False
         if not delivered:
-            _write_dead_letter(Path(ss.WATCHER_STATE_DIR), name, q.conversation_id, turn)
+            cbk.write_dead_letter(Path(ss.WATCHER_STATE_DIR), name, q.conversation_id, turn)
         log_event(event, session=name, conversation_id=q.conversation_id,
                   delivered=delivered)
 
@@ -1510,7 +1067,7 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
     saved = queues.get(name, [])
     if not saved:
         return
-    if (await _session_instance(name))[0] == SESSION_GONE:
+    if (await tn.session_instance(name))[0] == tn.SESSION_GONE:
         _abandon_queue(name, saved)
         _persist_queue(name)
         return
@@ -1560,8 +1117,8 @@ async def resume_watchers(app: Any) -> None:
         name = w["session"]
         if scope.refusal(name) is not None or name in ss.session_watchers:
             continue
-        state, current = await _session_instance(name)
-        gone = state == SESSION_GONE
+        state, current = await tn.session_instance(name)
+        gone = state == tn.SESSION_GONE
         recreated = bool(w["session_instance"] and current
                          and current != w["session_instance"])
         if gone or recreated:
@@ -1621,149 +1178,6 @@ _WAITING_EXPLAINED = {
 # them exactly-once with a durable high-water mark and bounded retry. Added
 # alongside the tmux watcher (above); cutover happens once `aidc create`
 # surfaces transcripts into _TRANSCRIPTS_BASE (design-09 rollout).
-
-_DELIVERY_BUDGET_S = 1800.0
-
-# How long a reply whose Stop hooks have not reported yet is held back. A blocking
-# hook's pushback is written only when the hook finishes, so a reply delivered
-# before then can be the first half of a turn the hook is about to reopen. Claude
-# Code writes a stop record after every reply once hooks finish, so this only
-# lapses when a hook runs longer than this, or a record goes missing; either way
-# the reply is then delivered rather than held forever.
-_STOP_HOOK_WAIT_S = 120.0
-
-
-# Non-2xx statuses worth retrying: transient server-side or rate-limit
-# conditions that a later identical POST can plausibly succeed on. Every OTHER
-# 4xx is PERMANENT — the request itself is unacceptable to the endpoint, so
-# retrying the identical payload can only flood it. 404 in particular means the
-# conversation is gone on the orchestrator's side (prod 2026-07-21, conv 019f6cf5: a
-# discarded conversation returned 404 to all 34 retries of one turn over the full
-# 30-minute budget — the "same message repeated" meltdown).
-_RETRYABLE_STATUSES = frozenset({408, 429})
-
-
-def _is_retryable_status(status: int) -> bool:
-    """True for a transient HTTP status (5xx / 408 / 429); False for a permanent
-    client error (other 4xx) that retrying the identical POST cannot fix."""
-    return status >= 500 or status in _RETRYABLE_STATUSES
-
-
-class _PermanentDeliveryError(Exception):
-    """A callback failed with a permanent (non-retryable) HTTP status. Signals
-    _deliver_with_retry to stop immediately and dead-letter instead of retrying
-    the identical payload for the whole budget. Carries the status for logging."""
-
-    def __init__(self, status: int) -> None:
-        super().__init__(f"permanent delivery failure: HTTP {status}")
-        self.status = status
-
-
-async def _post_turn(
-    callback_base: str, conversation_id: str, turn: ts.Turn, *, attempt: int, session: str
-) -> bool:
-    """One POST attempt for a turn. Returns True on 2xx, False on a TRANSIENT
-    failure (retryable), and raises _PermanentDeliveryError on a permanent 4xx
-    (non-retryable). Fully instrumented (MCP-19): logs attempt, ok/non-2xx/
-    exception with status, timing, type+repr."""
-    full_url = f"{callback_base}/api/v1/internal/callback/{conversation_id}"
-    log_event("transcript_callback_attempt", conversation_id=conversation_id, url=full_url,
-              turn_uuid=turn.terminal_uuid, content_len=len(turn.text), attempt=attempt)
-    start = time.monotonic()
-    try:
-        bearer = _load_token()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                full_url,
-                # ``session`` names WHICH aidc session finished this turn. The
-                # orchestrator gates ``session_send`` on a per-session BUSY marker
-                # (set when its own send is accepted) and needs this to know which
-                # session just became READY -- without it a multi-session
-                # conversation cannot tell whose reply arrived.
-                # ``prompt_origin`` says whose prompt this turn answers: "terminal"
-                # (a person typed it at the session's pane — the content then opens
-                # with that prompt), "person" (this MCP injected it for the person
-                # session_send's ``sent_by`` named, which comes back as
-                # ``sent_by``), "orchestrator" (a prompt this MCP injected for the
-                # caller), or "" (unknown: a prompt Claude Code synthesized with no
-                # prompted turn before it). Informational; the content already
-                # reads right.
-                # ``interrupted`` is true when the person pressed Esc and cut the turn
-                # off. It is not a failure, so ``ok`` stays true; the content opens
-                # with a note saying so, which is all a receiver that ignores the
-                # field needs. ``speaker`` ("human" | "agent") only when
-                # orchestrator.send_speaker is on. The whole body is pinned in design-10
-                # D5 and agreed with the orchestrator's side before any field changes.
-                json={"content": turn.text, "ok": turn.ok, "source": "agent_watch",
-                      "session": session, "prompt_origin": turn.prompt_origin,
-                      "interrupted": turn.interrupted,
-                      **({"sent_by": turn.sent_by} if turn.sent_by else {}),
-                      **({"error_code": turn.error_code} if turn.error_code else {}),
-                      **({"pasted_at": turn.pasted_at} if turn.pasted_at else {}),
-                      **({"prompts": list(turn.batch)} if turn.batch else {}),
-                      **({"speaker": turn.speaker}
-                         if turn.speaker and orc.orchestrator_send_speaker() else {})},
-                headers={"Authorization": f"Bearer {bearer}"},
-            )
-        elapsed_s = round(time.monotonic() - start, 3)
-        if resp.is_success:
-            log_event("transcript_callback_ok", conversation_id=conversation_id,
-                      turn_uuid=turn.terminal_uuid, status=resp.status_code,
-                      elapsed_s=elapsed_s, attempt=attempt)
-            return True
-        retryable = _is_retryable_status(resp.status_code)
-        log_event("transcript_callback_http_error", conversation_id=conversation_id,
-                  turn_uuid=turn.terminal_uuid, status=resp.status_code, elapsed_s=elapsed_s,
-                  body=resp.text[:500], attempt=attempt, retryable=retryable)
-        if not retryable:
-            # Permanent (e.g. 404 conversation-gone): retrying the identical POST
-            # can never succeed and only floods the endpoint. Stop now.
-            raise _PermanentDeliveryError(resp.status_code)
-        return False
-    except _PermanentDeliveryError:
-        raise
-    except Exception as exc:  # prawduct:allow prawduct/broad-except -- log why + retry
-        log_event("transcript_callback_failed", conversation_id=conversation_id,
-                  turn_uuid=turn.terminal_uuid, elapsed_s=round(time.monotonic() - start, 3),
-                  error_type=type(exc).__name__, error=repr(exc), attempt=attempt)
-        return False
-
-
-async def _deliver_with_retry(turn: ts.Turn, *, post_fn, sleep_fn=asyncio.sleep,
-                              budget: float = _DELIVERY_BUDGET_S) -> bool:
-    """Retry a turn on bounded backoff until confirmed (True), the budget is
-    exhausted, or a PERMANENT failure is hit (False -> caller dead-letters).
-    MCP-18: never silently drops. A permanent HTTP status (e.g. 404
-    conversation-gone) stops retries immediately — hammering the identical POST
-    for the whole budget only floods a dead endpoint."""
-    elapsed = 0.0
-    attempt = 0
-    while True:
-        delay = ts.delay_for_attempt(attempt)
-        if delay:
-            await sleep_fn(delay)
-            elapsed += delay
-        try:
-            if await post_fn(turn, attempt):
-                return True
-        except _PermanentDeliveryError:
-            return False  # non-retryable — dead-letter now, don't flood
-        attempt += 1
-        if elapsed + ts.delay_for_attempt(attempt) > budget:
-            return False
-
-
-def _write_dead_letter(state_dir: Path, session: str, conversation_id: str, turn: ts.Turn) -> None:
-    """Persist an undelivered turn so it is recorded, not silently lost (MCP-18)."""
-    dl = Path(state_dir) / "dead-letter"
-    dl.mkdir(parents=True, exist_ok=True)
-    name = f"{ts.slug(session)}__{ts.slug(conversation_id)}__{ts.slug(turn.terminal_uuid)}.json"
-    (dl / name).write_text(
-        json.dumps({"session": session, "conversation_id": conversation_id,
-                    "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok,
-                    "interrupted": turn.interrupted}),
-        encoding="utf-8",
-    )
 
 
 async def _baseline_watermark(session: str, conversation_id: str, *,
@@ -2005,15 +1419,15 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
         quiet = wall_now - active.stat().st_mtime
     except OSError:
         return None
-    if quiet < _LOG_QUIET_S:
+    if quiet < tn.LOG_QUIET_S:
         ss.unanswered_polls.pop(key, None)
         return None
     state = await screen_fn(session)
     if state is None or state.input_box not in (scr.EMPTY, scr.HAS_TEXT):
         ss.unanswered_polls.pop(key, None)
         return None
-    verdict, why = _turn_verdict(session, suffix, quiet, state)
-    if verdict != TURN_IDLE or why not in _STOPPED_BY_SCREEN:
+    verdict, why = tn.turn_verdict(session, suffix, quiet, state)
+    if verdict != tn.TURN_IDLE or why not in tn.STOPPED_BY_SCREEN:
         if why != "status_row_unproven":
             ss.unanswered_polls.pop(key, None)
         return None
@@ -2022,7 +1436,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
         ss.unanswered_polls[key] = polls
         return None
     ss.unanswered_polls.pop(key, None)
-    _record_reported_interrupt(session, turn.terminal_uuid)
+    tn.record_reported_interrupt(session, turn.terminal_uuid)
     log_event("transcript_interrupted_before_output", session=session,
               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
               quiet_s=round(quiet, 1), why=why)
@@ -2031,9 +1445,9 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
 
 async def _screen_for_watcher(session: str) -> scr.ScreenState | None:
     container = backend.target(session)
-    if not await _is_claude_running(container):
+    if not await tmx.is_claude_running(container):
         return None
-    return await _read_screen(container, session)
+    return await tn.read_screen(container, session)
 
 
 async def _drain_transcript_once(session: str, conversation_id: str, callback_base: str, *,
@@ -2217,7 +1631,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     if settle_seconds > 0 and ts.ends_on_turn_end(suffix):
         ss.settle_state.pop(key, None)
     elif settle_seconds > 0:
-        quiet_needed = (max(settle_seconds, _STOP_HOOK_WAIT_S)
+        quiet_needed = (max(settle_seconds, tn.STOP_HOOK_WAIT_S)
                         if ts.awaiting_stop_hooks(suffix, objs) else settle_seconds)
         now = now_fn()
         last = ss.settle_state.get(key)
@@ -2230,7 +1644,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     dropped: list[str] = []
     new = ts.extract_completed_turns(suffix, dropped)
     if screen_fn is not None:
-        if not _working_indicator_known(session) and ts.log_shows_turn_in_progress(suffix):
+        if not tn.working_indicator_known(session) and ts.log_shows_turn_in_progress(suffix):
             # Learn this session's working text while a turn is running, so an Esc
             # before Claude writes anything can be recognized without waiting out
             # _LOG_STALL_S. Stops once seen; a person-only session never touches
@@ -2262,8 +1676,8 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     ss.consumed_idle_counts.pop(key, None)   # delivering — not a stale pin
     if post_fn is None:
         async def post_fn(turn, attempt):  # noqa: E306
-            return await _post_turn(callback_base, conversation_id, turn,
-                                    attempt=attempt, session=session)
+            return await cbk.post_turn(callback_base, conversation_id, turn,
+                                       attempt=attempt, session=session)
     # The durable delivery ledger is the STRUCTURAL exactly-once guarantee: a
     # content fingerprint in it was already confirmed delivered to this
     # conversation, so it must never be POSTed again — no matter how it re-surfaced
@@ -2375,7 +1789,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                 mark.last_delivery_at = wall_now
                 if (mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
                         or mark.deliveries_since_idle > _LOOP_GUARD_BACKSTOP):
-                    _write_dead_letter(state_dir, session, conversation_id, outgoing)
+                    cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
                     log_event("transcript_delivery_loop_guard_tripped", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
                               consecutive_deliveries=mark.consecutive_deliveries,
@@ -2383,13 +1797,13 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                               cap=(_LOOP_GUARD_MAX_CONSECUTIVE
                                    if mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
                                    else _LOOP_GUARD_BACKSTOP))
-                elif await _deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn):
+                elif await cbk.deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn):
                     # Record ONLY a confirmed delivery, so a dead-lettered or
                     # dropped turn stays eligible for a later resend.
                     delivered_fps.add(fingerprint)
                     ts.record_delivered(state_dir, session, conversation_id, fingerprint)
                 else:
-                    _write_dead_letter(state_dir, session, conversation_id, outgoing)
+                    cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
                     log_event("transcript_delivery_abandoned", session=session,
                               conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         mark.last_delivered_uuid = turn.terminal_uuid
@@ -2492,13 +1906,13 @@ async def _resend_reply(session: str, conversation_id: str, callback_base: str, 
 
     if post_fn is None:
         async def post_fn(turn, attempt):  # noqa: E306
-            return await _post_turn(callback_base, conversation_id, turn,
-                                    attempt=attempt, session=session)
+            return await cbk.post_turn(callback_base, conversation_id, turn,
+                                       attempt=attempt, session=session)
     # The bare reply, as the resend contract says -- except that an interrupt keeps
     # its note: without it an interrupt with nothing written would post as empty.
     outgoing = dataclasses.replace(
         target, text=ts.render_delivery(target.text, [], interrupted=target.interrupted))
-    ok = await _deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn)
+    ok = await cbk.deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn)
     if ok:
         # Record the resent turn in the delivery ledger so the watcher never ALSO
         # delivers it (a double-send). Once it lands, the exactly-once invariant
@@ -2575,7 +1989,7 @@ async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: st
     # watcher tasks polling the same session. Two watchers share one durable
     # watermark and each POST every turn -> every reply delivered twice.
     _register_watcher(name, conversation_id, base_url)
-    _, instance = await _session_instance(name)
+    _, instance = await tn.session_instance(name)
     try:
         ts.save_watch(ss.WATCHER_STATE_DIR, name, conversation_id, base_url,
                       session_instance=instance)
@@ -2634,7 +2048,7 @@ async def _hand_session_mcp(name: str, server: str, path: str, bearer: str) -> d
         log_event("tool_call", tool="session_mcp_set", session=name, ok=False,
                   error_code=exc.code)
         return _session_mcp_refusal(exc)
-    running = await _is_claude_running(backend.target(name))
+    running = await tmx.is_claude_running(backend.target(name))
     needs_restart = handed.entry == session_mcp.ENTRY_ADDED and running
     applies = (_MCP_NEEDS_RESTART.format(name=name) if needs_restart
                else _MCP_LIVE if running else _MCP_ON_START)
@@ -2775,14 +2189,14 @@ async def _session_report(name: str) -> dict[str, Any]:
     Container health is not activity; `working` is."""
     container = backend.target(name)
     state, taint, audit, repo_dir = await asyncio.gather(
-        _session_state(container, name), sf.taint_or_none(name), sf.audit_dir(name),
+        tn.session_state(container, name), sf.taint_or_none(name), sf.audit_dir(name),
         sf.repo_path(name))
     branch = head = None
     if repo_dir is not None:
         branch, head = await asyncio.gather(repo.current_branch(name, repo_dir),
                                             repo.head(name, repo_dir))
-    objs, _, _ = _session_transcript(name)
-    working = state.claude_running and state.turn == TURN_RUNNING
+    objs, _, _ = tn.session_transcript(name)
+    working = state.claude_running and state.turn == tn.TURN_RUNNING
     return {
         "tainted": taint,
         "audit_dir": audit,
@@ -3299,7 +2713,7 @@ def register(app: Any) -> None:
             content_len = len(content)
             start = time.monotonic()
             try:
-                bearer = _load_token()
+                bearer = auth.load_token()
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.post(
                         callback_url,
@@ -3442,7 +2856,7 @@ def register(app: Any) -> None:
             return com.envelope_err(f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
                                     f"not {deliver!r}", code="invalid_argument")
         container = backend.target(name)
-        if (await _session_instance(name))[0] == SESSION_GONE:
+        if (await tn.session_instance(name))[0] == tn.SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
             # neither opens a webhook nor leaves one persisted. Audit every refusal:
             # these paths used to return silently, so the ONLY trace of a dropped send
@@ -3544,7 +2958,7 @@ def register(app: Any) -> None:
                     # Idle at the first reading, and a turn started during the wait.
                     await try_join()
             if (not joined and not wait_reason
-                    and not await _inject(container, this_prompt.paste(), _SESSION_WINDOW,
+                    and not await _inject(container, this_prompt.paste(), tmx.SESSION_WINDOW,
                                           session=name, sent_by=sent_by,
                                           prompts=[this_prompt])):
                 # A paste that did not land is a fact about one attempt, not about the
@@ -3646,7 +3060,7 @@ def register(app: Any) -> None:
         # it, or waits because of it). A prompt held for any other reason, or sent to an
         # idle session, has no turn to describe.
         busy = joined or (queued_depth and wait_reason == "claude_busy")
-        turn = (tv.turn_info(_session_transcript(name)[0]) if busy
+        turn = (tv.turn_info(tn.session_transcript(name)[0]) if busy
                 else tv.NO_TURN if status != "sent" else {})
         return com.envelope_ok(
             {"status": status, "session": name, "prompt_id": this_prompt.prompt_id,
@@ -3660,7 +3074,7 @@ def register(app: Any) -> None:
              **({"headless_runs": runs} if status != "sent" and (
                  runs := headless.tracked(name)) else {}),
              **({"watched_conversation_id": watched} if watched else {}),
-             "window": _SESSION_WINDOW, "delivery": delivery}
+             "window": tmx.SESSION_WINDOW, "delivery": delivery}
         )
 
     # --- session_run (intentionally NOT advertised as an MCP tool) -----
@@ -3733,7 +3147,7 @@ def register(app: Any) -> None:
         transcript: list[dict[str, Any]] = []
 
         async with lock:
-            if not await _is_claude_running(container):
+            if not await tmx.is_claude_running(container):
                 return com.envelope_err(
                     "Claude is not running in the session. "
                     "The user needs to start it (run 'aidc-claude' in the tmux claude window).",
@@ -3753,7 +3167,7 @@ def register(app: Any) -> None:
                                          sender_label=label,
                                          conversation_id=conversation_id or "")
                 sent_at = time.time()
-                if not await _inject(container, pasted, _SESSION_WINDOW, session=name):
+                if not await _inject(container, pasted, tmx.SESSION_WINDOW, session=name):
                     # Not retried: if the paste shows in the box later, it stays there
                     # as unsent input, held like a person's (see _own_unsent_text).
                     ss.unsubmitted_paste.pop(name, None)
@@ -3762,19 +3176,19 @@ def register(app: Any) -> None:
                     return com.envelope_err(err, {"completed_turns": transcript},
                                             code="paste_failed")
 
-                ended = await _wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)
+                ended = await tn.wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)
                 if ended:
                     err = f"turn {i + 1} did not finish ({ended})"
                     return com.envelope_err(err, {"completed_turns": transcript},
                                             code="turn_not_finished")
 
-                response = _reply_from_transcript(name, pasted, sent_at)
+                response = tn.reply_from_transcript(name, pasted, sent_at)
 
                 transcript.append({"turn": i + 1, "prompt": turn_prompt, "response": response})
 
         log_event("tool_call", tool="session_run_complete", session=name, turns=len(transcript))
         return com.envelope_ok({"transcript": transcript, "session": name,
-                                "window": _SESSION_WINDOW})
+                                "window": tmx.SESSION_WINDOW})
 
     # --- session_watch -------------------------------------------
 
@@ -3875,8 +3289,8 @@ def register(app: Any) -> None:
         # it reads a stale reply as the response to its last question (prod
         # 2026-08-22 conv 01a01cf6: a no-uuid resend returned the previous prompt's
         # answer while the real turn had 16 minutes left to run).
-        state = await _session_state(backend.target(name), name)
-        busy = state.claude_running and state.turn == TURN_RUNNING
+        state = await tn.session_state(backend.target(name), name)
+        busy = state.claude_running and state.turn == tn.TURN_RUNNING
         status, turn = await _resend_reply(name, conversation_id, base_url,
                                            turn_uuid=turn_uuid, force=force)
         if turn is None:
@@ -4083,7 +3497,7 @@ def register(app: Any) -> None:
         if not 1 <= last_n <= tv.MAX_TURNS:
             return com.envelope_err(f"last_n must be between 1 and {tv.MAX_TURNS}",
                                     code="invalid_argument")
-        objs, _, status = _session_transcript(name)
+        objs, _, status = tn.session_transcript(name)
         if status == "unreadable":
             return com.envelope_err("the session's transcript could not be read",
                                     code="command_failed")
@@ -4137,16 +3551,17 @@ def register(app: Any) -> None:
                 f"not {target!r}", code="invalid_argument")
         if target == INTERRUPT_HEADLESS:
             return await _interrupt_headless(name, container)
-        state = await _session_state(container, name)
-        objs, _, _ = _session_transcript(name)
+        state = await tn.session_state(container, name)
+        objs, _, _ = tn.session_transcript(name)
         tree = await _tree(name)
-        if not (state.claude_running and state.turn == TURN_RUNNING):
+        if not (state.claude_running and state.turn == tn.TURN_RUNNING):
             log_event("tool_call", tool="session_interrupt", session=name, interrupted=False,
                       why=state.why)
             return com.envelope_ok({"session": name, "interrupted": False, "was_running": None,
                                  "tree": tree, "note": "nothing was running"})
         was = {"why": state.why, **tv.turn_info(objs)}
-        rc = await _tmux_exec(container, ["send-keys", "-t", f"main:{_SESSION_WINDOW}", "Escape"])
+        rc = await tmx.tmux_exec(container,
+                                 ["send-keys", "-t", f"main:{tmx.SESSION_WINDOW}", "Escape"])
         if rc != 0:
             log_event("tool_call", tool="session_interrupt", session=name, ok=False, rc=rc)
             return com.envelope_err(f"the Esc could not be sent to the session (tmux exited {rc})",
@@ -4235,9 +3650,9 @@ def register(app: Any) -> None:
                 _persist_queue(name)
                 for _, q in taken:
                     _write_send_dead_letter(name, q, "cancelled")
-        state = await _session_state(container, name)
-        working = state.claude_running and state.turn == TURN_RUNNING
-        objs, _, _ = _session_transcript(name)
+        state = await tn.session_state(container, name)
+        working = state.claude_running and state.turn == tn.TURN_RUNNING
+        objs, _, _ = tn.session_transcript(name)
         cancelled = [{"prompt_id": q.prompt_id, "position": i, "prompt_preview": q.text[:120],
                       "enqueued_at": q.enqueued_at, "conversation_id": q.conversation_id}
                      for i, q in taken]

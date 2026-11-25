@@ -141,3 +141,9 @@ every tool through its registered function, is the check, and smoke runs the rea
 - (01) The two tests that scan source (every envelope carries a known code; off-loop bodies
   touch no loop state) scan tools.py and the whole service, and follow `alias.name` calls
   into other modules; each was checked to fail on a planted violation.
+- (02) `auth._load_token` becomes `auth.load_token`, called as `auth.load_token()` from the
+  tools and the service: it was shared across modules, and a name imported into each module
+  is a binding per module, so a test's patch of one (as the round-trip rig did) stopped
+  reaching the callback POST once that moved. Tests that patched `tools.asyncio`,
+  `tools.httpx`, `tools.subprocess` etc. now name those modules directly (the same objects;
+  the patches were always module-wide).

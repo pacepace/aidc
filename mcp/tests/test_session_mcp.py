@@ -15,6 +15,7 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import scope, session_mcp, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import tmux as tmx
 
 REPO = Path(__file__).resolve().parents[2]
 TOKEN = "tok-A1b2_C3d4.e5f6~g7h8+i9j0/k1l2=m3n4"
@@ -290,7 +291,7 @@ def wired(box, monkeypatch):
         return box.claude_running
 
     monkeypatch.setattr(session_mcp, "hand", hand)
-    monkeypatch.setattr(tools, "_is_claude_running", running)
+    monkeypatch.setattr(tmx, "is_claude_running", running)
     return box
 
 

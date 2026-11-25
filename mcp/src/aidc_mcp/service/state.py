@@ -55,14 +55,14 @@ session_watchers: dict[str, asyncio.Task[None]] = {}
 
 
 # Prompts pasted into a session whose arrival the transcript has not shown yet:
-# name -> (prompt as pasted, wall-clock time of the paste). _watch_for_echo owns the
+# name -> (prompt as pasted, wall-clock time of the paste). watch_for_echo owns the
 # expiry, so a prompt that never shows is logged even if nothing checks again.
 sent_awaiting_echo: dict[str, tuple[str, float]] = {}
 
 
 # Sessions whose status row the MCP has seen show `esc to interrupt`, so its absence
 # can be trusted (see _LOG_STALL_S). Mirrored by a marker file per session in the
-# watcher-state dir; read it through _working_indicator_known.
+# watcher-state dir; read it through working_indicator_known.
 working_indicator_seen: set[str] = set()
 
 
@@ -72,7 +72,7 @@ working_indicator_seen: set[str] = set()
 # and afterwards treats that prompt's turn as over. Mirrored on disk, because the
 # watcher's watermark is past the prompt once it is reported: after a restart nothing
 # would report it again, and the session would read busy for good. Use
-# _interrupt_reported / _record_reported_interrupt.
+# _interrupt_reported / record_reported_interrupt.
 reported_interrupts: dict[str, str] = {}
 
 
@@ -93,7 +93,7 @@ last_screen_raw: dict[str, str] = {}
 unsubmitted_paste: dict[str, tuple[str, tuple[str, ...]]] = {}
 
 
-# The session instance (see _session_instance) the in-memory markers above belong to.
+# The session instance (see session_instance) the in-memory markers above belong to.
 # A marker on disk records its instance too, and one from another instance (a session
 # killed and created again under the same name) is ignored and removed, so it cannot
 # vouch for a session the MCP has never watched. _sync_session_markers is the one place

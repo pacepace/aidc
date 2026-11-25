@@ -89,7 +89,7 @@ def served(tmp_path, monkeypatch):
         state["events"].append((kind, fields))
         real_log(kind, **fields)
 
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(headless, "container_runs", no_runs)
     monkeypatch.setattr(headless, "stop", stop)
     patch_log_event(monkeypatch, log)

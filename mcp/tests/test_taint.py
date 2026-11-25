@@ -5,7 +5,9 @@ must not. Every tool that puts work into a session refuses it from then on, with
 error_code `tainted`; the tools that read, stop work or take a queued prompt back
 stay open.
 """
+import asyncio
 import inspect
+import subprocess
 
 import pytest
 from mcp.server.mcpserver import MCPServer
@@ -52,8 +54,8 @@ def nothing_runs(monkeypatch):
     async def aboom(*a, **k):
         raise AssertionError("a refused call reached the session")
     monkeypatch.setattr(com, "run_cli", boom)
-    monkeypatch.setattr(tools.subprocess, "run", boom)
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", aboom)
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", aboom)
 
 
 def test_exactly_the_tools_that_put_work_in_are_guarded():

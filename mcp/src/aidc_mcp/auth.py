@@ -23,7 +23,7 @@ from aidc_mcp.audit import log_event
 _TOKEN_PATH = Path(os.environ.get("AIDC_MCP_TOKEN_FILE", "/aidc-config/mcp-token"))
 
 
-def _load_token() -> str:
+def load_token() -> str:
     if not _TOKEN_PATH.exists():
         raise RuntimeError(
             f"bearer token file not found at {_TOKEN_PATH}; "
@@ -47,7 +47,7 @@ class BearerAuthMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self._token = _load_token()
+        self._token = load_token()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":

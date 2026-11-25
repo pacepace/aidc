@@ -17,10 +17,11 @@ import subprocess
 import sys
 import time
 
+import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import headless, tools
+from aidc_mcp import auth, headless, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from tests.logs import patch_log_event
@@ -235,7 +236,7 @@ def docker(monkeypatch):
         state["events"].append((kind, fields))
         real_log(kind, **fields)
 
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(headless, "container_runs", found)
     monkeypatch.setattr(headless, "stop", stop)
     monkeypatch.setattr(headless, "stop_tagged", stop_tagged)
@@ -335,7 +336,7 @@ async def test_a_cancelled_invoke_is_stopped_in_the_container(docker):
 async def test_an_async_invoke_past_its_limit_is_stopped_in_the_container(docker, monkeypatch):
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(tools, "_ASYNC_INVOKE_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(tools, "_load_token", lambda: "t")
+    monkeypatch.setattr(auth, "load_token", lambda: "t")
     docker["release_now"] = False
     jobs = []
     monkeypatch.setattr(com, "fire", lambda coro: jobs.append(coro))
@@ -354,7 +355,7 @@ async def test_an_async_invoke_past_its_limit_is_stopped_in_the_container(docker
             docker["posted"] = json
             return type("R", (), {"is_success": True, "status_code": 202, "text": ""})()
 
-    monkeypatch.setattr(tools.httpx, "AsyncClient", _Http)
+    monkeypatch.setattr(httpx, "AsyncClient", _Http)
     await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
     await jobs[0]
     assert docker["stopped"][0][0] == "run"
@@ -517,7 +518,7 @@ async def test_a_claim_made_without_a_container_listing_is_logged(docker, monkey
 
 async def test_an_async_run_stopped_before_it_started_never_starts(docker, monkeypatch):
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
-    monkeypatch.setattr(tools, "_load_token", lambda: "t")
+    monkeypatch.setattr(auth, "load_token", lambda: "t")
 
     async def tree(name):
         return None
@@ -539,7 +540,7 @@ async def test_an_async_run_stopped_before_it_started_never_starts(docker, monke
             docker["posted"] = json
             return type("R", (), {"is_success": True, "status_code": 202, "text": ""})()
 
-    monkeypatch.setattr(tools.httpx, "AsyncClient", _Http)
+    monkeypatch.setattr(httpx, "AsyncClient", _Http)
     await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
     d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
     assert d["interrupted"] is True

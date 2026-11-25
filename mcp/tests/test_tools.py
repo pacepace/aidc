@@ -20,6 +20,7 @@ from aidc_mcp import backend, scope, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import turns as tn
 
 
 def _tool(name):
@@ -82,7 +83,7 @@ def _patch_async_proc(monkeypatch, proc, record=None):
         if record is not None:
             record.append(list(args))
         return proc
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
 
 
 def _patch_sync_run(monkeypatch, result, record=None):
@@ -92,7 +93,7 @@ def _patch_sync_run(monkeypatch, result, record=None):
         if isinstance(result, BaseException):
             raise result
         return result
-    monkeypatch.setattr(tools.subprocess, "run", _run)
+    monkeypatch.setattr(subprocess, "run", _run)
 
 
 def _patch_cli(monkeypatch, result, record=None):
@@ -758,7 +759,7 @@ class TestTurnSettleSeconds:
 
 async def test_session_instance_exists_with_the_network_id(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(stdout=b"572d0316d0a7\n", returncode=0))
-    assert await tools._session_instance("proj") == (tools.SESSION_EXISTS, "572d0316d0a7")
+    assert await tn.session_instance("proj") == (tn.SESSION_EXISTS, "572d0316d0a7")
 
 
 async def test_session_instance_gone_when_the_network_is_not_found(monkeypatch):
@@ -766,34 +767,34 @@ async def test_session_instance_gone_when_the_network_is_not_found(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"Error response from daemon: network aidc-nosuch-net not found\n",
         returncode=1))
-    assert await tools._session_instance("nosuch") == (tools.SESSION_GONE, "")
+    assert await tn.session_instance("nosuch") == (tn.SESSION_GONE, "")
 
 
 async def test_session_instance_gone_on_other_not_found_wordings(monkeypatch):
     for stderr in (b"Error: No such network: aidc-x-net\n",
                    b"Error: no such object: aidc-x-net\n"):
         _patch_async_proc(monkeypatch, FakeProc(stderr=stderr, returncode=1))
-        assert await tools._session_instance("x") == (tools.SESSION_GONE, "")
+        assert await tn.session_instance("x") == (tn.SESSION_GONE, "")
 
 
 async def test_session_instance_gone_when_the_wording_differs_but_names_the_network(
         monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"Error: network \"aidc-proj-net\" not found\n", returncode=1))
-    assert await tools._session_instance("proj") == (tools.SESSION_GONE, "")
+    assert await tn.session_instance("proj") == (tn.SESSION_GONE, "")
 
 
 async def test_a_not_found_about_something_else_is_not_a_gone_session(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"context \"remote\" not found\n", returncode=1))
-    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
+    assert await tn.session_instance("proj") == (tn.SESSION_UNKNOWN, "")
 
 
 async def test_session_instance_unknown_on_any_other_docker_failure(monkeypatch):
     _patch_async_proc(monkeypatch, FakeProc(
         stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
                b"Is the docker daemon running?\n", returncode=1))
-    assert await tools._session_instance("proj") == (tools.SESSION_UNKNOWN, "")
+    assert await tn.session_instance("proj") == (tn.SESSION_UNKNOWN, "")
 
 
 async def test_session_instance_reads_the_session_network(monkeypatch):
@@ -803,8 +804,8 @@ async def test_session_instance_reads_the_session_network(monkeypatch):
         calls.append(args)
         return FakeProc(stdout=b"id\n", returncode=0)
 
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", fake_exec)
-    await tools._session_instance("proj")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    await tn.session_instance("proj")
     assert calls == [("docker", "inspect", "--type", "network", "--format", "{{.Id}}",
                       "aidc-proj-net")]
 

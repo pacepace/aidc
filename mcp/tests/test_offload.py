@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
+import subprocess
 import textwrap
 import threading
 import time
@@ -85,7 +86,7 @@ async def test_session_exec_does_not_stall_the_loop(monkeypatch):
         returncode, stdout, stderr = 0, "hi", ""
 
     async def call(release):
-        monkeypatch.setattr(tools.subprocess, "run", _blocking(release, Done()))
+        monkeypatch.setattr(subprocess, "run", _blocking(release, Done()))
         return await app.call_tool("session_exec", {"name": "proj", "cmd": "echo hi"})
 
     _, elapsed = await _call_while_loop_releases(call)

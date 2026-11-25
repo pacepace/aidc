@@ -1,7 +1,9 @@
 """A session-scoped MCP server (AIDC_MCP_ALLOWED_SESSIONS): its token must not reach any
 session but the named ones."""
+import asyncio
 import inspect
 import json
+import subprocess
 
 import pytest
 from mcp.server.mcpserver import MCPServer
@@ -9,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import resources, scope, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import turns as tn
 
 NAMED_TOOLS = ["session_status", "session_exec", "session_invoke", "session_invoke_async",
                "session_send", "session_watch", "session_resend", "session_unwatch",
@@ -59,8 +62,8 @@ def forbid_side_effects(monkeypatch):
         raise AssertionError("an out-of-scope call reached the session")
 
     monkeypatch.setattr(com, "run_cli", boom)
-    monkeypatch.setattr(tools.subprocess, "run", boom)
-    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", aboom)
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", aboom)
 
 
 def test_unset_or_empty_means_unrestricted(monkeypatch):
@@ -181,7 +184,7 @@ async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
     async def never(name):
         raise AssertionError("checked a session outside the scope")
 
-    monkeypatch.setattr(tools, "_session_instance", never)
+    monkeypatch.setattr(tn, "session_instance", never)
     await tools.resume_send_queues()
     assert "orchestrator" not in ss.pending_sends
     assert ts.send_queue_path(ss.WATCHER_STATE_DIR, "orchestrator").exists()

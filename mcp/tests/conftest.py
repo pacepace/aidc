@@ -5,6 +5,7 @@ import pytest
 from aidc_mcp import headless, session_facts, tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import turns as tn
 
 
 async def no_docker(*args, timeout=20.0):
@@ -43,8 +44,8 @@ def _no_real_docker_for_headless(monkeypatch):
 def idle_session(monkeypatch):
     """A session whose coding agent is not running: _session_state without docker."""
     async def state(container, name):
-        return tools.SessionState(False, None, tools.TURN_IDLE, "claude_not_running")
-    monkeypatch.setattr(tools, "_session_state", state)
+        return tn.SessionState(False, None, tn.TURN_IDLE, "claude_not_running")
+    monkeypatch.setattr(tn, "session_state", state)
 
 
 @pytest.fixture(autouse=True)

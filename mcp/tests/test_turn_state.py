@@ -10,15 +10,19 @@ are real captures from Claude Code 2.1.27x.
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver import MCPServer
 
+from aidc_mcp import session_facts as sf
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.screen import EMPTY, ScreenState, classify
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import tmux as tmx
+from aidc_mcp.service import turns as tn
 from tests.logs import patch_log_event
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
@@ -80,10 +84,10 @@ class Session:
         monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", self.base)
 
         async def session_instance(name):
-            return tools.SESSION_EXISTS, self.instance
+            return tn.SESSION_EXISTS, self.instance
 
-        monkeypatch.setattr(tools, "_session_instance", session_instance)
-        monkeypatch.setattr(tools.time, "time", lambda: self.clock)
+        monkeypatch.setattr(tn, "session_instance", session_instance)
+        monkeypatch.setattr(time, "time", lambda: self.clock)
 
         async def is_running(container):
             return self.running
@@ -91,8 +95,8 @@ class Session:
         async def capture(container, window):
             return self.screen
 
-        monkeypatch.setattr(tools, "_is_claude_running", is_running)
-        monkeypatch.setattr(tools, "_capture_screen", capture)
+        monkeypatch.setattr(tmx, "is_claude_running", is_running)
+        monkeypatch.setattr(tmx, "capture_screen", capture)
 
     def write(self, objs, age=100.0):
         d = self.base / "proj"
@@ -212,7 +216,7 @@ class TestCheckFree:
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
         session.screen = _screen("idle-empty")
         assert await session.check() == "claude_busy"
-        assert not tools._working_indicator_known("proj")
+        assert not tn.working_indicator_known("proj")
         assert "proj" not in ss.sent_awaiting_echo
 
     async def test_the_working_text_wins_over_an_earlier_interrupt_report(self, session):
@@ -222,7 +226,7 @@ class TestCheckFree:
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             await session.check()
-            tools._record_reported_interrupt("proj", "u2")
+            tn.record_reported_interrupt("proj", "u2")
             session.screen = _screen("busy-tool-empty-box")
             assert await session.check() == "claude_busy"
             assert ss.last_free_verdict["proj"][1] == "status_row_working"
@@ -235,24 +239,24 @@ class TestCheckFree:
         await session.check()
 
         async def unknown(name):
-            return tools.SESSION_UNKNOWN, ""
+            return tn.SESSION_UNKNOWN, ""
 
-        monkeypatch.setattr(tools, "_session_instance", unknown)
+        monkeypatch.setattr(tn, "session_instance", unknown)
         await session.check()
-        assert tools._working_indicator_known("proj")
+        assert tn.working_indicator_known("proj")
 
     async def test_a_removed_session_forgets_the_working_text_on_disk(self, session):
         session.screen = _screen("busy-tool-empty-box")
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
         await session.check()
         ss.forget_session_send_state("proj")
-        assert not tools._working_indicator_known("proj")
+        assert not tn.working_indicator_known("proj")
 
     async def test_without_ever_seeing_the_working_text_a_quiet_open_turn_stays_busy(
             self, session):
         session.write([_typed("u1", "essay")], age=30.0)
         assert await session.check() == "claude_busy"
-        session.write([_typed("u1", "essay")], age=tools._LOG_STALL_S)
+        session.write([_typed("u1", "essay")], age=tn._LOG_STALL_S)
         assert await session.check() == ""
 
     async def test_reply_whose_stop_hooks_are_still_running_is_busy(self, session):
@@ -268,7 +272,7 @@ class TestCheckFree:
     async def test_past_the_stop_hook_hold_an_idle_status_row_means_free(self, session):
         ss.working_indicator_seen.add("proj")
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
-                      age=tools._STOP_HOOK_WAIT_S)
+                      age=tn.STOP_HOOK_WAIT_S)
         assert await session.check() == ""
         assert ss.last_free_verdict["proj"][1] == "status_row_idle"
 
@@ -276,7 +280,7 @@ class TestCheckFree:
         """A Stop hook that runs longer than the hold (a long review gate) with the
         status row still saying Claude is working must not get a prompt pasted in."""
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
-                      age=tools._STOP_HOOK_WAIT_S + 60)
+                      age=tn.STOP_HOOK_WAIT_S + 60)
         session.screen = _screen("busy-tool-empty-box")
         assert await session.check() == "claude_busy"
         assert ss.last_free_verdict["proj"][1] == "status_row_working"
@@ -356,29 +360,29 @@ class TestSessionStateSeparatesTurnFromInputBox:
         """session_resend's 'STILL WORKING' warning reads the turn, not the box."""
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=1.0)
         session.screen = _screen("typed-unsent")
-        state = await tools._session_state("aidc-proj-dev", "proj")
-        assert (state.turn, tools._paste_reason(state)) == (tools.TURN_RUNNING, "claude_busy")
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, tn.paste_reason(state)) == (tn.TURN_RUNNING, "claude_busy")
 
     async def test_turn_end_ignores_a_prompt_put_back_in_the_box(self, session, monkeypatch):
         """Esc before output puts the prompt back in the box. session_run's wait for the
         turn to end must not sit out its full timeout on that."""
         async def nosleep(_):
             return None
-        monkeypatch.setattr(tools.asyncio, "sleep", nosleep)
+        monkeypatch.setattr(asyncio, "sleep", nosleep)
         session.write(FINISHED)
         session.screen = _screen("esc-before-output-prompt-restored")
-        assert await tools._wait_for_turn_end("aidc-proj-dev", "proj", timeout=60) == ""
+        assert await tn.wait_for_turn_end("aidc-proj-dev", "proj", timeout=60) == ""
 
     async def test_send_path_waits_for_the_watcher_to_report_the_interrupt(self, session):
         ss.working_indicator_seen.add("proj")
         ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-            state = await tools._session_state("aidc-proj-dev", "proj")
-            assert (state.turn, state.why) == (tools.TURN_RUNNING, "interrupt_not_reported_yet")
-            tools._record_reported_interrupt("proj", "u2")
-            state = await tools._session_state("aidc-proj-dev", "proj")
-            assert (state.turn, state.why) == (tools.TURN_IDLE, "interrupt_reported")
+            state = await tn.session_state("aidc-proj-dev", "proj")
+            assert (state.turn, state.why) == (tn.TURN_RUNNING, "interrupt_not_reported_yet")
+            tn.record_reported_interrupt("proj", "u2")
+            state = await tn.session_state("aidc-proj-dev", "proj")
+            assert (state.turn, state.why) == (tn.TURN_IDLE, "interrupt_reported")
         finally:
             ss.session_watchers.pop("proj", None)
 
@@ -392,7 +396,7 @@ class TestSessionStateSeparatesTurnFromInputBox:
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
             await session.check()                        # learns the session instance
-            tools._record_reported_interrupt("proj", "u2")
+            tn.record_reported_interrupt("proj", "u2")
             ss.reported_interrupts.clear()          # the MCP restarts
             ss.session_instances.clear()
             assert await session.check() == ""
@@ -416,20 +420,20 @@ class TestWatchForEcho:
 
         async def nosleep(_):
             return None
-        monkeypatch.setattr(tools.asyncio, "sleep", nosleep)
+        monkeypatch.setattr(asyncio, "sleep", nosleep)
         session.write(FINISHED)
         ss.sent_awaiting_echo["proj"] = ("lost", NOW)
-        await tools._watch_for_echo("proj", "lost", NOW)
+        await tn.watch_for_echo("proj", "lost", NOW)
         assert "proj" not in ss.sent_awaiting_echo
         [(kind, fields)] = [e for e in logged if e[0] == "session_send_not_seen_in_transcript"]
-        assert fields["waited_s"] == tools._ECHO_WAIT_S
+        assert fields["waited_s"] == tn._ECHO_WAIT_S
 
     async def test_seen_prompt_clears_the_hold_without_logging(self, session, monkeypatch):
         logged = []
         patch_log_event(monkeypatch, lambda kind, **f: logged.append(kind))
         session.write([*FINISHED, _typed("u1", "next", when=ISO_NOW)])
         ss.sent_awaiting_echo["proj"] = ("next", NOW - 1)
-        await tools._watch_for_echo("proj", "next", NOW - 1)
+        await tn.watch_for_echo("proj", "next", NOW - 1)
         assert "proj" not in ss.sent_awaiting_echo
         assert "session_send_not_seen_in_transcript" not in logged
 
@@ -455,7 +459,7 @@ class TestWatchForEcho:
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
                                    "timestamp": ISO_NOW, "content": "next task"}])
         ss.sent_awaiting_echo["proj"] = ("next task", NOW - 1)
-        await tools._watch_for_echo("proj", "next task", NOW - 1)
+        await tn.watch_for_echo("proj", "next task", NOW - 1)
         assert "proj" not in ss.sent_awaiting_echo
         assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 
@@ -465,13 +469,13 @@ class TestWatchForEcho:
         ts.record_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "next task")
         session.write([*FINISHED, _typed("u1", "next task", when=ISO_NOW)])
         ss.sent_awaiting_echo["proj"] = ("next task", NOW - 1)
-        await tools._watch_for_echo("proj", "next task", NOW - 1)
+        await tn.watch_for_echo("proj", "next task", NOW - 1)
         assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 1
 
     async def test_a_later_paste_is_not_cleared_by_an_earlier_watch(self, session):
         session.write(FINISHED)
         ss.sent_awaiting_echo["proj"] = ("second", NOW)
-        await tools._watch_for_echo("proj", "first", NOW - 5)
+        await tn.watch_for_echo("proj", "first", NOW - 5)
         assert ss.sent_awaiting_echo["proj"] == ("second", NOW)
 
 
@@ -479,7 +483,7 @@ class TestEviction:
     def _fill(self):
         ss.working_indicator_seen.add("proj")
         ss.sent_awaiting_echo["proj"] = ("x", NOW)
-        tools._record_reported_interrupt("proj", "u1")
+        tn.record_reported_interrupt("proj", "u1")
         ss.last_free_verdict["proj"] = ("", "log_finished")
 
     def test_unwatching_keeps_the_send_paths_state(self):
@@ -496,7 +500,7 @@ class TestEviction:
         ss.forget_session_send_state("proj")
         assert "proj" not in ss.working_indicator_seen
         assert "proj" not in ss.sent_awaiting_echo
-        assert not tools._interrupt_reported("proj", "u1")
+        assert not tn._interrupt_reported("proj", "u1")
         assert "proj" not in ss.last_free_verdict
 
 
@@ -513,7 +517,7 @@ class TestWaitUntilFree:
             return None
 
         monkeypatch.setattr(tools, "_check_free", check)
-        monkeypatch.setattr(tools.asyncio, "sleep", nosleep)
+        monkeypatch.setattr(asyncio, "sleep", nosleep)
         assert await tools._wait_until_free("c", "proj", timeout=10) == ""
         assert len(calls) == 4
 
@@ -525,7 +529,7 @@ class TestWaitUntilFree:
             return None
 
         monkeypatch.setattr(tools, "_check_free", check)
-        monkeypatch.setattr(tools.asyncio, "sleep", nosleep)
+        monkeypatch.setattr(asyncio, "sleep", nosleep)
         assert await tools._wait_until_free("c", "proj", timeout=3) == "input_has_text"
 
 
@@ -533,12 +537,12 @@ class TestReplyFromTranscript:
     def test_reply_after_the_prompt(self, session):
         session.write([*FINISHED, _typed("u1", "run it"), _reply("a1", "Done."),
                        SUMMARY, DURATION])
-        assert tools._reply_from_transcript("proj", "run it", NOW - 1) == "Done."
+        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == "Done."
 
     def test_an_older_identical_prompt_is_not_the_one(self, session):
         session.write([_typed("u0", "run it", when="2026-09-17T01:00:00.000Z"),
                        _reply("a0", "OLD"), SUMMARY, DURATION])
-        assert tools._reply_from_transcript("proj", "run it", NOW - 1) == ""
+        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == ""
 
     def test_interrupted_reply_carries_the_note(self, session):
         interrupt = {"type": "user", "uuid": "i1", "timestamp": ISO_NOW,
@@ -546,7 +550,7 @@ class TestReplyFromTranscript:
                          {"type": "text", "text": "[Request interrupted by user]"}]}}
         session.write([_typed("u1", "run it"), _reply("a1", "Starting.", stop="tool_use"),
                        interrupt])
-        assert tools._reply_from_transcript("proj", "run it", NOW - 1) == ts.render_delivery(
+        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == ts.render_delivery(
             "Starting.", [], interrupted=True)
 
 
@@ -620,8 +624,8 @@ class TestInterruptedBeforeOutputDelivery:
         for _ in range(3):
             await self.drain(quiet=60.0)
         assert self.posted == []
-        await self.drain(quiet=tools._LOG_STALL_S)
-        await self.drain(quiet=tools._LOG_STALL_S)
+        await self.drain(quiet=tn._LOG_STALL_S)
+        await self.drain(quiet=tn._LOG_STALL_S)
         assert [t.terminal_uuid for t in self.posted] == ["u1"]
 
     async def test_a_restored_prompt_is_reported_without_waiting_for_the_stall_window(
@@ -715,7 +719,7 @@ class TestInterruptedBeforeOutputDelivery:
         assert turn.prompt_origin == "orchestrator"
         assert turn.text == ts.render_delivery("", [], interrupted=True)
         assert ts.consume_sent_prompt(self.state, "sess", "refactor the parser") is False
-        assert tools._interrupt_reported("sess", "u1")
+        assert tn._interrupt_reported("sess", "u1")
 
 
 class TestQueuedPromptOnTheAgentListScreen:
@@ -743,9 +747,9 @@ class TestQueuedPromptOnTheAgentListScreen:
             def cancel(self):
                 pass
 
-        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
-        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(tmx, "load_and_paste", load_paste)
+        monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+        monkeypatch.setattr(asyncio, "sleep", no_wait)
         app = MCPServer("t")
         tools.register(app)
         send = app._tool_manager._tools["session_send"].fn
@@ -805,9 +809,9 @@ class TestSendWhileABackgroundAgentRuns:
             def cancel(self):
                 pass
 
-        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
-        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(tmx, "load_and_paste", load_paste)
+        monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+        monkeypatch.setattr(asyncio, "sleep", no_wait)
         app = MCPServer("t")
         tools.register(app)
         ss.session_watchers["proj"] = Watching()
@@ -988,7 +992,7 @@ class TestSendReturnsWithinItsBound:
             return "claude_busy"
 
         monkeypatch.setattr(tools, "_check_free", slow_check)
-        monkeypatch.setattr(tools, "_FREE_POLL_S", 0.4)
+        monkeypatch.setattr(tn, "FREE_POLL_S", 0.4)
         loop = asyncio.get_running_loop()
         start = loop.time()
         reason = await tools._wait_until_free("c", "proj", timeout=0.6)
@@ -1008,7 +1012,7 @@ class TestSendReturnsWithinItsBound:
             return ""
 
         monkeypatch.setattr(tools, "_check_free", slow_free)
-        monkeypatch.setattr(tools, "_FREE_POLL_S", 0.1)
+        monkeypatch.setattr(tn, "FREE_POLL_S", 0.1)
         assert await tools._wait_until_free("c", "proj", timeout=0.3) == ""
         assert readings == [1, 1]
 
@@ -1077,9 +1081,9 @@ class TestSendDeliverJoin:
             self.logged.append((kind, fields))
             real_log(kind, **fields)
 
-        monkeypatch.setattr(tools, "_load_and_paste", load_paste)
-        monkeypatch.setattr(tools, "_tmux_exec", tmux_exec)
-        monkeypatch.setattr(tools.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(tmx, "load_and_paste", load_paste)
+        monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+        monkeypatch.setattr(asyncio, "sleep", no_wait)
         patch_log_event(monkeypatch, log)
         app = MCPServer("t")
         tools.register(app)
@@ -1209,11 +1213,11 @@ class TestSendDeliverJoin:
     async def test_join_holds_for_an_interrupt_not_reported_yet(self):
         """The watcher reports an Esc pressed before Claude wrote anything from the
         transcript's tail; a prompt pasted on top would bury that report."""
-        state = tools.SessionState(True, classify(_screen("idle-empty")), tools.TURN_RUNNING,
+        state = tn.SessionState(True, classify(_screen("idle-empty")), tn.TURN_RUNNING,
                                    "interrupt_not_reported_yet")
         assert tools._join_refusal("proj", state) == "interrupt_not_reported_yet"
-        busy = tools.SessionState(True, classify(_screen("busy-tool-empty-box")),
-                                  tools.TURN_RUNNING, "log_growing")
+        busy = tn.SessionState(True, classify(_screen("busy-tool-empty-box")),
+                                  tn.TURN_RUNNING, "log_growing")
         assert tools._join_refusal("proj", busy) == ""
 
     async def test_join_holds_a_session_tainted_under_the_lock(self, session, monkeypatch):
@@ -1221,7 +1225,7 @@ class TestSendDeliverJoin:
 
         async def tainted(name):
             return {"at": "2026-10-22T00:00:00Z", "trigger": "blocklist", "domain": "x"}
-        monkeypatch.setattr(tools.sf, "taint_or_none", tainted)
+        monkeypatch.setattr(sf, "taint_or_none", tainted)
         assert await tools._join_running_turn(
             "aidc-proj-dev", "proj", ts.QueuedPrompt(JOIN, ts.now_iso())) == (
             "session_tainted")
@@ -1238,7 +1242,7 @@ class TestPromptHeldByClaudeCode:
                                    "promptSource": "queued", "origin": {"kind": "human"},
                                    "message": {"role": "user", "content": JOIN}}], age=1.0)
         ss.sent_awaiting_echo["proj"] = (JOIN, NOW - 1)
-        await tools._watch_for_echo("proj", JOIN, NOW - 1)
+        await tn.watch_for_echo("proj", JOIN, NOW - 1)
         assert "proj" not in ss.sent_awaiting_echo
         assert ts.sent_prompts_remaining(ss.WATCHER_STATE_DIR, "proj") == 0
 

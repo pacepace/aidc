@@ -470,3 +470,5 @@ The owner's other products and projects are never named in code, tests or docs o
 - 2026-11-25 (3tears SQLite L3 behaviour): yes. The SQLite L3 matches Postgres's rules and errors wherever it can: unique indexes, unique constraints and NOT NULL are enforced, and refusals raise the same asyncpg error types. Where it cannot match, it refuses with a clear error instead of attempting it. Examples: adding a column whose default is the current time to an existing table, and a table change while a transaction is open. This confirms the revised decisions in 3tears build-plan-sqlite-l3.md.
 
 - 2026-11-25 (3tears models and evals drop MCP SDK 1.x): yes. Like 3tears-mcp, 3tears-models and the evals fastmcp extra require mcp 2.x. Projects still on 1.x upgrade before taking the next 3tears release. The change lands with U01 on feat/mcp-drop-sdk1.
+
+- 2026-11-25 (3tears test order): merge the 3tears branches together before running the full integration suite. Each branch gets its unit suite and its own Critic verify. The integration suites (integration, yugabyte, timing) run once, on the branch that merges them all, followed by a cumulative Critic review of that branch.

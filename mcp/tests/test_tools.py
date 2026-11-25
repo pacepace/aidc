@@ -706,6 +706,32 @@ class TestOrchestratorCallbackUrl:
         _write_cfg(monkeypatch, tmp_path, "orchestrator:\n  callback_url: https://new.example.com\n")
         assert tools._orchestrator_callback_url() == "https://new.example.com"
 
+    async def test_the_error_names_a_section_still_holding_callback_url(
+            self, monkeypatch, tmp_path):
+        """A config written before the rename: the error says which section holds the
+        setting and to rename it, on every tool that needs the URL. Still not read."""
+        _write_cfg(monkeypatch, tmp_path,
+                   "mcp:\n  port: 7878\nprevious_name:  # old\n  # where results go\n"
+                   "  callback_url: https://old.example.com\n  send_speaker: true\n")
+        assert tools._orchestrator_callback_url() == ""
+        assert tools._callback_url_misplaced() == "previous_name"
+        res = await _tool("session_invoke_async")(name="proj", prompt="q", conversation_id="c1")
+        assert res["ok"] is False and res["error_code"] == "not_configured"
+        assert "orchestrator.callback_url not set" in res["error"]
+        assert "`previous_name:`" in res["error"]
+        assert "rename that section to `orchestrator:`" in res["error"]
+        res = await _tool("session_watch")(name="proj", conversation_id="c1")
+        assert "`previous_name:`" in res["error"]
+
+    def test_no_hint_when_no_section_holds_callback_url(self, monkeypatch, tmp_path):
+        """Nothing misplaced (no file, an empty orchestrator section, another section's
+        keys): the plain error, no rename hint."""
+        monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "nope.yaml")
+        assert tools._callback_url_unset() == tools.CALLBACK_URL_UNSET
+        _write_cfg(monkeypatch, tmp_path, "mcp:\n  port: 7878\norchestrator:\n  callback_url: \"\"\n")
+        assert tools._callback_url_misplaced() is None
+        assert tools._callback_url_unset() == tools.CALLBACK_URL_UNSET
+
 
 class TestTurnSettleSeconds:
     def test_default_when_absent(self, monkeypatch, tmp_path):

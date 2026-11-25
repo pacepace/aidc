@@ -468,6 +468,23 @@ plain=$(grep -rnE '(^|[^_[:alnum:]])yq (eval|e) ' "$AIDC_ROOT/scripts" \
     | grep -v '^[^:]*/scripts/lib/yq\.sh:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
 eq "no yq eval outside scripts/lib/yq.sh" "" "$plain"
 
+# The orchestrator's settings are read from `orchestrator:` only; a config whose
+# callback_url sits under another section (one written before the rename) is named, so
+# `aidc mcp start` can say which section to rename.
+misplaced() {
+    printf '%b' "$1" > "$SCRATCH/misplaced.yaml"
+    env -i PATH="$TEST_PATH" AIDC_ROOT="$AIDC_ROOT" HOME="$SCRATCH/none" bash -c '
+        . "$AIDC_ROOT/scripts/lib/config.sh"
+        aidc_callback_url_misplaced "$1" || printf "none"' _ "$SCRATCH/misplaced.yaml"
+}
+eq "callback_url under another section is named" "previous_name" \
+    "$(misplaced 'mcp:\n  port: 7878\nprevious_name:   # old\n  # where\n  callback_url: https://o.example\n')"
+eq "under orchestrator: it is not misplaced" "none" \
+    "$(misplaced 'orchestrator:\n  callback_url: https://o.example\n')"
+eq "a top-level callback_url is no section's" "none" \
+    "$(misplaced 'callback_url: https://o.example\n')"
+eq "another section's keys alone are not" "none" "$(misplaced 'mcp:\n  port: 7878\n')"
+
 echo
 echo "config sources: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

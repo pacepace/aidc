@@ -14,7 +14,10 @@ orchestrator project.
   (`callback_url`, `send_speaker`, `turn_settle_seconds`). The readers in `tools.py`
   (`_orchestrator_setting` and its helpers), `session_mcp.py` and `scripts/lib/config.sh` read the
   new name only; there is no fallback to the old one.
-- Every "not set" error names `orchestrator.callback_url`.
+- Every "not set" error names `orchestrator.callback_url`. When another top-level section of
+  the config still holds a `callback_url` (a config written before the rename), the error also
+  names that section and says to rename it, and `aidc mcp start` prints the same warning. The
+  section is still not read.
 - Docs, comments, docstrings, tests and the README now say "the orchestrator" or "an
   orchestrator". The README's sentence that the key keeps its historical name is gone.
 - The 2026-09-17 joint-test log is now `.prawduct/artifacts/joint-test-orchestrator.md`.

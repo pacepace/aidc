@@ -122,7 +122,8 @@ mcp:
                             # mounts your home into the aidc-mcp container. Off, the tool is not
                             # offered at all.
 
-# Only relevant if an orchestrator drives sessions over MCP: where session_invoke_async / session_send POST results back.
+# Only relevant if an orchestrator drives sessions over MCP: where session_invoke_async /
+# session_send POST results back.
 orchestrator:
   callback_url: ""           # base URL of the orchestrator's callback endpoint, e.g. https://orchestrator.example.com
   send_speaker: false        # add "speaker": "human"|"agent" to session_send replies. Leave off until
@@ -683,6 +684,24 @@ _aidc_global_config_file() {
     elif [ -f "$mcp_cfg" ]; then
         printf '%s' "$mcp_cfg"
     fi
+}
+
+# aidc_callback_url_misplaced [file]: the top-level section, other than `orchestrator:`, that
+# holds a callback_url key (a config written before the section was renamed), echoed; returns
+# 1 when there is none. aidc-mcp reads only `orchestrator:` (no fallback), so `aidc mcp start`
+# warns with this instead of starting a server whose callbacks all fail.
+aidc_callback_url_misplaced() {
+    local file="${1:-$(_aidc_global_config_file)}"
+    [ -n "$file" ] && [ -f "$file" ] || return 1
+    local section
+    section=$(awk '
+        /^[[:space:]]*(#|$)/ { next }
+        /^[^[:space:]]/ { s = $0; sub(/[[:space:]]*(#.*)?$/, "", s)
+                          if (s ~ /:$/) { sub(/:$/, "", s); sec = s } else sec = ""; next }
+        sec != "" && sec != "orchestrator" && $1 == "callback_url:" { print sec; exit }
+    ' "$file")
+    [ -n "$section" ] || return 1
+    printf '%s\n' "$section"
 }
 
 mcp_load_settings() {

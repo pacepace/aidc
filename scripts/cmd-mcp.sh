@@ -94,6 +94,12 @@ mcp_start() {
     # meta.json there; AIDC_MCP_MOUNTS (below) tells it which host path that mount is.
     load_config
     mkdir -p "$AIDC_AUDIT_DIR"
+    local misplaced
+    if misplaced=$(aidc_callback_url_misplaced); then
+        err "callback_url is under \`${misplaced}:\` in ~/.config/aidc/config.yaml, which aidc-mcp does not read:"
+        err "rename that section to \`orchestrator:\` (keys unchanged), or every callback fails with"
+        err "'orchestrator.callback_url not set'"
+    fi
 
     ensure_image mcp   # inventory-driven build-if-missing (lib/common.sh)
 

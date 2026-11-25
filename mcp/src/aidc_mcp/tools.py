@@ -159,6 +159,37 @@ def _orchestrator_callback_url() -> str:
     return (_orchestrator_setting("callback_url") or "").rstrip("/")
 
 
+def _callback_url_misplaced() -> str | None:
+    """The top-level section, other than `orchestrator:`, that holds a `callback_url` key,
+    or None. A config written before the section was renamed still has its settings under
+    the former name; they are not read (no fallback), but the error says where they are."""
+    if not _CONFIG_PATH.exists():
+        return None
+    section = None
+    for line in _CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0:1].isspace():
+            head = stripped.split("#", 1)[0].rstrip()
+            section = head[:-1] if head.endswith(":") else None
+            continue
+        if section and section != ORCHESTRATOR_SECTION and stripped.startswith("callback_url:"):
+            return section
+    return None
+
+
+def _callback_url_unset() -> str:
+    """The error for a missing orchestrator.callback_url, naming the section to rename when
+    the settings sit under another one."""
+    misplaced = _callback_url_misplaced()
+    if misplaced is None:
+        return CALLBACK_URL_UNSET
+    return (f"{CALLBACK_URL_UNSET}: callback_url is under `{misplaced}:`, which is not read; "
+            f"rename that section to `{ORCHESTRATOR_SECTION}:` (keys unchanged) "
+            "and restart aidc-mcp")
+
+
 def _orchestrator_send_speaker() -> bool:
     """Read orchestrator.send_speaker (default false). Off until the orchestrator records a
     `speaker: "human"` turn instead of dropping it (design 10 D4)."""
@@ -2994,7 +3025,8 @@ def _session_mcp_refusal(exc: session_mcp.SessionMcpError) -> dict[str, Any]:
     if exc.code == "invalid_argument":
         return _envelope_err(said, code="invalid_argument")
     if exc.code == "not_configured":
-        return _envelope_err(said, code="not_configured")
+        # Its one cause is a missing callback URL; say where a misplaced one sits.
+        return _envelope_err(_callback_url_unset(), code="not_configured")
     if exc.code == "no_such_session":
         return _envelope_err(said, code="no_such_session")
     if exc.code == "session_not_ready":
@@ -3624,7 +3656,7 @@ def register(app: Any) -> None:
         base_url = _orchestrator_callback_url()
         if not base_url:
             return _envelope_err(
-                CALLBACK_URL_UNSET,
+                _callback_url_unset(),
                 code="not_configured",
             )
 
@@ -3863,8 +3895,7 @@ def register(app: Any) -> None:
                 )
             elif not base_url:
                 no_watch_reason = (
-                    "orchestrator.callback_url is not set in ~/.config/aidc/config.yaml, "
-                    "so replies have nowhere to be POSTed"
+                    f"{_callback_url_unset()}; replies have nowhere to be POSTed"
                 )
             else:
                 await _start_watcher(app, name, conversation_id, base_url, ctx)
@@ -4187,7 +4218,7 @@ def register(app: Any) -> None:
         """
         base_url = _orchestrator_callback_url()
         if not base_url:
-            return _envelope_err(CALLBACK_URL_UNSET,
+            return _envelope_err(_callback_url_unset(),
                                  code="not_configured")
         if not conversation_id:
             return _envelope_err(
@@ -4254,7 +4285,7 @@ def register(app: Any) -> None:
             )
         base_url = _orchestrator_callback_url()
         if not base_url:
-            return _envelope_err(CALLBACK_URL_UNSET,
+            return _envelope_err(_callback_url_unset(),
                                  code="not_configured")
         log_event("tool_call", tool="session_resend", session=name,
                   conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)

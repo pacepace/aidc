@@ -442,3 +442,7 @@ Before the 2.0 features are added upstream (call context, progress, error model,
 ## 2026-11-25 — The 3tears packages are exempt from the 14-day cooldown (REL-09)
 
 The owner's own 3tears packages, reviewed in their own repo, may be adopted as soon as they are released. When aidc first depends on them (build-plan-3tears-adoption chunk 01), each 3tears package gets an `exclude-newer-package` entry in `mcp/pyproject.toml` with this reason beside it; every other dependency keeps the 14-day wait.
+
+## 2026-11-25 — Tool names: plain on the MCP face, `aidc.` on the mesh (TRS-15)
+
+Chosen on long-term merit, not compatibility. In MCP the server is the namespace (clients already prefix by server name, and the model APIs reject dots), so the local MCP face keeps plain names (`session_send`). The 3tears mesh has one shared registry with no server namespace, so the mesh face uses `aidc.<tool>`. `published-tools.json` records both names for every tool.

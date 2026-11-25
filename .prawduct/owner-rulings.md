@@ -446,3 +446,7 @@ The owner's own 3tears packages, reviewed in their own repo, may be adopted as s
 ## 2026-11-25 — Tool names: plain on the MCP face, `aidc.` on the mesh (TRS-15)
 
 Chosen on long-term merit, not compatibility. In MCP the server is the namespace (clients already prefix by server name, and the model APIs reject dots), so the local MCP face keeps plain names (`session_send`). The 3tears mesh has one shared registry with no server namespace, so the mesh face uses `aidc.<tool>`. `published-tools.json` records both names for every tool.
+
+## 2026-11-25 — No HTTP API face in 2.0, but keep it easy to add (TRS-18)
+
+The local server does not serve an HTTP API in 2.0 (upstream U10 and adoption chunk 06 drop out) unless something turns out to need it. The design keeps adding it cheap: the tools stay TearsTools over the service layer with no MCP types, so an API face would be one more face over the same instances.

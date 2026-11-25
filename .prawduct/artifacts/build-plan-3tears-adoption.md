@@ -94,7 +94,7 @@ verify-api against the released source.
 | design-13 Q4 | Durable state: an L1-on-a-file 3tears store (U11, TRS-25 A), or aidc's files (TRS-25 B)? | 07 (and U11) |
 | design-13 Q5 | Answered 2026-11-25: drop SDK 1.x first (U01). | — |
 | REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 01 |
-| TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) |
+| TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) — answered 2026-11-25: no API in 2.0; U10 and chunk 06 dropped, kept addable |
 | Q-K1 | How a user adds a Claude account to the broker. | 17 |
 | W-K0-03 / Q-M5 | Does paste+Enter answer AskUserQuestion? If not, the key sequence (§5 decision). | 14 |
 
@@ -212,7 +212,7 @@ Order follows design-13 "Upstream work".
   export off; `/prawduct:critic`; committed.
 - **Owner's hands:** none.
 
-### Chunk 06: The HTTP API face
+### Chunk 06: The HTTP API face — NOT IN 2.0 (owner ruling 2026-11-25: no API yet; keep it addable as another face over the same TearsTools)
 
 - **Description:** Serve each tool as one POST with the same bearer and envelope, in local mode.
 - **Depends on:** 05; gate TRS-18; U10 released.

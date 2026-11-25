@@ -66,7 +66,11 @@ k8s_expose_check() {
 }
 
 # k8s_expose_taken <namespace> <host>: 0 (printing where) when another Ingress already serves
-# <host>, in the user's namespace or (when this user may read them) any other.
+# <host>, in the user's namespace or (when these credentials may list them: an admin's) any
+# other. A user's own credentials may not list other namespaces' Ingresses (that would show
+# every user's page names), so for them only their own namespace is read: the admission policy
+# (manifests.sh, k8s_render_user_shared) already keeps another user's Ingress off this user's
+# page names.
 k8s_expose_taken() {
     local out
     for scope in "-n $1" "-A"; do
@@ -84,8 +88,44 @@ k8s_htpasswd_line() {
     printf '%s:%s' "$1" "$(printf '%s' "$2" | openssl passwd -apr1 -stdin)"
 }
 
-# k8s_render_expose <session> <login-secret-htpasswd or ""> <port>...: the Service, the ingress
-# NetworkPolicy, the login (when given) and an Ingress per port.
+# k8s_render_expose_login <session> <htpasswd>: the page's login, for `kubectl create` (made
+# once, removed by name: a user may make and delete Secrets but not read them): a Secret with the
+# htpasswd hash, and on Traefik the basicAuth Middleware that reads it.
+k8s_render_expose_login() {
+    local s="$1" htpasswd="$2" ns labels key=auth
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, aidc/session: ${s}"
+    [ "$AIDC_K8S_INGRESS_CONTROLLER" = traefik ] && key=users
+    cat <<EOF
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: ${s}-login, namespace: ${ns}, labels: {${labels}, app: expose}}
+type: Opaque
+stringData: {${key}: $(jq -n --arg v "$htpasswd" '$v')}
+EOF
+    [ "$AIDC_K8S_INGRESS_CONTROLLER" = traefik ] || return 0
+    cat <<EOF
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: ${s}-login, namespace: ${ns}, labels: {${labels}, app: expose}}
+spec:
+  basicAuth: {secret: ${s}-login, realm: ${s}}
+EOF
+}
+
+# k8s_expose_login_remove <namespace> <session>: the page's login, by name (no read needed). The
+# Middleware kind exists only where Traefik's CRDs are installed, so its removal may fail
+# without meaning anything. Not waited for: waiting reads the object, which a user may not.
+k8s_expose_login_remove() {
+    k8s_kubectl -n "$1" delete middlewares.traefik.io "${2}-login" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    k8s_kubectl -n "$1" delete secret "${2}-login" --ignore-not-found --wait=false >/dev/null
+}
+
+# k8s_render_expose <session> <htpasswd or ""> <port>...: the Service, the ingress
+# NetworkPolicy and an Ingress per port, behind the login when one is given (its Secret and
+# Middleware come from k8s_render_expose_login).
 k8s_render_expose() {
     local s="$1" htpasswd="$2" ns labels p first=1 host svc_ports="" pol_ports="" ann tls
     shift 2
@@ -123,32 +163,8 @@ EOF
     ann=""
     if [ -n "$htpasswd" ]; then
         case "$AIDC_K8S_INGRESS_CONTROLLER" in
-            traefik)
-                cat <<EOF
----
-apiVersion: v1
-kind: Secret
-metadata: {name: ${s}-login, namespace: ${ns}, labels: {${labels}, app: expose}}
-type: Opaque
-stringData: {users: $(jq -n --arg v "$htpasswd" '$v')}
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata: {name: ${s}-login, namespace: ${ns}, labels: {${labels}, app: expose}}
-spec:
-  basicAuth: {secret: ${s}-login, realm: ${s}}
-EOF
-                ann="traefik.ingress.kubernetes.io/router.middlewares: ${ns}-${s}-login@kubernetescrd" ;;
-            ingress-nginx)
-                cat <<EOF
----
-apiVersion: v1
-kind: Secret
-metadata: {name: ${s}-login, namespace: ${ns}, labels: {${labels}, app: expose}}
-type: Opaque
-stringData: {auth: $(jq -n --arg v "$htpasswd" '$v')}
-EOF
-                ann="nginx.ingress.kubernetes.io/auth-type: basic, nginx.ingress.kubernetes.io/auth-secret: ${s}-login, nginx.ingress.kubernetes.io/auth-realm: ${s}" ;;
+            traefik) ann="traefik.ingress.kubernetes.io/router.middlewares: ${ns}-${s}-login@kubernetescrd" ;;
+            ingress-nginx) ann="nginx.ingress.kubernetes.io/auth-type: basic, nginx.ingress.kubernetes.io/auth-secret: ${s}-login, nginx.ingress.kubernetes.io/auth-realm: ${s}" ;;
         esac
     fi
     [ -z "$AIDC_K8S_INGRESS_CLUSTER_ISSUER" ] || ann="${ann:+${ann}, }cert-manager.io/cluster-issuer: ${AIDC_K8S_INGRESS_CLUSTER_ISSUER}"
@@ -226,15 +242,15 @@ k8s_exposed() {
         | join(" ")' | sort -n
 }
 
-# k8s_expose_remove <namespace> <session>: what --expose made (the Ingresses, Service, policy,
-# login and any certificate cert-manager made for it). The Middleware kind exists only where
-# Traefik's CRDs are installed, so its removal may fail without meaning anything.
+# k8s_expose_remove <namespace> <session>: what --expose made (the Ingresses, the login, and any
+# certificate cert-manager made for them; the Service and policy go with the session's others).
+# Secrets are removed by name: the login's, and the certificates the Ingresses name.
 k8s_expose_remove() {
     local ns="$1" s="$2" certs
     certs=$(k8s_kubectl -n "$ns" get ingress -l "aidc/session=${s},app=expose" -o json 2>/dev/null \
         | jq -r '.items[] | select(.metadata.annotations["cert-manager.io/cluster-issuer"]) | .spec.tls[]?.secretName // empty' 2>/dev/null || true)
-    k8s_kubectl -n "$ns" delete ingress,secret -l "aidc/session=${s},app=expose" --ignore-not-found >&2 || return 1
-    k8s_kubectl -n "$ns" delete middlewares.traefik.io -l "aidc/session=${s},app=expose" --ignore-not-found >/dev/null 2>&1 || true
+    k8s_kubectl -n "$ns" delete ingress -l "aidc/session=${s},app=expose" --ignore-not-found >&2 || return 1
+    k8s_expose_login_remove "$ns" "$s" || return 1
     # shellcheck disable=SC2086  # one secret name per word
-    [ -z "$certs" ] || k8s_kubectl -n "$ns" delete secret $certs --ignore-not-found >&2 || true
+    [ -z "$certs" ] || k8s_kubectl -n "$ns" delete secret $certs --ignore-not-found --wait=false >&2 || true
 }

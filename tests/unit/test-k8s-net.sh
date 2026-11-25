@@ -62,7 +62,10 @@ assert_not_has() {
 # K_EXISTS=1 the session demo exists (its dev StatefulSet). K_RELAY_LEFT=1 a relay Deployment of
 # demo is left (app=egress). The workload lookup honours the selector's `app in (...)` clause, as
 # the API does. K_LEFT what clean-env's listing answers. K_EXPOSE_JSON what the session's pages
-# read answers. K_PF_BUSY=1 port-forward cannot listen.
+# read answers. K_PF_BUSY=1 port-forward cannot listen. K_INGRESS_HOSTS: a host an Ingress
+# serves, in namespace K_INGRESS_NS (default other); K_INGRESS_A=forbidden: listing Ingresses in
+# every namespace is refused (a user's credentials). K_CANI_SVC=no: the credentials may not
+# list another namespace's Services (no aidc user allow-network).
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -76,7 +79,16 @@ pick() {
     done
 }
 ARGS="$*"
+ingress_json() {
+    if [ -n "${K_INGRESS_HOSTS:-}" ]; then
+        echo "{\"items\":[{\"metadata\":{\"namespace\":\"${K_INGRESS_NS:-other}\",\"name\":\"site\"},\"spec\":{\"rules\":[{\"host\":\"${K_INGRESS_HOSTS}\"}]}}]}"
+    else echo '{"items":[]}'; fi
+}
 case "$*" in
+    *"auth can-i list services -n "*) echo "${K_CANI_SVC:-yes}"; [ "${K_CANI_SVC:-yes}" = yes ] ;;
+    *"-A get ingress"*) [ "${K_INGRESS_A:-}" = forbidden ] && { echo 'Error from server (Forbidden): ingresses.networking.k8s.io is forbidden' >&2; exit 1; }
+        ingress_json ;;
+    *"-n ${K_INGRESS_NS:-other} get ingress -o json"*) ingress_json ;;
     *"get statefulset demo-dev --ignore-not-found -o name"*)
         [ -e "$K_STATE/sts_fail" ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -e "$K_STATE/sts_gone" ] || echo "statefulset.apps/demo-dev" ;;
@@ -88,7 +100,7 @@ case "$*" in
     *"get deployment,statefulset -l aidc/session=demo"*)
         { [ "${K_EXISTS:-}" = 1 ] && echo "dev statefulset.apps/demo-dev"
           [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
-    *"get deployment,service,networkpolicy,configmap,ingress,secret,pvc -l aidc/session=demo "*) printf '%s' "${K_LEFT:-}" ;;
+    *"get deployment,service,networkpolicy,configmap,ingress,pvc -l aidc/session=demo "*) printf '%s' "${K_LEFT:-}" ;;
     *"get pvc -l aidc/session=demo,aidc/kept=audit -o name"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
     *"get ingress -l aidc/session=demo,app=expose -o json"*) printf '%s' "${K_EXPOSE_JSON:-}" ;;
     *"get ingress demo-expose-"*"loadBalancer"*) printf '%s' "${K_LB:-}" ;;
@@ -117,7 +129,7 @@ case "$*" in
         exec sleep 300 ;;
     *"get pvc disk"*) printf 'Bound' ;;
     *"get networkpolicy default-deny"*) echo "networkpolicy.networking.k8s.io/default-deny" ;;
-    *"get ingress"*) [ -n "${K_INGRESS_HOSTS:-}" ] && echo "{\"items\":[{\"metadata\":{\"namespace\":\"other\",\"name\":\"site\"},\"spec\":{\"rules\":[{\"host\":\"${K_INGRESS_HOSTS}\"}]}}]}" || echo '{"items":[]}' ;;
+    *"get ingress"*) echo '{"items":[]}' ;;
 esac
 exit 0
 STUB
@@ -277,15 +289,20 @@ line=$(k8s_htpasswd_line u1 s3cret)
 case "$line" in 'u1:$apr1$'*) echo "  PASS: the login is kept as an apr1 hash"; PASS=$((PASS + 1)) ;; *) echo "  FAIL: apr1 hash ($line)"; FAIL=$((FAIL + 1)) ;; esac
 assert_not_has "  never the password" "s3cret" "$line"
 e=$(k8s_render_expose demo "$line" 8080)
+l=$(k8s_render_expose_login demo "$line")
 assert_eq "Traefik: a basicAuth Middleware on the login Secret" '{"secret":"demo-login","realm":"demo"}' \
-    "$(yj 'select(.kind == "Middleware") | .spec.basicAuth' "$e")"
+    "$(yj 'select(.kind == "Middleware") | .spec.basicAuth' "$l")"
 assert_eq "  the Ingress goes through it" '"aidc-u-alice-demo-login@kubernetescrd"' \
     "$(yj 'select(.kind == "Ingress") | .metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]' "$e")"
-assert_eq "  the Secret holds the hash" "\"$line\"" "$(yj 'select(.kind == "Secret") | .stringData.users' "$e" | sed 's/\\\$/$/g')"
+assert_eq "  the Secret holds the hash" "\"$line\"" "$(yj 'select(.kind == "Secret") | .stringData.users' "$l" | sed 's/\\\$/$/g')"
+assert_eq "  the login is made apart from the pages (create, not apply: a user may not read Secrets)" "" \
+    "$(yj 'select(.kind == "Secret" or .kind == "Middleware") | .kind' "$e")"
 e=$(AIDC_K8S_INGRESS_CONTROLLER=ingress-nginx AIDC_K8S_INGRESS_TLS_SECRET=wild k8s_render_expose demo "$line" 8080)
+l=$(AIDC_K8S_INGRESS_CONTROLLER=ingress-nginx k8s_render_expose_login demo "$line")
 assert_eq "ingress-nginx: its auth annotations on the login Secret" '["basic","demo-login"]' \
     "$(yj 'select(.kind == "Ingress") | [.metadata.annotations["nginx.ingress.kubernetes.io/auth-type"], .metadata.annotations["nginx.ingress.kubernetes.io/auth-secret"]]' "$e")"
-assert_eq "  and no Traefik Middleware" "" "$(yj 'select(.kind == "Middleware") | .kind' "$e")"
+assert_eq "  the Secret holds the hash under auth" "\"$line\"" "$(yj 'select(.kind == "Secret") | .stringData.auth' "$l" | sed 's/\\\$/$/g')"
+assert_eq "  and no Traefik Middleware" "" "$(yj 'select(.kind == "Middleware") | .kind' "$l")"
 assert_eq "a TLS Secret named in the config is used" '[{"hosts":["demo-alice.pages.example.org"],"secretName":"wild"}]' \
     "$(yj 'select(.kind == "Ingress") | .spec.tls' "$e")"
 e=$(AIDC_K8S_INGRESS_CLUSTER_ISSUER=letsencrypt k8s_render_expose demo "" 8080)
@@ -445,6 +462,11 @@ out=$(K_EXISTS=1 run network demo add kube-system)
 assert_has "a system namespace is refused" "refusing kube-system" "$out"
 out=$(K_EXISTS=1 run network demo add aidc-u-alice)
 assert_has "the user's own namespace (the git login, other sessions) is refused" "refusing aidc-u-alice" "$out"
+: > "$K_APPLIED"
+out=$(K_EXISTS=1 K_CANI_SVC=no run network demo add shop)
+assert_has "add of a namespace the credentials may not read is refused, naming the admin's grant" \
+    "your credentials may not read the Services of shop: an admin grants it with \`aidc user allow-network alice shop\`" "$out"
+assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
 out=$(K_EXISTS=1 run network demo add shop)
 assert_has "add lets the session reach the namespace" "network: demo -> every pod of shop, any port" "$out"
 assert_has "  says it bypasses squid" "NOT proxied by squid" "$out"
@@ -485,6 +507,21 @@ assert_has "a loopback --egress-tcp is refused before anything is made" "is loop
 out=$(K_INGRESS_HOSTS=demo-alice.pages.example.org crun --expose 8080)
 assert_has "a page name another Ingress serves is refused, saying which" "already served by ingress other/site" "$out"
 assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
+# The clash check with a user's own credentials, which may not list other namespaces' Ingresses
+# (not granted: it would show every user's page names). Their own namespace is still read; the
+# admission policy keeps other users' Ingresses off their names.
+: > "$K_LOG"
+got=$(K_INGRESS_HOSTS=demo-alice.pages.example.org K_INGRESS_NS=aidc-u-alice K_INGRESS_A=forbidden k8s_expose_taken aidc-u-alice demo-alice.pages.example.org); rc=$?
+assert_eq "user credentials: a clash in their own namespace is found" "0 aidc-u-alice/site" "$rc $got"
+got=$(K_INGRESS_HOSTS=demo-alice.pages.example.org K_INGRESS_A=forbidden k8s_expose_taken aidc-u-alice demo-alice.pages.example.org 2>&1); rc=$?
+assert_eq "user credentials: every namespace cannot be read, so the check skips it without failing" "1 " "$rc $got"
+assert_has "  (it was asked)" "-A get ingress" "$(cat "$K_LOG")"
+got=$(K_INGRESS_HOSTS=demo-alice.pages.example.org k8s_expose_taken aidc-u-alice demo-alice.pages.example.org); rc=$?
+assert_eq "admin credentials: a clash in another namespace is found" "0 other/site" "$rc $got"
+out=$(K_CANI_SVC=no crun --network shop)
+assert_has "a --network namespace the credentials may not read is refused, naming the admin's grant" \
+    "aidc user allow-network alice shop" "$out"
+assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
 sed -i '/ingress:/d' "$HOME/.config/aidc/config.yaml"
 out=$(crun --expose 8080)
 assert_has "--expose with no ingress in the config is refused" "kubernetes.ingress.domain" "$out"
@@ -518,9 +555,10 @@ done
 out=$( (cd "$HOME" && printf 'y\n' | K_RELAY_LEFT=1 "$AIDC_ROOT/scripts/aidc" clean-env demo --backend kubernetes 2>&1); echo "exit=$?")
 assert_has "a session whose relay alone is left is not 'running': y removes what is left" "removed what demo left behind" "$out"
 assert_eq "  exactly these deletes: the pages, login, certificate, then the session's objects, then its claims but the kept audit one" \
-"-n aidc-u-alice delete ingress,secret -l aidc/session=demo,app=expose --ignore-not-found
--n aidc-u-alice delete middlewares.traefik.io -l aidc/session=demo,app=expose --ignore-not-found
--n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found
+"-n aidc-u-alice delete ingress -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete middlewares.traefik.io demo-login --ignore-not-found --wait=false
+-n aidc-u-alice delete secret demo-login --ignore-not-found --wait=false
+-n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found --wait=false
 -n aidc-u-alice delete deployment,service,networkpolicy,configmap -l aidc/session=demo --ignore-not-found
 -n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --ignore-not-found --wait=false" \
     "$(grep ' delete ' "$K_LOG")"
@@ -536,9 +574,10 @@ assert_has "kill says which tunnels it stopped" "stopped this machine's tunnels 
 assert_eq "  the supervisor is gone" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
 assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
 assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one" \
-"-n aidc-u-alice delete ingress,secret -l aidc/session=demo,app=expose --ignore-not-found
--n aidc-u-alice delete middlewares.traefik.io -l aidc/session=demo,app=expose --ignore-not-found
--n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found
+"-n aidc-u-alice delete ingress -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete middlewares.traefik.io demo-login --ignore-not-found --wait=false
+-n aidc-u-alice delete secret demo-login --ignore-not-found --wait=false
+-n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found --wait=false
 -n aidc-u-alice delete statefulset,deployment,service,networkpolicy,configmap -l aidc/session=demo --wait=true
 -n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --wait=false" \
     "$(grep ' delete ' "$K_LOG")"

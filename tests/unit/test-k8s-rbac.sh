@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Keeps a user's Role in step with aidc's scripts (scripts/k8s/manifests.sh, K8S_USER_RULES and
-# K8S_USER_CLUSTER_RULES; docs/design-12-kubernetes.md, "Users and credentials").
+# Keeps a user's Role in step with aidc's scripts (scripts/k8s/manifests.sh, K8S_USER_RULES,
+# K8S_USER_CLUSTER_RULES and K8S_NETWORK_RULES; docs/design-12-kubernetes.md, "Users and
+# credentials").
 #
 # Reads every kubectl call in scripts/ (all go through k8s_kubectl), works out the API resource
 # and RBAC verb each one needs, and fails when:
@@ -9,9 +10,15 @@
 #   - the rules grant a (resource, verb) no call uses and no reason below names (the Role grows
 #     beyond what aidc does);
 #   - a call cannot be read (a new form this test does not know): it must be taught, not skipped;
-#   - the MCP's rules grant anything the user's do not;
+#   - a call into another namespace (--network) needs what the network grant does not give, or
+#     the grant gives what no such call uses;
+#   - the MCP's rules grant anything the user's do not (on a cluster with or without
+#     ValidatingAdmissionPolicy);
+#   - a grant decided against is made: listing Ingresses cluster-wide;
 #   - kubectl is called directly instead of through k8s_kubectl.
-# What `kubectl apply` makes comes from rendering each manifest function, not from a list.
+# Calls through lib.sh's k8s_get (and session-create's k8s_read on top of it) are read as the
+# `kubectl get` they make. What `kubectl apply` and `kubectl create -f -` make comes from
+# rendering each manifest function, not from a list.
 #
 # Needs python3, yq and jq; skips without them.
 
@@ -33,15 +40,24 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
 # shellcheck disable=SC1091,SC2034
 (
     . "$AIDC_ROOT/scripts/k8s/lib.sh"; . "$AIDC_ROOT/scripts/k8s/manifests.sh"; k8s_load_settings
-    AIDC_VERSION_TAG="test"
-    kinds() { yq ea -N '.kind' - | sort -u | paste -sd, -; }
+    . "$AIDC_ROOT/scripts/k8s/net.sh"; . "$AIDC_ROOT/scripts/k8s/expose.sh"
+    AIDC_VERSION_TAG="test" AIDC_K8S_INGRESS_DOMAIN=pages.example.org AIDC_K8S_INGRESS_CLASS=c
+    AIDC_K8S_INGRESS_CONTROLLER_NS=ing AIDC_K8S_INGRESS_CONTROLLER_LABELS='{"app":"ing"}'
+    kinds() { yq ea -N '.kind' - | grep -v '^null$' | sort -u | paste -sd, -; }
+    # Every controller's form: the kinds either may make.
+    controllers() { local c; for c in traefik ingress-nginx; do AIDC_K8S_INGRESS_CONTROLLER=$c "$@"; done; }
     {
-        printf 'RULES user\n%s\nRULES user-cluster\n%s\nRULES mcp\n%s\nRULES mcp-cluster\n%s\n' \
-            "$K8S_USER_RULES" "$K8S_USER_CLUSTER_RULES" "$K8S_MCP_RULES" "$K8S_MCP_CLUSTER_RULES"
+        printf 'RULES user\n%s\nRULES user-novap\n%s\nRULES user-cluster\n%s\nRULES mcp\n%s\nRULES mcp-cluster\n%s\nRULES network\n%s\n' \
+            "$K8S_USER_RULES" "$(k8s_user_rules no-vap)" "$K8S_USER_CLUSTER_RULES" "$K8S_MCP_RULES" \
+            "$K8S_MCP_CLUSTER_RULES" "$K8S_NETWORK_RULES"
         printf 'RENDER k8s_render_session %s\n' "$(k8s_render_session s1 /home/alice/r default '{}' s1-audit-1 10.0.0.1 | kinds)"
         printf 'RENDER k8s_render_git %s\n' "$(k8s_render_git '{}' | kinds)"
         printf 'RENDER k8s_render_repo_dir %s\n' "$(k8s_render_repo_dir p /home/alice/r make '{}' | kinds)"
         printf 'RENDER k8s_render_git_repos %s\n' "$(k8s_render_git_repos aidc-u-alice 'a/b' | yq -p=json '.kind')"
+        printf 'RENDER k8s_render_relay %s\n' "$(k8s_render_relay s1 db.example.org 192.0.2.7 declared s1-audit-1 '{}' 5432 | kinds)"
+        printf 'RENDER k8s_render_network %s\n' "$(k8s_render_network s1 shop | kinds)"
+        printf 'RENDER k8s_render_expose %s\n' "$(controllers k8s_render_expose s1 'u:$apr1$x' 8080 9090 | kinds)"
+        printf 'RENDER k8s_render_expose_login %s\n' "$(controllers k8s_render_expose_login s1 'u:$apr1$x' | kinds)"
     } > "$SCRATCH/facts"
 )
 
@@ -57,7 +73,7 @@ for line in open(facts_path):
     if line.startswith("RULES "):
         cur = line.split()[1]; rules[cur] = set(); continue
     if line.startswith("RENDER "):
-        _, fn, kinds = line.split(" ", 2); renders[fn] = [k for k in kinds.split(",") if k]; cur = None; continue
+        f = line.split(" ", 2); renders[f[1]] = [k for k in (f[2] if len(f) > 2 else "").split(",") if k]; cur = None; continue
     if cur and line.strip():
         f = line.split()
         g = "" if f[0] == "core" else f[0]
@@ -66,7 +82,8 @@ for line in open(facts_path):
 
 KIND = {"Pod": "pods", "Service": "services", "ConfigMap": "configmaps",
         "PersistentVolumeClaim": "persistentvolumeclaims", "Deployment": "deployments",
-        "StatefulSet": "statefulsets", "NetworkPolicy": "networkpolicies"}
+        "StatefulSet": "statefulsets", "NetworkPolicy": "networkpolicies", "Ingress": "ingresses",
+        "Secret": "secrets", "Middleware": "middlewares"}
 ALIAS = {"pod": "pods", "pods": "pods", "pvc": "persistentvolumeclaims",
          "persistentvolumeclaims": "persistentvolumeclaims", "pv": "persistentvolumes",
          "service": "services", "services": "services", "svc": "services",
@@ -74,21 +91,41 @@ ALIAS = {"pod": "pods", "pods": "pods", "pvc": "persistentvolumeclaims",
          "deployments": "deployments", "statefulset": "statefulsets", "statefulsets": "statefulsets",
          "networkpolicy": "networkpolicies", "networkpolicies": "networkpolicies",
          "runtimeclass": "runtimeclasses", "storageclass": "storageclasses", "nodes": "nodes",
-         "node": "nodes", "events": "events"}
-CLUSTER = {"nodes", "persistentvolumes", "runtimeclasses", "storageclasses"}
+         "node": "nodes", "events": "events", "ingress": "ingresses", "ingresses": "ingresses",
+         "ingressclass": "ingressclasses", "secret": "secrets", "secrets": "secrets",
+         "middlewares.traefik.io": "middlewares"}
+CLUSTER = {"nodes", "persistentvolumes", "runtimeclasses", "storageclasses", "ingressclasses"}
 
 # Calls only an admin makes (they set up the cluster, users and the system namespace), or that
 # go to the system namespace and degrade to a note without the right (aidc k8s check).
-ADMIN_FILES = {"k8s/user-add.sh", "k8s/user-remove.sh", "k8s/k8s-setup.sh", "k8s/k8s-build.sh"}
+ADMIN_FILES = {"k8s/user-add.sh", "k8s/user-remove.sh", "k8s/k8s-setup.sh", "k8s/k8s-build.sh",
+               "k8s/user-allow-network.sh"}
 ADMIN_LINES = [("k8s/user-creds.sh", "delete serviceaccount"),       # --revoke
                ("k8s/user-creds.sh", "k8s_render_user_access"),      # --revoke
                ("k8s/k8s-check.sh", '-n "$sys_ns"')]                 # the registry
 # Calls whose resource is a variable, resolved here by hand (file, text in the call) -> needs.
 DECLARED = {
-    ("k8s/session-create.sh", 'get "$@"'): [("persistentvolumeclaims", "get"), ("networkpolicies", "get"), ("deployments", "get")],
+    # k8s_expose_taken: the user's own namespace ("-n $1"), then every namespace ("-A"), which a
+    # user may not list (NOT_GRANTED) and the check skips.
+    ("k8s/expose.sh", "k8s_kubectl $scope get ingress"): [("ingresses", "list")],
     ("k8s/lib.sh", 'k8s_kubectl "$verb" -f -'): [("configmaps", "create"), ("configmaps", "update")],
     ("k8s/session-kill.sh", 'annotate "$audit"'): [("persistentvolumeclaims", "get"), ("persistentvolumeclaims", "patch")],
     ("k8s/session-logs.sh", 'logs ${FOLLOW[@]+"${FOLLOW[@]}"} "$target"'): [("pods", "get"), ("pods/log", "get")],
+}
+# The wrappers' own bodies: their callers are read instead.
+WRAPPER_BODIES = [("k8s/lib.sh", 'k8s_kubectl -n "$ns" get "$@"'), ("k8s/session-create.sh", 'k8s_get "$ns" "$@"')]
+# Wrapper -> how many words come before the `kubectl get` arguments (the namespace; k8s_read's
+# description).
+WRAPPERS = {"k8s_get": 1, "k8s_read": 1}
+# Calls into another namespace (the one --network gives a session): need the network grant
+# (K8S_NETWORK_RULES), not the user's Role. Matched by (file, the call's namespace word).
+OTHER_NS = {("k8s/net.sh", "$target")}
+# Decided against, and why (a test fails if they are ever granted).
+NOT_GRANTED = {
+    ("ingresses", "list", "user-cluster"): "it would show every user's page names; the page name check reads the user's own namespace and the admission policy keeps users' names apart",
+    ("secrets", "get", "user"): "a page's login is made with create and removed by name: no read of the namespace's Secrets",
+    ("secrets", "list", "user"): "as get",
+    ("services", "list", "user-cluster"): "another namespace's Services are readable only where an admin grants it (aidc user allow-network)",
 }
 # Granted with no call of its own, and why.
 REASONS = {
@@ -98,7 +135,7 @@ REASONS = {
     ("serviceaccounts/token", "create"): "aidc user creds, a user renewing their own kubeconfig",
 }
 for r in ("pods", "services", "configmaps", "persistentvolumeclaims", "deployments",
-          "statefulsets", "networkpolicies", "persistentvolumes"):
+          "statefulsets", "networkpolicies", "persistentvolumes", "ingresses"):
     REASONS[(r, "watch")] = "kubectl delete --wait, wait and rollout status watch what they wait for"
     REASONS[(r, "list")] = "kubectl get -l and delete -l list first"
 
@@ -139,9 +176,16 @@ def res_of(word):
     if w not in ALIAS: return None
     return ALIAS[w]
 
-needs, problems, calls = {}, [], 0
+needs, other_needs, problems, calls = {}, {}, [], 0
+other = False
 def need(where, r, v):
-    needs.setdefault((r, v), []).append(where)
+    (other_needs if other else needs).setdefault((r, v), []).append(where)
+
+def render_of(line):
+    """The manifest function piped into this call (whole names: k8s_render_expose is not
+    k8s_render_expose_login)."""
+    fns = [fn for fn in renders if re.search(r"\b" + fn + r"\b", line)]
+    return fns[0] if fns else None
 
 for root, _, files in os.walk(scripts):
     for f in files:
@@ -154,18 +198,26 @@ for root, _, files in os.walk(scripts):
             direct = re.search(r"(^\s*|\$\(\s*|[|;&]\s*|\b(then|do|else|if|!)\s+)kubectl\s", code)
             if direct and rel != "k8s/lib.sh" and code[:direct.start()].count('"') % 2 == 0:
                 problems.append(f"{rel}: kubectl called directly (use k8s_kubectl): {line.strip()}")
-            for m in re.finditer(r"k8s_kubectl\b", code):
-                rest = code[m.end():]
+            for m in re.finditer(r"\b(k8s_kubectl|k8s_get|k8s_read)\b", code):
+                fn, rest = m.group(1), code[m.end():]
                 if rest.startswith("()"): continue        # the definition
+                if fn == "k8s_read" and rel != "k8s/session-create.sh": continue
                 where = f"{rel}: {line.strip()[:110]}"
                 calls += 1
+                other = False
                 if rel in ADMIN_FILES or any(rel == a and s in line for a, s in ADMIN_LINES):
+                    continue
+                if any(rel == a and s in line for a, s in WRAPPER_BODIES):
                     continue
                 dec = [d for (a, s), d in DECLARED.items() if a == rel and s in line]
                 if dec:
                     for r, v in dec[0]: need(where, r, v)
                     continue
                 t = tokens(rest)
+                if fn in WRAPPERS:
+                    pre, t = t[:WRAPPERS[fn]], t[WRAPPERS[fn]:]
+                    if fn == "k8s_get" and pre and (rel, unq(pre[0])) in OTHER_NS: other = True
+                    t = ["get"] + t
                 words, i = [], 0
                 while i < len(t):
                     w = unq(t[i])
@@ -187,17 +239,23 @@ for root, _, files in os.walk(scripts):
                     if len(words) > 1 and unq(words[1]).startswith("deployment/"):
                         need(where, "deployments", "get"); need(where, "pods", "list")
                     continue
+                if sub == "port-forward":
+                    need(where, "pods/portforward", "create"); need(where, "pods", "get"); continue
                 if sub == "create":
                     if "--dry-run=client" in rest: continue
                     if len(words) > 1 and unq(words[1]) == "token":
                         need(where, "serviceaccounts/token", "create"); continue
                     if re.search(r"-f -", rest) and "SelfSubjectRulesReview" in line: continue
+                    fn = render_of(line[:m.start()]) if re.search(r"-f -", rest) else None
+                    if fn:
+                        for k in renders[fn]: need(where, KIND[k], "create")
+                        continue
                     problems.append(f"cannot read create: {where}"); continue
                 if sub == "apply":
-                    fns = [fn for fn in renders if fn in line]
+                    fn = render_of(line[:m.start()])
                     pre = line[:m.start()]
-                    if fns:
-                        for k in renders[fns[0]]:
+                    if fn:
+                        for k in renders[fn]:
                             for v in ("get", "create", "patch"): need(where, KIND[k], v)
                     elif "create configmap" in pre:
                         for v in ("get", "create", "patch"): need(where, "configmaps", v)
@@ -220,7 +278,10 @@ for root, _, files in os.walk(scripts):
                     continue
                 if sub in ("get", "delete", "patch", "annotate"):
                     if len(words) < 2: problems.append(f"cannot read {sub}: {where}"); continue
-                    rs = [res_of(x) for x in unq(words[1]).split(",")]
+                    if "/" in unq(words[1]):              # type/name type/name ...
+                        rs = sorted({res_of(x) for x in words[1:] if "/" in unq(x)}, key=str)
+                    else:
+                        rs = [res_of(x) for x in unq(words[1]).split(",")]
                     if None in rs: problems.append(f"unknown resource in: {where}"); continue
                     named = len(words) > 2 or "/" in unq(words[1])
                     for r in rs:
@@ -242,9 +303,24 @@ for rv in sorted((granted_ns | granted_cl) - set(needs)):
         print(f"  PASS: {rv[1]} {rv[0]} granted with no call: {REASONS[rv]}")
     else:
         problems.append(f"{rv[1]} {rv[0]} is granted but no call uses it and no reason is named")
-extra = (rules["mcp"] - granted_ns) | (rules["mcp-cluster"] - granted_cl)
-if extra: problems.append(f"the MCP's rules grant what the user's do not: {sorted(extra)}")
-else: print("  PASS: the MCP's rules are within the user's")
+for (r, v), wh in sorted(other_needs.items()):
+    ok = (r, v) in rules["network"]
+    print(f"  {'PASS' if ok else 'FAIL'}: {v} {r} in another namespace granted by allow-network ({len(wh)} call(s), e.g. {wh[0]})")
+    if not ok: problems.append(f"{v} {r} in another namespace is used but the network grant lacks it: {wh[0]}")
+for rv in sorted(rules["network"] - set(other_needs)):
+    problems.append(f"the network grant gives {rv[1]} {rv[0]} but no call into another namespace uses it")
+for (r, v, which), why in sorted(NOT_GRANTED.items()):
+    if (r, v) in rules[which]: problems.append(f"{v} {r} ({which}) is granted, decided against: {why}")
+    else: print(f"  PASS: not granted, {v} {r} ({which}): {why}")
+for name, ns_rules in (("", granted_ns), (" without ValidatingAdmissionPolicy", rules["user-novap"])):
+    extra = (rules["mcp"] - ns_rules) | (rules["mcp-cluster"] - granted_cl)
+    if extra: problems.append(f"the MCP's rules grant what the user's{name} do not: {sorted(extra)}")
+    else: print(f"  PASS: the MCP's rules are within the user's{name}")
+novap_only = rules["user-novap"] - granted_ns
+if novap_only: problems.append(f"the user's rules without ValidatingAdmissionPolicy grant more: {sorted(novap_only)}")
+gone = sorted(rv for rv in granted_ns - rules["user-novap"] if rv[1] not in ("create", "patch"))
+if gone: problems.append(f"without ValidatingAdmissionPolicy the user loses more than making pages: {gone}")
+else: print("  PASS: without ValidatingAdmissionPolicy the user loses only making pages (create, patch)")
 if calls < 60: problems.append(f"only {calls} kubectl calls read: the reader is skipping some")
 else: print(f"  PASS: {calls} kubectl calls read")
 for p in problems: print(f"  FAIL: {p}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: Add, credential and remove users on the Kubernetes backend (namespace, disk, kubeconfig).
 #
-# Usage: aidc user <add|creds|remove> <name> [options]
+# Usage: aidc user <add|creds|allow-network|remove> <name> [options]
 #
 # Users exist on the Kubernetes backend only (docs/design-12-kubernetes.md, "Users and
 # credentials"): each has a namespace and one disk shared by their sessions, and their own
@@ -13,7 +13,7 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-aidc user <add|creds|remove> <name> [options]
+aidc user <add|creds|allow-network|remove> <name> [options]
 
   add <name> [--out FILE] [--duration D]
            (admin) Create <name>'s area in the cluster of the `kubernetes:` config: a
@@ -31,6 +31,12 @@ aidc user <add|creds|remove> <name> [options]
            renewed in place when aidc is configured with <name>'s own kubeconfig); never
            inside a git work tree. The token is printed only with --token (then no file).
            An admin or <name> may renew; --revoke (admin) invalidates every earlier token.
+  allow-network <name> [<namespace>] [--remove]
+           (admin) Let <name> give their sessions another namespace (aidc create
+           --network, aidc network add): a RoleBinding in <namespace> that lets <name>
+           and their MCP server list its Services (the session resolves them by name),
+           nothing else, never cluster-wide. aidc's own namespaces and the system ones
+           are refused. --remove takes it back; with no namespace, lists the granted ones.
   remove <name> [--yes]
            (admin) Remove <name> and everything aidc made for them: namespace, disk, kept
            audit trails (their volumes and data too, whatever the class retains),

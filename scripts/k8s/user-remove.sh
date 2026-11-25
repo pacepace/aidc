@@ -3,7 +3,8 @@
 # piles up: their namespace (sessions' leftovers, the git container, the ServiceAccounts and
 # Roles), their disk and kept audit trails with the volumes and data behind them (a retaining
 # class keeps a volume whose claim is deleted: each is set to Delete first), their
-# ClusterRoleBindings, and, with the last user, the shared ClusterRoles and admission policy.
+# ClusterRoleBindings and network grants in other namespaces, and, with the last user, the
+# shared ClusterRoles and admission policies.
 # An admin runs it. It refuses while the user has sessions, and asks first (type the name)
 # unless --yes.
 
@@ -49,8 +50,12 @@ pvs=$(printf '%s' "$pvs" | jq -r --arg ns "$ns" '.items[] | select(.spec.claimRe
     | "\(.metadata.name)\t\(.spec.claimRef.name)\t\(.spec.persistentVolumeReclaimPolicy)\t\(.status.phase)"')
 crbs=$(k8s_kubectl get clusterrolebinding "$(k8s_user_crb "$USER_NAME")" "$(k8s_mcp_crb "$USER_NAME")" \
     --ignore-not-found -o name --request-timeout=10s) || die "the cluster did not answer; nothing removed"
+# The other namespaces the user was let give their sessions (aidc user allow-network).
+nets=$(k8s_kubectl get rolebinding -A -l "aidc/user=${USER_NAME},aidc/grant=network" \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' --request-timeout=10s) \
+    || die "the cluster did not answer; nothing removed"
 
-if [ -z "$have_ns" ] && [ -z "$pvs" ] && [ -z "$crbs" ]; then
+if [ -z "$have_ns" ] && [ -z "$pvs" ] && [ -z "$crbs" ] && [ -z "$nets" ]; then
     info "nothing of ${USER_NAME} is in the cluster (no ${ns}, no volumes, no bindings)"
     exit 0
 fi
@@ -63,6 +68,7 @@ fi
         printf '%s\n' "$pvs" | awk -F'\t' '{ printf "    %s (claim %s, %s, %s)\n", $1, $2, $3, $4 }'
     fi
     [ -z "$crbs" ] || printf '%s\n' "$crbs" | sed 's/^/  /'
+    [ -z "$nets" ] || printf '%s\n' "$nets" | awk -v rb="$(k8s_network_rb "$USER_NAME")" 'NF { print "  rolebinding " rb " in " $1 " (aidc user allow-network)" }'
 } >&2
 if [ -z "$YES" ]; then
     [ -t 0 ] || die "not a terminal: pass --yes to remove ${USER_NAME} without being asked"
@@ -97,15 +103,21 @@ done <<<"$pvs"
 
 k8s_kubectl delete clusterrolebinding "$(k8s_user_crb "$USER_NAME")" "$(k8s_mcp_crb "$USER_NAME")" \
     --ignore-not-found >&2 || rc=1
+while read -r n; do
+    [ -n "$n" ] || continue
+    k8s_kubectl -n "$n" delete rolebinding "$(k8s_network_rb "$USER_NAME")" --ignore-not-found >&2 || rc=1
+done <<<"$nets"
 
 # The shared pieces go with the last user of this prefix.
 left=$(k8s_kubectl get namespace -l aidc/role=user -o name --request-timeout=10s) || left="?"
 case "$left" in
     "")
-        info "no users left: removing the shared ClusterRoles and admission policy"
-        k8s_kubectl delete clusterrole "$(k8s_user_clusterrole)" "$(k8s_mcp_clusterrole)" --ignore-not-found >&2 || rc=1
+        info "no users left: removing the shared ClusterRoles and admission policies"
+        k8s_kubectl delete clusterrole "$(k8s_user_clusterrole)" "$(k8s_mcp_clusterrole)" "$(k8s_network_clusterrole)" \
+            --ignore-not-found >&2 || rc=1
+        # shellcheck disable=SC2046  # one policy name per word
         k8s_kubectl delete validatingadmissionpolicybinding,validatingadmissionpolicy "$(k8s_user_volume_policy)" \
-            --ignore-not-found >/dev/null 2>&1 || true ;;
+            $(k8s_user_object_policies) --ignore-not-found >/dev/null 2>&1 || true ;;
     "?") info "could not list the remaining users: the shared ClusterRoles stay" ;;
 esac
 

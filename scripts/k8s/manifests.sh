@@ -259,36 +259,54 @@ EOF
 # the credentials in use with it.
 #   reads (get, list, watch) on everything aidc reads: `kubectl get` by name or label,
 #     `rollout status` and `wait`, and the `kubectl describe` aidc's errors point to (events)
-#   create and patch: `kubectl apply` (sessions, the git container, the repo folder pods);
-#     create and update: the repo list (configmap git-repos, written at a resourceVersion)
+#   create and patch: `kubectl apply` (sessions, relays, network policies, pages, the git
+#     container, the repo folder pods); create and update: the repo list (configmap git-repos,
+#     written at a resourceVersion)
 #   delete: aidc kill (by label), aidc restart (the dev pod), the repo folder pods, audit trim
 #   pods/exec (create and get: kubectl's exec is a websocket GET that newer API servers also
-#     authorize as create), pods/log
+#     authorize as create), pods/log; pods/portforward: the tunnels (aidc create --port, proxy)
+#   secrets create and delete only: a page's login (an htpasswd hash) is made with `kubectl
+#     create` and removed by name, so no read of the namespace's Secrets is granted (no get, no
+#     list); the admission policy (k8s_render_user_shared) refuses ServiceAccount token Secrets
+#   ingresses: the pages (--expose); middlewares.traefik.io create and delete: a page's login
+#     on Traefik, made with `kubectl create` and removed by name (a rule for a kind the cluster
+#     does not have grants nothing). The admission policy narrows every Ingress to the user's
+#     own page names and aidc's annotations, and every Service to a ClusterIP.
 #   serviceaccounts/token on aidc-user only: the user renews their own kubeconfig
 K8S_USER_SA=aidc-user
 K8S_USER_RULES='core pods get,list,watch,create,patch,delete
 core pods/exec create,get
 core pods/log get
+core pods/portforward create
 core services get,list,watch,create,patch,delete
 core configmaps get,list,watch,create,patch,update,delete
 core persistentvolumeclaims get,list,watch,create,patch,delete
 core events get,list,watch
+core secrets create,delete
 core serviceaccounts/token create aidc-user
 apps deployments get,list,watch,create,patch,delete
 apps statefulsets get,list,watch,create,patch,delete
-networking.k8s.io networkpolicies get,list,watch,create,patch,delete'
+networking.k8s.io networkpolicies get,list,watch,create,patch,delete
+networking.k8s.io ingresses get,list,watch,create,patch,delete
+traefik.io middlewares create,delete'
 
 # The cluster-wide part, one ClusterRole shared by all users, bound per user:
 #   runtimeclasses, storageclasses (get): aidc create and git setup read the runtime class's node
 #     selector; aidc k8s check reads both
+#   ingressclasses (get): --expose reads the configured IngressClass's controller when the
+#     config does not name it
 #   nodes (list): aidc k8s check, the ready nodes sessions can land on
 #   persistentvolumes (get, list, watch, patch): aidc audit lists released audit volumes, and
 #     trim sets a volume to Delete before deleting its claim, so the data goes with it. RBAC
 #     cannot say "volumes claimed in your namespace", so patch is narrowed by an admission
 #     policy (k8s_render_user_shared): only a volume claimed in the user's own namespace, only
 #     to Delete, its claim unchanged.
+# Not granted: listing Ingresses cluster-wide (it would show every user's page names); the page
+# name check reads the user's own namespace, and the admission policy keeps users' page names
+# apart (docs/design-12-kubernetes.md, "Users and credentials").
 K8S_USER_CLUSTER_RULES='node.k8s.io runtimeclasses get
 storage.k8s.io storageclasses get
+networking.k8s.io ingressclasses get
 core nodes list
 core persistentvolumes get,list,watch,patch'
 
@@ -296,7 +314,9 @@ core persistentvolumes get,list,watch,patch'
 # lifecycle in its own namespace only (create, kill, status, list, attach and send by exec,
 # logs, restart, upgrade, refresh, audit list) and the git container's request registration by
 # exec. No bare pods (sessions are StatefulSets and Deployments), no repo list, no tokens, no
-# volumes. Pod Security "baseline" bounds what any pod it makes may do.
+# volumes, no tunnels (they end on the machine that runs them), no pages of its own: it may
+# list and delete Ingresses and delete a page's login (by name) so its aidc kill removes pages
+# the user made. Pod Security "baseline" bounds what any pod it makes may do.
 K8S_MCP_SA=aidc-mcp
 K8S_MCP_RULES='core pods get,list,watch,delete
 core pods/exec create,get
@@ -305,15 +325,38 @@ core services get,list,watch,create,patch,delete
 core configmaps get,list,watch,create,patch,delete
 core persistentvolumeclaims get,list,watch,create,patch,delete
 core events get,list,watch
+core secrets delete
 apps deployments get,list,watch,create,patch,delete
 apps statefulsets get,list,watch,create,patch,delete
-networking.k8s.io networkpolicies get,list,watch,create,patch,delete'
+networking.k8s.io networkpolicies get,list,watch,create,patch,delete
+networking.k8s.io ingresses list,watch,delete
+traefik.io middlewares delete'
 K8S_MCP_CLUSTER_RULES='node.k8s.io runtimeclasses get'
+
+# Another namespace a user's sessions may reach (--network): a ClusterRole bound in that
+# namespace only, by `aidc user allow-network <user> <namespace>` (an admin's grant), so the
+# session's names responder can serve its Services. Never bound cluster-wide.
+K8S_NETWORK_RULES='core services list'
+
+# k8s_user_rules [no-vap]: the user's Role rules. On a cluster without ValidatingAdmissionPolicy
+# nothing would narrow a page's Ingress, login Secret or Middleware, so none may be made there;
+# removing them (aidc kill, clean-env) stays.
+k8s_user_rules() {
+    if [ -z "${1:-}" ]; then printf '%s\n' "$K8S_USER_RULES"; return 0; fi
+    printf '%s\n' "$K8S_USER_RULES" | sed -e 's/^core secrets .*/core secrets delete/' \
+        -e 's/^traefik.io middlewares .*/traefik.io middlewares delete/' \
+        -e 's/^networking.k8s.io ingresses .*/networking.k8s.io ingresses get,list,watch,delete/'
+}
 
 # Cluster-scoped names: shared by every user of this prefix, or one user's.
 k8s_user_clusterrole()   { printf '%s-user' "$AIDC_K8S_PREFIX"; }
 k8s_mcp_clusterrole()    { printf '%s-mcp' "$AIDC_K8S_PREFIX"; }
 k8s_user_volume_policy() { printf '%s-user-volumes' "$AIDC_K8S_PREFIX"; }
+k8s_user_ingress_policy() { printf '%s-user-ingresses' "$AIDC_K8S_PREFIX"; }
+k8s_user_service_policy() { printf '%s-user-services' "$AIDC_K8S_PREFIX"; }
+k8s_user_secret_policy() { printf '%s-user-secrets' "$AIDC_K8S_PREFIX"; }
+k8s_network_clusterrole() { printf '%s-network' "$AIDC_K8S_PREFIX"; }
+k8s_network_rb()         { printf '%s-u-%s-network' "$AIDC_K8S_PREFIX" "$1"; }
 k8s_user_crb()           { printf '%s-u-%s' "$AIDC_K8S_PREFIX" "$1"; }
 k8s_mcp_crb()            { printf '%s-u-%s-mcp' "$AIDC_K8S_PREFIX" "$1"; }
 
@@ -328,13 +371,14 @@ _k8s_rules_yaml() {
     }'
 }
 
-# k8s_render_user_access <user>: the user's and their MCP's ServiceAccounts, Roles and
-# RoleBindings in the user's namespace, and their ClusterRoleBindings.
+# k8s_render_user_access <user> [no-vap]: the user's and their MCP's ServiceAccounts, Roles and
+# RoleBindings in the user's namespace, and their ClusterRoleBindings. With no-vap (a cluster
+# without ValidatingAdmissionPolicy) the user's Role makes no pages (k8s_user_rules).
 k8s_render_user_access() {
     local user="$1" ns sa rules crb cr
     ns=$(k8s_user_ns "$user")
     for sa in "$K8S_USER_SA" "$K8S_MCP_SA"; do
-        rules="$K8S_USER_RULES" crb=$(k8s_user_crb "$user") cr=$(k8s_user_clusterrole)
+        rules=$(k8s_user_rules "${2:-}") crb=$(k8s_user_crb "$user") cr=$(k8s_user_clusterrole)
         if [ "$sa" = "$K8S_MCP_SA" ]; then
             rules="$K8S_MCP_RULES" crb=$(k8s_mcp_crb "$user") cr=$(k8s_mcp_clusterrole)
         fi
@@ -366,10 +410,43 @@ YAML
     done
 }
 
+# k8s_render_network_clusterrole: the ClusterRole `aidc user allow-network` binds in another
+# namespace (K8S_NETWORK_RULES).
+k8s_render_network_clusterrole() {
+    cat <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: $(k8s_network_clusterrole), labels: {${K8S_MANAGED_BY}}}
+rules:
+$(_k8s_rules_yaml "$K8S_NETWORK_RULES")
+YAML
+}
+
+# k8s_render_network_access <user> <namespace>: the RoleBinding in <namespace> that lets the
+# user and their MCP read its Services (for --network), and nothing else there.
+k8s_render_network_access() {
+    local user="$1" target="$2" ns
+    ns=$(k8s_user_ns "$user")
+    cat <<YAML
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $(k8s_network_rb "$user")
+  namespace: ${target}
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${user}, aidc/grant: network}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: $(k8s_network_clusterrole)}
+subjects:
+  - {kind: ServiceAccount, name: ${K8S_USER_SA}, namespace: ${ns}}
+  - {kind: ServiceAccount, name: ${K8S_MCP_SA}, namespace: ${ns}}
+YAML
+}
+
 # k8s_render_user_shared [no-volume-patch]: the ClusterRoles every user's bindings name, and the
-# admission policy that narrows the volume patch. With an argument (a cluster without
-# ValidatingAdmissionPolicy), the user ClusterRole grants no patch on volumes and no policy is
-# rendered: aidc audit trim then leaves a retained volume for an admin, and says so.
+# admission policies that narrow the volume patch and what a user may make in their namespace.
+# With an argument (a cluster without ValidatingAdmissionPolicy), the user ClusterRole grants no
+# patch on volumes and no policy is rendered: aidc audit trim then leaves a retained volume for
+# an admin, and says so (and the user's Role makes no pages: k8s_user_rules).
 k8s_render_user_shared() {
     local rules="$K8S_USER_CLUSTER_RULES" sa_prefix
     [ -z "${1:-}" ] || rules=$(printf '%s\n' "$rules" | sed 's/^core persistentvolumes .*/core persistentvolumes get,list,watch/')
@@ -386,8 +463,11 @@ kind: ClusterRole
 metadata: {name: $(k8s_mcp_clusterrole), labels: {${K8S_MANAGED_BY}}}
 rules:
 $(_k8s_rules_yaml "$K8S_MCP_CLUSTER_RULES")
+---
+$(k8s_render_network_clusterrole)
 YAML
     [ -z "${1:-}" ] || return 0
+    local user_ns_prefix="${AIDC_K8S_PREFIX}-u-"
     cat <<YAML
 ---
 # Every volume change by a user's ServiceAccount (${sa_prefix}<user>:${K8S_USER_SA}) is refused
@@ -420,6 +500,83 @@ kind: ValidatingAdmissionPolicyBinding
 metadata: {name: $(k8s_user_volume_policy), labels: {${K8S_MANAGED_BY}}}
 spec:
   policyName: $(k8s_user_volume_policy)
+  validationActions: [Deny]
+YAML
+    local vars checks
+    # shellcheck disable=SC2016  # CEL, not shell
+    vars=$(cat <<'CEL'
+    - name: user
+      expression: "request.namespace.startsWith('@NSP@') ? request.namespace.substring(@NSN@) : ''"
+    - name: host
+      expression: "'^[a-z0-9-]+-' + variables.user + '[.]'"
+    - name: ann
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+CEL
+)
+    vars=${vars//@NSP@/${user_ns_prefix}}; vars=${vars//@NSN@/${#user_ns_prefix}}
+    # shellcheck disable=SC2016
+    checks=$(cat <<'CEL'
+    - expression: "!has(object.spec.defaultBackend) && has(object.spec.rules) && size(object.spec.rules) > 0 && object.spec.rules.all(r, has(r.host) && r.host.matches(variables.host))"
+      message: "an aidc user's Ingress serves only their own page names (<session>-<user>.<domain>), with no default backend"
+    - expression: "!has(object.spec.tls) || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h.matches(variables.host)))"
+      message: "an aidc user's Ingress certificate names only their own page names"
+    - expression: "variables.ann.all(k, k in ['aidc/expose-port', 'kubectl.kubernetes.io/last-applied-configuration', 'traefik.ingress.kubernetes.io/router.middlewares', 'nginx.ingress.kubernetes.io/auth-type', 'nginx.ingress.kubernetes.io/auth-secret', 'nginx.ingress.kubernetes.io/auth-realm', 'cert-manager.io/cluster-issuer'])"
+      message: "an aidc user's Ingress carries only the annotations aidc sets"
+    - expression: "!('traefik.ingress.kubernetes.io/router.middlewares' in variables.ann) || variables.ann['traefik.ingress.kubernetes.io/router.middlewares'].matches('^' + request.namespace + '-[a-z0-9-]+@kubernetescrd$')"
+      message: "an aidc user's page uses only a login Middleware of their own namespace"
+    - expression: "!('nginx.ingress.kubernetes.io/auth-secret' in variables.ann) || !variables.ann['nginx.ingress.kubernetes.io/auth-secret'].contains('/')"
+      message: "an aidc user's page uses only a login Secret of their own namespace"
+CEL
+)
+    _k8s_user_object_policy "$(k8s_user_ingress_policy)" networking.k8s.io '"*"' ingresses "$vars" "$checks"
+    _k8s_user_object_policy "$(k8s_user_service_policy)" '""' v1 services "" \
+'    - expression: "(!has(object.spec.type) || object.spec.type == '"'ClusterIP'"') && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
+      message: "an aidc user'"'"'s Service is a ClusterIP with no external IPs"'
+    _k8s_user_object_policy "$(k8s_user_secret_policy)" '""' v1 secrets "" \
+'    - expression: "!has(object.type) || object.type != '"'kubernetes.io/service-account-token'"'"
+      message: "an aidc user may not make ServiceAccount token Secrets"'
+}
+
+# What a user's or their MCP's ServiceAccount makes in the user's namespace, narrowed where RBAC
+# cannot (it grants a verb on a kind, not on what the object says), one policy per kind (so each
+# expression is checked against its own kind's schema):
+#   - an Ingress serves only the user's own page names: every host's first label ends in
+#     -<user> (<session>-<user>, <session>-<port>-<user>; `aidc user add` refuses a user name
+#     that ends in -<another user>, so no two users' names overlap), no default backend, and
+#     only the annotations aidc sets (no controller snippets, no login from another namespace);
+#   - a Service is a ClusterIP with no external IPs (no node port, load balancer or external
+#     address: those would reach past the namespace's policies or take other traffic);
+#   - a Secret is never a ServiceAccount token (a token that would not expire).
+k8s_user_object_policies() { printf '%s %s %s' "$(k8s_user_ingress_policy)" "$(k8s_user_service_policy)" "$(k8s_user_secret_policy)"; }
+
+# _k8s_user_object_policy <name> <apiGroup> <apiVersion> <resource> <variables yaml> <validations
+# yaml>: one such policy and its binding, on create and update by a user's or their MCP's
+# ServiceAccount.
+_k8s_user_object_policy() {
+    local sa_prefix="system:serviceaccount:${AIDC_K8S_PREFIX}-u-"
+    cat <<YAML
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: ${1}, labels: {${K8S_MANAGED_BY}}}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [${2}], apiVersions: [${3}], operations: [CREATE, UPDATE], resources: [${4}]}
+  matchConditions:
+    - name: aidc-user
+      expression: "request.userInfo.username.startsWith('${sa_prefix}') && (request.userInfo.username.endsWith(':${K8S_USER_SA}') || request.userInfo.username.endsWith(':${K8S_MCP_SA}'))"
+${5:+  variables:
+${5}
+}  validations:
+${6}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: ${1}, labels: {${K8S_MANAGED_BY}}}
+spec:
+  policyName: ${1}
   validationActions: [Deny]
 YAML
 }

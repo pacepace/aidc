@@ -70,7 +70,8 @@ if [ -n "$REVOKE" ]; then
     info "revoking every token of ${K8S_USER_SA} in ${ns}: replacing the ServiceAccount"
     k8s_kubectl -n "$ns" delete serviceaccount "$K8S_USER_SA" --ignore-not-found --wait=true >&2 \
         || die "could not delete ServiceAccount ${K8S_USER_SA} in ${ns} (revoking takes an admin)"
-    k8s_render_user_access "$USER_NAME" | k8s_kubectl apply -f - >/dev/null \
+    no_vap=""; k8s_has_vap || no_vap=1
+    k8s_render_user_access "$USER_NAME" "$no_vap" | k8s_kubectl apply -f - >/dev/null \
         || die "could not apply ${USER_NAME}'s credentials again in ${ns}"
 fi
 

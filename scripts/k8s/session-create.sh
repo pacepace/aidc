@@ -171,6 +171,7 @@ done
 NETWORKS=""
 for _n in ${NETWORK_FLAGS[@]+"${NETWORK_FLAGS[@]}"} ${AIDC_NETWORKS:-}; do
     if _why=$(k8s_network_refusal "$_n"); then die "refusing --network ${_n}: ${_why}"; fi
+    if _why=$(k8s_network_ungranted "$_n"); then die "refusing --network ${_n}: ${_why}"; fi
     case " ${NETWORKS} " in *" ${_n} "*) ;; *) NETWORKS="${NETWORKS:+${NETWORKS} }${_n}" ;; esac
 done
 # TCP egress (NET-15): flags then egress_tcp:, resolved here on this machine, as on Docker.
@@ -321,6 +322,13 @@ if [ -n "$EXPOSE_PORTS" ]; then
         login_user="u$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
         login_pw=$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')
         htpasswd=$(k8s_htpasswd_line "$login_user" "$login_pw") || die "cannot hash the login's password"
+    fi
+    # The login first, so no page is ever served without it: made with create (a user may make
+    # and delete Secrets, not read them), after removing any a half-made session left.
+    if [ -n "$htpasswd" ]; then
+        k8s_expose_login_remove "$ns" "$NAME" || die "cannot remove an earlier login of ${NAME}: the cluster did not answer"
+        k8s_render_expose_login "$NAME" "$htpasswd" | k8s_kubectl create -f - >&2 \
+            || die "the cluster did not take the login for ${NAME}'s pages: no page was made (the session runs; aidc kill ${NAME} removes it)"
     fi
     # shellcheck disable=SC2086  # one port per word
     k8s_render_expose "$NAME" "$htpasswd" $EXPOSE_PORTS | k8s_kubectl apply -f - >&2

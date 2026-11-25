@@ -73,7 +73,7 @@ ARGS="$*"
 case "$*" in
     *"get ingressclass"*) printf '%s' "${K_IC:-traefik.io/ingress-controller}" ;;
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
-    *"apply -f -"*) cat >> "$K_APPLIED" ;;
+    *"apply -f -"*|*"create -f -"*) cat >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -n "${K_DISK_PHASE:-}" ] && { printf '%s' "$K_DISK_PHASE"; exit 0; }
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -308,12 +308,15 @@ printf '  ingress: {domain: pages.example.org, class: web}\n' >> "$HOME/.config/
 out=$(K_CURL=401 run create demo --backend kubernetes --expose 8080 --login)
 assert_has "a page that answers 401 without the login is kept, and its login printed" "login for these pages (shown once" "$out"
 assert_has "  (the controller read from IngressClass web: Traefik's Middleware)" "kind: Middleware" "$(cat "$K_APPLIED")"
+assert_has "  the login is made with create, before the pages are applied" "create -f -|apply -f -" \
+    "$(grep -oE '(create|apply) -f -' "$K_LOG" | tail -2 | paste -sd'|' -)"
 assert_not_has "  nothing removed" "delete ingress" "$(cat "$K_LOG")"
 assert_has "  create succeeds" "exit=0" "$out"
 out=$(K_CURL=200 AIDC_K8S_LOGIN_PROBE_WAIT=1 run create demo --backend kubernetes --expose 8080 --login)
 assert_has "a page that answers 200 without the login is said, by name and status" \
     "https://demo-alice.pages.example.org/ answered 200 without the login, not 401" "$out"
-assert_has "  removed again" "delete ingress,secret -l aidc/session=demo,app=expose" "$(cat "$K_LOG")"
+assert_has "  removed again" "delete ingress -l aidc/session=demo,app=expose" "$(cat "$K_LOG")"
+assert_has "  with its login" "delete secret demo-login --ignore-not-found --wait=false" "$(cat "$K_LOG")"
 assert_has "  said loudly" "the pages were REMOVED" "$out"
 assert_not_has "  its login is never printed (it guards nothing)" "login for these pages" "$out"
 assert_not_has "  nor the page offered" "page: https://" "$out"

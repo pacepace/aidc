@@ -454,7 +454,9 @@ namespace <prefix>-u-<name>     Pod Security enforce|audit|warn: baseline
   (no token mounted into any pod: automountServiceAccountToken false)
 ClusterRoleBinding <prefix>-u-<name>       -> ClusterRole <prefix>-user (shared)
 ClusterRoleBinding <prefix>-u-<name>-mcp   -> ClusterRole <prefix>-mcp  (shared)
+ClusterRole <prefix>-network (shared; bound only per namespace, by aidc user allow-network)
 ValidatingAdmissionPolicy <prefix>-user-volumes (shared) + its binding
+ValidatingAdmissionPolicies <prefix>-user-ingresses, -services, -secrets (shared) + bindings
 kubeconfig ~/.config/aidc/users/<name>.kubeconfig (on the admin's machine, mode 0600)
 ```
 
@@ -468,22 +470,30 @@ call needs a verb the Role lacks, or the Role grants one no call uses and no rea
 | pods | get list watch create patch delete | status, taint, restart (delete), the repo folder pods (`aidc repo`, `aidc git setup`: apply, delete) |
 | pods/exec | create get | attach, kill, refresh, status, upgrade, the git container (exec is a websocket GET that API servers authorize as get or create) |
 | pods/log | get | logs, create and restart (the ready marker) |
+| pods/portforward | create | the tunnels (`aidc create --port`, `aidc proxy`) |
 | services | get list watch create patch delete | create (apply), kill |
 | configmaps | get list watch create patch update delete | create (the audit seed), kill, the repo list (`git-repos`, replaced at a resourceVersion) |
 | persistentvolumeclaims | get list watch create patch delete | create, kill (annotate the kept trail), audit list and trim |
 | events | get list watch | `kubectl describe`, which aidc's errors point to |
+| secrets | create delete | a page's login (`--expose --login`): made with `kubectl create`, removed by name; no get or list |
 | serviceaccounts/token (aidc-user only) | create | `aidc user creds`: the user renews their own kubeconfig |
 | deployments, statefulsets | get list watch create patch delete | create, kill, list, upgrade (set image, rollout restart), git setup |
-| networkpolicies | get list watch create patch delete | create, kill, status, git setup |
+| networkpolicies | get list watch create patch delete | create, kill, status, git setup, relays, `--network` |
+| ingresses | get list watch create patch delete | the pages (`--expose`): apply, the login check, status, kill |
+| middlewares.traefik.io | create delete | a page's login on Traefik: made with `kubectl create`, removed by name (a rule for a kind the cluster lacks grants nothing) |
 
-Not granted: Secrets (aidc keeps none: the token lives only in the kubeconfig), Roles and
-bindings (a user cannot widen their own rights), the namespace itself (a user cannot relabel
-it to drop Pod Security), any other ServiceAccount's token (not the MCP's). `watch` and `list`
-are on the table because `kubectl delete --wait`, `wait`, `rollout status` and `-l` selectors
-use them.
+Not granted: reading Secrets (get, list: the token lives only in the kubeconfig, and a page's
+login, the one Secret aidc makes, is made and removed by name; a user who mounts a Secret into
+a pod of their own can still read their own namespace's, so this keeps them out of `kubectl
+get` output rather than out of reach), Roles and bindings (a user cannot widen their own
+rights), the namespace itself (a user cannot relabel it to drop Pod Security), any other
+ServiceAccount's token (not the MCP's). `watch` and `list` are on the table because `kubectl
+delete --wait`, `wait`, `rollout status` and `-l` selectors use them; deletes of Secrets and
+Middlewares pass `--wait=false`, since waiting reads the object.
 
 **The shared ClusterRole** `<prefix>-user`: get runtime classes (create and git setup read the
-runtime class's node selector) and storage classes, list nodes (`aidc k8s check`), get, list,
+runtime class's node selector) and storage classes, get ingress classes (`--expose` reads the
+configured class's controller unless the config names it), list nodes (`aidc k8s check`), get, list,
 watch and patch volumes (`aidc audit` lists released trails; trim sets a volume to Delete
 before deleting its claim, so a retaining class keeps no data). RBAC cannot say "volumes
 claimed in your namespace", so the patch is narrowed by the admission policy: a change to a
@@ -495,11 +505,53 @@ no patch and says so, and trim leaves a retained volume for an admin. Checked li
 another user's disk volume to Delete, labelling one's own volume, or handing it to another
 namespace were each refused by the policy; setting one's own to Delete passed.
 
+Not granted cluster-wide: listing Ingresses. `--expose` refuses a page name another Ingress
+already serves; with an admin's credentials it reads every namespace, but a user's may read only
+their own, since a cluster-wide list would show every user's page names. The check stays safe
+without it because the Ingress admission policy (below) holds every user's Ingresses to their
+own names, and `aidc user add` refuses a user name that ends in `-<another user>` (`a-bob`'s
+session `x` and `bob`'s session `x-a` would both be `x-a-bob`), so two users' page names never
+meet; an Ingress an admin made outside aidc under the same domain is the admin's to avoid.
+
+**What a user makes, narrowed** (ValidatingAdmissionPolicies `<prefix>-user-ingresses`,
+`<prefix>-user-services` and `<prefix>-user-secrets`, one per kind, for the user's and their
+MCP's ServiceAccounts, on create and update). RBAC grants a verb on a kind, not
+on what the object says, so:
+- an Ingress serves only the user's own page names: every rule's and certificate's host has a
+  first label ending in `-<user>` (the user from the namespace's name), there is no default
+  backend, and it carries only the annotations aidc sets (its port, the Traefik login
+  Middleware, which must be of the user's own namespace, ingress-nginx's three auth
+  annotations, whose Secret may not name another namespace, the cert-manager issuer, and
+  kubectl's last-applied record). No controller snippets, no catching every host;
+- a Service is a ClusterIP with no external IPs (no node port or load balancer reaching past
+  the namespace's policies, no external IP taking other traffic: CVE-2020-8554). This holds
+  for every Service aidc makes, so it closes a door the Role had opened since W-K5;
+- a Secret is never a ServiceAccount token Secret (a token that would not expire).
+Without ValidatingAdmissionPolicy `aidc user add` grants no page making at all (no Ingress,
+login Secret or Middleware create or patch; deleting them stays, for kill) and says so.
+
+**Other namespaces** (`--network`). A session given a namespace reaches its pods by a
+NetworkPolicy in the user's own namespace, and its Services by name through the names
+responder, which aidc fills from that namespace's Service list, read with the user's
+credentials. A user's credentials read nothing outside their namespace, and no cluster-wide
+Service list is granted (it would show every namespace's); instead an admin grants one
+namespace at a time: `aidc user allow-network <user> <namespace>` makes a RoleBinding there,
+`<prefix>-u-<user>-network`, to the shared ClusterRole `<prefix>-network` (list Services,
+nothing else), for the user and their MCP server (a `networks:` entry in the config applies
+to sessions the MCP creates too). aidc's own namespaces and the system ones are refused, as
+`--network` refuses them; `--remove` takes it back; with no namespace it lists the grants.
+`aidc create --network` and `aidc network add` ask first (`kubectl auth can-i list services -n
+<namespace>`) and refuse before anything is made, naming the command, when the grant is not
+there. `aidc user remove` removes the user's grants with them.
+
 **The MCP's Role** (`K8S_MCP_RULES`, Q-M2) is the session lifecycle in its own namespace:
 StatefulSets and Deployments (the proxy is a Deployment, so Q-M2's list gains it), Services,
-NetworkPolicies, ConfigMaps, claims, pods (get, list, watch, delete: restart), exec and logs.
-No bare pods, no repo list, no tokens, no volumes; its ClusterRole reads runtime classes only. A
-test fails if it ever grants what the user's Role does not.
+NetworkPolicies, ConfigMaps, claims, pods (get, list, watch, delete: restart), exec and logs,
+and, so that its `aidc kill` removes a page the user made, list, watch and delete Ingresses and
+delete Secrets and Middlewares (by name). No bare pods, no repo list, no tokens, no volumes, no
+tunnels (a port-forward ends on the machine that runs it), no pages of its own; its ClusterRole
+reads runtime classes only. A test fails if it ever grants what the user's Role does not, with
+or without ValidatingAdmissionPolicy.
 
 **Pod Security "baseline"** on every user namespace (enforce, audit, warn; version latest) is
 what bounds any pod a user or their MCP makes: no privileged containers, host namespaces,
@@ -538,8 +590,11 @@ and the admission policy, and removes the kubeconfig it wrote. The user's token 
 ServiceAccount. Checked live: seven volumes (disk, a kept trail, git home, login and store, a
 session's home and state) and both bindings gone, the old kubeconfig `Unauthorized`.
 
-Not built here: K8S-14's tunnel (`kubectl port-forward`) will need `create` on pods/portforward
-in the user's Role when ports are built; the rules test will ask for it.
+The rules test also reads the calls W-K2 added: what `kubectl apply` and `kubectl create -f -`
+make for relays, network policies, pages and logins (by rendering them), `port-forward`, calls
+through the `k8s_get` reader, and the one call into another namespace (held to the network
+grant instead of the Role); it fails if a grant decided against (cluster-wide Ingress or
+Service list, reading Secrets) is ever made.
 
 ## Images: built in the cluster, kept in a private registry
 
@@ -731,8 +786,11 @@ survived `aidc restart`; `getent hosts github.com` still failed.
   made later resolves after `aidc network <s> sync`). It widens the sandbox the same way (not
   through squid, invisible to taint). The user's own namespace (the git login, other sessions), aidc's other
   namespaces and the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`,
-  `default`) are refused. Measured: a session given a scratch namespace fetched its web Service by
-  name; cluster DNS stayed refused.
+  `default`) are refused. With a user's own credentials, the namespace's Services are readable
+  only where an admin granted it (`aidc user allow-network <user> <namespace>`, "Users and
+  credentials"); without that, `--network` and `aidc network add` refuse it, naming the command.
+  Measured: a session given a scratch namespace fetched its web Service by name; cluster DNS
+  stayed refused.
 - `clean-env` keeps its purpose (remove what a session left behind) and gets a cluster form: the
   objects of a session that is no longer running (a create or kill that stopped half way), except
   its kept audit claim, and this machine's tunnels to it. Docker's container-only-path volumes have

@@ -59,6 +59,7 @@ do_add() {
     local target="${1:-}" why
     [ -n "$target" ] || die "add requires a namespace"
     if why=$(k8s_network_refusal "$target"); then die "refusing ${target}: ${why}"; fi
+    if why=$(k8s_network_ungranted "$target"); then die "refusing ${target}: ${why}"; fi
     if current | grep -qxF "$target"; then
         info "${NAME} already reaches ${target}; reading its Services again"
         do_sync

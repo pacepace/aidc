@@ -37,11 +37,23 @@ sel=$(k8s_node_selector)
 # The cluster-wide pieces every user's bindings name. Without ValidatingAdmissionPolicy
 # (Kubernetes before 1.30) the volume patch it narrows is not granted at all.
 no_vap=""
-if ! k8s_kubectl api-resources --api-group=admissionregistration.k8s.io -o name 2>/dev/null \
-        | grep -q '^validatingadmissionpolicies'; then
+if ! k8s_has_vap; then
     no_vap=1
     info "this cluster has no ValidatingAdmissionPolicy: users may not set their audit volumes to Delete; an admin trims retained ones (aidc audit trim)"
+    info "  nor make pages (aidc create --expose): nothing would hold their Ingresses to their own names"
 fi
+
+# Page names are <session>-<user>.<domain>: a user whose name ends in -<another user's name>
+# could make the other's page names (a-bob's session x and bob's session x-a are both x-a-bob),
+# so such a name is refused. The admission policy then keeps every user to their own.
+others=$(k8s_kubectl get namespace -l aidc/role=user -o name --request-timeout=10s) \
+    || die "the cluster did not answer (listing the other users); nothing was made"
+for o in $others; do
+    o="${o#namespace/}"; o="${o#"${AIDC_K8S_PREFIX}-u-"}"
+    [ "$o" != "$USER_NAME" ] || continue
+    case "$USER_NAME" in *-"$o") die "user name '${USER_NAME}' ends in -${o}, another user's name: their page names would overlap (<session>-${USER_NAME} and <session>-${o}); pick another name" ;; esac
+    case "$o" in *-"$USER_NAME") die "user '${o}' ends in -${USER_NAME}: their page names would overlap (<session>-${o} and <session>-${USER_NAME}); pick another name" ;; esac
+done
 
 info "applying ${ns} and ${USER_NAME}'s disk (${AIDC_K8S_USER_DISK_SIZE} on ${AIDC_K8S_STORAGE_CLASS})"
 k8s_render_user_shared "${no_vap:+no-volume-patch}" | k8s_kubectl apply -f - >&2
@@ -61,7 +73,7 @@ phase=$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/n
 [ "$phase" = "Bound" ] || die "${USER_NAME}'s disk is ${phase:-missing}, not Bound"
 
 info "applying ${USER_NAME}'s credentials: ServiceAccount ${K8S_USER_SA} (the user) and ${K8S_MCP_SA} (their MCP server), each with its Role in ${ns}"
-k8s_render_user_access "$USER_NAME" | k8s_kubectl apply -f - >&2
+k8s_render_user_access "$USER_NAME" "$no_vap" | k8s_kubectl apply -f - >&2
 info "${USER_NAME} is set up in ${ns}. They add their own GitHub login (aidc git login) and Claude accounts."
 
 bash "$AIDC_SCRIPTS/k8s/user-creds.sh" "$USER_NAME" ${CREDS_ARGS[@]+"${CREDS_ARGS[@]}"}

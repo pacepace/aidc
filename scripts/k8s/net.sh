@@ -185,6 +185,20 @@ k8s_network_refusal() {
     return 1
 }
 
+# k8s_network_ungranted <namespace>: why these credentials cannot give <namespace> to a session
+# (printed, and returns 0), or returns 1 when they can. The session's names responder serves that
+# namespace's Services, read with the user's credentials, which may list them only where an admin
+# granted it (`aidc user allow-network <user> <namespace>`): a user's credentials reach no other
+# namespace by themselves. An admin's credentials may anyway.
+k8s_network_ungranted() {
+    local a
+    a=$(k8s_kubectl auth can-i list services -n "$1" 2>/dev/null </dev/null) || true
+    [ "$a" = yes ] && return 1
+    printf 'your credentials may not read the Services of %s: an admin grants it with `aidc user allow-network %s %s`' \
+        "$1" "$AIDC_K8S_USER" "$1"
+    return 0
+}
+
 # k8s_render_network <session> <namespace>: the NetworkPolicy that lets the session's dev pod
 # reach every pod of <namespace>, on any port. That namespace's own policies may still refuse.
 k8s_render_network() {

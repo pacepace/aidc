@@ -101,7 +101,9 @@ K8S_LACKING_JQ='
 _k8s_lacking() { jq -r --arg rules "$1" "$K8S_LACKING_JQ" <<<"$2"; }
 review=$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"%s"}}' "$user_ns" \
     | k8s_kubectl create --validate=false -f - -o json 2>/dev/null) || review=""
-if [ -z "$review" ] || ! lack=$(_k8s_lacking "$K8S_USER_RULES" "$review" 2>/dev/null); then
+# Without ValidatingAdmissionPolicy a user's Role makes no pages (manifests.sh, k8s_user_rules).
+if k8s_has_vap; then user_rules=$(k8s_user_rules); else user_rules=$(k8s_user_rules no-vap); fi
+if [ -z "$review" ] || ! lack=$(_k8s_lacking "$user_rules" "$review" 2>/dev/null); then
     missing "cannot ask the cluster what your credentials may do in ${user_ns} (SelfSubjectRulesReview)"
 else
     who=$(k8s_kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)
@@ -115,9 +117,9 @@ else
     fi
     clack=$(_k8s_lacking "$K8S_USER_CLUSTER_RULES" "$review" 2>/dev/null || printf '?')
     if [ -z "$clack" ]; then
-        ok "cluster-wide you may read runtime classes, storage classes, nodes and volumes, and set your own volumes to Delete (aidc audit trim)"
+        ok "cluster-wide you may read runtime classes, storage classes, ingress classes, nodes and volumes, and set your own volumes to Delete (aidc audit trim)"
     else
-        note "cluster-wide you may not: ${clack}. Without them: no runtime class, no aidc create; no nodes, no ready-node check; no volumes, aidc audit leaves released trails unlisted and retained ones for an admin to trim"
+        note "cluster-wide you may not: ${clack}. Without them: no runtime class, no aidc create; no ingress classes, --expose needs kubernetes.ingress.controller in the config; no nodes, no ready-node check; no volumes, aidc audit leaves released trails unlisted and retained ones for an admin to trim"
     fi
 fi
 if [ "$(k8s_kubectl auth can-i create namespaces 2>/dev/null || true)" = "yes" ]; then

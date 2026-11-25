@@ -51,11 +51,14 @@ case "$rc" in
     1) ;;
     *) die "cannot tell whether session '${NAME}' runs: the cluster did not answer: ${where#unknown }" ;;
 esac
-left=$(k8s_kubectl -n "$ns" get deployment,service,networkpolicy,configmap,ingress,secret,pvc -l "$sel" \
+# Secrets are not listed (a user may not read them): a page's login goes by name with its pages.
+left=$(k8s_kubectl -n "$ns" get deployment,service,networkpolicy,configmap,ingress,pvc -l "$sel" \
     -o go-template='{{range .items}}{{if not (and .metadata.labels (index .metadata.labels "aidc/kept"))}}{{.kind}}/{{.metadata.name}}{{"\n"}}{{end}}{{end}}' \
     --request-timeout=10s </dev/null) || die "the cluster did not answer; nothing was removed"
 tunnels=$(k8s_tunnels "$ns" "$NAME")
 if [ -z "$left" ] && [ -z "$tunnels" ]; then
+    # A login made by a create that stopped before its pages cannot be seen; removed unasked.
+    k8s_expose_login_remove "$ns" "$NAME" 2>/dev/null || true
     info "nothing left behind by ${NAME}"
     exit 0
 fi

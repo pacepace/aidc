@@ -51,6 +51,7 @@ assert_has() {
 #   auth can-i ...            namespaces ${K_CANI_NS:-yes}, nodes ${K_CANI_NODES:-yes},
 #                             deployments (the registry's) ${K_CANI_REG:-yes}
 #   get deployment registry   ${K_REGISTRY_READY} or fails when unset
+#   api-resources             lists validatingadmissionpolicies unless K_NO_VAP=1
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -76,9 +77,10 @@ case "$*" in
         if [ -n "${K_RULES:-}" ]; then printf '%s' "$K_RULES"
         elif [ "${K_CANI:-yes}" = no ]; then
             # Every right but creating pods (and a create named for one pod only, which is not it).
-            echo '{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["get","list","watch","patch","update","delete"]},{"apiGroups":["*"],"resources":["pods"],"verbs":["create"],"resourceNames":["only-this"]},{"apiGroups":["*"],"resources":["services","configmaps","persistentvolumeclaims","events","serviceaccounts/token","pods/exec","deployments","statefulsets","networkpolicies"],"verbs":["create"]}]}}'
+            echo '{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["get","list","watch","patch","update","delete"]},{"apiGroups":["*"],"resources":["pods"],"verbs":["create"],"resourceNames":["only-this"]},{"apiGroups":["*"],"resources":["services","configmaps","persistentvolumeclaims","events","serviceaccounts/token","pods/exec","pods/portforward","secrets","deployments","statefulsets","networkpolicies","ingresses","middlewares"],"verbs":["create"]}]}}'
         else echo '{"status":{"resourceRules":[{"apiGroups":["*"],"resources":["*"],"verbs":["*"]}]}}'; fi ;;
     *"auth whoami"*) printf 'system:admin' ;;
+    *"api-resources"*) [ "${K_NO_VAP:-}" = 1 ] || echo validatingadmissionpolicies.admissionregistration.k8s.io ;;
     *"auth can-i list nodes"*) echo "${K_CANI_NODES:-yes}" ;;
     *"auth can-i get deployments"*) echo "${K_CANI_REG:-yes}" ;;
     *"get deployment registry"*)
@@ -192,7 +194,7 @@ echo "=== aidc k8s check with a user's own credentials (aidc user add's Role and
 granted() {
     # shellcheck disable=SC1091
     ( . "$AIDC_ROOT/scripts/k8s/lib.sh"; . "$AIDC_ROOT/scripts/k8s/manifests.sh"; k8s_load_settings
-      { k8s_render_user_access alice; printf '%s\n' '---'; k8s_render_user_shared ""; } \
+      { k8s_render_user_access alice "${K_ROLE_NOVAP:-}"; printf '%s\n' '---'; k8s_render_user_shared ""; } \
         | yq ea -o=json -I=0 "[select(.kind == \"Role\" and .metadata.name == \"aidc-user\") , select(.kind == \"ClusterRole\" and .metadata.name == \"aidc-user\") ${1:+| select(.kind == \"Role\")}] | {\"status\": {\"resourceRules\": ([.[].rules[]] + [{\"apiGroups\": [\"authorization.k8s.io\"], \"resources\": [\"selfsubjectrulesreviews\"], \"verbs\": [\"create\"]}])}}" - )
 }
 out=$(K_NODES='n1 True\n' K_RULES="$(granted)" K_CANI_NS=no K_CANI_REG=no run_check)
@@ -201,9 +203,17 @@ assert_has "and the shared ClusterRole its cluster-wide reads and the volume pat
 assert_has "the registry they cannot see is a note, not missing" "note:    the registry in aidc-system is an admin's" "$out"
 assert_has "a user's credentials can run sessions" "This cluster can run aidc sessions." "$out"
 
+# A user added on a cluster without ValidatingAdmissionPolicy makes no pages: their Role is all
+# aidc needs there, and short of it where the policy exists.
+out=$(K_NODES='n1 True\n' K_RULES="$(K_ROLE_NOVAP=1 granted)" K_NO_VAP=1 K_CANI_NS=no K_CANI_REG=no run_check)
+assert_has "without ValidatingAdmissionPolicy: a Role that makes no pages is everything aidc does" \
+    "ok:      your credentials (system:admin) may do everything aidc does in aidc-u-" "$out"
+out=$(K_NODES='n1 True\n' K_RULES="$(K_ROLE_NOVAP=1 granted)" K_CANI_NS=no K_CANI_REG=no run_check)
+assert_has "with it: the same Role lacks making pages" \
+    "missing: permission to create secrets, create ingresses, patch ingresses, create middlewares" "$out"
 out=$(K_NODES='n1 True\n' K_RULES="$(granted ns-only)" K_CANI_NS=no K_CANI_NODES=no run_check)
 assert_has "without the ClusterRole: what is missing cluster-wide, as a note" \
-    "note:    cluster-wide you may not: get runtimeclasses, get storageclasses, list nodes, get persistentvolumes, list persistentvolumes, watch persistentvolumes, patch persistentvolumes" "$out"
+    "note:    cluster-wide you may not: get runtimeclasses, get storageclasses, get ingressclasses, list nodes, get persistentvolumes, list persistentvolumes, watch persistentvolumes, patch persistentvolumes" "$out"
 out=$(K_NODES='' K_RULES="$(granted ns-only)" K_CANI_NS=no K_CANI_NODES=no run_check)
 assert_has "nodes they may not list: the ready-node check is skipped, said as a note" \
     "note:    your credentials may not list nodes" "$out"

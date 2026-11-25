@@ -37,6 +37,21 @@ per-user MCP server (W-M1/M2) needs the same model (Q-M2).
   admission policy for volumes); Pod Security admitted sessions and the git container and
   refused privileged, host and extra-capability pods; `aidc user remove` left nothing.
 
+- After the merge with W-K2 (ports, pages, relays, `--network`, clean-env): the user's Role
+  gains `pods/portforward` create (tunnels), Secrets create and delete only (a page's login is
+  made with `kubectl create` and removed by name; no Secret is read), Ingresses (pages) and
+  Traefik Middlewares create and delete (the login); the shared ClusterRole gains `get
+  ingressclasses`. The MCP's Role gains only what its `aidc kill` needs to remove a page (list
+  and delete Ingresses, delete Secrets and Middlewares by name). No cluster-wide Ingress or
+  Service list. New admission policies `<prefix>-user-ingresses` (a user's Ingress serves only
+  `<anything>-<user>` page names, no default backend, only aidc's annotations),
+  `<prefix>-user-services` (ClusterIP only, no external IPs) and `<prefix>-user-secrets` (no
+  ServiceAccount token Secrets); `aidc user add` refuses a user name ending in `-<another
+  user>`. New `aidc user allow-network <user> [<namespace>] [--remove]` (admin): a RoleBinding in
+  that namespace letting the user and their MCP list its Services, for `--network`, which now
+  refuses an ungranted namespace before making anything. The rules test reads the new call
+  shapes and fails if a grant decided against is made. Checked live with a test user.
+
 ## Consumer note
 
 An existing user namespace has none of this until an admin runs `aidc user add <name>` again
@@ -44,3 +59,7 @@ An existing user namespace has none of this until an admin runs `aidc user add <
 warned about, not stopped), adds the credentials and writes the kubeconfig. Users then set
 `kubernetes.kubeconfig` to it. Needs Kubernetes 1.30+ for the volume policy; older clusters get
 no volume patch, and an admin trims retained audit volumes.
+
+After this update, an admin runs `aidc user add <name>` again for each existing user (it
+applies the new Role, ClusterRoles and policies), and `aidc user allow-network <name>
+<namespace>` for each namespace a user's sessions are given with `--network` or `networks:`.

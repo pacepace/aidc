@@ -877,7 +877,9 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   change: a Service made there later resolves after `aidc network <name> sync` (its pods are
   reachable by address at once). Like Docker's `--network` this widens the sandbox: that traffic does
   not pass Squid. aidc's own namespaces and the cluster's system ones are refused, and that
-  namespace's own NetworkPolicies may still refuse.
+  namespace's own NetworkPolicies may still refuse. With a user's own credentials (`aidc user
+  add`), an admin first lets the user give their sessions that namespace: `aidc user
+  allow-network <user> <namespace>` (see "Admins and users").
 - `aidc clean-env <name> --backend kubernetes` removes what a session that is no longer running
   left behind (a create or kill that stopped half way), keeping its audit claim.
 - A tainted session is recorded and reported, not frozen yet.
@@ -947,6 +949,7 @@ An **admin** (credentials that may make namespaces, such as the cluster's own ku
 ```bash
 aidc user add alice            # namespace aidc-u-alice, her disk, her credentials, a kubeconfig
 aidc user creds alice          # a new kubeconfig (renew; --revoke kills every earlier token)
+aidc user allow-network alice shop   # her sessions may be given namespace shop (--network)
 aidc user remove alice         # alice and everything made for her: refuses while she has sessions
 ```
 
@@ -954,9 +957,14 @@ aidc user remove alice         # alice and everything made for her: refuses whil
 host network or extra capabilities; aidc's sessions, Sysbox included, and git container pass)
 and makes a ServiceAccount for the user whose Role may do exactly what aidc's commands do in
 that namespace and nothing in any other, a second one for the user's MCP server (sessions
-only), and read-only cluster-wide rights for the runtime class, storage class, nodes and
-volumes, plus setting her own volumes to Delete (`aidc audit trim`; an admission policy refuses
-any other volume change). It writes her kubeconfig (the cluster's server and CA, a token valid
+only), and read-only cluster-wide rights for the runtime class, storage class, ingress class,
+nodes and volumes, plus setting her own volumes to Delete (`aidc audit trim`; an admission policy
+refuses any other volume change). Further admission policies hold what she makes in her
+namespace to what aidc makes: Ingresses only at her own page names (`<session>-alice.<domain>`)
+with aidc's annotations, Services only as ClusterIPs, no ServiceAccount token Secrets; so a user
+name ending in `-<another user's name>` is refused. Her credentials reach no other namespace:
+`aidc user allow-network` grants one, for `--network` (listing its Services, nothing else).
+It writes her kubeconfig (the cluster's server and CA, a token valid
 `user_token_ttl`, default 720h) to `~/.config/aidc/users/alice.kubeconfig`, mode 0600, and
 prints the path, never the token (`aidc user creds alice --token` prints only the token, when
 you want it). Hand the file over privately. `aidc user remove` sets the user's volumes to

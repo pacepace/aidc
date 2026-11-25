@@ -192,6 +192,14 @@ k8s_kubectl() {
     kubectl ${opts[@]+"${opts[@]}"} "$@"
 }
 
+# k8s_has_vap: whether the cluster has ValidatingAdmissionPolicy (Kubernetes 1.30), which narrows
+# what a user's credentials may do with a volume, an Ingress, a Service or a Secret
+# (manifests.sh, k8s_render_user_shared).
+k8s_has_vap() {
+    k8s_kubectl api-resources --api-group=admissionregistration.k8s.io -o name 2>/dev/null \
+        | grep -q '^validatingadmissionpolicies'
+}
+
 # Names. A namespace name is a DNS label: at most 63 characters of [a-z0-9-].
 k8s_system_ns()  { printf '%s-system' "$AIDC_K8S_PREFIX"; }
 k8s_user_ns()    { printf '%s-u-%s' "$AIDC_K8S_PREFIX" "${1:-$AIDC_K8S_USER}"; }

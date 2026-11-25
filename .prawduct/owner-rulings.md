@@ -456,3 +456,7 @@ The local server does not serve an HTTP API in 2.0 (upstream U10 and adoption ch
 3tears' L1 is a cache, so it cannot be the record. aidc's single durable file is SQLite as a first-class 3tears L3 (durable store) beside the Postgres one, with no L2 and L1 as the normal cache in front: the full durable-store contract, so any collection that works on Postgres works on SQLite and a deployment switches by configuration. On a mesh the L3 becomes Postgres and an L2 is added. This replaces the 2026-11-25 "L1 on a file" wording; the intent (one file, no services) is unchanged.
 
 Also (owner, same day): the git store is already a proper L3; the SQLite L3 is built the same way, beside it and Postgres, and the git and Postgres stores are not reworked.
+
+## 2026-11-25 — Finish the git L3 follow-ups with the SQLite L3
+
+While adding the SQLite L3, build the proper shared L3 contract suite (Postgres, SQLite, git) and finish the git L3's open follow-ups in 3tears: hand edits re-versioned so CAS cannot overwrite them, one-commit batched flush, the table/store mapping and public adopt-row hooks Scriob works around, stale docstrings, a format version, and deletes joining a caller transaction.

@@ -434,3 +434,7 @@ The owner raised prawduct's review_round_budget (6 → 40) so the aidc 2.0 work 
 ## 2026-11-25 — 3tears-mcp drops MCP SDK 1.x first (design-13 Q5)
 
 Before the 2.0 features are added upstream (call context, progress, error model, resources, stateful mode), 3tears-mcp drops its MCP Python SDK 1.x support, so each feature is built and tested once against the current SDK.
+
+## 2026-11-25 — Durable state moves onto an L1-on-a-file 3tears store (design-13 Q4)
+
+3tears gains an L1-only store on a file (SQLite with write-ahead logging), and aidc's MCP state (watches, send queues, the delivery ledger and the rest that must survive a restart) moves onto it in 2.0. The L1 cache size limit coming in 3tears 0.95.0 stays off for this store, and the store refuses to start with it on. TRS-25 option A is ratified.

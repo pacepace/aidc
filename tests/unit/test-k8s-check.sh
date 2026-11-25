@@ -194,7 +194,7 @@ echo "=== aidc k8s check with a user's own credentials (aidc user add's Role and
 granted() {
     # shellcheck disable=SC1091
     ( . "$AIDC_ROOT/scripts/k8s/lib.sh"; . "$AIDC_ROOT/scripts/k8s/manifests.sh"; k8s_load_settings
-      { k8s_render_user_access alice "${K_ROLE_NOVAP:-}"; printf '%s\n' '---'; k8s_render_user_shared ""; } \
+      { k8s_render_user_access alice; printf '%s\n' '---'; k8s_render_user_shared; } \
         | yq ea -o=json -I=0 "[select(.kind == \"Role\" and .metadata.name == \"aidc-user\") , select(.kind == \"ClusterRole\" and .metadata.name == \"aidc-user\") ${1:+| select(.kind == \"Role\")}] | {\"status\": {\"resourceRules\": ([.[].rules[]] + [{\"apiGroups\": [\"authorization.k8s.io\"], \"resources\": [\"selfsubjectrulesreviews\"], \"verbs\": [\"create\"]}])}}" - )
 }
 out=$(K_NODES='n1 True\n' K_RULES="$(granted)" K_CANI_NS=no K_CANI_REG=no run_check)
@@ -203,14 +203,13 @@ assert_has "and the shared ClusterRole its cluster-wide reads and the volume pat
 assert_has "the registry they cannot see is a note, not missing" "note:    the registry in aidc-system is an admin's" "$out"
 assert_has "a user's credentials can run sessions" "This cluster can run aidc sessions." "$out"
 
-# A user added on a cluster without ValidatingAdmissionPolicy makes no pages: their Role is all
-# aidc needs there, and short of it where the policy exists.
-out=$(K_NODES='n1 True\n' K_RULES="$(K_ROLE_NOVAP=1 granted)" K_NO_VAP=1 K_CANI_NS=no K_CANI_REG=no run_check)
-assert_has "without ValidatingAdmissionPolicy: a Role that makes no pages is everything aidc does" \
-    "ok:      your credentials (system:admin) may do everything aidc does in aidc-u-" "$out"
-out=$(K_NODES='n1 True\n' K_RULES="$(K_ROLE_NOVAP=1 granted)" K_CANI_NS=no K_CANI_REG=no run_check)
-assert_has "with it: the same Role lacks making pages" \
-    "missing: permission to create secrets, create ingresses, patch ingresses, create middlewares" "$out"
+# A cluster without ValidatingAdmissionPolicy: aidc issues no user credentials there (nothing
+# would narrow a user's Services, Ingresses, Secrets, Middlewares or volumes), so it is missing.
+assert_has "with ValidatingAdmissionPolicy: ok" "ok:      ValidatingAdmissionPolicy" "$out"
+out=$(K_NODES='n1 True\n' K_RULES="$(granted)" K_NO_VAP=1 K_CANI_NS=no K_CANI_REG=no run_check)
+assert_has "without it: missing, naming the Kubernetes version and why" \
+    "missing: this cluster has no ValidatingAdmissionPolicy (Kubernetes 1.30 or later): without it nothing holds a user's Services" "$out"
+assert_has "  and the cluster cannot run sessions (exit 1)" "exit=1" "$out"
 out=$(K_NODES='n1 True\n' K_RULES="$(granted ns-only)" K_CANI_NS=no K_CANI_NODES=no run_check)
 assert_has "without the ClusterRole: what is missing cluster-wide, as a note" \
     "note:    cluster-wide you may not: get runtimeclasses, get storageclasses, get ingressclasses, list nodes, get persistentvolumes, list persistentvolumes, watch persistentvolumes, patch persistentvolumes" "$out"

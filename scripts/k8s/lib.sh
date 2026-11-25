@@ -193,11 +193,25 @@ k8s_kubectl() {
 }
 
 # k8s_has_vap: whether the cluster has ValidatingAdmissionPolicy (Kubernetes 1.30), which narrows
-# what a user's credentials may do with a volume, an Ingress, a Service or a Secret
-# (manifests.sh, k8s_render_user_shared).
+# what a user's credentials may do with a volume, an Ingress, a Service, a Secret or a Traefik
+# Middleware (manifests.sh, k8s_render_user_shared).
 k8s_has_vap() {
     k8s_kubectl api-resources --api-group=admissionregistration.k8s.io -o name 2>/dev/null \
         | grep -q '^validatingadmissionpolicies'
+}
+
+# K8S_NO_VAP_WHY: why no user credentials are issued on a cluster without it (aidc user add and
+# creds refuse with it; aidc k8s check reports it missing). RBAC grants a verb
+# on a kind, not on what the object says: without the policies a user's Service could take
+# another namespace's traffic (externalIPs, CVE-2020-8554) or open a node port or load balancer,
+# an Ingress could serve another user's page names, a Middleware could make the ingress
+# controller call any address, and a Secret could be a token that never expires.
+# shellcheck disable=SC2034  # used by the scripts that source this
+K8S_NO_VAP_WHY="this cluster has no ValidatingAdmissionPolicy (Kubernetes 1.30 or later): without it nothing holds a user's Services, Ingresses, login Middlewares, Secrets and volumes to their own namespace, so aidc issues no user credentials here; upgrade the cluster to Kubernetes 1.30 or later"
+
+# k8s_valid_domain <name>: 0 when <name> is a domain name of lowercase DNS labels (two or more).
+k8s_valid_domain() {
+    printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 }
 
 # Names. A namespace name is a DNS label: at most 63 characters of [a-z0-9-].

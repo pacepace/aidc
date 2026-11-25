@@ -270,8 +270,11 @@ EOF
 #     list); the admission policy (k8s_render_user_shared) refuses ServiceAccount token Secrets
 #   ingresses: the pages (--expose); middlewares.traefik.io create and delete: a page's login
 #     on Traefik, made with `kubectl create` and removed by name (a rule for a kind the cluster
-#     does not have grants nothing). The admission policy narrows every Ingress to the user's
-#     own page names and aidc's annotations, and every Service to a ClusterIP.
+#     does not have grants nothing). The admission policies narrow every Ingress to the user's
+#     own page names under the configured domain and aidc's annotations, every Service to a
+#     ClusterIP, and every Middleware to a basicAuth login reading a Secret of its own
+#     namespace. Credentials are issued only where those policies can exist
+#     (ValidatingAdmissionPolicy, Kubernetes 1.30; lib.sh, K8S_NO_VAP_WHY).
 #   serviceaccounts/token on aidc-user only: the user renews their own kubeconfig
 K8S_USER_SA=aidc-user
 K8S_USER_RULES='core pods get,list,watch,create,patch,delete
@@ -338,16 +341,6 @@ K8S_MCP_CLUSTER_RULES='node.k8s.io runtimeclasses get'
 # session's names responder can serve its Services. Never bound cluster-wide.
 K8S_NETWORK_RULES='core services list'
 
-# k8s_user_rules [no-vap]: the user's Role rules. On a cluster without ValidatingAdmissionPolicy
-# nothing would narrow a page's Ingress, login Secret or Middleware, so none may be made there;
-# removing them (aidc kill, clean-env) stays.
-k8s_user_rules() {
-    if [ -z "${1:-}" ]; then printf '%s\n' "$K8S_USER_RULES"; return 0; fi
-    printf '%s\n' "$K8S_USER_RULES" | sed -e 's/^core secrets .*/core secrets delete/' \
-        -e 's/^traefik.io middlewares .*/traefik.io middlewares delete/' \
-        -e 's/^networking.k8s.io ingresses .*/networking.k8s.io ingresses get,list,watch,delete/'
-}
-
 # Cluster-scoped names: shared by every user of this prefix, or one user's.
 k8s_user_clusterrole()   { printf '%s-user' "$AIDC_K8S_PREFIX"; }
 k8s_mcp_clusterrole()    { printf '%s-mcp' "$AIDC_K8S_PREFIX"; }
@@ -355,6 +348,7 @@ k8s_user_volume_policy() { printf '%s-user-volumes' "$AIDC_K8S_PREFIX"; }
 k8s_user_ingress_policy() { printf '%s-user-ingresses' "$AIDC_K8S_PREFIX"; }
 k8s_user_service_policy() { printf '%s-user-services' "$AIDC_K8S_PREFIX"; }
 k8s_user_secret_policy() { printf '%s-user-secrets' "$AIDC_K8S_PREFIX"; }
+k8s_user_middleware_policy() { printf '%s-user-middlewares' "$AIDC_K8S_PREFIX"; }
 k8s_network_clusterrole() { printf '%s-network' "$AIDC_K8S_PREFIX"; }
 k8s_network_rb()         { printf '%s-u-%s-network' "$AIDC_K8S_PREFIX" "$1"; }
 k8s_user_crb()           { printf '%s-u-%s' "$AIDC_K8S_PREFIX" "$1"; }
@@ -371,14 +365,13 @@ _k8s_rules_yaml() {
     }'
 }
 
-# k8s_render_user_access <user> [no-vap]: the user's and their MCP's ServiceAccounts, Roles and
-# RoleBindings in the user's namespace, and their ClusterRoleBindings. With no-vap (a cluster
-# without ValidatingAdmissionPolicy) the user's Role makes no pages (k8s_user_rules).
+# k8s_render_user_access <user>: the user's and their MCP's ServiceAccounts, Roles and
+# RoleBindings in the user's namespace, and their ClusterRoleBindings.
 k8s_render_user_access() {
     local user="$1" ns sa rules crb cr
     ns=$(k8s_user_ns "$user")
     for sa in "$K8S_USER_SA" "$K8S_MCP_SA"; do
-        rules=$(k8s_user_rules "${2:-}") crb=$(k8s_user_crb "$user") cr=$(k8s_user_clusterrole)
+        rules="$K8S_USER_RULES" crb=$(k8s_user_crb "$user") cr=$(k8s_user_clusterrole)
         if [ "$sa" = "$K8S_MCP_SA" ]; then
             rules="$K8S_MCP_RULES" crb=$(k8s_mcp_crb "$user") cr=$(k8s_mcp_clusterrole)
         fi
@@ -442,14 +435,14 @@ subjects:
 YAML
 }
 
-# k8s_render_user_shared [no-volume-patch]: the ClusterRoles every user's bindings name, and the
-# admission policies that narrow the volume patch and what a user may make in their namespace.
-# With an argument (a cluster without ValidatingAdmissionPolicy), the user ClusterRole grants no
-# patch on volumes and no policy is rendered: aidc audit trim then leaves a retained volume for
-# an admin, and says so (and the user's Role makes no pages: k8s_user_rules).
+# k8s_render_user_shared: the ClusterRoles every user's bindings name, and the admission policies
+# that narrow the volume patch and what a user may make in their namespace. Page names are held
+# to the configured domain (kubernetes.ingress.domain, read when this is rendered: aidc user add);
+# with none configured, the policy refuses every page. The caller has checked the cluster has
+# ValidatingAdmissionPolicy (no credentials are issued without it) and that the domain, if any,
+# is a domain name (it goes into the policy's expressions).
 k8s_render_user_shared() {
     local rules="$K8S_USER_CLUSTER_RULES" sa_prefix
-    [ -z "${1:-}" ] || rules=$(printf '%s\n' "$rules" | sed 's/^core persistentvolumes .*/core persistentvolumes get,list,watch/')
     sa_prefix="system:serviceaccount:${AIDC_K8S_PREFIX}-u-"
     cat <<YAML
 apiVersion: rbac.authorization.k8s.io/v1
@@ -466,7 +459,6 @@ $(_k8s_rules_yaml "$K8S_MCP_CLUSTER_RULES")
 ---
 $(k8s_render_network_clusterrole)
 YAML
-    [ -z "${1:-}" ] || return 0
     local user_ns_prefix="${AIDC_K8S_PREFIX}-u-"
     cat <<YAML
 ---
@@ -508,16 +500,18 @@ YAML
     - name: user
       expression: "request.namespace.startsWith('@NSP@') ? request.namespace.substring(@NSN@) : ''"
     - name: host
-      expression: "'^[a-z0-9-]+-' + variables.user + '[.]'"
+      expression: "'^[a-z0-9-]+-' + variables.user + '[.]@DOMRE@$'"
     - name: ann
       expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
 CEL
 )
+    local domain="${AIDC_K8S_INGRESS_DOMAIN:-}"
     vars=${vars//@NSP@/${user_ns_prefix}}; vars=${vars//@NSN@/${#user_ns_prefix}}
+    vars=${vars//@DOMRE@/${domain//./[.]}}
     # shellcheck disable=SC2016
     checks=$(cat <<'CEL'
     - expression: "!has(object.spec.defaultBackend) && has(object.spec.rules) && size(object.spec.rules) > 0 && object.spec.rules.all(r, has(r.host) && r.host.matches(variables.host))"
-      message: "an aidc user's Ingress serves only their own page names (<session>-<user>.<domain>), with no default backend"
+      message: "an aidc user's Ingress serves only their own page names (<session>-<user>.@DOMAIN@), with no default backend"
     - expression: "!has(object.spec.tls) || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h.matches(variables.host)))"
       message: "an aidc user's Ingress certificate names only their own page names"
     - expression: "variables.ann.all(k, k in ['aidc/expose-port', 'kubectl.kubernetes.io/last-applied-configuration', 'traefik.ingress.kubernetes.io/router.middlewares', 'nginx.ingress.kubernetes.io/auth-type', 'nginx.ingress.kubernetes.io/auth-secret', 'nginx.ingress.kubernetes.io/auth-realm', 'cert-manager.io/cluster-issuer'])"
@@ -528,6 +522,11 @@ CEL
       message: "an aidc user's page uses only a login Secret of their own namespace"
 CEL
 )
+    checks=${checks//@DOMAIN@/${domain}}
+    if [ -z "$domain" ]; then
+        checks='    - expression: "false"
+      message: "no page domain (kubernetes.ingress.domain) was configured when aidc user add set up this cluster: an aidc user may make no pages; an admin sets it and runs aidc user add again"'
+    fi
     _k8s_user_object_policy "$(k8s_user_ingress_policy)" networking.k8s.io '"*"' ingresses "$vars" "$checks"
     _k8s_user_object_policy "$(k8s_user_service_policy)" '""' v1 services "" \
 '    - expression: "(!has(object.spec.type) || object.spec.type == '"'ClusterIP'"') && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
@@ -535,19 +534,32 @@ CEL
     _k8s_user_object_policy "$(k8s_user_secret_policy)" '""' v1 secrets "" \
 '    - expression: "!has(object.type) || object.type != '"'kubernetes.io/service-account-token'"'"
       message: "an aidc user may not make ServiceAccount token Secrets"'
+    # shellcheck disable=SC2016
+    _k8s_user_object_policy "$(k8s_user_middleware_policy)" traefik.io '"*"' middlewares "" \
+'    - expression: "has(object.spec) && object.spec.all(k, k == '"'basicAuth'"')"
+      message: "an aidc user'"'"'s Middleware is a page login: basicAuth and nothing else"
+    - expression: "has(object.spec.basicAuth) && has(object.spec.basicAuth.secret) && object.spec.basicAuth.all(k, k in ['"'secret', 'realm', 'removeHeader'"']) && object.spec.basicAuth.secret.matches('"'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'"')"
+      message: "an aidc user'"'"'s login Middleware reads a Secret of its own namespace (a plain name), with at most a realm and removeHeader besides"'
 }
 
 # What a user's or their MCP's ServiceAccount makes in the user's namespace, narrowed where RBAC
 # cannot (it grants a verb on a kind, not on what the object says), one policy per kind (so each
 # expression is checked against its own kind's schema):
-#   - an Ingress serves only the user's own page names: every host's first label ends in
-#     -<user> (<session>-<user>, <session>-<port>-<user>; `aidc user add` refuses a user name
-#     that ends in -<another user>, so no two users' names overlap), no default backend, and
-#     only the annotations aidc sets (no controller snippets, no login from another namespace);
+#   - an Ingress serves only the user's own page names under the configured domain: every host
+#     is <label>-<user>.<domain> (<session>-<user>, <session>-<port>-<user>; `aidc user add`
+#     refuses a user name that ends in -<another user> or starts with <another user>-, so no
+#     two users' page names or namespaces overlap), no default backend, and only the
+#     annotations aidc sets (no controller snippets, no login from another namespace: Traefik
+#     names a Middleware <namespace>-<name>, which the start rule keeps unambiguous);
 #   - a Service is a ClusterIP with no external IPs (no node port, load balancer or external
 #     address: those would reach past the namespace's policies or take other traffic);
-#   - a Secret is never a ServiceAccount token (a token that would not expire).
-k8s_user_object_policies() { printf '%s %s %s' "$(k8s_user_ingress_policy)" "$(k8s_user_service_policy)" "$(k8s_user_secret_policy)"; }
+#   - a Secret is never a ServiceAccount token (a token that would not expire);
+#   - a Traefik Middleware is a basicAuth login reading a Secret of its own namespace, and
+#     nothing else: other kinds make the controller itself act (forwardAuth calls any address
+#     the user names, from the controller's place in the network, which every user's exposed
+#     port lets in; errors fetches a page from any Service), so only the login aidc makes is
+#     allowed.
+k8s_user_object_policies() { printf '%s %s %s %s' "$(k8s_user_ingress_policy)" "$(k8s_user_service_policy)" "$(k8s_user_secret_policy)" "$(k8s_user_middleware_policy)"; }
 
 # _k8s_user_object_policy <name> <apiGroup> <apiVersion> <resource> <variables yaml> <validations
 # yaml>: one such policy and its binding, on create and update by a user's or their MCP's

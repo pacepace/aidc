@@ -23,7 +23,9 @@ aidc user <add|creds|allow-network|remove> <name> [options]
            their MCP server, and a kubeconfig for <name> (see creds). The new user then
            adds their own GitHub login and Claude accounts; the admin never handles them
            (they run `aidc git setup`, log in to GitHub with `aidc git login` and to Claude
-           through `aidc git attach`). Safe to run again.
+           through `aidc git attach`). Safe to run again. Needs a cluster with
+           ValidatingAdmissionPolicy (Kubernetes 1.30 or later); add and creds refuse
+           without it. Pages are held to kubernetes.ingress.domain as configured here.
   creds <name> [--out FILE] [--duration D] [--token] [--revoke]
            Issue <name>'s kubeconfig again: a new token (kubernetes.user_token_ttl, default
            720h, or --duration) and the cluster's server and CA from the credentials in

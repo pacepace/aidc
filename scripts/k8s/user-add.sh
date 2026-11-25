@@ -34,18 +34,23 @@ ns=$(k8s_user_ns "$USER_NAME")
 k8s_valid_label "$ns" || die "namespace '${ns}' would be longer than 63 characters"
 sel=$(k8s_node_selector)
 
-# The cluster-wide pieces every user's bindings name. Without ValidatingAdmissionPolicy
-# (Kubernetes before 1.30) the volume patch it narrows is not granted at all.
-no_vap=""
-if ! k8s_has_vap; then
-    no_vap=1
-    info "this cluster has no ValidatingAdmissionPolicy: users may not set their audit volumes to Delete; an admin trims retained ones (aidc audit trim)"
-    info "  nor make pages (aidc create --expose): nothing would hold their Ingresses to their own names"
+# The admission policies that narrow what a user's credentials may do need
+# ValidatingAdmissionPolicy (Kubernetes 1.30); without it no user is set up (lib.sh,
+# K8S_NO_VAP_WHY). Nothing has been made yet.
+k8s_has_vap || die "$K8S_NO_VAP_WHY"
+# Pages live only under the configured domain; it goes into the shared policy as rendered now.
+if [ -z "$AIDC_K8S_INGRESS_DOMAIN" ]; then
+    info "no kubernetes.ingress.domain in this config: users may make no pages (aidc create --expose) until it is set and aidc user add runs again"
+elif ! k8s_valid_domain "$AIDC_K8S_INGRESS_DOMAIN"; then
+    die "kubernetes.ingress.domain '${AIDC_K8S_INGRESS_DOMAIN}' is not a domain name; nothing was made"
 fi
 
 # Page names are <session>-<user>.<domain>: a user whose name ends in -<another user's name>
 # could make the other's page names (a-bob's session x and bob's session x-a are both x-a-bob),
-# so such a name is refused. The admission policy then keeps every user to their own.
+# so such a name is refused. Traefik names a login Middleware <namespace>-<name>, so a user whose
+# name starts with <another user's name>- would make the other's Middleware names ambiguous
+# (bob's x-a-login and bob-x's a-login are both <prefix>-u-bob-x-a-login): refused too. The
+# admission policies then keep every user to their own.
 others=$(k8s_kubectl get namespace -l aidc/role=user -o name --request-timeout=10s) \
     || die "the cluster did not answer (listing the other users); nothing was made"
 for o in $others; do
@@ -53,10 +58,12 @@ for o in $others; do
     [ "$o" != "$USER_NAME" ] || continue
     case "$USER_NAME" in *-"$o") die "user name '${USER_NAME}' ends in -${o}, another user's name: their page names would overlap (<session>-${USER_NAME} and <session>-${o}); pick another name" ;; esac
     case "$o" in *-"$USER_NAME") die "user '${o}' ends in -${USER_NAME}: their page names would overlap (<session>-${o} and <session>-${USER_NAME}); pick another name" ;; esac
+    case "$USER_NAME" in "$o"-*) die "user name '${USER_NAME}' starts with ${o}-, another user's name: their login Middleware names would overlap (Traefik's ${AIDC_K8S_PREFIX}-u-${o}-<name>); pick another name" ;; esac
+    case "$o" in "$USER_NAME"-*) die "user '${o}' starts with ${USER_NAME}-: their login Middleware names would overlap (Traefik's ${AIDC_K8S_PREFIX}-u-${USER_NAME}-<name>); pick another name" ;; esac
 done
 
 info "applying ${ns} and ${USER_NAME}'s disk (${AIDC_K8S_USER_DISK_SIZE} on ${AIDC_K8S_STORAGE_CLASS})"
-k8s_render_user_shared "${no_vap:+no-volume-patch}" | k8s_kubectl apply -f - >&2
+k8s_render_user_shared | k8s_kubectl apply -f - >&2
 if [ "$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/null || true)" = "Bound" ]; then
     k8s_render_user "$USER_NAME" "$sel" | yq ea 'select(.kind != "Pod")' - | k8s_kubectl apply -f - >&2
     info "${USER_NAME}'s disk is already set up"
@@ -73,7 +80,7 @@ phase=$(k8s_kubectl -n "$ns" get pvc disk -o jsonpath='{.status.phase}' 2>/dev/n
 [ "$phase" = "Bound" ] || die "${USER_NAME}'s disk is ${phase:-missing}, not Bound"
 
 info "applying ${USER_NAME}'s credentials: ServiceAccount ${K8S_USER_SA} (the user) and ${K8S_MCP_SA} (their MCP server), each with its Role in ${ns}"
-k8s_render_user_access "$USER_NAME" "$no_vap" | k8s_kubectl apply -f - >&2
+k8s_render_user_access "$USER_NAME" | k8s_kubectl apply -f - >&2
 info "${USER_NAME} is set up in ${ns}. They add their own GitHub login (aidc git login) and Claude accounts."
 
 bash "$AIDC_SCRIPTS/k8s/user-creds.sh" "$USER_NAME" ${CREDS_ARGS[@]+"${CREDS_ARGS[@]}"}

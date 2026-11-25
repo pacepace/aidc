@@ -20,10 +20,12 @@ aidc k8s check
 
 Checks, read-only, that the cluster in the `kubernetes:` block of
 ~/.config/aidc/config.yaml can run aidc sessions: kubectl reaches it, the runtime
-class and the storage class exist, a ready node can take session pods, and what the
-credentials in use may and may not do: everything aidc does in your namespace (missing
-otherwise), its cluster-wide reads (a note says what is skipped without them), and
-whether they are an admin's. Exits 1 when something is missing.
+class and the storage class exist, the cluster has ValidatingAdmissionPolicy (Kubernetes
+1.30 or later: aidc issues no user credentials without it), a ready node can take
+session pods, and what the credentials in use may and may not do: everything aidc does
+in your namespace (missing otherwise), its cluster-wide reads (a note says what is
+skipped without them), and whether they are an admin's. Exits 1 when something is
+missing.
 EOF
         exit 0 ;;
 esac
@@ -54,6 +56,14 @@ if prov=$(k8s_kubectl get storageclass "$AIDC_K8S_STORAGE_CLASS" -o jsonpath='{.
     ok "storage class ${AIDC_K8S_STORAGE_CLASS} (provisioner ${prov})"
 else
     missing "storage class ${AIDC_K8S_STORAGE_CLASS} (kubernetes.storage_class)"
+fi
+
+# Users' credentials are issued only where admission policies can narrow them (lib.sh,
+# K8S_NO_VAP_WHY): without, aidc user add and creds refuse, and so no session has a namespace.
+if k8s_has_vap; then
+    ok "ValidatingAdmissionPolicy (the policies aidc user add sets hold each user to their own namespace)"
+else
+    missing "$K8S_NO_VAP_WHY"
 fi
 
 # Nodes a session pod can land on: ready, matching the configured node selector and the
@@ -101,8 +111,7 @@ K8S_LACKING_JQ='
 _k8s_lacking() { jq -r --arg rules "$1" "$K8S_LACKING_JQ" <<<"$2"; }
 review=$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"%s"}}' "$user_ns" \
     | k8s_kubectl create --validate=false -f - -o json 2>/dev/null) || review=""
-# Without ValidatingAdmissionPolicy a user's Role makes no pages (manifests.sh, k8s_user_rules).
-if k8s_has_vap; then user_rules=$(k8s_user_rules); else user_rules=$(k8s_user_rules no-vap); fi
+user_rules="$K8S_USER_RULES"
 if [ -z "$review" ] || ! lack=$(_k8s_lacking "$user_rules" "$review" 2>/dev/null); then
     missing "cannot ask the cluster what your credentials may do in ${user_ns} (SelfSubjectRulesReview)"
 else

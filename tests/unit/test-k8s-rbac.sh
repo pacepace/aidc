@@ -12,8 +12,9 @@
 #   - a call cannot be read (a new form this test does not know): it must be taught, not skipped;
 #   - a call into another namespace (--network) needs what the network grant does not give, or
 #     the grant gives what no such call uses;
-#   - the MCP's rules grant anything the user's do not (on a cluster with or without
-#     ValidatingAdmissionPolicy);
+#   - the MCP's rules grant anything the user's do not;
+#   - a rule names a resource under another API group than the resource's own, or loses (or
+#     gains) a resourceName restriction (the aidc-user token);
 #   - a grant decided against is made: listing Ingresses cluster-wide;
 #   - kubectl is called directly instead of through k8s_kubectl.
 # Calls through lib.sh's k8s_get (and session-create's k8s_read on top of it) are read as the
@@ -47,8 +48,8 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
     # Every controller's form: the kinds either may make.
     controllers() { local c; for c in traefik ingress-nginx; do AIDC_K8S_INGRESS_CONTROLLER=$c "$@"; done; }
     {
-        printf 'RULES user\n%s\nRULES user-novap\n%s\nRULES user-cluster\n%s\nRULES mcp\n%s\nRULES mcp-cluster\n%s\nRULES network\n%s\n' \
-            "$K8S_USER_RULES" "$(k8s_user_rules no-vap)" "$K8S_USER_CLUSTER_RULES" "$K8S_MCP_RULES" \
+        printf 'RULES user\n%s\nRULES user-cluster\n%s\nRULES mcp\n%s\nRULES mcp-cluster\n%s\nRULES network\n%s\n' \
+            "$K8S_USER_RULES" "$K8S_USER_CLUSTER_RULES" "$K8S_MCP_RULES" \
             "$K8S_MCP_CLUSTER_RULES" "$K8S_NETWORK_RULES"
         printf 'RENDER k8s_render_session %s\n' "$(k8s_render_session s1 /home/alice/r default '{}' s1-audit-1 10.0.0.1 | kinds)"
         printf 'RENDER k8s_render_git %s\n' "$(k8s_render_git '{}' | kinds)"
@@ -68,6 +69,7 @@ scripts, facts_path = sys.argv[1], sys.argv[2]
 
 # ---- the rules and renders --------------------------------------------------------------------
 rules, renders, cur = {}, {}, None
+groups = []   # (rules table, resource, API group, resourceName or "")
 for line in open(facts_path):
     line = line.rstrip("\n")
     if line.startswith("RULES "):
@@ -77,6 +79,7 @@ for line in open(facts_path):
     if cur and line.strip():
         f = line.split()
         g = "" if f[0] == "core" else f[0]
+        groups.append((cur, f[1], g, f[3] if len(f) > 3 else ""))
         for v in f[2].split(","):
             rules[cur].add((f[1], v))
 
@@ -309,18 +312,30 @@ for (r, v), wh in sorted(other_needs.items()):
     if not ok: problems.append(f"{v} {r} in another namespace is used but the network grant lacks it: {wh[0]}")
 for rv in sorted(rules["network"] - set(other_needs)):
     problems.append(f"the network grant gives {rv[1]} {rv[0]} but no call into another namespace uses it")
+# Each resource under its own API group, and the one resourceName restriction where it belongs.
+GROUP = {"pods": "", "pods/exec": "", "pods/log": "", "pods/portforward": "", "services": "",
+         "configmaps": "", "persistentvolumeclaims": "", "events": "", "secrets": "",
+         "serviceaccounts/token": "", "nodes": "", "persistentvolumes": "",
+         "deployments": "apps", "statefulsets": "apps", "networkpolicies": "networking.k8s.io",
+         "ingresses": "networking.k8s.io", "ingressclasses": "networking.k8s.io",
+         "middlewares": "traefik.io", "runtimeclasses": "node.k8s.io",
+         "storageclasses": "storage.k8s.io"}
+RESOURCE_NAMES = {("user", "serviceaccounts/token"): "aidc-user"}
+before = len(problems)
+for which, r, g, n in groups:
+    if r not in GROUP: problems.append(f"{which}: {r} has no known API group (teach GROUP)"); continue
+    if g != GROUP[r]: problems.append(f"{which}: {r} is granted under API group '{g}', not '{GROUP[r]}'")
+    want = RESOURCE_NAMES.get((which, r), "")
+    if n != want: problems.append(f"{which}: {r} is restricted to '{n}', not '{want}'")
+for (which, r), n in RESOURCE_NAMES.items():
+    if not any(w == which and x == r for w, x, _, _ in groups): problems.append(f"{which}: {r} ({n}) is not granted")
+if len(problems) == before: print(f"  PASS: {len(groups)} rules each under their resource's API group, resourceNames only on the aidc-user token")
 for (r, v, which), why in sorted(NOT_GRANTED.items()):
     if (r, v) in rules[which]: problems.append(f"{v} {r} ({which}) is granted, decided against: {why}")
     else: print(f"  PASS: not granted, {v} {r} ({which}): {why}")
-for name, ns_rules in (("", granted_ns), (" without ValidatingAdmissionPolicy", rules["user-novap"])):
-    extra = (rules["mcp"] - ns_rules) | (rules["mcp-cluster"] - granted_cl)
-    if extra: problems.append(f"the MCP's rules grant what the user's{name} do not: {sorted(extra)}")
-    else: print(f"  PASS: the MCP's rules are within the user's{name}")
-novap_only = rules["user-novap"] - granted_ns
-if novap_only: problems.append(f"the user's rules without ValidatingAdmissionPolicy grant more: {sorted(novap_only)}")
-gone = sorted(rv for rv in granted_ns - rules["user-novap"] if rv[1] not in ("create", "patch"))
-if gone: problems.append(f"without ValidatingAdmissionPolicy the user loses more than making pages: {gone}")
-else: print("  PASS: without ValidatingAdmissionPolicy the user loses only making pages (create, patch)")
+extra = (rules["mcp"] - granted_ns) | (rules["mcp-cluster"] - granted_cl)
+if extra: problems.append(f"the MCP's rules grant what the user's do not: {sorted(extra)}")
+else: print("  PASS: the MCP's rules are within the user's")
 if calls < 60: problems.append(f"only {calls} kubectl calls read: the reader is skipping some")
 else: print(f"  PASS: {calls} kubectl calls read")
 for p in problems: print(f"  FAIL: {p}")

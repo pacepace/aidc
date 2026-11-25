@@ -177,13 +177,30 @@ the same way (decisions (05)).
   does not exist. `aidc create --network` and `aidc network add` ask `auth can-i list services`
   first and refuse before anything is made, naming the command. `aidc user remove` deletes the
   user's grants; the last user's removal deletes the ClusterRole. Chosen over degrading (pods by
-  address, no names) because the grant also makes widening the sandbox into another namespace
-  an admin's decision, not only the user's.
+  address, no names) because it keeps the namespace's Service names private to whom an admin
+  grants them. The grant controls Service names and aidc's own `--network` flow only: the
+  user's Role still makes, patches and deletes NetworkPolicies in their own namespace, so with
+  their kubeconfig they can open a session's egress to another namespace's pods by address (or
+  remove the default-deny); what reaches those pods is then the other namespace's own
+  NetworkPolicies' business.
 - (05) `middlewares.traefik.io` `create` and `delete` in the user's Role (created with `kubectl
   create` with the login Secret, removed by name), `delete` in the MCP's. A rule for a kind the
-  cluster lacks grants nothing. No admission rule on Middlewares: one only affects the routes
-  that use it, and the Ingress policy lets a user's page use only a Middleware of their own
-  namespace.
+  cluster lacks grants nothing. Corrected after review: a Middleware does not only affect the
+  routes that use it. Some kinds make the controller itself act: a forwardAuth Middleware makes
+  Traefik call an address the user picks on every request to their page, from the controller's
+  place in the network, and every user's exposed port lets the controller in (the NetworkPolicy
+  `--expose` makes, which must stay, or the controller could not serve pages), so a user could
+  reach another user's dev server past their login, or cluster-internal and metadata addresses,
+  and read the answers. An admission policy (`<prefix>-user-middlewares`, traefik.io
+  middlewares, create and update by the user's and MCP's ServiceAccounts) admits only a spec
+  whose one key is `basicAuth`, with only `secret`, `realm` and `removeHeader`, its `secret` a
+  plain name (a Secret of the Middleware's own namespace; no `<namespace>/` form). That closes
+  the hole: the controller's way into every exposed port is then used only to serve the page
+  through a login that reads the user's own Secret. The Ingress policy's Middleware reference
+  `<namespace>-<name>@kubernetescrd` is ambiguous across users whose names extend one another
+  (`bob`'s `x-a` and `bob-x`'s `a` are both `<prefix>-u-bob-x-a`), so `aidc user add` also
+  refuses a user name that starts with `<another user>-` (or that another starts with), as it
+  refuses one ending in `-<another user>`.
 - (05) `pods/portforward` `create` for the tunnels. Live on a 1.35 API server with a 1.37
   kubectl, `create` alone was enough. The MCP gets none: a port-forward ends on the machine
   that runs it.
@@ -194,11 +211,21 @@ the same way (decisions (05)).
   `<prefix>-user-secrets`: no ServiceAccount token Secrets (a token that never expires). One
   policy per kind, since one policy over three kinds fails type checking for the other kinds'
   fields.
-- (05) Without ValidatingAdmissionPolicy, `aidc user add` grants no page making (no Ingress,
-  login Secret or Middleware create or patch; deleting them stays so kill and clean-env work)
-  and says so; `aidc k8s check` and `aidc user creds --revoke` use the same table
-  (`k8s_user_rules`). The rules test checks the MCP stays within the user's rules on such a
-  cluster too.
+- (05) Without ValidatingAdmissionPolicy (before Kubernetes 1.30), aidc issues no user
+  credentials: `aidc user add` and `aidc user creds` refuse before anything is made or issued,
+  saying why and naming 1.30, and `aidc k8s check` reports it missing. Chosen after review over
+  a reduced Role there: Services alone (`create`, `patch`, which sessions need) would have no
+  policy refusing external IPs (CVE-2020-8554), NodePort or LoadBalancer, and the volume,
+  Ingress, Secret and Middleware policies would be missing too. So there is one Role
+  (`K8S_USER_RULES`) and no no-VAP variant.
+- (05) Page names are held to the configured domain as well as the `-<user>` first label: the
+  Ingress policy's host pattern is `^[a-z0-9-]+-<user>[.]<domain>$`, the domain read from the
+  admin's `kubernetes.ingress.domain` when `aidc user add` renders the shared policies (never in
+  the repo; checked to be a domain name before it goes into the expression). With no domain
+  configured, the policy refuses every page and `aidc user add` says so.
+- (05) `aidc user creds --out` chmods a folder only when it made it (0700, with any parents),
+  or aidc's own `~/.config/aidc/users`; an existing folder `--out` names (`$HOME`, `/tmp`) is
+  left alone. The file is 0600 either way.
 - (05) The rules test reads W-K2's shapes: kinds of `apply` and `create -f -` pipelines by
   rendering `k8s_render_relay`, `k8s_render_network`, `k8s_render_expose` and
   `k8s_render_expose_login` (both controllers' forms; whole-name matching, so
@@ -223,3 +250,13 @@ the same way (decisions (05)).
   page name and Middleware, a ClusterIP Service and an Opaque Secret admitted. The test user,
   its grant and the scratch namespaces were removed; the shared ClusterRoles and policies stay
   (the owner's namespace is a user namespace and will use them).
+- (05) Live after review (2026-11-25), `aidc user add` of a temporary test user re-rendered the
+  shared policies with the domain from the admin's scratch config; server dry runs as that user:
+  forwardAuth Middlewares (to another user's page Service, to a metadata address), basicAuth
+  with headers, an errors Middleware, an empty spec and basicAuth reading another namespace's
+  Secret refused; aidc's own basicAuth form admitted; the user's page name under another domain
+  or a deeper subdomain refused, under the configured domain admitted; external IPs refused. A
+  full `aidc create --expose 8080 --login` as that user worked (401 without or with a wrong
+  login; with the printed one the login passed to the empty port); `aidc user add <test
+  user>-x` was refused before anything was made. The test user was removed; the shared
+  ClusterRoles and policies stay.

@@ -36,6 +36,8 @@ done
 k8s_valid_label "$USER_NAME" || die "user name '${USER_NAME}' must be lowercase letters, digits and dashes (a DNS label)"
 [ -z "$PRINT_TOKEN" ] || [ -z "$OUT" ] || die "--token prints the token instead of writing a file: not with --out"
 k8s_require || exit 1
+# No credentials where the admission policies cannot exist (lib.sh, K8S_NO_VAP_WHY).
+k8s_has_vap || die "$K8S_NO_VAP_WHY"
 DURATION="${DURATION:-$AIDC_K8S_USER_TOKEN_TTL}"
 if [ -z "$DURATION" ] || ! printf '%s' "$DURATION" | grep -Eqx '([0-9]+h)?([0-9]+m)?([0-9]+s)?'; then
     die "token lifetime '${DURATION}' is not a duration such as 720h or 90m"
@@ -70,8 +72,7 @@ if [ -n "$REVOKE" ]; then
     info "revoking every token of ${K8S_USER_SA} in ${ns}: replacing the ServiceAccount"
     k8s_kubectl -n "$ns" delete serviceaccount "$K8S_USER_SA" --ignore-not-found --wait=true >&2 \
         || die "could not delete ServiceAccount ${K8S_USER_SA} in ${ns} (revoking takes an admin)"
-    no_vap=""; k8s_has_vap || no_vap=1
-    k8s_render_user_access "$USER_NAME" "$no_vap" | k8s_kubectl apply -f - >/dev/null \
+    k8s_render_user_access "$USER_NAME" | k8s_kubectl apply -f - >/dev/null \
         || die "could not apply ${USER_NAME}'s credentials again in ${ns}"
 fi
 
@@ -114,8 +115,15 @@ insecure=$(printf '%s' "$view" | jq -r '.clusters[0].cluster["insecure-skip-tls-
 tlsname=$(printf '%s' "$view" | jq -r '.clusters[0].cluster["tls-server-name"] // empty')
 [ -n "$ca" ] || [ "$insecure" = true ] || info "the current context has no CA: the kubeconfig trusts the system's CAs"
 
-mkdir -p "$(dirname "$OUT")"
-chmod 0700 "$(dirname "$OUT")" 2>/dev/null || true
+# The folder: one this makes is the admin's alone (0700, with any parents it makes); aidc's own
+# folder of kubeconfigs is kept so; any other folder that exists is left as it is (--out may
+# name $HOME or /tmp). The file itself is 0600.
+outdir=$(dirname "$OUT")
+if [ ! -d "$outdir" ]; then
+    (umask 077 && mkdir -p "$outdir") || die "cannot make ${outdir}"
+elif [ "$outdir" = "${XDG_CONFIG_HOME:-$HOME/.config}/aidc/users" ]; then
+    chmod 0700 "$outdir" 2>/dev/null || true
+fi
 tmp=$(umask 077 && mktemp "$(dirname "$OUT")/.aidc-kubeconfig.XXXXXX")
 trap 'rm -f "$errf" "$tmp"' EXIT
 jq -n --arg ctx "$ctx" --arg ns "$ns" --arg server "$server" --arg ca "$ca" \

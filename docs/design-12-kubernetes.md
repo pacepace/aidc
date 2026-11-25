@@ -456,7 +456,8 @@ ClusterRoleBinding <prefix>-u-<name>       -> ClusterRole <prefix>-user (shared)
 ClusterRoleBinding <prefix>-u-<name>-mcp   -> ClusterRole <prefix>-mcp  (shared)
 ClusterRole <prefix>-network (shared; bound only per namespace, by aidc user allow-network)
 ValidatingAdmissionPolicy <prefix>-user-volumes (shared) + its binding
-ValidatingAdmissionPolicies <prefix>-user-ingresses, -services, -secrets (shared) + bindings
+ValidatingAdmissionPolicies <prefix>-user-ingresses, -services, -secrets, -middlewares
+  (shared) + bindings
 kubeconfig ~/.config/aidc/users/<name>.kubeconfig (on the admin's machine, mode 0600)
 ```
 
@@ -500,8 +501,8 @@ claimed in your namespace", so the patch is narrowed by the admission policy: a 
 volume by any `system:serviceaccount:<prefix>-u-*:aidc-user` is refused unless the volume is
 claimed in that user's own namespace, the change sets its reclaim policy to `Delete`, and its
 claim reference stays as it was; deleting a volume is refused outright (and not granted).
-Needs ValidatingAdmissionPolicy (Kubernetes 1.30); on an older cluster `aidc user add` grants
-no patch and says so, and trim leaves a retained volume for an admin. Checked live: setting
+Needs ValidatingAdmissionPolicy (Kubernetes 1.30), as every policy here does; aidc issues no
+user credentials without it (below). Checked live: setting
 another user's disk volume to Delete, labelling one's own volume, or handing it to another
 namespace were each refused by the policy; setting one's own to Delete passed.
 
@@ -511,24 +512,43 @@ their own, since a cluster-wide list would show every user's page names. The che
 without it because the Ingress admission policy (below) holds every user's Ingresses to their
 own names, and `aidc user add` refuses a user name that ends in `-<another user>` (`a-bob`'s
 session `x` and `bob`'s session `x-a` would both be `x-a-bob`), so two users' page names never
-meet; an Ingress an admin made outside aidc under the same domain is the admin's to avoid.
+meet; an Ingress an admin made outside aidc under the same domain is the admin's to avoid. It
+also refuses a user name that starts with `<another user>-`: Traefik names a Middleware
+`<namespace>-<name>`, and `bob`'s `x-a` and `bob-x`'s `a` would both be `<prefix>-u-bob-x-a`.
 
 **What a user makes, narrowed** (ValidatingAdmissionPolicies `<prefix>-user-ingresses`,
-`<prefix>-user-services` and `<prefix>-user-secrets`, one per kind, for the user's and their
-MCP's ServiceAccounts, on create and update). RBAC grants a verb on a kind, not
-on what the object says, so:
-- an Ingress serves only the user's own page names: every rule's and certificate's host has a
-  first label ending in `-<user>` (the user from the namespace's name), there is no default
-  backend, and it carries only the annotations aidc sets (its port, the Traefik login
-  Middleware, which must be of the user's own namespace, ingress-nginx's three auth
-  annotations, whose Secret may not name another namespace, the cert-manager issuer, and
-  kubectl's last-applied record). No controller snippets, no catching every host;
+`<prefix>-user-services`, `<prefix>-user-secrets` and `<prefix>-user-middlewares`, one per
+kind, for the user's and their MCP's ServiceAccounts, on create and update). RBAC grants a
+verb on a kind, not on what the object says, so:
+- an Ingress serves only the user's own page names under the configured domain: every rule's
+  and certificate's host is `<label>-<user>.<domain>` (the user from the namespace's name, the
+  domain the admin's `kubernetes.ingress.domain` when `aidc user add` rendered the policy; with
+  none configured the policy refuses every page), there is no default backend, and it carries
+  only the annotations aidc sets (its port, the Traefik login Middleware, which must be of the
+  user's own namespace, ingress-nginx's three auth annotations, whose Secret may not name
+  another namespace, the cert-manager issuer, and kubectl's last-applied record). No
+  controller snippets, no catching every host, no names under another domain that reaches the
+  controller;
 - a Service is a ClusterIP with no external IPs (no node port or load balancer reaching past
   the namespace's policies, no external IP taking other traffic: CVE-2020-8554). This holds
   for every Service aidc makes, so it closes a door the Role had opened since W-K5;
-- a Secret is never a ServiceAccount token Secret (a token that would not expire).
-Without ValidatingAdmissionPolicy `aidc user add` grants no page making at all (no Ingress,
-login Secret or Middleware create or patch; deleting them stays, for kill) and says so.
+- a Secret is never a ServiceAccount token Secret (a token that would not expire);
+- a Traefik Middleware is a page login and nothing else: its spec's one key is `basicAuth`,
+  with only `secret`, `realm` and `removeHeader`, and its `secret` a plain name, read from the
+  Middleware's own namespace. Other kinds make the controller itself act, not only the routes
+  that use them: a forwardAuth Middleware would make Traefik call any address the user names on
+  every request to their page and hand back the answer. The NetworkPolicy `--expose` makes lets
+  the controller's pods into every user's exposed port, and it must (the controller serves the
+  pages), so such a Middleware would reach another user's dev server past their login, or
+  cluster-internal and metadata addresses. Held to basicAuth, the controller's way in is used
+  only to serve a page through a login that reads the user's own Secret.
+
+**Without ValidatingAdmissionPolicy** (before Kubernetes 1.30) aidc issues no user
+credentials: `aidc user add` and `aidc user creds` refuse, saying why, before anything is made,
+and `aidc k8s check` reports it missing. Sessions need Services (`create`, `patch`), and
+without the policy nothing would refuse a Service with external IPs (CVE-2020-8554: kube-proxy
+would send another namespace's traffic for that address to the user's pods), a NodePort or a
+LoadBalancer; nor would anything narrow volumes, Ingresses, Secrets or Middlewares.
 
 **Other namespaces** (`--network`). A session given a namespace reaches its pods by a
 NetworkPolicy in the user's own namespace, and its Services by name through the names
@@ -537,12 +557,16 @@ credentials. A user's credentials read nothing outside their namespace, and no c
 Service list is granted (it would show every namespace's); instead an admin grants one
 namespace at a time: `aidc user allow-network <user> <namespace>` makes a RoleBinding there,
 `<prefix>-u-<user>-network`, to the shared ClusterRole `<prefix>-network` (list Services,
-nothing else), for the user and their MCP server (a `networks:` entry in the config applies
-to sessions the MCP creates too). aidc's own namespaces and the system ones are refused, as
-`--network` refuses them; `--remove` takes it back; with no namespace it lists the grants.
-`aidc create --network` and `aidc network add` ask first (`kubectl auth can-i list services -n
-<namespace>`) and refuse before anything is made, naming the command, when the grant is not
-there. `aidc user remove` removes the user's grants with them.
+nothing else; it controls Service names and aidc's own `--network` flow, not the network
+itself: a user's Role makes NetworkPolicies in their own namespace, so with their kubeconfig
+they can open a session's egress to another namespace's pods by address, and what those pods
+let in is their namespace's own policies' business), for the user and their MCP server (a
+`networks:` entry in the config applies to sessions the MCP creates too). aidc's own namespaces
+and the system ones are refused, as `--network` refuses them; `--remove` takes it back; with no
+namespace it lists the grants. `aidc create --network` and `aidc network add` ask first
+(`kubectl auth can-i list services -n <namespace>`) and refuse before anything is made, naming
+the command, when the grant is not there. `aidc user remove` removes the user's grants with
+them.
 
 **The MCP's Role** (`K8S_MCP_RULES`, Q-M2) is the session lifecycle in its own namespace:
 StatefulSets and Deployments (the proxy is a Deployment, so Q-M2's list gains it), Services,
@@ -550,8 +574,7 @@ NetworkPolicies, ConfigMaps, claims, pods (get, list, watch, delete: restart), e
 and, so that its `aidc kill` removes a page the user made, list, watch and delete Ingresses and
 delete Secrets and Middlewares (by name). No bare pods, no repo list, no tokens, no volumes, no
 tunnels (a port-forward ends on the machine that runs it), no pages of its own; its ClusterRole
-reads runtime classes only. A test fails if it ever grants what the user's Role does not, with
-or without ValidatingAdmissionPolicy.
+reads runtime classes only. A test fails if it ever grants what the user's Role does not.
 
 **Pod Security "baseline"** on every user namespace (enforce, audit, warn; version latest) is
 what bounds any pod a user or their MCP makes: no privileged containers, host namespaces,
@@ -567,7 +590,8 @@ exemption is needed. The system namespace stays `privileged` for the builder alo
 **The kubeconfig.** A TokenRequest token for `aidc-user` (`kubectl create token`), lifetime
 `kubernetes.user_token_ttl` (default 720h; the API server may cap it, and aidc prints the real
 expiry), and the cluster's server and CA from the credentials in use. Written mode 0600 in a
-0700 folder, never inside a git work tree unless the repo ignores the path, and never printed:
+0700 folder (aidc's `~/.config/aidc/users`, or one `--out` makes; an existing folder `--out`
+names, such as `$HOME` or `/tmp`, is left as it is), never inside a git work tree unless the repo ignores the path, and never printed:
 `aidc user creds <name> --token` prints the bare token to stdout on request, and nothing else
 does. The admin hands the file over privately; the user points `kubernetes.kubeconfig` at it.
 `aidc user creds <name>` renews it (the admin, or the user with their own still-valid

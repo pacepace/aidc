@@ -170,25 +170,50 @@ assert_has "only volumes claimed in their own namespace" \
     "request.userInfo.username == 'system:serviceaccount:' + oldObject.spec.claimRef.namespace + ':aidc-user'" "$vap"
 assert_has "only to Delete" "object.spec.persistentVolumeReclaimPolicy == 'Delete'" "$vap"
 assert_has "never to another claim" "object.spec.claimRef == oldObject.spec.claimRef" "$vap"
-assert_eq "and the policies deny" '["Deny"] ["Deny"] ["Deny"] ["Deny"]' "$(k 'select(.kind == "ValidatingAdmissionPolicyBinding") | .spec.validationActions' | paste -sd' ' -)"
+assert_eq "and the policies deny" '["Deny"] ["Deny"] ["Deny"] ["Deny"] ["Deny"]' "$(k 'select(.kind == "ValidatingAdmissionPolicyBinding") | .spec.validationActions' | paste -sd' ' -)"
 pol() { k "select(.kind == \"ValidatingAdmissionPolicy\" and .metadata.name == \"$1\") | .spec"; }
-for p in aidc-user-ingresses aidc-user-services aidc-user-secrets; do
+for p in aidc-user-ingresses aidc-user-services aidc-user-secrets aidc-user-middlewares; do
     assert_has "${p}: the user's and their MCP's ServiceAccounts are matched" \
         "request.userInfo.username.endsWith(':aidc-user') || request.userInfo.username.endsWith(':aidc-mcp')" "$(pol "$p")"
     assert_has "  on create and update" '"operations":["CREATE","UPDATE"]' "$(pol "$p")"
 done
 obj=$(pol aidc-user-ingresses)
+assert_eq "no page domain in the admin's config: the Ingress policy refuses every page" \
+    '[{"expression":"false","message":"no page domain (kubernetes.ingress.domain) was configured when aidc user add set up this cluster: an aidc user may make no pages; an admin sets it and runs aidc user add again"}]' \
+    "$(k 'select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == "aidc-user-ingresses") | .spec.validations')"
+assert_has "  and aidc user add says so" "no kubernetes.ingress.domain in this config: users may make no pages" "$out"
+# With the domain configured, the page names are held to it.
+printf '  ingress: {domain: pages.example.org}\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(add alice)
+obj=$(pol aidc-user-ingresses)
 assert_has "Ingresses are narrowed" '"apiGroups":["networking.k8s.io"],"apiVersions":["*"],"operations":["CREATE","UPDATE"],"resources":["ingresses"]' "$obj"
 assert_has "  the user is their namespace's" "request.namespace.substring(7)" "$obj"
 assert_has "  an Ingress serves only <anything>-<user>.<domain>, with no default backend" \
     "!has(object.spec.defaultBackend) && has(object.spec.rules) && size(object.spec.rules) > 0 && object.spec.rules.all(r, has(r.host) && r.host.matches(variables.host))" "$obj"
-assert_has "  (the pattern)" "'^[a-z0-9-]+-' + variables.user + '[.]'" "$obj"
+assert_has "  (the pattern: the first label ends in -<user>, under the configured domain only)" \
+    "'^[a-z0-9-]+-' + variables.user + '[.]pages[.]example[.]org\$'" "$obj"
+assert_has "  (and the message names the domain)" "(<session>-<user>.pages.example.org)" "$obj"
 assert_has "  its certificate names too" "t.hosts.all(h, h.matches(variables.host))" "$obj"
 assert_has "  only aidc's annotations (no controller snippets)" "variables.ann.all(k, k in ['aidc/expose-port'" "$obj"
 assert_has "  a Traefik login of its own namespace only" "matches('^' + request.namespace + '-[a-z0-9-]+@kubernetescrd\$')" "$obj"
 assert_has "  an ingress-nginx login Secret of its own namespace only" "contains('/')" "$obj"
 assert_has "a Service is a ClusterIP with no external IPs" "object.spec.type == 'ClusterIP') && (!has(object.spec.externalIPs)" "$(pol aidc-user-services)"
 assert_has "no ServiceAccount token Secrets" "object.type != 'kubernetes.io/service-account-token'" "$(pol aidc-user-secrets)"
+obj=$(pol aidc-user-middlewares)
+assert_has "Traefik Middlewares are narrowed" '"apiGroups":["traefik.io"],"apiVersions":["*"],"operations":["CREATE","UPDATE"],"resources":["middlewares"]' "$obj"
+assert_has "  a Middleware's spec holds basicAuth and nothing else (no forwardAuth, errors, ...)" \
+    "has(object.spec) && object.spec.all(k, k == 'basicAuth')" "$obj"
+assert_has "  basicAuth only with a secret, realm and removeHeader" \
+    "has(object.spec.basicAuth) && has(object.spec.basicAuth.secret) && object.spec.basicAuth.all(k, k in ['secret', 'realm', 'removeHeader'])" "$obj"
+assert_has "  its Secret a plain name (its own namespace's, no <namespace>/)" \
+    "object.spec.basicAuth.secret.matches('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?\$')" "$obj"
+cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/good.yaml"
+BAD="x.org') || true || ('" yq -i '.kubernetes.ingress.domain = strenv(BAD)' "$HOME/.config/aidc/config.yaml"
+out=$(add alice)
+assert_has "a domain that is not a domain name is refused (it would go into the policy)" "is not a domain name; nothing was made" "$out"
+assert_eq "  nothing applied" "" "$(tr -d '\n-' < "$K_APPLIED")"
+cp "$SCRATCH/good.yaml" "$HOME/.config/aidc/config.yaml"
+out=$(add alice)
 assert_eq "the network ClusterRole (bound per namespace by allow-network) lists Services, nothing else" \
     '[{"apiGroups":[""],"resources":["services"],"verbs":["list"]}]' \
     "$(k 'select(.kind == "ClusterRole" and .metadata.name == "aidc-network") | .rules')"
@@ -226,6 +251,15 @@ assert_eq "nothing written there, exit 1" "absent|1" "$([ -e "$SCRATCH/repo/kube
 printf 'kube/\n' > "$SCRATCH/repo/.gitignore"
 out=$(creds alice --out "$SCRATCH/repo/kube/alice.kubeconfig" 2>&1); rc=$?
 assert_eq "a path the repo ignores is allowed" "0" "$rc"
+assert_eq "  the folder it made is the admin's alone" "700" "$(stat -c %a "$SCRATCH/repo/kube" 2>/dev/null || stat -f %Lp "$SCRATCH/repo/kube")"
+mkdir -p "$SCRATCH/shared" && chmod 0755 "$SCRATCH/shared"
+out=$(creds alice --out "$SCRATCH/shared/alice.kubeconfig" 2>&1); rc=$?
+assert_eq "--out into a folder that exists: written 0600" "0|600" "${rc}|$(stat -c %a "$SCRATCH/shared/alice.kubeconfig" 2>/dev/null || stat -f %Lp "$SCRATCH/shared/alice.kubeconfig")"
+assert_eq "  and the folder is left as it was (--out ~/x or /tmp/x must not close \$HOME or /tmp)" "755" \
+    "$(stat -c %a "$SCRATCH/shared" 2>/dev/null || stat -f %Lp "$SCRATCH/shared")"
+chmod 0755 "$(dirname "$KC")"
+out=$(creds alice 2>&1); rc=$?
+assert_eq "aidc's own folder of kubeconfigs is kept 0700" "0|700" "${rc}|$(stat -c %a "$(dirname "$KC")" 2>/dev/null || stat -f %Lp "$(dirname "$KC")")"
 out=$(K_NO_SA=1 creds alice 2>&1); rc=$?
 assert_has "no ServiceAccount: says to add the user" "is alice added? aidc user add alice" "$out"
 # The user renews their own: aidc's configured kubeconfig is theirs (its context is theirs).
@@ -248,14 +282,19 @@ assert_eq "then applies the credentials again and issues a new token, in that or
     "$(printf '%s\n' "$log" | grep -oE 'delete serviceaccount|apply -f -|create token' | awk '{print $1}' | paste -sd' ' -)"
 
 echo "=== a cluster without ValidatingAdmissionPolicy ==="
+# Nothing would narrow a user's Services (external IPs: CVE-2020-8554; node ports, load
+# balancers), Ingresses, Secrets, Middlewares or volumes: no user credentials are issued.
 out=$(K_NO_VAP=1 add alice)
-assert_has "says users may not set volumes to Delete there" "no ValidatingAdmissionPolicy" "$out"
-assert_eq "no policy, and no volume patch granted" '0|["get","list","watch"]' \
-    "$(k 'select(.kind == "ValidatingAdmissionPolicy")' | grep -c . || true)|$(k 'select(.kind == "ClusterRole" and .metadata.name == "aidc-user") | .rules[] | select(.resources[0] == "persistentvolumes") | .verbs')"
-assert_has "says users may not make pages there" "nor make pages (aidc create --expose)" "$out"
-assert_eq "  the user's Role makes no Ingress, login Secret or Middleware (removing them stays, for kill)" \
-    '["delete"] ["delete"] ["get","list","watch","delete"]' \
-    "$(k 'select(.kind == "Role" and .metadata.name == "aidc-user") | .rules[] | select(.resources[0] == "ingresses" or .resources[0] == "secrets" or .resources[0] == "middlewares") | .verbs' | sort | paste -sd' ' -)"
+assert_has "aidc user add refuses, saying why and naming the Kubernetes version" \
+    "this cluster has no ValidatingAdmissionPolicy (Kubernetes 1.30 or later)" "$out"
+assert_has "  and exits 1" "exit=1" "$out"
+assert_eq "  before anything is made (nothing applied, no token asked)" "|0" \
+    "$(tr -d '\n-' < "$K_APPLIED")|$(grep -c 'create token' "$K_LOG" || true)"
+out=$(K_NO_VAP=1 creds alice 2>&1); rc=$?
+assert_has "aidc user creds refuses too" "aidc issues no user credentials here" "$out"
+assert_eq "  exit 1, and no token is issued" "1|0" "${rc}|$(grep -c 'create token' "$K_LOG" || true)"
+out=$(K_NO_VAP=1 creds alice --revoke 2>&1); rc=$?
+assert_eq "  nor with --revoke (nothing deleted)" "1|0" "${rc}|$(grep -c 'delete serviceaccount' "$K_LOG" || true)"
 
 echo "=== user names whose page names would overlap ==="
 out=$(K_USERS_LEFT='namespace/aidc-u-bob' add a-bob)
@@ -269,6 +308,14 @@ namespace/aidc-u-alice' add alice)
 assert_has "the same user again, beside others, is fine" "exit=0" "$out"
 out=$(K_USERS_LEFT='namespace/aidc-u-bob' add bobby)
 assert_has "a name that merely shares letters is fine" "exit=0" "$out"
+# Traefik names a Middleware <namespace>-<name>: bob's x-a and bob-x's a would both be
+# aidc-u-bob-x-a, so the Ingress policy's own-namespace reference could name another user's.
+out=$(K_USERS_LEFT='namespace/aidc-u-bob' add bob-x)
+assert_has "a name starting with <another user>- is refused" "user name 'bob-x' starts with bob-, another user's name" "$out"
+assert_has "  before anything is made" "exit=1" "$out"
+assert_eq "  (nothing applied)" "" "$(tr -d '\n-' < "$K_APPLIED")"
+out=$(K_USERS_LEFT='namespace/aidc-u-bob-x' add bob)
+assert_has "a name another user's starts with is refused" "user 'bob-x' starts with bob-" "$out"
 
 echo "=== aidc user allow-network ==="
 allow() { : > "$K_APPLIED"; : > "$K_LOG"; "$AIDC_ROOT/scripts/aidc" user allow-network "$@" 2>&1 </dev/null; echo "exit=$?"; }
@@ -326,7 +373,7 @@ assert_eq "the shared ClusterRoles stay while another user is left" "0" "$(grep 
 : > "$KC"
 out=$(K_PVS="$PVS" K_USERS_LEFT='' remove alice --yes)
 assert_has "with the last user, the shared ClusterRoles go" "delete clusterrole aidc-user aidc-mcp aidc-network --ignore-not-found" "$(cat "$K_LOG")"
-assert_has "and the admission policies" "delete validatingadmissionpolicybinding,validatingadmissionpolicy aidc-user-volumes aidc-user-ingresses aidc-user-services aidc-user-secrets" "$(cat "$K_LOG")"
+assert_has "and the admission policies" "delete validatingadmissionpolicybinding,validatingadmissionpolicy aidc-user-volumes aidc-user-ingresses aidc-user-services aidc-user-secrets aidc-user-middlewares" "$(cat "$K_LOG")"
 assert_eq "the user's kubeconfig on this machine is removed" "absent" "$([ -e "$KC" ] && echo present || echo absent)"
 out=$(K_NO_NS=1 remove alice --yes)
 assert_has "nothing left: says so" "nothing of alice is in the cluster" "$out"

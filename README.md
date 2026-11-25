@@ -960,12 +960,18 @@ that namespace and nothing in any other, a second one for the user's MCP server 
 only), and read-only cluster-wide rights for the runtime class, storage class, ingress class,
 nodes and volumes, plus setting her own volumes to Delete (`aidc audit trim`; an admission policy
 refuses any other volume change). Further admission policies hold what she makes in her
-namespace to what aidc makes: Ingresses only at her own page names (`<session>-alice.<domain>`)
-with aidc's annotations, Services only as ClusterIPs, no ServiceAccount token Secrets; so a user
-name ending in `-<another user's name>` is refused. Her credentials reach no other namespace:
-`aidc user allow-network` grants one, for `--network` (listing its Services, nothing else).
+namespace to what aidc makes: Ingresses only at her own page names (`<session>-alice.<domain>`,
+the domain the admin's `kubernetes.ingress.domain` when `aidc user add` ran; with none set, no
+pages) with aidc's annotations, Services only as ClusterIPs, no ServiceAccount token Secrets,
+Traefik Middlewares only as a page's basicAuth login; so a user name ending in `-<another user's
+name>` or starting with `<another user's name>-` is refused. The policies need
+ValidatingAdmissionPolicy (Kubernetes 1.30 or later): on an older cluster `aidc user add` and
+`aidc user creds` refuse, and `aidc k8s check` says so. Her credentials reach no other namespace:
+`aidc user allow-network` grants one, for `--network` (listing its Services, nothing else; her
+own NetworkPolicies are still hers to write).
 It writes her kubeconfig (the cluster's server and CA, a token valid
-`user_token_ttl`, default 720h) to `~/.config/aidc/users/alice.kubeconfig`, mode 0600, and
+`user_token_ttl`, default 720h) to `~/.config/aidc/users/alice.kubeconfig` (a 0700 folder; with
+`--out`, a folder that exists is left as it is), mode 0600, and
 prints the path, never the token (`aidc user creds alice --token` prints only the token, when
 you want it). Hand the file over privately. `aidc user remove` sets the user's volumes to
 Delete, so her disk and kept audit trails go with their data, and asks for her name first
@@ -1004,7 +1010,9 @@ testament:
 ```
 
 `aidc k8s check` reads it and checks, without changing anything, that kubectl reaches the
-cluster, the runtime class and storage class exist, a ready node can take session pods, and you
+cluster, the runtime class and storage class exist, the cluster has ValidatingAdmissionPolicy
+(Kubernetes 1.30 or later; aidc issues no user credentials without it), a ready node can take
+session pods, and you
 may create pods in your namespace (and, for `setup` and `user add`, namespaces). Needs `kubectl`
 and `yq`.
 

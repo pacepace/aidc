@@ -38,7 +38,7 @@ k8s_expose_check() {
     [ -n "$AIDC_K8S_INGRESS_DOMAIN" ] || {
         printf -- '--expose needs kubernetes.ingress.domain in your config: the wildcard domain your pages live under (README, Kubernetes backend)\n' >&2
         return 1; }
-    printf '%s' "$AIDC_K8S_INGRESS_DOMAIN" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' || {
+    k8s_valid_domain "$AIDC_K8S_INGRESS_DOMAIN" || {
         printf 'kubernetes.ingress.domain %s is not a domain name\n' "'$AIDC_K8S_INGRESS_DOMAIN'" >&2; return 1; }
     [ -n "$AIDC_K8S_INGRESS_CLASS" ] || {
         printf -- '--expose needs kubernetes.ingress.class in your config: the IngressClass of the controller that serves the domain\n' >&2

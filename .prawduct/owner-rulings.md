@@ -450,3 +450,7 @@ Chosen on long-term merit, not compatibility. In MCP the server is the namespace
 ## 2026-11-25 — No HTTP API face in 2.0, but keep it easy to add (TRS-18)
 
 The local server does not serve an HTTP API in 2.0 (upstream U10 and adoption chunk 06 drop out) unless something turns out to need it. The design keeps adding it cheap: the tools stay TearsTools over the service layer with no MCP types, so an API face would be one more face over the same instances.
+
+## 2026-11-25 — The durable store is SQLite as a proper 3tears L3 (refines design-13 Q4)
+
+3tears' L1 is a cache, so it cannot be the record. aidc's single durable file is SQLite as a first-class 3tears L3 (durable store) beside the Postgres one, with no L2 and L1 as the normal cache in front: the full durable-store contract, so any collection that works on Postgres works on SQLite and a deployment switches by configuration. On a mesh the L3 becomes Postgres and an L2 is added. This replaces the 2026-11-25 "L1 on a file" wording; the intent (one file, no services) is unchanged.

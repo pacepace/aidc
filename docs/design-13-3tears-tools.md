@@ -224,5 +224,5 @@ agreed.
 2. Mesh delivery of finished turns: keep the webhook, or add a NATS subject the orchestrator
    consumes (agreed with the orchestrator, design-10 D5)?
 3. Packaging: one image with mesh support, or a light default plus a mesh variant?
-4. Durable state: an L1-on-a-file store in 3tears core (upstream item 8), or keep aidc's files? **Answered 2026-11-25: yes, L1 on a file, and aidc's state moves onto it** (owner-rulings).
+4. Durable state: an L1-on-a-file store in 3tears core (upstream item 8), or keep aidc's files? **Answered 2026-11-25: aidc's state moves onto a single SQLite file used as a proper 3tears L3 (no L2; L1 stays a cache)** (owner-rulings).
 5. `3tears-mcp`'s SDK 1.x support: keep building each feature twice, or drop 1.x first? **Answered 2026-11-25: drop 1.x first** (owner-rulings).

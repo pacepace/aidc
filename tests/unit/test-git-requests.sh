@@ -327,6 +327,17 @@ OUT=$(PATH="$S/gitwrap:$PATH" AIDC_GIT_MODE=rules bash "$GR" once 2>&1)
 assert_has "no base in the request: origin's default (origin/HEAD) is the base" "pr-create $P feat main " "$(calls)"
 assert_eq "read with the system config kept (no GIT_CONFIG_NOSYSTEM), as gitctl reads working copies" \
     "NOSYSTEM=unset HOME=$HOME" "$(sort -u "$S/gitwrap.log")"
+# No base given and none known (a working copy never fetched, made with git init and git remote
+# add): the request is refused before anything is pushed, so no branch is left on origin with
+# no pull request.
+G_HEAD=$(git -C "$P" symbolic-ref refs/remotes/origin/HEAD)
+git -C "$P" symbolic-ref --delete refs/remotes/origin/HEAD
+reset_calls; id=$(newid); put "$id" "$(req "$id" pr-create '{"base":""}')"
+AIDC_GIT_MODE=rules bash "$GR" once >/dev/null 2>&1
+assert_eq "no base and no origin/HEAD: the request fails and nothing is pushed" "failed|" "$(state "$id")|$(calls)"
+assert_has "and the result says so" "origin has no default" "$(jq -r .message "$REQ/results/$id.json")"
+assert_has "and that nothing was pushed" "nothing pushed" "$(jq -r .message "$REQ/results/$id.json")"
+git -C "$P" symbolic-ref refs/remotes/origin/HEAD "$G_HEAD"
 
 echo ""
 echo "=== every field is checked; a bad request is refused, never run ==="

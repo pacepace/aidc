@@ -410,6 +410,18 @@ run() {
     rc=0
     case "$Q_action" in
         push|pr-create)
+            # A pull request's base is settled before anything is pushed: a request that cannot
+            # open its pull request pushes nothing. (The push fetches nothing, so the working
+            # copy's origin/HEAD is the same before it as after.)
+            local base="$Q_base"
+            if [ "$Q_action" = pr-create ]; then
+                [ -n "$base" ] || base=$(agit -C "$Q_repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+                gitctl_branch_ok "$REAL_GIT" "$base" 2>/dev/null || base=""
+                if [ -z "$base" ]; then
+                    R_OUTPUT="no base branch given and origin has no default (gitctl fetch the working copy, or gh pr create --base): nothing pushed"
+                    result "$id" failed "$R_OUTPUT"; rmdir -- "work/${id}.lock" 2>/dev/null || true; return 1
+                fi
+            fi
             out=$("$GITCTL" push "$Q_repo" "$Q_branch" "${expect[@]}" --expect-commit "$Q_sha" "${ASK[@]}" 2>&1 </dev/null) || rc=$?
             R_OUTPUT=$(printf '%s' "$out" | printable)
             if [ "$rc" = 0 ]; then
@@ -418,14 +430,8 @@ run() {
             fi
             if [ "$rc" = 0 ] && [ "$Q_action" = pr-create ]; then
                 printf '%s' "$Q_title" > "work/${id}.title" && printf '%s' "$Q_body" > "work/${id}.body"
-                local base="$Q_base"
-                [ -n "$base" ] || base=$(agit -C "$Q_repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-                gitctl_branch_ok "$REAL_GIT" "$base" 2>/dev/null || base=""
-                if [ -z "$base" ]; then rc=1 out="no base branch given and origin has no default"
-                else
-                    out=$("$GITCTL" pr-create "$Q_repo" "$Q_branch" "$base" --title-file "work/${id}.title" \
-                        --body-file "work/${id}.body" "${expect[@]}" "${ASK[@]}" 2>&1 </dev/null) || rc=$?
-                fi
+                out=$("$GITCTL" pr-create "$Q_repo" "$Q_branch" "$base" --title-file "work/${id}.title" \
+                    --body-file "work/${id}.body" "${expect[@]}" "${ASK[@]}" 2>&1 </dev/null) || rc=$?
                 rm -f -- "work/${id}.title" "work/${id}.body"
                 R_OUTPUT="${R_OUTPUT}${R_OUTPUT:+$'\n'}$(printf '%s' "$out" | printable)"
                 R_URL=$(printf '%s\n' "$out" | grep -Eo 'https://github\.com/[A-Za-z0-9._/-]+/pull/[0-9]+' | tail -n1)

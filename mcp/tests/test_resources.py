@@ -1,7 +1,7 @@
 """Tests for aidc_mcp.resources.
 
 Covers the shared `aidc status` audit-dir parser (used by both the resources here
-and tools.audit_get) and the path-traversal guard on the audit-file resource — the
+and ses.audit_get) and the path-traversal guard on the audit-file resource — the
 security boundary that stops `{filename}` from escaping the session's audit dir.
 """
 import json
@@ -25,7 +25,7 @@ class TestParseAuditDir:
             "/var/audit/proj"
 
     def test_case_insensitive(self):
-        # tools.audit_get used to match case-sensitively; the shared helper is
+        # ses.audit_get used to match case-sensitively; the shared helper is
         # case-insensitive so a header-case change in the CLI can't break it.
         assert str(parse_audit_dir("AUDIT: /upper/case")) == "/upper/case"
         assert str(parse_audit_dir("Audit:  /mixed")) == "/mixed"

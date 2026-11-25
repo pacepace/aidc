@@ -25,7 +25,7 @@ aidc control plane
 ├─ core (no transport): transcript, turns_view, screen, repo, headless, session_facts,
 │      session_mcp, backend           (already transport-free; their tests carry over)
 ├─ service (one per install, one event loop): watchers, send queues and drainers, delivery
-│      with retry and dead letters, resume on start, persisted state      (tools.py today)
+│      with retry and dead letters, resume on start, persisted state  (mcp/.../service/)
 ├─ tools: one 3tears TearsTool per aidc tool, a thin layer over core + service
 └─ faces
    ├─ local:  3tears-mcp McpServer (stdio or Streamable HTTP), bearer token -> Identity,

@@ -24,6 +24,8 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import auth, headless, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import invoke as inv
+from aidc_mcp.service import repos as rps
 from tests.logs import patch_log_event
 
 # The real listing: conftest stands it in for every test, and this one needs it.
@@ -254,7 +256,7 @@ async def test_an_invoke_runs_fresh_and_says_how_long_it_took(docker):
 
 
 async def test_a_long_invoke_is_told_that_long_work_belongs_to_session_send(docker, monkeypatch):
-    monkeypatch.setattr(tools, "_INVOKE_LONG_S", -1.0)
+    monkeypatch.setattr(inv, "INVOKE_LONG_S", -1.0)
     res = await _tool("session_invoke")(name="proj", prompt="q")
     assert "session_send" in res["data"]["warning"]
 
@@ -335,7 +337,7 @@ async def test_a_cancelled_invoke_is_stopped_in_the_container(docker):
 
 async def test_an_async_invoke_past_its_limit_is_stopped_in_the_container(docker, monkeypatch):
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
-    monkeypatch.setattr(tools, "_ASYNC_INVOKE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(inv, "ASYNC_INVOKE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(auth, "load_token", lambda: "t")
     docker["release_now"] = False
     jobs = []
@@ -378,7 +380,7 @@ async def test_status_lists_the_headless_runs(docker, monkeypatch, idle_session)
 async def test_interrupting_the_headless_run_stops_a_call_still_waiting(docker, monkeypatch):
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
     docker["release_now"] = False
     ctx = type("Ctx", (), {"headers": {"mcp-session-id": "s1"}, "request_id": "7",
                            "info": staticmethod(lambda chunk: asyncio.sleep(0))})()
@@ -397,7 +399,7 @@ async def test_interrupting_the_headless_run_stops_a_call_still_waiting(docker, 
 async def test_interrupting_an_orphan_finds_it_in_the_container(docker, monkeypatch):
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
     docker["found"] = [{"pid": 77, "started_at": 1.0, "run_id": "session_invoke-aa",
                         "prompt": "x"},
                        {"pid": 78, "started_at": 2.0, "run_id": "", "prompt": "y"}]
@@ -409,7 +411,7 @@ async def test_interrupting_an_orphan_finds_it_in_the_container(docker, monkeypa
 async def test_interrupting_with_no_headless_run_does_nothing(docker, monkeypatch):
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
     d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
     assert d["interrupted"] is False and d["note"] == "no headless run was going"
     assert d["stopped"] == [] and docker["stopped"] == []
@@ -465,7 +467,7 @@ async def test_a_paused_or_gone_container_lists_as_unknown_not_as_empty(monkeypa
 async def test_an_interrupt_whose_stop_fails_says_it_did_not_interrupt(docker, monkeypatch):
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
 
     async def failing(container, run_id):
         raise headless.DockerFailed("docker exited 1: container is paused")
@@ -481,7 +483,7 @@ async def test_an_interrupt_whose_stop_fails_says_it_did_not_interrupt(docker, m
 async def test_an_interrupt_that_cannot_read_the_container_says_so(docker, monkeypatch):
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
 
     async def unreadable(container):
         return None
@@ -522,7 +524,7 @@ async def test_an_async_run_stopped_before_it_started_never_starts(docker, monke
 
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
     jobs = []
     monkeypatch.setattr(com, "fire", lambda coro: jobs.append(coro))
 
@@ -575,7 +577,7 @@ async def test_an_invoke_stopped_on_request_says_so(docker, monkeypatch):
     returned "claude failed", which reads as a crash."""
     async def tree(name):
         return None
-    monkeypatch.setattr(tools, "_tree", tree)
+    monkeypatch.setattr(rps, "tree", tree)
     docker["release_now"] = False
     ctx = type("Ctx", (), {"headers": {"mcp-session-id": "s1"}, "request_id": "9",
                            "info": staticmethod(lambda chunk: asyncio.sleep(0))})()

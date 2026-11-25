@@ -15,6 +15,7 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import scope, session_mcp, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import sessions as ses
 from aidc_mcp.service import tmux as tmx
 
 REPO = Path(__file__).resolve().parents[2]
@@ -302,7 +303,7 @@ class TestTheTool:
         assert res == {"ok": True, "data": {
             "session": "sandbox", "server": "project", "url": BASE + PATH, "entry": "added",
             "needs_claude_restart": True,
-            "applies": tools._MCP_NEEDS_RESTART.format(name="sandbox"),
+            "applies": ses._MCP_NEEDS_RESTART.format(name="sandbox"),
         }}
         assert TOKEN not in json.dumps(res)
         logged = _audit_log(tmp_path)
@@ -314,7 +315,7 @@ class TestTheTool:
         res = await _tool("session_mcp_set")(name="sandbox", server="project", path=PATH, bearer=OTHER)
 
         assert (res["data"]["entry"], res["data"]["needs_claude_restart"]) == ("unchanged", False)
-        assert res["data"]["applies"] == tools._MCP_LIVE
+        assert res["data"]["applies"] == ses._MCP_LIVE
         assert OTHER not in json.dumps(res)
 
     async def test_a_new_server_with_claude_not_running_needs_no_restart(self, wired):
@@ -323,7 +324,7 @@ class TestTheTool:
         res = await _tool("session_mcp_set")(name="sandbox", server="project", path=PATH, bearer=TOKEN)
 
         assert (res["data"]["entry"], res["data"]["needs_claude_restart"]) == ("added", False)
-        assert res["data"]["applies"] == tools._MCP_ON_START
+        assert res["data"]["applies"] == ses._MCP_ON_START
 
     async def test_a_refusal_logs_nothing_the_caller_gave(self, wired, tmp_path):
         """An argument in the wrong place could be the token."""

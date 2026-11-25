@@ -48,8 +48,10 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
 - **Data modeling**: frozen dataclasses for read models (`Turn`, `SessionState`, `ScreenState`);
   plain dicts only at the wire boundary.
 - **Module split**: `transcript.py` is the pure core (parsing, delivery decisions, persistence
-  helpers) with no I/O of its own; `screen.py` and `scope.py` own one concept each; `tools.py`
-  holds the MCP surface, the send queue and the watcher.
+  helpers) with no I/O of its own; `screen.py` and `scope.py` own one concept each; the service
+  package `service/` holds the send queue, the watchers, delivery, resume and the session
+  operations, with no MCP types (`test_service_boundary`), its state in `service/state.py`;
+  `tools.py` holds only the MCP surface (schemas, descriptions, guards, the Context) over it.
 - **State**: anything that must survive a restart is a file in the watcher-state dir, written
   temp+rename. In-memory caches are derived, never the source of truth.
 - **Contracts**: the MCP tool envelope and the callback payload are pinned in

@@ -18,6 +18,7 @@ from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
 from aidc_mcp.audit import log_event
 from aidc_mcp.service import callbacks as cbk
+from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
@@ -385,7 +386,7 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
 
     Claude Code writes no marker for an Esc pressed that early, so the transcript alone
     shows only a prompt with no reply. It is reported when the shared turn rule
-    (_turn_verdict) says Claude is not working on two consecutive polls, with Claude
+    (tn.turn_verdict) says Claude is not working on two consecutive polls, with Claude
     running at its input box. `screen_fn(session)` returns the session's ScreenState,
     or None when Claude is not running.
     """
@@ -605,7 +606,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
     # allowed the stop), so when the transcript ends on it there is nothing to wait
     # for. Its absence falls back to the window: the record is not guaranteed.
     # A reply whose Stop hooks have not reported yet waits longer (see
-    # _STOP_HOOK_WAIT_S): a slow blocking hook would otherwise reopen a turn that
+    # tn.STOP_HOOK_WAIT_S): a slow blocking hook would otherwise reopen a turn that
     # was already delivered as finished.
     if settle_seconds > 0 and ts.ends_on_turn_end(suffix):
         ss.settle_state.pop(key, None)
@@ -981,3 +982,120 @@ async def start_watcher(name: str, conversation_id: str, base_url: str,
     # is still established before the first delivery.
     await _baseline_watermark(name, conversation_id)
     await announce()
+
+
+async def watch(
+    name: str,
+    conversation_id: str | None = None,
+    *,
+    announce: Callable[[], Awaitable[None]],
+) -> dict[str, Any]:
+    """The session_watch tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    base_url = orc.orchestrator_callback_url()
+    if not base_url:
+        return com.envelope_err(orc.callback_url_unset(),
+                                code="not_configured")
+    if not conversation_id:
+        return com.envelope_err(
+            "conversation_id is required (the orchestrator injects it automatically)",
+                code="invalid_argument"
+        )
+    # start_watcher atomically cancels any existing watcher and installs the
+    # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
+    await start_watcher(name, conversation_id, base_url, announce)
+    log_event("tool_call", tool="session_watch", session=name, conversation_id=conversation_id)
+    return com.envelope_ok(
+        {"status": "watching", "session": name, "conversation_id": conversation_id}
+    )
+
+
+async def resend(
+    name: str,
+    conversation_id: str | None = None,
+    turn_uuid: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """The session_resend tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    if not conversation_id:
+        return com.envelope_err(
+            "conversation_id is required (the orchestrator injects it automatically)",
+                code="invalid_argument"
+        )
+    base_url = orc.orchestrator_callback_url()
+    if not base_url:
+        return com.envelope_err(orc.callback_url_unset(),
+                                code="not_configured")
+    log_event("tool_call", tool="session_resend", session=name,
+              conversation_id=conversation_id, turn_uuid=turn_uuid or "", force=force)
+    # Is the agent mid-turn right now? If so, the newest COMPLETED turn cannot
+    # be the answer to the prompt still in flight — the caller must be told, or
+    # it reads a stale reply as the response to its last question (prod
+    # 2026-08-22 conv 01a01cf6: a no-uuid resend returned the previous prompt's
+    # answer while the real turn had 16 minutes left to run).
+    state = await tn.session_state(backend.target(name), name)
+    busy = state.claude_running and state.turn == tn.TURN_RUNNING
+    status, turn = await resend_reply(name, conversation_id, base_url,
+                                      turn_uuid=turn_uuid, force=force)
+    if turn is None:
+        return com.envelope_err(
+            "no completed reply found to resend for this session "
+            "(the session may not have produced a reply yet)", code="no_reply"
+        )
+    if status == "failed":
+        return com.envelope_err(
+            "resend reached the transcript but the callback to the orchestrator failed "
+            "(see logs); the reply was not delivered", code="callback_failed"
+        )
+
+    notes: list[str] = []
+    if status == "already_delivered":
+        notes.append(
+            "This reply was ALREADY delivered to this conversation — it is "
+            "somewhere above. It was NOT re-sent, deliberately: a second copy "
+            "would answer the same question twice and corrupt the history. Its "
+            "full text is in `content` here; read it from there."
+        )
+    if busy:
+        notes.append(
+            "The session is STILL WORKING on a later prompt. This is the most "
+            "recent COMPLETED reply, so it answers an EARLIER prompt — not the "
+            "one you are waiting for. Do not treat it as the pending answer, and "
+            "do not call this tool again; that reply arrives over the webhook on "
+            "its own."
+        )
+    if status == "already_delivered" and not busy:
+        notes.append(
+            "If a reply you expected is genuinely missing, the likeliest cause is "
+            "that it was never requested: check that your session_send actually "
+            "ran rather than assuming it did."
+        )
+    log_event("transcript_resend_result", session=name,
+              conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
+              status=status, session_busy=busy, forced=force)
+    return com.envelope_ok(
+        {"status": status, "session": name, "turn_uuid": turn.terminal_uuid,
+         "content": turn.text, "session_busy": busy,
+         "already_delivered": status == "already_delivered",
+         **({"note": " ".join(notes)} if notes else {})}
+    )
+
+
+async def unwatch(name: str, *, announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
+    """The session_unwatch tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    ts.remove_watch(ss.WATCHER_STATE_DIR, name)
+    task = ss.session_watchers.pop(name, None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    # Evict the per-session send lock + settle entries too, or they leak as
+    # sessions come and go (the done-callback also does this on natural exit).
+    ss.evict_session_state(name)
+    await announce()
+    log_event("tool_call", tool="session_unwatch", session=name)
+    return com.envelope_ok({"status": "stopped", "session": name})

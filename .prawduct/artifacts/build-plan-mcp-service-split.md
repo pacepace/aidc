@@ -153,3 +153,13 @@ every tool through its registered function, is the check, and smoke runs the rea
   server and the tests that drive startup through them are unchanged. The service modules
   import one another without a cycle: state, config, tmux at the bottom; turns, callbacks;
   delivery and sending; startup on top.
+- (04) Service operation names: `sessions.create|list_sessions|status|kill|exec_command|
+  transcript|interrupt|file_put|audit_get`, `invoke.invoke|invoke_async`,
+  `sending.send|run_turns|queue_cancel`, `delivery.watch|resend|unwatch`; the repository and
+  file tools and session_mcp_set were already one call and call `repos.in_repo` /
+  `sessions.hand_session_mcp` directly. Each operation's body is the tool's body verbatim,
+  with `ctx` replaced by the hooks; `call_key` is computed by the adapter before the call
+  (it reads only the request's headers, so when it is read does not matter).
+- (04) Docs that named tools.py internals now name the service modules (design-10 cross
+  references, design-13's Shape, boundary-patterns' producers, project-preferences' module
+  split). boundary-patterns also lost a redundant "(the orchestrator)", like design-11's.

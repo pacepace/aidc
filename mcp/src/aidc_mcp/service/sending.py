@@ -11,17 +11,20 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
-from aidc_mcp import backend, scope
+from aidc_mcp import backend, headless, scope
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
+from aidc_mcp import turns_view as tv
 from aidc_mcp.audit import log_event
 from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -140,7 +143,7 @@ def _save_unrecognized_screen(name: str) -> None:
 
 async def _check_free(container: str, name: str) -> str:
     """Whether a prompt can be pasted into the session now: "" or a reason (see
-    _paste_reason). Every change of verdict is logged with its evidence, so a "free"
+    tn.paste_reason). Every change of verdict is logged with its evidence, so a "free"
     reached without transcript evidence (no transcript, a stalled one, the status
     row) is on record."""
     state = await tn.session_state(container, name)
@@ -159,7 +162,7 @@ async def _check_free(container: str, name: str) -> str:
 
 def _join_refusal(name: str, state: tn.SessionState) -> str:
     """Why a prompt may not be pasted into the turn running now (session_send's
-    deliver="join"), or "". The screen rules of _paste_reason all hold: the turn
+    deliver="join"), or "". The screen rules of tn.paste_reason all hold: the turn
     being busy is the one they skip. And an Esc the watcher has not reported yet: a
     prompt pasted on top of it would bury the report (design 10 S1)."""
     if not state.claude_running or state.screen is None:
@@ -236,7 +239,7 @@ async def wait_until_free(container: str, name: str, timeout: float) -> str:
 
 def write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -> None:
     """Persist a prompt that will never be pasted because its session is gone, so it
-    is recorded, not lost. Sibling of _write_dead_letter (an undelivered REPLY)."""
+    is recorded, not lost. Sibling of cbk.write_dead_letter (an undelivered REPLY)."""
     dl = Path(ss.WATCHER_STATE_DIR) / "dead-letter"
     try:
         dl.mkdir(parents=True, exist_ok=True)
@@ -755,3 +758,406 @@ WAITING_EXPLAINED = {
     "interrupt_not_reported_yet": "the agent was just interrupted, and that has not been "
                                   "reported to its conversation yet",
 }
+
+
+async def send(
+    name: str,
+    prompt: str,
+    conversation_id: str | None = None,
+    sent_by: str | None = None,
+    sender_label: str | None = None,
+    deliver: str = DELIVER_QUEUE,
+    *,
+    announce: Callable[[], Awaitable[None]],
+) -> dict[str, Any]:
+    """The session_send tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    # Who the prompt is for: the reply comes back with prompt_origin "person"
+    # and this, so the orchestrator answers it as that person's and not as a
+    # report on its own prompt.
+    sent_by = (sent_by or "").strip()
+    deliver = (deliver or DELIVER_QUEUE).strip()
+    log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
+              sent_by=sent_by, sender_label=ts.clean_sender_label(sender_label),
+              deliver=deliver)
+    if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
+        return com.envelope_err(
+            f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
+            f"not {deliver!r}", code="invalid_argument")
+    container = backend.target(name)
+    if (await tn.session_instance(name))[0] == tn.SESSION_GONE:
+        # Checked before anything else, so a send to a session that does not exist
+        # neither opens a webhook nor leaves one persisted. Audit every refusal:
+        # these paths used to return silently, so the ONLY trace of a dropped send
+        # was the ABSENCE of the session_send_sent line below — which is how prod
+        # 2026-08-22 conv 01a01cf6 lost a prompt with nothing in the log naming it.
+        log_event("tool_call", tool="session_send_failed", session=name,
+                  prompt_len=len(prompt), reason="no_such_session")
+        ss.forget_session_send_state(name)
+        return com.envelope_err(
+            f"There is no session named '{name}'. "
+            "Check session_list.", code="no_such_session"
+        )
+
+    # Auto-register the transcript watcher if one isn't already running.
+    # Capture WHY when we can't: both gates fail silently, and a send with no
+    # watcher still injects the prompt and reports ok — so the reply is
+    # produced and then dropped on the floor with nothing in the audit log
+    # saying which gate closed (prod 2026-07-26: `orchestrator.callback_url` was
+    # simply absent from config.yaml; every session_send logged
+    # `watching:false` and no further clue, and diagnosis meant reading the
+    # source). `no_watch_reason` names the gate so the log answers it.
+    no_watch_reason = ""
+    if name not in ss.session_watchers:
+        base_url = orc.orchestrator_callback_url() if conversation_id else ""
+        if not conversation_id:
+            no_watch_reason = (
+                "no conversation_id was supplied — the orchestrator injects it automatically, "
+                "so this call did not come from an orchestrated conversation"
+            )
+        elif not base_url:
+            no_watch_reason = (
+                f"{orc.callback_url_unset()}; replies have nowhere to be POSTed"
+            )
+        else:
+            await dlv.start_watcher(name, conversation_id, base_url, announce)
+            log_event("tool_call", tool="session_send_auto_watch", session=name,
+                      conversation_id=conversation_id)
+
+    lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
+
+    queued_depth = 0
+    sanitized = prompt.replace("\n", " ").strip()
+    # The prompt as one queue entry, whether it goes in now or waits (then this
+    # object is what is queued): its id is what this call returns, what
+    # session_queue_cancel takes and what the reply's `prompts` names.
+    prompt_conversation = conversation_id or dlv.watched_conversation(name)
+    # Framed here, once, so every path that pastes it (now, joined into a running
+    # turn, or later from the queue) and everything that matches the paste against
+    # the transcript afterwards (the send record, the echo hold, an unsubmitted
+    # paste) sees the same text (paste()); `text` stays the prompt, for previews.
+    # The header names the call's own conversation, never the webhook's: that is
+    # where the reply goes, not who sent it.
+    label = ts.clean_sender_label(sender_label)
+    this_prompt = ts.QueuedPrompt(
+        text=sanitized, enqueued_at=ts.now_iso(), conversation_id=prompt_conversation,
+        sent_by=sent_by, sender_label=label,
+        paste_text=ts.frame_prompt(sanitized, sender_label=label, sent_by=sent_by,
+                                   conversation_id=conversation_id or ""))
+    wait_reason = ""
+    attempts = 0
+    async with lock:
+        # A queue saved before a restart goes first, even if this send arrives
+        # before startup has resumed it.
+        await load_persisted_queue(container, name)
+
+        # Inject only when free so we never paste into a turn already in flight
+        # or on top of a person's unsent text. A busy session does not cost the
+        # prompt: it goes on the per-session
+        # queue and the drainer injects it the moment the turn ends. Anything
+        # already queued means this one MUST queue behind it, or a send would
+        # overtake an earlier one that is still waiting.
+        # deliver="join" pastes into a running turn instead, on one reading: the
+        # two-reading wait exists to keep a prompt OUT of a turn just starting, which
+        # is what joining asks for. It never overtakes a queued prompt either.
+        joined = False
+        join_declined = ""
+
+        async def try_join() -> str:
+            nonlocal joined, join_declined, wait_reason, attempts
+            outcome = await join_running_turn(container, name, this_prompt)
+            if outcome == "joined":
+                joined, wait_reason = True, ""
+            elif outcome == "paste_failing":
+                join_declined, wait_reason, attempts = outcome, outcome, 1
+            elif outcome != "idle":
+                join_declined = outcome
+            return outcome
+
+        if ss.pending_sends.get(name):
+            wait_reason = "queued_behind"
+            if deliver == DELIVER_JOIN:
+                join_declined = "queued_behind"
+        else:
+            first = await try_join() if deliver == DELIVER_JOIN else "idle"
+            if not joined and not wait_reason:
+                wait_reason = await wait_until_free(container, name,
+                                                    timeout=SEND_FREE_WAIT_S)
+            if deliver == DELIVER_JOIN and first == "idle" and wait_reason == "claude_busy":
+                # Idle at the first reading, and a turn started during the wait.
+                await try_join()
+        if (not joined and not wait_reason
+                and not await inject(container, this_prompt.paste(), tmx.SESSION_WINDOW,
+                                     session=name, sent_by=sent_by,
+                                     prompts=[this_prompt])):
+            # A paste that did not land is a fact about one attempt, not about the
+            # session: queue it, and the drainer retries with backoff.
+            wait_reason = "paste_failing"
+            attempts = 1
+            log_event("tool_call", tool="session_send_paste_failed", session=name,
+                      prompt_len=len(prompt))
+        if wait_reason:
+            this_prompt.paste_attempts = attempts
+            queued_depth = await enqueue_send(name, container, this_prompt, wait_reason)
+            if queued_depth == 0:
+                log_event("tool_call", tool="session_send_failed", session=name,
+                          prompt_len=len(prompt), reason="queue_full",
+                          depth=PENDING_MAX_DEPTH)
+                return com.envelope_err(
+                    f"{PENDING_MAX_DEPTH} prompts are already queued for this "
+                    "session and none has been injected yet — the session is "
+                    "wedged or the agent is not consuming them. Stop sending and "
+                    "tell the user to check the session.", code="queue_full"
+                )
+            log_event("tool_call", tool="session_send_queued", session=name,
+                      prompt_len=len(prompt), depth=queued_depth, reason=wait_reason)
+
+    # Non-blocking: the reply is delivered by the transcript watcher, not returned
+    # here. If no watcher is open, the reply has nowhere to go — say so plainly.
+    watching = name in ss.session_watchers
+    log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
+              no_watch_reason=no_watch_reason, queued_depth=queued_depth)
+    waiting_why = WAITING_EXPLAINED.get(wait_reason, wait_reason)
+    # One webhook per session: a caller that did not open it does not get the
+    # reply. Saying "delivered to this conversation" then is false, and the
+    # caller waits for a reply that goes elsewhere (live 2026-10-08: a project's
+    # brief and every reply to it went to the conversation that sent a stray
+    # task first).
+    watched = dlv.watched_conversation(name) if watching else ""
+    elsewhere = bool(conversation_id and watched and watched != conversation_id)
+    not_joined = (f"Not joined to the running turn: "
+                  f"{WAITING_EXPLAINED.get(join_declined, join_declined)}. "
+                  if join_declined else "")
+    if joined:
+        delivery = (
+            "Joined — pasted into the turn the agent is already working on; it takes "
+            "the prompt in at its next step (or runs it next, if the turn ends first). "
+            "The reply is not separate: it comes in that turn's final answer"
+            + (f", to conversation {watched} (one webhook per session), not this one"
+               if elsewhere else ", over the webhook" if watching
+               else ", but no webhook is open for this session, so it will NOT be "
+               "auto-delivered")
+            + ". Do NOT re-send it."
+        )
+    elif elsewhere:
+        delivery = not_joined + (
+            (f"Queued — held because {waiting_why}. It will be pasted automatically "
+             f"as soon as the session is free ({queued_depth} waiting, this one "
+             "last). Do NOT re-send it. " if queued_depth else "Sent. ")
+            + "Claude's reply will NOT come to this conversation: it goes to "
+            f"conversation {watched}, which opened this session's webhook first "
+            "(one webhook per session). To move the replies here, call "
+            "session_unwatch and then session_watch for this session."
+        )
+    elif watching and queued_depth:
+        delivery = not_joined + (
+            f"Queued — held because {waiting_why}. It will be pasted automatically "
+            f"as soon as the session is free ({queued_depth} "
+            "waiting, this one last). Nothing is lost and there is nothing to "
+            "retry: do NOT re-send it, and do NOT call session_resend — the reply "
+            "to THIS prompt arrives over the webhook like any other. Keep talking "
+            "to the user meanwhile."
+        )
+    elif watching:
+        delivery = (
+            "Sent. Claude's reply will be delivered to this conversation via "
+            "webhook when the turn finishes — keep talking to the user meanwhile."
+        )
+    else:
+        # Deliberately still ok=True: the prompt was injected (or is queued for
+        # injection) and the session will work on it. Returning an error would
+        # invite the caller to retry, putting a second copy of the prompt into
+        # the same tmux window.
+        delivery = not_joined + (
+            (f"Queued (held because {waiting_why}), but " if queued_depth
+             else "Sent, but ")
+            + "no webhook is open for this session, so the reply will NOT "
+            "be auto-delivered"
+            + (f" ({no_watch_reason})" if no_watch_reason else "")
+            + ". Do NOT re-send — the prompt was accepted and the session will "
+            "work on it. Use session_invoke to block for the answer "
+            "instead, or tell the user to fix the cause above."
+        )
+    # Where the reply goes, as a field a caller branches on rather than a sentence
+    # it parses: here, to another conversation, or nowhere.
+    # The same rule the delivery sentence above follows.
+    reply_goes = "nowhere" if not watching else "elsewhere" if elsewhere else "here"
+    status = "joined_turn" if joined else "queued" if queued_depth else "sent"
+    # What the agent is busy with, so a caller whose prompt waits (or joined) can
+    # decide what to do next without another call: the fields session_status gives,
+    # under its rule: only while the agent is working on a turn (the prompt joined
+    # it, or waits because of it). A prompt held for any other reason, or sent to an
+    # idle session, has no turn to describe.
+    busy = joined or (queued_depth and wait_reason == "claude_busy")
+    turn = (tv.turn_info(tn.session_transcript(name)[0]) if busy
+            else tv.NO_TURN if status != "sent" else {})
+    return com.envelope_ok(
+        {"status": status, "session": name, "prompt_id": this_prompt.prompt_id,
+         "reply_goes": reply_goes,
+         "queued_behind": max(0, queued_depth - 1),
+         **({"waiting_reason": wait_reason} if queued_depth else {}),
+         **({"join_declined": join_declined} if join_declined else {}),
+         **turn,
+         # Headless runs (session_invoke) this server has going in the session:
+         # they work in the same tree as the agent.
+         **({"headless_runs": runs} if status != "sent" and (
+             runs := headless.tracked(name)) else {}),
+         **({"watched_conversation_id": watched} if watched else {}),
+         "window": tmx.SESSION_WINDOW, "delivery": delivery}
+    )
+
+
+async def run_turns(
+    name: str,
+    turns: list[str],
+    conversation_id: str | None = None,
+    sender_label: str | None = None,
+) -> dict[str, Any]:
+    """The session_run tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    if not turns:
+        return com.envelope_err("turns must be a non-empty list of prompt strings",
+                                code="invalid_argument")
+
+    log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
+    label = ts.clean_sender_label(sender_label)
+
+    # NB: session_run does NOT auto-start a transcript watcher (contrast
+    # session_send). It delivers the transcript inline as its return value; a
+    # watcher would POST each completed turn to the callback too, so the
+    # orchestrator would receive every turn twice. See the docstring.
+
+    _TURN_TIMEOUT_S = 1800
+    _PRE_IDLE_TIMEOUT_S = 30.0
+
+    if name not in ss.session_send_locks:
+        ss.session_send_locks[name] = asyncio.Lock()
+    lock = ss.session_send_locks[name]
+
+    container = backend.target(name)
+    transcript: list[dict[str, Any]] = []
+
+    async with lock:
+        if not await tmx.is_claude_running(container):
+            return com.envelope_err(
+                "Claude is not running in the session. "
+                "The user needs to start it (run 'aidc-claude' in the tmux claude window).",
+                    code="claude_not_running"
+            )
+
+        for i, turn_prompt in enumerate(turns):
+            reason = await wait_until_free(container, name, timeout=_PRE_IDLE_TIMEOUT_S)
+            if reason:
+                err = f"session not ready before turn {i + 1} ({reason})"
+                return com.envelope_err(err, {"completed_turns": transcript},
+                                        code="session_not_ready")
+
+            # Framed like a session_send prompt; the reply is then found by the
+            # framed text, which is what the transcript holds.
+            pasted = ts.frame_prompt(turn_prompt.replace("\n", " ").strip(),
+                                     sender_label=label,
+                                     conversation_id=conversation_id or "")
+            sent_at = time.time()
+            if not await inject(container, pasted, tmx.SESSION_WINDOW, session=name):
+                # Not retried: if the paste shows in the box later, it stays there
+                # as unsent input, held like a person's (see _own_unsent_text).
+                ss.unsubmitted_paste.pop(name, None)
+                err = (f"failed to inject turn {i + 1} (if the text reached the input "
+                       "box it was not submitted and stays there unsent)")
+                return com.envelope_err(err, {"completed_turns": transcript},
+                                        code="paste_failed")
+
+            ended = await tn.wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)
+            if ended:
+                err = f"turn {i + 1} did not finish ({ended})"
+                return com.envelope_err(err, {"completed_turns": transcript},
+                                        code="turn_not_finished")
+
+            response = tn.reply_from_transcript(name, pasted, sent_at)
+
+            transcript.append({"turn": i + 1, "prompt": turn_prompt, "response": response})
+
+    log_event("tool_call", tool="session_run_complete", session=name, turns=len(transcript))
+    return com.envelope_ok({"transcript": transcript, "session": name,
+                            "window": tmx.SESSION_WINDOW})
+
+
+async def queue_cancel(
+    name: str,
+    position: int | None = None,
+    prompt_id: str | None = None,
+) -> dict[str, Any]:
+    """The session_queue_cancel tool's work. tools.py holds the tool: its schema and description,
+    and the guards around it."""
+    container = backend.target(name)
+    prompt_id = (prompt_id or "").strip()
+    if prompt_id and position is not None:
+        return com.envelope_err("give position or prompt_id, not both",
+                                code="invalid_argument")
+    lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
+    pasted_at = ""
+    async with lock:
+        # Under the send lock, the one the drainer chooses and pastes its batch
+        # under, so a prompt cannot be pasted and taken back at once.
+        await load_persisted_queue(container, name)
+        queue = ss.pending_sends.get(name, [])
+        listed = [(i + 1, q) for i, q in enumerate(queue)]
+        # A batch pasted into the input box and waiting for its Enter is the
+        # session's already: the drainer submits it as it is.
+        in_box = set(batch_in_box(name))
+        if prompt_id:
+            taken = [(i, q) for i, q in listed if q.prompt_id == prompt_id]
+            if taken and prompt_id in in_box:
+                taken, outcome = [], "already_pasted"
+            elif taken:
+                outcome = "cancelled"
+            else:
+                pasted_at = ts.pasted_at_of(ss.WATCHER_STATE_DIR, name, prompt_id)
+                outcome = "already_pasted" if pasted_at else "unknown"
+        elif position is None:
+            taken = [(i, q) for i, q in listed if q.prompt_id not in in_box]
+            outcome = ("cancelled" if taken else "already_pasted" if listed
+                       else "nothing_waiting")
+        elif 1 <= position <= len(queue):
+            taken = [listed[position - 1]]
+            if taken[0][1].prompt_id in in_box:
+                taken, outcome = [], "already_pasted"
+            else:
+                outcome = "cancelled"
+        else:
+            waiting = "; ".join(f"{i}: {q.text[:60]}" for i, q in listed) or "none"
+            return com.envelope_err(
+                f"there is no waiting prompt {position}; waiting: {waiting}",
+                code="not_found")
+        gone = {id(q) for _, q in taken}
+        queue[:] = [q for q in queue if id(q) not in gone]
+        if taken:
+            if not queue:
+                ss.pending_sends.pop(name, None)
+                await show_waiting_on_input(container, name, False)
+            persist_queue(name)
+            for _, q in taken:
+                write_send_dead_letter(name, q, "cancelled")
+    state = await tn.session_state(container, name)
+    working = state.claude_running and state.turn == tn.TURN_RUNNING
+    objs, _, _ = tn.session_transcript(name)
+    cancelled = [{"prompt_id": q.prompt_id, "position": i, "prompt_preview": q.text[:120],
+                  "enqueued_at": q.enqueued_at, "conversation_id": q.conversation_id}
+                 for i, q in taken]
+    log_event("tool_call", tool="session_queue_cancel", session=name, outcome=outcome,
+              prompt_id=prompt_id, cancelled=len(cancelled), left=len(queue))
+    data: dict[str, Any] = {
+        "session": name, "outcome": outcome, "cancelled": cancelled, "left": len(queue),
+        "running": {"working": working,
+                    **(tv.turn_info(objs) if working else tv.NO_TURN)}}
+    if prompt_id:
+        data["prompt_id"] = prompt_id
+    if outcome == "already_pasted":
+        data["pasted_at"] = pasted_at or None
+        data["note"] = (f"too late: the prompt was pasted at {pasted_at}" if pasted_at
+                        else "too late: the prompt is in the input box being submitted")
+    elif outcome == "unknown":
+        data["note"] = f"no prompt {prompt_id} was sent to this session"
+    elif not cancelled:
+        data["note"] = "no prompt was waiting"
+    return com.envelope_ok(data)

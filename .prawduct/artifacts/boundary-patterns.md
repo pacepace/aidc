@@ -7,18 +7,19 @@ that ships separately.
 ## Contract Surfaces
 
 ### The MCP tool surface (external consumer)
-- **Producer**: `mcp/src/aidc_mcp/tools.py` (registration and envelopes), `resources.py`.
-- **Consumer**: the orchestrator (the orchestrator), over streamable HTTP with a bearer token. It is a
+- **Producer**: `mcp/src/aidc_mcp/tools.py` (registration), `resources.py`; the envelopes are
+  built in `mcp/src/aidc_mcp/service/` (`common.envelope_ok` / `envelope_err`).
+- **Consumer**: the orchestrator, over streamable HTTP with a bearer token. It is a
   separate product, developed by another session/agent.
 - **Contract**: every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": "...",
   "error_code": "<kind>"}`, `isError` false either way; the code set is closed
-  (`tools.ERROR_CODES`) and documented in `docs/design-10-turn-state-and-sending.md` D6.
+  (`service/common.py` `ERROR_CODES`) and documented in `docs/design-10-turn-state-and-sending.md` D6.
 - **Rule**: adding a tool or a code is additive and safe; removing one, renaming one, or changing
   what a code means is agreed with the orchestrator first. `session_create` exists only under
   MCP-38. A test fails if any failure path omits a code or invents one.
 
 ### The reply callback (external consumer)
-- **Producer**: `_post_turn` in `tools.py`.
+- **Producer**: `post_turn` in `mcp/src/aidc_mcp/service/callbacks.py`.
 - **Consumer**: the orchestrator's callback endpoint, `POST {callback_url}/api/v1/internal/callback/{conversation_id}`.
 - **Contract**: the payload table in design 10 D5 — `content`, `ok`, `source`, `session`,
   `prompt_origin`, `interrupted`, plus `error_code` on the two callbacks that are notices rather

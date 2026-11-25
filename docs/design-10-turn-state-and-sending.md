@@ -847,13 +847,14 @@ pass it only when the aidc it talks to declares it.
 
 - Requirements: MCP-15..19, MCP-23, MCP-24..30, MCP-32..37 (`docs/requirements.md`).
 - Delivery path: `mcp/src/aidc_mcp/transcript.py` (`extract_completed_turns`, `human_prompt_text`),
-  `mcp/src/aidc_mcp/tools.py` (`_drain_once_body` settle gate, `_post_turn`).
-- Send path: `mcp/src/aidc_mcp/tools.py` (`session_send`, `_drain_pending_sends`,
-  `_enqueue_send`, `_inject`, `_session_state`, `_turn_verdict`, `_paste_reason`, `_check_free`,
-  `_wait_until_free`, `_wait_for_turn_end`, `_watch_for_echo`, `_load_persisted_queue`,
-  `_drop_prompts_of_removed_session`, `_notify_dropped`, `resume_on_startup`, `resume_watchers`,
-  `session_run`, `session_resend`);
-  `mcp/src/aidc_mcp/screen.py` (`classify`).
+  `mcp/src/aidc_mcp/service/delivery.py` (`_drain_once_body` settle gate, `resend`,
+  `resume_watches`), `service/callbacks.py` (`post_turn`).
+- Send path: `mcp/src/aidc_mcp/service/sending.py` (`send`, `_drain_pending_sends`,
+  `enqueue_send`, `inject`, `_check_free`, `wait_until_free`, `load_persisted_queue`,
+  `_drop_prompts_of_removed_session`, `_notify_prompts`, `resume_send_queues`, `run_turns`);
+  `service/turns.py` (`session_state`, `turn_verdict`, `paste_reason`, `wait_for_turn_end`,
+  `watch_for_echo`); `service/startup.py` (`resume`); `mcp/src/aidc_mcp/screen.py` (`classify`).
+  `mcp/src/aidc_mcp/tools.py` holds the MCP tools over them.
 - Turn info and join (S5): `transcript.open_turn`, `turns_view.turn_info`,
   `tools._join_running_turn`, `tools._join_refusal`.
 - Headless runs (S6): `mcp/src/aidc_mcp/headless.py`, `mcp/src/aidc_mcp/disconnect.py`,

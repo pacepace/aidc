@@ -17,6 +17,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from aidc_mcp import __version__, audit, resources, tools
 from aidc_mcp.service import common as com
+from aidc_mcp.service import invoke as inv
 
 
 class ResumeOnStartup:
@@ -75,7 +76,7 @@ def build_app() -> Any:
     from aidc_mcp.disconnect import StopInvokeOnDisconnect
 
     return ResumeOnStartup(BearerAuthMiddleware(
-        StopInvokeOnDisconnect(http_app, tools.stop_invoke_of_gone_client)), app)
+        StopInvokeOnDisconnect(http_app, inv.stop_invoke_of_gone_client)), app)
 
 
 def main() -> int:

@@ -10,6 +10,7 @@ from mcp.server.mcpserver import MCPServer
 
 from aidc_mcp import resources, scope, tools
 from aidc_mcp.service import common as com
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
@@ -185,6 +186,6 @@ async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
         raise AssertionError("checked a session outside the scope")
 
     monkeypatch.setattr(tn, "session_instance", never)
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     assert "orchestrator" not in ss.pending_sends
     assert ts.send_queue_path(ss.WATCHER_STATE_DIR, "orchestrator").exists()

@@ -17,6 +17,7 @@ from aidc_mcp import repo, scope, tools
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -214,7 +215,7 @@ def queued(facts, monkeypatch):
         ts.QueuedPrompt("second prompt", "2026-10-14T09:01:00Z", conversation_id="c-2",
                         prompt_id="p-2"),
     ]
-    tools._persist_queue("proj")
+    snd.persist_queue("proj")
 
 
 async def test_queue_cancel_takes_back_one_waiting_prompt(queued):

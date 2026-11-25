@@ -17,6 +17,8 @@ from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -108,7 +110,7 @@ def wiring(monkeypatch):
         await _REAL_SLEEP(0)
 
     monkeypatch.setattr(tmx, "is_claude_running", is_running)
-    monkeypatch.setattr(tools, "_check_free", check_free)
+    monkeypatch.setattr(snd, "_check_free", check_free)
     monkeypatch.setattr(tn, "session_instance", session_instance)
     monkeypatch.setattr(tmx, "load_and_paste", load_paste)
     monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
@@ -253,8 +255,8 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
         return None
 
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
-    monkeypatch.setattr(tools, "_baseline_watermark", baseline)
-    monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
+    monkeypatch.setattr(dlv, "_baseline_watermark", baseline)
+    monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
@@ -367,14 +369,14 @@ async def test_refuses_once_the_queue_is_full(wiring):
     app, send = _make_send()
     ss.session_watchers["proj"] = _StubTask()
     ss.pending_sends["proj"] = [ts.QueuedPrompt(f"q{i}", "t")
-                                    for i in range(tools._PENDING_MAX_DEPTH)]
+                                    for i in range(snd.PENDING_MAX_DEPTH)]
 
     res = await send(name="proj", prompt="one too many", conversation_id="c1")
 
     assert res["ok"] is False
     assert "queued" in res["error"]
     assert res["error_code"] == "queue_full"
-    assert len(ss.pending_sends["proj"]) == tools._PENDING_MAX_DEPTH
+    assert len(ss.pending_sends["proj"]) == snd.PENDING_MAX_DEPTH
 
 
 async def test_a_long_busy_turn_never_costs_the_prompt(wiring):
@@ -491,7 +493,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     ss.queue_loaded.clear()
 
     wiring.idle_ok = True
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
     assert not ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj").exists()
@@ -501,7 +503,7 @@ async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
     ts.save_send_queue(ss.WATCHER_STATE_DIR, "gone",
                        [ts.QueuedPrompt("orphan", "2026-09-17T02:00:00Z")])
     wiring.session_state = tn.SESSION_GONE
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     assert "gone" not in ss.pending_sends
     [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
     assert json.loads(dead.read_text())["reason"] == "session_killed"
@@ -539,7 +541,7 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
         return ""
 
     wiring.idle_ok = True
-    tools._check_free = recreated_while_waiting   # restored by monkeypatch at teardown
+    snd._check_free = recreated_while_waiting   # restored by monkeypatch at teardown
     await _let_drainer_run("proj", ticks=100)
 
     assert not wiring.paste_calls
@@ -559,7 +561,7 @@ async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enque
         return tn.SESSION_EXISTS, "id-1"
 
     monkeypatch.setattr(tn, "session_instance", session_instance)
-    await tools._enqueue_send("proj", "aidc-proj-dev", ts.QueuedPrompt("new", ts.now_iso()),
+    await snd.enqueue_send("proj", "aidc-proj-dev", ts.QueuedPrompt("new", ts.now_iso()),
                               "claude_busy")
     assert [q.text for q in ss.pending_sends["proj"]] == ["kept", "new"]
 
@@ -569,7 +571,7 @@ async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
     # Startup cannot tell whose it is (the name is inside the file): logged, left alone.
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     assert path.read_text() == "{not json"
 
     app, send = _make_send()
@@ -587,8 +589,8 @@ async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeyp
     async def capture(name, items, error_code):
         notices.append((name, [q.text for q, _ in items], error_code))
 
-    monkeypatch.setattr(tools, "_PROMPT_WAITING_S", 0.0)
-    monkeypatch.setattr(tools, "_notify_prompts", capture)
+    monkeypatch.setattr(snd, "_PROMPT_WAITING_S", 0.0)
+    monkeypatch.setattr(snd, "_notify_prompts", capture)
     app, send = _make_send()
     ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
@@ -633,7 +635,7 @@ async def test_a_saved_queue_goes_before_a_send_that_beats_startup_resume(wiring
 
     res = await send(name="proj", prompt="new", conversation_id="c1")
     assert res["data"]["status"] == "queued"
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     await _let_drainer_run("proj", ticks=100)
 
     assert [text for _, text, _ in wiring.paste_calls] == [f"saved [next message] {_f('new')}"]
@@ -648,7 +650,7 @@ async def test_status_line_shows_while_waiting_on_unsent_text_and_clears_on_past
 
     options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
     assert options[-1] == ["set-option", "-t", "main", "@aidc_waiting",
-                           tools._WAITING_ON_INPUT_TEXT]
+                           snd._WAITING_ON_INPUT_TEXT]
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
@@ -764,10 +766,10 @@ async def test_inject_is_the_single_recording_point(wiring):
     """Every paste path goes through _inject, and _inject records on success —
     so no caller can forget to (the record is what keeps a reply from being
     framed as the person's)."""
-    assert await tools._inject("aidc-proj-dev", "via inject", tmx.SESSION_WINDOW, session="proj")
+    assert await snd.inject("aidc-proj-dev", "via inject", tmx.SESSION_WINDOW, session="proj")
     assert ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "via inject")
     wiring.paste_ok = False
-    assert not await tools._inject("aidc-proj-dev", "lost", tmx.SESSION_WINDOW, session="proj")
+    assert not await snd.inject("aidc-proj-dev", "lost", tmx.SESSION_WINDOW, session="proj")
     assert not ts.consume_sent_prompt(ss.WATCHER_STATE_DIR, "proj", "lost")
 
 
@@ -818,7 +820,7 @@ async def test_resume_keeps_a_queue_when_docker_cannot_answer(wiring):
                        [ts.QueuedPrompt("kept", "2026-09-17T02:00:00Z")])
     wiring.session_state = tn.SESSION_UNKNOWN
     wiring.idle_ok = False
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     assert [q.text for q in ss.pending_sends["proj"]] == ["kept"]
 
 
@@ -857,7 +859,7 @@ async def test_a_recurring_drainer_error_restarts_with_backoff_not_a_spin(wiring
     async def broken(container, name, timeout):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(tools, "_wait_until_free", broken)
+    monkeypatch.setattr(snd, "wait_until_free", broken)
     await _let_drainer_run("proj", ticks=60)
 
     assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
@@ -871,7 +873,7 @@ async def test_resume_remembers_the_notice_is_showing_so_it_is_cleared(wiring):
     ts.save_send_queue(ss.WATCHER_STATE_DIR, "proj",
                        [ts.QueuedPrompt("waiting", "2026-09-17T02:00:00Z", 0, "input_has_text")])
     wiring.idle_ok = True
-    await tools.resume_send_queues()
+    await snd.resume_send_queues()
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == ["waiting"]
     options = [args for _, args in wiring.tmux_calls if args[:1] == ["set-option"]]
@@ -933,7 +935,7 @@ async def test_the_drainer_holds_a_prompt_once_the_session_is_tainted(wiring, mo
         await _REAL_SLEEP(0)
     assert wiring.paste_calls == []
     assert ss.pending_sends["proj"][0].waiting_reason == "session_tainted"
-    assert "session_tainted" in tools._WAITING_EXPLAINED
+    assert "session_tainted" in snd.WAITING_EXPLAINED
 
 
 async def test_the_drainer_pastes_a_queued_prompt_into_a_clean_session(wiring, monkeypatch):
@@ -1330,7 +1332,7 @@ async def test_the_echo_hold_and_the_send_record_hold_the_framed_text(wiring):
 async def test_the_paste_itself_adds_nothing(wiring):
     """Framing happens where a caller's prompt is accepted. The paste path writes what
     it is given, so nothing that reaches the terminal by any other way is changed."""
-    await tools._inject("aidc-proj-dev", "typed at the terminal", tmx.SESSION_WINDOW,
+    await snd.inject("aidc-proj-dev", "typed at the terminal", tmx.SESSION_WINDOW,
                         session="proj")
     assert _pasted(wiring) == ["typed at the terminal"]
 
@@ -1363,7 +1365,7 @@ async def test_the_header_names_the_calls_conversation_never_the_webhooks(wiring
     ts.save_watch(ss.WATCHER_STATE_DIR, "proj", "c-watcher", "http://orchestrator.local")
     await send(name="proj", prompt="hello")
     assert _pasted(wiring) == [f"{_ORCH} hello"]
-    assert tools._watched_conversation("proj") == "c-watcher"
+    assert dlv.watched_conversation("proj") == "c-watcher"
 
 
 async def test_an_empty_prompt_pastes_no_header(wiring):

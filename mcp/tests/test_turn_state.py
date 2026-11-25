@@ -20,6 +20,8 @@ from aidc_mcp import session_facts as sf
 from aidc_mcp import tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.screen import EMPTY, ScreenState, classify
+from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -107,7 +109,7 @@ class Session:
         return p
 
     async def check(self):
-        return await tools._check_free("aidc-proj-dev", "proj")
+        return await snd._check_free("aidc-proj-dev", "proj")
 
 
 @pytest.fixture
@@ -516,9 +518,9 @@ class TestWaitUntilFree:
         async def nosleep(_):
             return None
 
-        monkeypatch.setattr(tools, "_check_free", check)
+        monkeypatch.setattr(snd, "_check_free", check)
         monkeypatch.setattr(asyncio, "sleep", nosleep)
-        assert await tools._wait_until_free("c", "proj", timeout=10) == ""
+        assert await snd.wait_until_free("c", "proj", timeout=10) == ""
         assert len(calls) == 4
 
     async def test_returns_the_last_reason_when_it_never_frees(self, monkeypatch):
@@ -528,9 +530,9 @@ class TestWaitUntilFree:
         async def nosleep(_):
             return None
 
-        monkeypatch.setattr(tools, "_check_free", check)
+        monkeypatch.setattr(snd, "_check_free", check)
         monkeypatch.setattr(asyncio, "sleep", nosleep)
-        assert await tools._wait_until_free("c", "proj", timeout=3) == "input_has_text"
+        assert await snd.wait_until_free("c", "proj", timeout=3) == "input_has_text"
 
 
 class TestReplyFromTranscript:
@@ -579,7 +581,7 @@ class TestInterruptedBeforeOutputDelivery:
 
     async def drain(self, quiet=60.0):
         mtime = self.path.stat().st_mtime
-        await tools._drain_transcript_once(
+        await dlv._drain_transcript_once(
             "sess", "conv", "http://cb", transcripts_base=self.base, state_dir=self.state,
             post_fn=self._post, screen_fn=self._screen_fn,
             wall_now_fn=lambda: mtime + quiet)
@@ -920,11 +922,11 @@ class TestSendWhileABackgroundAgentRuns:
         session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         for _ in range(300):
             await asyncio.sleep(0)
-            if tools._queue_ids("proj") == [second["data"]["prompt_id"]]:
+            if snd._queue_ids("proj") == [second["data"]["prompt_id"]]:
                 break
         for task in ss.pending_drainers.values():
             task.cancel()
-        assert tools._queue_ids("proj") == [second["data"]["prompt_id"]]
+        assert snd._queue_ids("proj") == [second["data"]["prompt_id"]]
         assert self.keys == ["Enter"]
         assert set(self.pasted) == {_f("please look at the parser")}
 
@@ -991,11 +993,11 @@ class TestSendReturnsWithinItsBound:
             await real_sleep(0.4)
             return "claude_busy"
 
-        monkeypatch.setattr(tools, "_check_free", slow_check)
+        monkeypatch.setattr(snd, "_check_free", slow_check)
         monkeypatch.setattr(tn, "FREE_POLL_S", 0.4)
         loop = asyncio.get_running_loop()
         start = loop.time()
-        reason = await tools._wait_until_free("c", "proj", timeout=0.6)
+        reason = await snd.wait_until_free("c", "proj", timeout=0.6)
         assert loop.time() - start < 0.6 + 0.2
         assert reason == "claude_busy"
         assert readings == [1]
@@ -1011,9 +1013,9 @@ class TestSendReturnsWithinItsBound:
             await real_sleep(0.4)
             return ""
 
-        monkeypatch.setattr(tools, "_check_free", slow_free)
+        monkeypatch.setattr(snd, "_check_free", slow_free)
         monkeypatch.setattr(tn, "FREE_POLL_S", 0.1)
-        assert await tools._wait_until_free("c", "proj", timeout=0.3) == ""
+        assert await snd.wait_until_free("c", "proj", timeout=0.3) == ""
         assert readings == [1, 1]
 
 
@@ -1199,7 +1201,7 @@ class TestSendDeliverJoin:
             session.screen = (SCREENS / BUSY).read_text()
             session.write(NOTIFIED, age=1.0)
             return "claude_busy"
-        monkeypatch.setattr(tools, "_wait_until_free", turn_starts)
+        monkeypatch.setattr(snd, "wait_until_free", turn_starts)
         res = await send(name="proj", prompt=JOIN, conversation_id="c1", deliver="join")
         assert res["data"]["status"] == "joined_turn" and self.pasted == [JOIN_SENT]
 
@@ -1215,10 +1217,10 @@ class TestSendDeliverJoin:
         transcript's tail; a prompt pasted on top would bury that report."""
         state = tn.SessionState(True, classify(_screen("idle-empty")), tn.TURN_RUNNING,
                                    "interrupt_not_reported_yet")
-        assert tools._join_refusal("proj", state) == "interrupt_not_reported_yet"
+        assert snd._join_refusal("proj", state) == "interrupt_not_reported_yet"
         busy = tn.SessionState(True, classify(_screen("busy-tool-empty-box")),
                                   tn.TURN_RUNNING, "log_growing")
-        assert tools._join_refusal("proj", busy) == ""
+        assert snd._join_refusal("proj", busy) == ""
 
     async def test_join_holds_a_session_tainted_under_the_lock(self, session, monkeypatch):
         self._setup(session, monkeypatch)
@@ -1226,7 +1228,7 @@ class TestSendDeliverJoin:
         async def tainted(name):
             return {"at": "2026-10-22T00:00:00Z", "trigger": "blocklist", "domain": "x"}
         monkeypatch.setattr(sf, "taint_or_none", tainted)
-        assert await tools._join_running_turn(
+        assert await snd.join_running_turn(
             "aidc-proj-dev", "proj", ts.QueuedPrompt(JOIN, ts.now_iso())) == (
             "session_tainted")
         assert self.pasted == []

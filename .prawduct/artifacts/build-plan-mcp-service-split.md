@@ -147,3 +147,9 @@ every tool through its registered function, is the check, and smoke runs the rea
   reaching the callback POST once that moved. Tests that patched `tools.asyncio`,
   `tools.httpx`, `tools.subprocess` etc. now name those modules directly (the same objects;
   the patches were always module-wide).
+- (03) The service's resume entry points are `startup.resume(resume_watchers)` and
+  `delivery.resume_watches(on_resumed)`; `tools.resume_on_startup(app)` and
+  `tools.resume_watchers(app)` keep their names as the adapters that bind the app, so the
+  server and the tests that drive startup through them are unchanged. The service modules
+  import one another without a cycle: state, config, tmux at the bottom; turns, callbacks;
+  delivery and sending; startup on top.

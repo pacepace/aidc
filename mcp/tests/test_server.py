@@ -1,6 +1,7 @@
 """The aidc-mcp entry point's startup hook: persisted send queues and webhooks resume."""
 from aidc_mcp import server, tools
 from aidc_mcp.service import common as com
+from aidc_mcp.service import sending as snd
 
 
 async def test_lifespan_start_resumes_once_and_passes_through(monkeypatch):
@@ -38,7 +39,7 @@ async def test_a_failing_queue_resume_does_not_stop_webhooks_resuming(monkeypatc
     async def watchers(app):
         resumed.append(app)
 
-    monkeypatch.setattr(tools, "resume_send_queues", queues)
+    monkeypatch.setattr(snd, "resume_send_queues", queues)
     monkeypatch.setattr(tools, "resume_watchers", watchers)
     app = object()
     await tools.resume_on_startup(app)
@@ -54,7 +55,7 @@ async def test_startup_resumes_queues_before_webhooks(monkeypatch):
     async def watchers(app):
         order.append("watchers")
 
-    monkeypatch.setattr(tools, "resume_send_queues", queues)
+    monkeypatch.setattr(snd, "resume_send_queues", queues)
     monkeypatch.setattr(tools, "resume_watchers", watchers)
     await tools.resume_on_startup(object())
     assert order == ["queues", "watchers"]

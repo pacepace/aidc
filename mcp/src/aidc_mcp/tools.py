@@ -12,16 +12,12 @@ parameter and emit progress notifications during execution.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import functools
-import hashlib
 import inspect
-import json
 import os
 import shlex
 import subprocess
 import time
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
@@ -30,15 +26,16 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from aidc_mcp import auth, backend, headless, repo, scope, session_mcp
-from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
 from aidc_mcp.audit import log_event
 from aidc_mcp.offload import off_loop
-from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import sending as snd
+from aidc_mcp.service import startup as sup
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -65,9 +62,6 @@ _SENDER_LABEL_DESC = (
     "typed at its terminal; without this it names \"the orchestrator\", or \"a person, "
     "through the orchestrator\" when sent_by is set."
 )
-# session_send's `deliver`: what to do with a prompt sent while the agent is mid-turn.
-DELIVER_QUEUE = "queue"
-DELIVER_JOIN = "join"
 _DELIVER_DESC = (
     'What to do if the agent is in the middle of a turn. "queue" (the default): hold the '
     "prompt and paste it when the turn ends; its reply comes on its own. \"join\": paste it "
@@ -246,44 +240,6 @@ async def _stop_headless(container: str, run: headless.Run, proc: Any, event: st
 # ---- shared claude session helpers -----------------------------------------
 
 
-# How often, and how far apart, the input box is read after a paste that has to be
-# confirmed there before Enter (see _inject): long enough for Claude Code to draw it.
-_PASTE_CONFIRM_POLLS = 5
-_PASTE_CONFIRM_POLL_S = 0.3
-
-
-# What joins the prompts of one batch (every prompt queued while the session was busy,
-# pasted as one message when it is next free). Not a newline: the paste goes in through
-# tmux paste-buffer, where a newline is Enter and would submit the first prompt alone
-# (it is why session_send flattens a prompt's own newlines). Each prompt opens with its
-# own sender line, so the marker only has to say where one ends.
-_BATCH_SEPARATOR = " [next message] "
-
-
-# How long session_send itself waits for the session to be free before queueing.
-# Short on purpose: anything longer is the drainer's job, and a busy send should
-# return "queued" promptly.
-_SEND_FREE_WAIT_S = 5.0
-
-# How long each drainer free-wait runs before the drainer re-checks that the session
-# still exists and records the latest waiting reason. Not a deadline: it loops.
-_QUEUE_POLL_S = 60.0
-
-# Backoff between failed pastes of the same prompt: 2, 4, 8 … seconds, capped. There
-# is no attempt limit; each failure is logged and shown as the waiting reason.
-_PASTE_RETRY_MAX_S = 60.0
-
-# Hard cap on queue depth per session. A runaway orchestrator that keeps sending
-# into a wedged session must not grow this without bound; past the cap a NEW prompt
-# is refused (audibly). A prompt already accepted is never dropped by it.
-_PENDING_MAX_DEPTH = 25
-
-# What a person attached to the session sees on the tmux status line while a queued
-# prompt waits on their unsent text. tmux-start.sh shows the @aidc_waiting option.
-# Short enough to show whole on an 80-column terminal (tests/unit/test-tmux-status-line.sh).
-_WAITING_ON_INPUT_TEXT = "aidc: orchestrator message waiting — press Enter or clear your input"
-
-
 # Tools that talk to a session by `name` and therefore advertise which sessions
 # currently have an open webhook.
 # How many policy events audit_get returns at most (the newest).
@@ -353,822 +309,16 @@ async def _announce_watchers(app: Any, ctx: Context | None = None) -> None:
                   error_type=type(exc).__name__, error=repr(exc))
 
 
-def _own_unsent_text(name: str, screen: scr.ScreenState | None) -> bool:
-    """Whether the input box holds the batch _inject pasted and left unsubmitted, and
-    that batch's prompts still open the queue, so the drainer is the one that comes
-    back for it and submits it as it is. A paste from a caller that does not queue (the
-    unadvertised session_run) carries no prompt ids, and its text stays a person's
-    unsent input, which nothing is pasted on top of. Claude Code shows a long paste
-    as a placeholder (`[Pasted text …]`), so that counts as well: a person pasting
-    into the box in the seconds before a late paste draws is the narrow window
-    this accepts."""
-    pending = ss.unsubmitted_paste.get(name)
-    if pending is None or screen is None or screen.input_box != scr.HAS_TEXT:
-        return False
-    if not _batch_in_box(name):
-        return False
-    return scr.same_text(screen.typed, pending[0]) or screen.typed.startswith("[Pasted text")
-
-
-def _queue_ids(name: str) -> list[str]:
-    return [q.prompt_id for q in ss.pending_sends.get(name) or []]
-
-
-def _batch_in_box(name: str) -> tuple[str, ...]:
-    """The prompt ids of the batch _inject pasted into the box and did not submit, while
-    they still open the queue (the drainer's to submit as they are); () otherwise."""
-    pending = ss.unsubmitted_paste.get(name)
-    ids = pending[1] if pending else ()
-    return ids if ids and tuple(_queue_ids(name)[:len(ids)]) == ids else ()
-
-
-def _next_batch(name: str) -> list[ts.QueuedPrompt]:
-    """The prompts the drainer pastes next, in queue order: every queued prompt, as one
-    message, unless a batch already pasted into the box is waiting for its Enter (then
-    exactly that batch, and what queued after it waits for the next free moment).
-
-    This is the one place that chooses what goes in together, so a per-prompt delivery
-    choice (a prompt pasted on its own, or mid-turn) would be decided here."""
-    queue = ss.pending_sends.get(name) or []
-    in_box = _batch_in_box(name)
-    return queue[:len(in_box)] if in_box else list(queue)
-
-
-def _batch_sent_by(batch: Sequence[ts.QueuedPrompt]) -> str:
-    """The one ``sent_by`` a batch's send record carries: the last prompt's that names
-    a person, as for a turn answering several prompts (_terminal_prompts). Each prompt's
-    own is in the batch record and the reply's ``prompts``."""
-    return next((q.sent_by for q in reversed(batch) if q.sent_by), "")
-
-
-def _save_unrecognized_screen(name: str) -> None:
-    """Keep the capture that did not match, for whoever updates screen.py."""
-    raw = ss.last_screen_raw.get(name)
-    if raw is None:
-        return
-    try:
-        d = Path(ss.WATCHER_STATE_DIR) / "screens"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{ts.slug(name)}-unrecognized.ansi").write_text(raw, encoding="utf-8")
-    except OSError as exc:
-        log_event("session_screen_save_failed", session=name, error_type=type(exc).__name__)
-
-
-async def _check_free(container: str, name: str) -> str:
-    """Whether a prompt can be pasted into the session now: "" or a reason (see
-    _paste_reason). Every change of verdict is logged with its evidence, so a "free"
-    reached without transcript evidence (no transcript, a stalled one, the status
-    row) is on record."""
-    state = await tn.session_state(container, name)
-    reason = tn.paste_reason(state)
-    if reason == "input_has_text" and _own_unsent_text(name, state.screen):
-        reason = ""
-    verdict = (reason, state.why)
-    if ss.last_free_verdict.get(name) != verdict:
-        ss.last_free_verdict[name] = verdict
-        log_event("session_free_check", session=name, reason=reason, turn=state.turn,
-                  why=state.why)
-        if reason == "screen_unrecognized":
-            _save_unrecognized_screen(name)
-    return reason
-
-
-def _join_refusal(name: str, state: tn.SessionState) -> str:
-    """Why a prompt may not be pasted into the turn running now (session_send's
-    deliver="join"), or "". The screen rules of _paste_reason all hold: the turn
-    being busy is the one they skip. And an Esc the watcher has not reported yet: a
-    prompt pasted on top of it would bury the report (design 10 S1)."""
-    if not state.claude_running or state.screen is None:
-        return "claude_not_running"
-    if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return "claude_not_at_prompt"
-    if state.screen.input_box == scr.UNRECOGNIZED:
-        return "screen_unrecognized"
-    if state.screen.list_focused:
-        return "agent_list_selected"
-    if state.screen.input_box == scr.HAS_TEXT and not _own_unsent_text(name, state.screen):
-        return "input_has_text"
-    if state.why == "interrupt_not_reported_yet":
-        return "interrupt_not_reported_yet"
-    return ""
-
-
-async def _join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt) -> str:
-    """Paste `prompt` into the turn running in `name` now, for session_send's
-    deliver="join". Called under the session's send lock, with nothing queued.
-
-    Returns "joined" once it went in; "idle" when no turn is running, so the caller
-    sends as usual; else why it may not go in now (a waiting reason, or
-    "interrupt_not_reported_yet"), and the caller queues it.
-
-    Claude Code holds a prompt pasted mid-turn as a queue-operation and hands it to the
-    turn at its next tool boundary (or runs it next, if the turn ends first);
-    _prompt_arrived recognizes that arrival."""
-    state = await tn.session_state(container, name)
-    if state.claude_running and state.turn != tn.TURN_RUNNING:
-        return "idle"
-    refusal = _join_refusal(name, state)
-    if not refusal and await sf.taint_or_none(name) is not None:
-        refusal = "session_tainted"
-    if refusal:
-        log_event("session_send_join_declined", session=name, reason=refusal, why=state.why)
-        return refusal
-    if not await _inject(container, prompt.paste(), tmx.SESSION_WINDOW, session=name,
-                         sent_by=prompt.sent_by, prompts=[prompt]):
-        log_event("session_send_join_declined", session=name, reason="paste_failing",
-                  why=state.why)
-        return "paste_failing"
-    log_event("session_send_joined_turn", session=name, prompt_len=len(prompt.paste()),
-              why=state.why)
-    return "joined"
-
-
-async def _wait_until_free(container: str, name: str, timeout: float) -> str:
-    """Poll _check_free until two consecutive readings are free (""), or the timeout
-    runs out (the last reason). The timeout is held to on the clock: after a reading
-    that was not free, no further reading starts that could not finish inside it, so
-    slow readings (docker exec under load) cannot stretch the wait. A free reading is
-    always confirmed by a second one, which may run past the timeout by one poll. The
-    poll count still caps it, so the loop ends under a patched sleep too."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    polls = max(2, int(timeout / tn.FREE_POLL_S))
-    streak = 0
-    reason = ""
-    for i in range(polls):
-        started = loop.time()
-        reason = await _check_free(container, name)
-        streak = 0 if reason else streak + 1
-        if streak >= 2:
-            return ""
-        took = loop.time() - started
-        # A free reading always gets the second one it needs, even past the deadline:
-        # stopping there would report a free session as busy.
-        if i == polls - 1 or (streak == 0 and loop.time() + tn.FREE_POLL_S + took > deadline):
-            break
-        await asyncio.sleep(tn.FREE_POLL_S)
-    return reason or "claude_busy"
-
-
-def _write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -> None:
-    """Persist a prompt that will never be pasted because its session is gone, so it
-    is recorded, not lost. Sibling of _write_dead_letter (an undelivered REPLY)."""
-    dl = Path(ss.WATCHER_STATE_DIR) / "dead-letter"
-    try:
-        dl.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(
-            f"{queued.enqueued_at}\n{queued.text}".encode()).hexdigest()[:16]
-        (dl / f"send__{ts.slug(session)}__{digest}.json").write_text(
-            json.dumps({"session": session, "prompt": queued.text, "reason": reason,
-                        "prompt_id": queued.prompt_id,
-                        "enqueued_at": queued.enqueued_at,
-                        "paste_attempts": queued.paste_attempts,
-                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log_event("session_send_dead_letter_failed", session=session, reason=reason,
-                  error_type=type(exc).__name__)
-
-
-def _record_sent(name: str, text: str, sent_by: str = "",
-                 batch: dict | None = None) -> None:
-    """Remember a prompt the MCP just injected into `name`'s pane, and who it was
-    sent for, so the drain can tell it apart from one a person typed at the
-    terminal (see ts.record_sent_prompt). Best-effort: a failure to persist must
-    not fail the send that already landed — it degrades to that one reply carrying
-    a terminal-typed note it should not have, which the audit line explains."""
-    try:
-        ts.record_sent_prompt(ss.WATCHER_STATE_DIR, name, text, sent_by=sent_by, batch=batch)
-    except OSError as exc:
-        log_event("session_send_record_failed", session=name, prompt_len=len(text),
-                  error_type=type(exc).__name__, error=repr(exc))
-    if not batch:
-        return
-    try:
-        # Only what lets session_queue_cancel say "too late" instead of "unknown".
-        ts.record_pasted_ids(ss.WATCHER_STATE_DIR, name,
-                             [p["prompt_id"] for p in batch["prompts"]], batch["pasted_at"])
-    except OSError as exc:
-        log_event("session_send_pasted_ids_failed", session=name,
-                  error_type=type(exc).__name__, error=repr(exc))
-
-
-def _terminal_prompts(session: str, prompts: tuple[str, ...],
-                      state_dir: Path) -> tuple[list[str], str, dict | None]:
-    """The subset of a turn's opening prompts that a PERSON typed at the terminal:
-    every prompt that does not match one the MCP itself injected (each match
-    consumes its record entry); who the injected ones were sent for, the
-    last one's ``sent_by`` that names anyone ("" when every one was the caller's
-    own); and the batch they carried (``{"pasted_at", "prompts"}``: the latest
-    paste's time and every batched prompt in paste order, or None when no match
-    carried one). A record that cannot be updated counts the prompt as the MCP's
-    own — an orchestrator prompt mislabelled as the person's is the confusion this
-    exists to remove, so it is the side never to err on."""
-    typed: list[str] = []
-    sent_by = ""
-    batch: dict | None = None
-    for prompt in prompts:
-        try:
-            entry = ts.take_sent_entry(state_dir, session, prompt)
-        except OSError as exc:
-            log_event("transcript_sent_record_failed", session=session,
-                      error_type=type(exc).__name__, error=repr(exc))
-            continue
-        if entry is None:
-            typed.append(prompt)
-            continue
-        if entry["by"]:
-            sent_by = entry["by"]
-        if entry.get("batch"):
-            batch = {"pasted_at": entry["batch"]["pasted_at"],
-                     "prompts": (batch["prompts"] if batch else []) + entry["batch"]["prompts"]}
-    return typed, sent_by, batch
-
-
-def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | None:
-    """`batch` with every prompt joined into the turn since (deliver="join") after its
-    own, each once; they are answered in this reply. The turn's continuations then name
-    them too. pasted_at stays the turn's own paste, or the first join's without one."""
-    try:
-        joined = ts.take_joined_batches(state_dir, session)
-    except OSError as exc:
-        log_event("transcript_joined_record_failed", session=session,
-                  error_type=type(exc).__name__, error=repr(exc))
-        return batch
-    if not joined:
-        return batch
-    merged = {"pasted_at": batch["pasted_at"] if batch else joined[0]["pasted_at"],
-              "prompts": list(batch["prompts"]) if batch else []}
-    seen = {p["prompt_id"] for p in merged["prompts"]}
-    for b in joined:
-        for p in b["prompts"]:
-            if p["prompt_id"] not in seen:
-                seen.add(p["prompt_id"])
-                merged["prompts"].append(p)
-    origin, sent_by = ts.last_prompt_origin(state_dir, session)
-    try:
-        ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=merged)
-    except OSError as exc:
-        log_event("transcript_origin_record_failed", session=session,
-                  error_type=type(exc).__name__, error=repr(exc))
-    return merged
-
-
-def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
-                         batch: dict | None,
-                         state_dir: Path) -> tuple[str, str, dict | None]:
-    """Whose prompt a turn answers, and who sent it when a person did, carried
-    across the turn's continuations.
-
-    A prompted turn's origin is recorded for its session. A turn with no prompt
-    of its own -- a continuation past the read window, a task notification, an
-    auto-continue -- is the same piece of work, so it answers the same party and
-    takes the recorded origin, and the pasted batch it answers. Delivered as "", a
-    night of continuations of turns a person typed (2026-10-08) read to the
-    orchestrator as replies to its own prompts. A record that cannot be written
-    leaves the origin as computed."""
-    if turn.prompts:
-        try:
-            ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=batch)
-        except OSError as exc:
-            log_event("transcript_origin_record_failed", session=session,
-                      error_type=type(exc).__name__, error=repr(exc))
-        return origin, sent_by, batch
-    return (*ts.last_prompt_origin(state_dir, session),
-            ts.last_prompt_batch(state_dir, session))
-
-
-async def _inject(container: str, text: str, window: str, *, session: str,
-                  sent_by: str = "", prompts: Sequence[ts.QueuedPrompt] = ()) -> bool:
-    """Paste one message into the window and press Enter. True when it went in.
-
-    The ONLY way a prompt reaches the pane, so it is also the only place the send
-    record is written: a paste that landed is recorded here, on success, for
-    `session`, with the person it was sent for (`sent_by`, "" for the caller's
-    own) — the drain tells the orchestrator's prompts from a person's by that
-    record alone, so a paste path that skipped it would ship a reply falsely
-    framed as answering something the person typed. `prompts` are the session_send
-    prompts `text` carries (one, or a batch joined by _BATCH_SEPARATOR); the record
-    keeps each one's id, sender and conversation with the paste time, which the
-    reply callback returns as `prompts` and `pasted_at`."""
-    ids = tuple(q.prompt_id for q in prompts)
-    # Judged against the screen the free check just read: every caller pastes only
-    # after _check_free said "" for this session, which it says only having read the
-    # screen (a session whose screen could not be read is never free). With the
-    # background-agent list's pointer showing, the paste is confirmed in the input
-    # box before Enter: Enter in the list opens an agent instead of sending.
-    raw = ss.last_screen_raw.get(session)
-    screen = scr.classify(raw) if raw is not None else None
-    if ss.unsubmitted_paste.get(session) == (text, ids) and _own_unsent_text(session, screen):
-        log_event("session_send_late_paste_submitted", session=session,
-                  prompt_len=len(text))
-    else:
-        if not await tmx.load_and_paste(container, text, window):
-            return False
-        if screen is not None and screen.agent_pointed and not await _paste_in_box(
-                container, window, session):
-            # What the box showed last: still empty means the keys went elsewhere;
-            # anything else means the screen changed under the paste.
-            box = scr.classify(ss.last_screen_raw.get(session, "")).input_box
-            ss.unsubmitted_paste[session] = (text, ids)
-            log_event("session_send_paste_not_in_box", session=session,
-                      prompt_len=len(text), input_box=box,
-                      waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
-            return False
-    ss.unsubmitted_paste.pop(session, None)
-    await tmx.tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
-    batch = ({"pasted_at": ts.now_iso(),
-              "prompts": [q.batch_entry() for q in prompts]}
-             if prompts else None)
-    _record_sent(session, text, sent_by, batch)
-    # Until the transcript shows this prompt, a follow-up's free check must read the
-    # session as busy: the mirrored transcript lags the paste by a couple of seconds,
-    # and in that gap it still shows the previous, finished turn.
-    sent_at = time.time()
-    ss.sent_awaiting_echo[session] = (text, sent_at)
-    com.fire(tn.watch_for_echo(session, text, sent_at))
-    return True
-
-
-async def _paste_in_box(container: str, window: str, session: str) -> bool:
-    """Whether the input box shows text after a paste into an empty box, read a few
-    times while Claude Code draws it. Any text counts: Claude Code shows a long paste
-    as a placeholder (`[Pasted text #1]`), not as the words."""
-    for i in range(_PASTE_CONFIRM_POLLS):
-        raw = await tmx.capture_screen(container, window)
-        ss.last_screen_raw[session] = raw
-        if scr.classify(raw).input_box == scr.HAS_TEXT:
-            return True
-        if i < _PASTE_CONFIRM_POLLS - 1:
-            await asyncio.sleep(_PASTE_CONFIRM_POLL_S)
-    return False
-
-
-async def _drop_prompts_of_removed_session(container: str, name: str) -> None:
-    """Take out of `name`'s queue every prompt whose session no longer exists: all of
-    them when the session is gone, and, when a session of the same name has a different
-    instance (killed and created again), those accepted for the old one. Docker failing
-    to answer removes nothing."""
-    state, current = await tn.session_instance(name)
-    if state == tn.SESSION_UNKNOWN:
-        log_event("session_send_queue_session_unknown", session=name)
-        return
-    queue = ss.pending_sends.get(name, [])
-    if state == tn.SESSION_GONE:
-        dropped, kept = queue, []
-    else:
-        if not current:
-            return
-        dropped = [q for q in queue
-                   if q.session_instance and q.session_instance != current]
-        kept = [q for q in queue if q not in dropped]
-    if not dropped:
-        return
-    if kept:
-        ss.pending_sends[name] = kept
-    else:
-        ss.pending_sends.pop(name, None)
-    _abandon_queue(name, dropped)
-    _persist_queue(name)
-
-
-def _persist_queue(name: str) -> None:
-    # The batch in the box is saved with the queue, so a restart still knows it is the
-    # session's (_load_persisted_queue_once restores it).
-    in_box = set(_batch_in_box(name))
-    for q in ss.pending_sends.get(name, []):
-        q.in_box = q.prompt_id in in_box
-    try:
-        ts.save_send_queue(ss.WATCHER_STATE_DIR, name, ss.pending_sends.get(name, []))
-    except OSError as exc:
-        log_event("session_send_queue_persist_failed", session=name,
-                  error_type=type(exc).__name__, error=repr(exc))
-
-
-async def _set_waiting_reason(container: str, name: str, reason: str) -> None:
-    """Record why the queue's head is waiting (the rest wait behind it), persist on a
-    change, and show or clear the tmux status-line notice for unsent input."""
-    queue = ss.pending_sends.get(name)
-    if not queue:
-        return
-    await _show_waiting_on_input(container, name, reason == "input_has_text")
-    wanted = [reason] + ["queued_behind"] * (len(queue) - 1)
-    if [q.waiting_reason for q in queue] == wanted:
-        return
-    for q, r in zip(queue, wanted, strict=True):
-        q.waiting_reason = r
-    _persist_queue(name)
-    log_event("session_send_queue_waiting", session=name, reason=reason, depth=len(queue))
-
-
-async def _show_waiting_on_input(container: str, name: str, show: bool) -> None:
-    """Set or clear the status-line notice, tracking whether it is showing on its own
-    (not from a prompt's reason, which other paths overwrite)."""
-    if show == (name in ss.waiting_notice_shown):
-        return
-    args = (["set-option", "-t", "main", "@aidc_waiting", _WAITING_ON_INPUT_TEXT] if show
-            else ["set-option", "-t", "main", "-u", "@aidc_waiting"])
-    await tmx.tmux_exec(container, args)
-    if show:
-        ss.waiting_notice_shown.add(name)
-    else:
-        ss.waiting_notice_shown.discard(name)
-
-
-async def _drain_pending_sends(container: str, name: str) -> None:
-    """Paste queued prompts into `name`'s pane as it becomes free: every prompt
-    waiting at that moment goes in together, as one message in queue order joined by
-    _BATCH_SEPARATOR (_next_batch), so a session that was busy gets its backlog in one
-    turn rather than one turn per prompt.
-
-    Runs until the queue empties or the session's container is gone, and never gives
-    up on a prompt otherwise: a busy Claude, unsent text in the input box, a stopped
-    Claude or a failing paste all just keep it waiting, with the reason recorded.
-
-    The long free-wait happens WITHOUT the send lock held — holding it across a
-    22-minute turn would block every concurrent session_send for the duration. The
-    lock is taken only around the paste itself, which is what actually needs
-    serializing against a direct send, and against session_queue_cancel: the batch is
-    chosen and pasted under the lock, so a prompt is either in it or cancelled. Order
-    is preserved because session_send enqueues rather than pasting whenever the queue
-    is non-empty."""
-    lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
-    failed = False
-    try:
-        while ss.pending_sends.get(name):
-            await _drop_prompts_of_removed_session(container, name)
-            if not ss.pending_sends.get(name):
-                return
-            _notify_long_waits(name)
-            reason = await _wait_until_free(container, name, timeout=_QUEUE_POLL_S)
-            if reason:
-                await _set_waiting_reason(container, name, reason)
-                continue
-            retry_in = 0.0
-            async with lock:
-                queue = ss.pending_sends.get(name)
-                if not queue:
-                    return
-                # Re-verify under the lock: the session may have picked up work
-                # between the wait above and acquiring it.
-                reason = await _check_free(container, name)
-                if reason:
-                    await _set_waiting_reason(container, name, reason)
-                    continue
-                # And again that the prompt's session is still this one: the wait above
-                # can be long enough for it to be killed and created again.
-                await _drop_prompts_of_removed_session(container, name)
-                queue = ss.pending_sends.get(name)
-                if not queue:
-                    return
-                batch = _next_batch(name)
-                head = batch[0]
-                text = _BATCH_SEPARATOR.join(q.paste() for q in batch)
-                if await sf.taint_or_none(name) is not None:
-                    # A prompt accepted before the session was tainted is never pasted
-                    # into it: it waits, saying why, until the person kills the session
-                    # (which hands the queue to the dead-letter dir and tells its
-                    # conversation). Checked here, under the lock, right before the paste.
-                    await _set_waiting_reason(container, name, "session_tainted")
-                    log_event("session_send_queue_held_tainted", session=name,
-                              depth=len(queue))
-                    retry_in = _QUEUE_POLL_S
-                elif await _inject(container, text, tmx.SESSION_WINDOW, session=name,
-                                   sent_by=_batch_sent_by(batch), prompts=batch):
-                    pasted = {id(q) for q in batch}
-                    queue[:] = [q for q in queue if id(q) not in pasted]
-                    ss.drainer_failures.pop(name, None)
-                    await _show_waiting_on_input(container, name, False)
-                    if not queue:
-                        ss.pending_sends.pop(name, None)
-                    else:
-                        queue[0].waiting_reason = ""
-                    _persist_queue(name)
-                    log_event("session_send_queued_injected", session=name,
-                              prompt_len=len(text), batch=len(batch),
-                              prompt_ids=[q.prompt_id for q in batch],
-                              remaining=len(queue), paste_attempts=head.paste_attempts)
-                    continue
-                else:
-                    for q in batch:
-                        q.paste_attempts += 1
-                    _persist_queue(name)
-                    await _set_waiting_reason(container, name, "paste_failing")
-                    retry_in = min(_PASTE_RETRY_MAX_S, 2.0 ** min(head.paste_attempts, 6))
-                    log_event("session_send_queued_paste_retry", session=name,
-                              attempts=head.paste_attempts, retry_in_s=retry_in)
-            await asyncio.sleep(retry_in)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # prawduct:allow prawduct/broad-except -- drainer must survive
-        failed = True
-        log_event("session_send_queue_error", session=name,
-                  error_type=type(exc).__name__, error=repr(exc))
-    finally:
-        if ss.pending_drainers.get(name) is asyncio.current_task():
-            ss.pending_drainers.pop(name, None)
-            # A send that queued while this drainer was winding down would
-            # otherwise be orphaned: _enqueue_send saw a live (not-yet-done)
-            # drainer and declined to start one, and then that drainer exited. The
-            # same applies when the drainer stopped on an unexpected error: the
-            # prompts are still accepted, so hand them to a fresh drainer, after a
-            # backoff so an error that recurs every cycle does not spin.
-            if ss.pending_sends.get(name):
-                delay = 0.0
-                if failed:
-                    n = ss.drainer_failures.get(name, 0) + 1
-                    ss.drainer_failures[name] = n
-                    delay = min(_PASTE_RETRY_MAX_S, 2.0 ** min(n, 6))
-                _spawn_drainer(container, name, delay=delay)
-
-
-def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
-    """Start the per-session drainer unless a live one is already registered."""
-    drainer = ss.pending_drainers.get(name)
-    if drainer is not None and not drainer.done():
-        return
-
-    async def run() -> None:
-        if delay:
-            await asyncio.sleep(delay)
-        await _drain_pending_sends(container, name)
-
-    task = asyncio.create_task(run())
-    ss.pending_drainers[name] = task
-    com.background_tasks.add(task)
-    task.add_done_callback(com.background_tasks.discard)
-
-
-async def _enqueue_send(name: str, container: str, prompt: ts.QueuedPrompt,
-                        reason: str) -> int:
-    """Queue a prompt for pasting when the session frees up; returns queue depth.
-
-    Returns 0 when the queue is at _PENDING_MAX_DEPTH and the prompt was refused.
-    Records why it waits (showing the status-line notice if that is unsent input),
-    persists the queue, and starts the per-session drainer if one is not running."""
-    # Read before touching the queue: nothing may await between taking the list and
-    # appending to it, or the drainer can replace the list meanwhile and the prompt
-    # would land in one nobody reads.
-    _, instance = await tn.session_instance(name)
-    queue = ss.pending_sends.setdefault(name, [])
-    if len(queue) >= _PENDING_MAX_DEPTH:
-        return 0
-    prompt.session_instance = instance
-    queue.append(prompt)
-    _persist_queue(name)
-    await _set_waiting_reason(container, name, queue[0].waiting_reason or reason)
-    _spawn_drainer(container, name)
-    return len(queue)
-
-
-_DROPPED_NOTE = ("[Not delivered: the session '{session}' was removed before this prompt "
-                 "could be pasted. It was never seen by the agent.]")
-
-
-def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
-    """The session these prompts were accepted for is gone. Record each in the send
-    dead-letter dir, tell each prompt's conversation it was not delivered (never
-    silence: the orchestrator was promised it would go in), and forget the session's
-    send-path state."""
-    for q in prompts:
-        _write_send_dead_letter(name, q, "session_killed")
-    com.fire(_notify_prompts(name, [(q, _DROPPED_NOTE.format(session=name)) for q in prompts],
-                          "prompt_dropped"))
-    ss.forget_session_send_state(name)
-    log_event("session_send_queue_abandoned", session=name, dropped=len(prompts),
-              reason="session_killed")
-
-
-async def _notify_prompts(name: str, notices: list[tuple[ts.QueuedPrompt, str]],
-                         error_code: str) -> None:
-    """Tell each queued prompt's conversation something about it that is not a reply:
-    the note, a blank line, then the prompt, with `error_code` naming which (design 10
-    D5). "prompt_dropped" is a failure, so ok is false; "prompt_waiting" is a status
-    (nothing has failed, and a receiver that shows ok false as an error would invite a
-    resend), so ok is true. Retried, and dead-lettered when it cannot be delivered,
-    like a reply."""
-    event = f"session_send_{error_code}_notified"
-    base = orc.orchestrator_callback_url()
-    for q, note in notices:
-        if not q.conversation_id or not base:
-            # Sent without a webhook: nobody to tell beyond the log.
-            log_event(event, session=name, delivered=False,
-                      reason="no_conversation" if base else "no_callback_url")
-            continue
-        digest = hashlib.sha256(f"{q.enqueued_at}\n{q.text}".encode()).hexdigest()[:16]
-        turn = ts.Turn(terminal_uuid=f"{error_code}-{digest}", text=f"{note}\n\n{q.text}",
-                       ok=error_code != "prompt_dropped", prompt_origin="orchestrator",
-                       error_code=error_code,
-                       batch=(q.batch_entry(),))
-
-        async def post_fn(t: ts.Turn, attempt: int, cid: str = q.conversation_id) -> bool:
-            return await cbk.post_turn(base, cid, t, attempt=attempt, session=name)
-
-        try:
-            delivered = await cbk.deliver_with_retry(turn, post_fn=post_fn)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # prawduct:allow prawduct/broad-except -- report, don't crash
-            log_event(f"session_send_{error_code}_notify_error", session=name,
-                      error_type=type(exc).__name__, error=repr(exc))
-            delivered = False
-        if not delivered:
-            cbk.write_dead_letter(Path(ss.WATCHER_STATE_DIR), name, q.conversation_id, turn)
-        log_event(event, session=name, conversation_id=q.conversation_id,
-                  delivered=delivered)
-
-
-# How long a queued prompt waits before its conversation is told, once, that it is
-# still waiting (design 10 D5, MCP-36). A paste normally happens within seconds.
-# AIDC_MCP_PROMPT_WAITING_S overrides it, for testing.
-_PROMPT_WAITING_S = float(os.environ.get("AIDC_MCP_PROMPT_WAITING_S", "600"))
-_WAITING_NOTE = ("[Still waiting: this prompt has been queued for the session '{session}' "
-                 "for {minutes}, because {why}. It has not been seen by the agent yet. "
-                 "It will still go in when the session is free.]")
-
-
-def _notify_long_waits(name: str) -> None:
-    """Tell each prompt that has waited _PROMPT_WAITING_S, once, that it is still
-    waiting and why. Whatever keeps a queue from moving, a person's forgotten text, a
-    dialog nobody answered, or a bug, the orchestrator was told the prompt would go in
-    and would otherwise hear nothing."""
-    queue = ss.pending_sends.get(name) or []
-    now = time.time()
-    due = []
-    for q in queue:
-        if q.waiting_notified:
-            continue
-        accepted = ts.wall_time({"timestamp": q.enqueued_at})
-        if accepted is None or now - accepted < _PROMPT_WAITING_S:
-            continue
-        q.waiting_notified = True
-        due.append((q, int(now - accepted)))
-    if not due:
-        return
-    _persist_queue(name)
-    head_why = _WAITING_EXPLAINED.get(queue[0].waiting_reason, "the session is not free")
-    notices = []
-    for q, waited in due:
-        why = (head_why if q is queue[0]
-               else f"{_WAITING_EXPLAINED['queued_behind']} (held because {head_why})")
-        minutes = waited // 60
-        notices.append((q, _WAITING_NOTE.format(
-            session=name, why=why,
-            minutes=f"{minutes} minute{'s' if minutes != 1 else ''}" if minutes
-            else f"{waited} seconds")))
-        log_event("session_send_prompt_waiting", session=name, waited_s=waited,
-                  reason=q.waiting_reason or "queued_behind")
-    com.fire(_notify_prompts(name, notices, "prompt_waiting"))
-
-
-def _watched_conversation(name: str) -> str:
-    """The conversation `name`'s open webhook delivers to, or "" without one."""
-    if name not in ss.session_watchers:
-        return ""
-    watches, _ = ts.load_watches(ss.WATCHER_STATE_DIR)
-    return next((w["conversation_id"] for w in watches if w["session"] == name), "")
-
-
-async def _load_persisted_queue(container: str, name: str) -> None:
-    """Read `name`'s saved queue once per process, ahead of anything queued in memory,
-    and start its drainer. Called under the session's send lock by both startup resume
-    and session_send, so the two cannot race or reorder."""
-    if name in ss.queue_loaded:
-        return
-    try:
-        await _load_persisted_queue_once(container, name)
-    except BaseException:
-        # Not loaded after all: the next send or resume tries again, rather than
-        # saving over prompts that were never read.
-        ss.queue_loaded.discard(name)
-        raise
-
-
-async def _load_persisted_queue_once(container: str, name: str) -> None:
-    ss.queue_loaded.add(name)
-    path = ts.send_queue_path(ss.WATCHER_STATE_DIR, name)
-    if not path.exists():
-        return
-    queues, unreadable = ts.load_send_queues(path.parent)
-    if path in unreadable:
-        # Kept for a person under another name, so saving this session's queue from
-        # now on does not overwrite it.
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        aside = path.with_name(f"{path.name}.unreadable-{stamp}")
-        try:
-            path.rename(aside)
-        except OSError as exc:
-            log_event("session_send_queue_unreadable", path=str(path), kept_as="",
-                      error_type=type(exc).__name__)
-        else:
-            log_event("session_send_queue_unreadable", path=str(path), kept_as=str(aside))
-        return
-    saved = queues.get(name, [])
-    if not saved:
-        return
-    if (await tn.session_instance(name))[0] == tn.SESSION_GONE:
-        _abandon_queue(name, saved)
-        _persist_queue(name)
-        return
-    ss.pending_sends[name] = saved + ss.pending_sends.get(name, [])
-    in_box = []
-    for q in saved:
-        if not q.in_box:
-            break
-        in_box.append(q)
-    if in_box and name not in ss.unsubmitted_paste:
-        # A batch was pasted into the box and not submitted when the MCP stopped: it is
-        # still the session's to submit as it is, and not a person's unsent text.
-        ss.unsubmitted_paste[name] = (_BATCH_SEPARATOR.join(q.paste() for q in in_box),
-                                    tuple(q.prompt_id for q in in_box))
-    if saved[0].waiting_reason == "input_has_text":
-        # The tmux option outlives the MCP; remember it is showing, so the drainer
-        # clears it when the prompt goes in.
-        ss.waiting_notice_shown.add(name)
-    _persist_queue(name)
-    _spawn_drainer(container, name)
-    log_event("session_send_queue_resumed", session=name, depth=len(saved))
-
-
 async def resume_on_startup(app: Any) -> None:
-    """Everything aidc-mcp must pick up after a restart: saved send queues first, then
-    the webhooks that deliver their replies."""
-    steps = (("queues", resume_send_queues), ("watchers", lambda: resume_watchers(app)))
-    for step, run in steps:
-        try:
-            await run()
-        except Exception as exc:  # prawduct:allow prawduct/broad-except -- keep resuming
-            # One failing step must not keep the other from running.
-            log_event("startup_resume_failed", step=step,
-                      error_type=type(exc).__name__, error=repr(exc))
+    """Startup resume (service/startup.py), with the webhooks' resume bound to this app's
+    tool descriptions. server.py runs it when the server starts."""
+    await sup.resume(lambda: resume_watchers(app))
 
 
 async def resume_watchers(app: Any) -> None:
-    """Re-open every persisted webhook in scope whose session still exists, WITHOUT
-    re-baselining: delivery continues from the saved watermark, and the delivery
-    ledger keeps it exactly once. A reply produced while the MCP was down, such as
-    one to a prompt resumed from the queue, is delivered once rather than skipped."""
-    watches, unreadable = ts.load_watches(ss.WATCHER_STATE_DIR)
-    for path in unreadable:
-        log_event("session_watch_unreadable", path=str(path))
-    resumed = False
-    for w in watches:
-        name = w["session"]
-        if scope.refusal(name) is not None or name in ss.session_watchers:
-            continue
-        state, current = await tn.session_instance(name)
-        gone = state == tn.SESSION_GONE
-        recreated = bool(w["session_instance"] and current
-                         and current != w["session_instance"])
-        if gone or recreated:
-            # The conversation was watching a session that no longer exists; a new
-            # session under the same name has not been asked to report to it.
-            ts.remove_watch(ss.WATCHER_STATE_DIR, name)
-            ss.forget_session_send_state(name)
-            log_event("session_watch_dropped", session=name,
-                      reason="session_killed" if gone else "session_recreated")
-            continue
-        _register_watcher(name, w["conversation_id"], w["callback_base"])
-        log_event("session_watch_resumed", session=name, conversation_id=w["conversation_id"])
-        resumed = True
-    if resumed:
-        # No client is connected this early, so there is nobody to notify: each one
-        # reads the refreshed descriptions when it lists tools.
-        _refresh_session_tool_descriptions(app)
-
-
-async def resume_send_queues() -> None:
-    """Pick up every persisted queue in scope after an aidc-mcp start. Unreadable
-    queue files are logged and left for a person."""
-    queues, unreadable = ts.load_send_queues(ss.WATCHER_STATE_DIR)
-    for path in unreadable:
-        log_event("session_send_queue_unreadable", path=str(path))
-    for name in queues:
-        if scope.refusal(name) is not None:
-            continue   # another server's session: leave its queue file alone
-        lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
-        async with lock:
-            await _load_persisted_queue(backend.target(name), name)
-
-
-_WAITING_EXPLAINED = {
-    "claude_busy": "Claude is working on a turn",
-    "input_has_text": "someone has unsent text in Claude's input box in the session "
-                      "(the session's status line tells them)",
-    "claude_not_running": "Claude is not running in the session",
-    "claude_not_at_prompt": "Claude is showing a dialog (e.g. login) instead of its prompt",
-    "screen_unrecognized": "aidc does not recognize Claude's screen",
-    "paste_failing": "pasting into the session is failing and being retried",
-    "queued_behind": "an earlier prompt is still waiting",
-    "agent_list_selected": "someone in the session has the keyboard in Claude's background-"
-                           "agent list, where typed keys are commands",
-    "session_tainted": "the session is tainted, so nothing more is pasted into it; the person "
-                       "has to kill and recreate it",
-    # Only ever a join_declined: the prompt itself then waits as claude_busy.
-    "interrupt_not_reported_yet": "the agent was just interrupted, and that has not been "
-                                  "reported to its conversation yet",
-}
+    """Re-open the persisted webhooks (delivery.resume_watches) and, when any opened,
+    refresh the tool descriptions that list them."""
+    await dlv.resume_watches(lambda: _refresh_session_tool_descriptions(app))
 
 
 # ---- transcript-sourced delivery (design-09, MCP-15..19) --------------------
@@ -1178,829 +328,6 @@ _WAITING_EXPLAINED = {
 # them exactly-once with a durable high-water mark and bounded retry. Added
 # alongside the tmux watcher (above); cutover happens once `aidc create`
 # surfaces transcripts into _TRANSCRIPTS_BASE (design-09 rollout).
-
-
-async def _baseline_watermark(session: str, conversation_id: str, *,
-                              transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                              state_dir: Path = ss.WATCHER_STATE_DIR) -> None:
-    """Forward-only anchor on EVERY watcher (re)start (MCP-17, forward-only-on-connect).
-
-    Re-anchor ``last_delivered_uuid`` to the current LAST completed turn of the
-    active transcript, so a (re)connecting orchestrator conversation is NEVER caught up with
-    a backlog — only turns that complete AFTER the (re)connect are delivered.
-
-    Previously this no-op'd when a mark already existed ("resume"), which meant a
-    reconnect / MCP-restart / a mark left stale from a prior life replayed the whole
-    gap from the old position to now — the connect-catch-up runaway (prod
-    2026-07-09, conv 019f4220).
-
-    Runs at watcher (RE)START, not on every send: ``session_send`` calls
-    ``_start_watcher`` only when no live watcher is registered (a first send after
-    an MCP restart, where the in-memory registry is empty), and ``session_watch``
-    calls it explicitly. A send with a watcher already live does NOT re-register, so
-    it does not re-anchor. On a (re)start the anchor is set BEFORE the prompt is
-    injected, so the response — a strictly-later turn — is still delivered; only
-    pre-existing history is skipped. Forward-only.
-
-    The loop-guard runs (``consecutive_deliveries``, ``deliveries_since_idle``,
-    ``last_delivery_at``) are PRESERVED across the re-anchor (loaded from the
-    existing mark), so the ongoing-runaway backstop keeps accumulating: a re-anchor
-    never resets it.
-
-    Called synchronously at watch registration so the anchor is set before any
-    prompt is injected; _drain_transcript_once also self-baselines defensively."""
-    # Preserve the durable loop-guard run across the re-anchor — load the existing
-    # mark rather than minting a fresh (zeroed) one.
-    mark = (
-        ts.load_watermark(state_dir, session, conversation_id)
-        if ts.watermark_exists(state_dir, session, conversation_id)
-        else ts.Watermark(session=session, conversation_id=conversation_id)
-    )
-    mark.baselined_at = ts.now_iso()
-    # Resolve the active transcript PREFERRING the pinned session_id (as the drain
-    # does) — on reconnect a frozen sibling transcript can carry a NEWER mtime (the
-    # copy-forward mirror re-touches it), and a prefer-less resolve would mis-pin to
-    # it and anchor past the real session's response. Genuine rotation-while-down is
-    # still handled by the drain's stale-pin recovery.
-    active = ts.resolve_active_transcript(
-        Path(transcripts_base) / session,
-        prefer_session_id=mark.session_id or None,
-    )
-    if active is not None:
-        try:
-            data = active.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            data = ""
-        objs = ts.parse_jsonl(data)
-        same_file = mark.session_id == active.stem
-        if same_file and mark.last_delivered_uuid:
-            # Re-anchoring the SAME pinned file (the common reconnect case) must
-            # never move last_delivered_uuid BACKWARD. The copy-forward mirror
-            # rewrites whole files non-atomically, so a reconnect read can land
-            # mid-rewrite and see a torn/partial copy — one that is missing the
-            # tail this watcher already delivered past. Blindly taking that read's
-            # last turn as the new anchor rewound it to an earlier line, and the
-            # next drain replayed everything after it, INCLUDING turns already
-            # confirmed delivered (prod 2026-07-18, conv 019f6cf5: a reconnect
-            # baseline landed on a torn read and re-delivered 3 already-delivered
-            # turns to the orchestrator in one burst). Reuse the same anchor
-            # lookup the resume path uses: if the existing anchor doesn't resolve
-            # in this read, treat it as torn and leave the mark untouched — a
-            # later, complete read will re-anchor correctly.
-            if ts.objs_after_uuid(objs, mark.last_delivered_uuid) is None:
-                log_event("transcript_baseline_torn_read_skipped", session=session,
-                          conversation_id=conversation_id, session_id=active.stem,
-                          last_delivered_uuid=mark.last_delivered_uuid)
-                ts.save_watermark(state_dir, mark)
-                return
-        turns = ts.extract_completed_turns(objs)
-        mark.session_id = active.stem
-        mark.byte_offset = len(data.encode("utf-8"))
-        mark.last_delivered_uuid = turns[-1].terminal_uuid if turns else ""
-    ts.save_watermark(state_dir, mark)
-    log_event("transcript_baseline", session=session, conversation_id=conversation_id,
-              session_id=mark.session_id, last_delivered_uuid=mark.last_delivered_uuid,
-              consecutive_deliveries=mark.consecutive_deliveries)
-
-
-# Loop guard for the delivery watcher. When the orchestrator's session_send drives
-# every turn, a runaway where the orchestrator and this session answer each other
-# forever (prod incident
-# 2026-07-03, orchestrator conv 019f1fde) has no natural terminator. TIMING is NOT the
-# signal: the earlier rate-based guard reset its run on any >45 s gap, but the
-# runaway's turns grew slow as context ballooned (observed gaps up to ~250 s), so
-# it never tripped while it flooded the orchestrator. The signal is an unbroken RUN
-# of deliveries. Count consecutive deliveries and trip past
-# _LOOP_GUARD_MAX_CONSECUTIVE. A slow turn never resets the run; a genuinely IDLE gap
-# does — the orchestrator stopped driving, far longer than any single turn
-# (_LOOP_GUARD_IDLE_RESET_S) — so a session that goes quiet and later resumes is not
-# latched, while a slow runaway cannot use its slow turns to dodge. The run + last-delivery time are
-# persisted in the durable watermark, so an MCP restart cannot silently resume the
-# loop. This is the coarse backstop; the orchestrator's own guard (which resets on
-# a human turn) is the precise layer, so this cap sits ABOVE it. On trip a turn is
-# DROPPED (dead-lettered + watermark advanced, no POST) so the orchestrator stops
-# receiving callbacks and the session idles out — self-healing once a long idle
-# resets the run.
-#
-# The run counts only replies to the orchestrator's prompts: a prompt typed at the
-# terminal, or sent for a person, puts a human in the loop, which a runaway never has,
-# and ends it. A turn no one prompted carries the origin of the prompt before it
-# (_carry_prompt_origin) and counts with that. Origin rests on matching each prompt to
-# the MCP's send record, and that match can fail (a record write that failed, an
-# expired entry, Claude Code writing a paste differently), which would make a runaway's
-# prompts read as typed and never trip the cap. _LOOP_GUARD_BACKSTOP is the cap for
-# that case: an unbroken run of deliveries of any origin, set far above what a person
-# working at the terminal reaches without a long pause.
-_LOOP_GUARD_MAX_CONSECUTIVE = 20
-_LOOP_GUARD_BACKSTOP = 100
-_LOOP_GUARD_IDLE_RESET_S = 900.0
-
-# Consecutive torn-read polls before the watcher concludes the pinned session is
-# dead (not a transient partial read) and rotates onto the newest transcript. At
-# the 2 s poll interval this is ~30 s — far beyond any transient torn read, but
-# bounded so a wedged watcher self-heals instead of stalling forever (prod
-# 019f1fde: the faidh watcher was stuck for 40+ min).
-_TORN_READ_RECOVER_POLLS = 15
-
-# Consecutive "pinned session fully consumed AND a strictly-newer session exists"
-# polls before the watcher concludes the session genuinely rotated (Claude never
-# deletes the old transcript, so the pin never releases on its own) and follows
-# forward onto the new session. Content-timestamp based (flap-proof), so short.
-_STALE_PIN_RECOVER_POLLS = 5
-
-
-def _resume_fields(mark: ts.Watermark, seen: float | None) -> dict[str, Any]:
-    """Where delivery resumed on a new transcript, and from what, for the log: the
-    anchor line, the moment it resumed after (None when nothing was known, and it then
-    anchored at the file's end), so a lost or replayed reply after Claude restarts
-    can be traced."""
-    return {"anchor_uuid": mark.last_delivered_uuid,
-            "seen_until": (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seen))
-                           if seen is not None else None),
-            "anchored_at_end": seen is None}
-
-
-def _newest_of_siblings(d: Path, sid: str) -> list[tuple[Path, str]]:
-    """Each transcript in `d` other than `sid`, with its newest message timestamp.
-    Blocking (it may read every earlier transcript): run it in a worker thread."""
-    found = []
-    for p in ts.conversation_files(d):
-        if p.stem == sid:
-            continue
-        # Every sibling, every poll: read once per version of the file, never again
-        # while it is unchanged (ts.newest_message_ts_of). Parsing them all each time
-        # was nearly all of the server's CPU while a large session was watched.
-        try:
-            found.append((p, ts.newest_message_ts_of(p)))
-        except OSError:
-            continue
-    return found
-
-
-async def _rotate_if_stale_pin(session: str, conversation_id: str,
-                               key: tuple[str, str], sid: str, pinned_objs: list,
-                               transcripts_base: Path, state_dir: Path) -> bool:
-    """Follow a session rotation the pin can't see on its own.
-
-    The session pin selects the pinned transcript as long as it EXISTS, and
-    Claude never deletes a rotated-away transcript — so once the user's Claude
-    starts a new session (a new sessionId file), the watcher stays welded to the
-    old, fully-consumed file and delivers nothing forever (prod 019f1fde: pinned
-    to 1b968f61 while faidh moved on). This runs only when the pinned session is
-    fully consumed (no undelivered turns). It picks the transcript with the
-    globally-newest message CONTENT timestamp; if that is a different, strictly
-    newer session, it forward-baselines onto it (anchor at its end — never
-    replays history). Content timestamps (not mtime) make this immune to the
-    copy-forward mirror's mtime churn: a frozen sibling can never out-timestamp
-    the session active after it. Gated by a sustained poll count so a transient
-    partial read that momentarily makes a sibling look newer cannot trip it.
-
-    :returns: True when it rotated the watermark forward; False otherwise.
-    """
-    d = Path(transcripts_base) / session
-    best, best_ts = None, ts.newest_message_ts(pinned_objs)
-    # Off the event loop: the first scan after a restart reads every earlier
-    # transcript, seconds of work for a long-lived session, and every tool call and
-    # watcher would wait behind it.
-    for p, cand_ts in await asyncio.to_thread(_newest_of_siblings, d, sid):
-        if cand_ts and cand_ts > best_ts:
-            best, best_ts = p, cand_ts
-
-    if best is None:
-        ss.consumed_idle_counts.pop(key, None)   # no newer session — keep waiting
-        return False
-
-    n = ss.consumed_idle_counts.get(key, 0) + 1
-    ss.consumed_idle_counts[key] = n
-    if n < _STALE_PIN_RECOVER_POLLS:
-        return False
-
-    try:
-        best_data = best.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    best_stem = best.stem
-    mark = ts.load_watermark(state_dir, session, conversation_id)
-    seen = ts.seen_until(pinned_objs, mark)
-    mark.session_id = best_stem
-    mark.byte_offset = len(best_data.encode("utf-8"))
-    mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-        ts.parse_jsonl(best_data), seen)
-    # The loop-guard run is NOT reset here. Watermark documents it as reset only by a
-    # genuinely idle gap, and a runaway that restarts Claude (or rotates its transcript)
-    # would otherwise clear its own backstop.
-    ts.save_watermark(state_dir, mark)
-    ss.settle_state.pop(key, None)
-    ss.consumed_idle_counts.pop(key, None)
-    log_event("transcript_stale_pin_recovered", session=session,
-              conversation_id=conversation_id, dead_session_id=sid,
-              new_session_id=best_stem, reason="fully_consumed_idle",
-              **_resume_fields(mark, seen))
-    return True
-
-
-async def _interrupted_before_output(session: str, conversation_id: str, suffix: list[dict],
-                                     active: Path, screen_fn, wall_now: float) -> ts.Turn | None:
-    """The prompt at the transcript's tail, as an interrupted turn, when Claude was
-    stopped before writing anything; otherwise None.
-
-    Claude Code writes no marker for an Esc pressed that early, so the transcript alone
-    shows only a prompt with no reply. It is reported when the shared turn rule
-    (_turn_verdict) says Claude is not working on two consecutive polls, with Claude
-    running at its input box. `screen_fn(session)` returns the session's ScreenState,
-    or None when Claude is not running.
-    """
-    key = (session, conversation_id)
-    turn = ts.unanswered_prompt_turn(suffix)
-    if turn is None:
-        ss.unanswered_polls.pop(key, None)
-        return None
-    try:
-        quiet = wall_now - active.stat().st_mtime
-    except OSError:
-        return None
-    if quiet < tn.LOG_QUIET_S:
-        ss.unanswered_polls.pop(key, None)
-        return None
-    state = await screen_fn(session)
-    if state is None or state.input_box not in (scr.EMPTY, scr.HAS_TEXT):
-        ss.unanswered_polls.pop(key, None)
-        return None
-    verdict, why = tn.turn_verdict(session, suffix, quiet, state)
-    if verdict != tn.TURN_IDLE or why not in tn.STOPPED_BY_SCREEN:
-        if why != "status_row_unproven":
-            ss.unanswered_polls.pop(key, None)
-        return None
-    polls = ss.unanswered_polls.get(key, 0) + 1
-    if polls < 2:
-        ss.unanswered_polls[key] = polls
-        return None
-    ss.unanswered_polls.pop(key, None)
-    tn.record_reported_interrupt(session, turn.terminal_uuid)
-    log_event("transcript_interrupted_before_output", session=session,
-              conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-              quiet_s=round(quiet, 1), why=why)
-    return turn
-
-
-async def _screen_for_watcher(session: str) -> scr.ScreenState | None:
-    container = backend.target(session)
-    if not await tmx.is_claude_running(container):
-        return None
-    return await tn.read_screen(container, session)
-
-
-async def _drain_transcript_once(session: str, conversation_id: str, callback_base: str, *,
-                                 transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                                 state_dir: Path = ss.WATCHER_STATE_DIR,
-                                 post_fn=None, sleep_fn=asyncio.sleep,
-                                 settle_seconds: float = 0.0,
-                                 now_fn=time.monotonic,
-                                 wall_now_fn=time.time,
-                                 screen_fn=None) -> None:
-    """One delivery pass, serialized per (session, conversation).
-
-    The exactly-once guarantee lives in the durable watermark, but advancing it
-    is a read-modify-write that straddles the await-heavy POST. Two overlapping
-    passes for the same key would both load the pre-delivery mark and POST the
-    same turn (delivering every turn twice), so the whole load->deliver->advance
-    body runs under a per-key mutex — the second pass then sees the advanced mark
-    and dedups. See _drain_locks."""
-    async with ss.drain_lock((session, conversation_id)):
-        await _drain_once_body(
-            session, conversation_id, callback_base,
-            transcripts_base=transcripts_base, state_dir=state_dir,
-            post_fn=post_fn, sleep_fn=sleep_fn, settle_seconds=settle_seconds,
-            now_fn=now_fn, wall_now_fn=wall_now_fn, screen_fn=screen_fn,
-        )
-
-
-async def _drain_once_body(session: str, conversation_id: str, callback_base: str, *,
-                           transcripts_base: Path = ss.TRANSCRIPTS_BASE,
-                           state_dir: Path = ss.WATCHER_STATE_DIR,
-                           post_fn=None, sleep_fn=asyncio.sleep,
-                           settle_seconds: float = 0.0,
-                           now_fn=time.monotonic,
-                           wall_now_fn=time.time,
-                           screen_fn=None) -> None:
-    """The delivery-pass body (run under the per-key lock by _drain_transcript_once):
-    resolve active transcript, extract new completed turns, deliver each
-    exactly-once with retry, advance the durable high-water mark.
-
-    Forward-only: if no mark exists yet (first encounter), baseline to the
-    current end and deliver nothing — never replay pre-existing history. The
-    mark advances past a turn only after it is confirmed delivered, empty, or
-    dead-lettered — never while a delivery is still being retried (MCP-17/18)."""
-    if not ts.watermark_exists(state_dir, session, conversation_id):
-        await _baseline_watermark(session, conversation_id,
-                                  transcripts_base=transcripts_base, state_dir=state_dir)
-        return
-    mark = ts.load_watermark(state_dir, session, conversation_id)
-    # Pin to the session we're already tracking. The copy-forward mirror rewrites
-    # whole files and bumps their mtimes, so a plain newest-mtime resolution flaps
-    # between transcript files — and each flap looked like a rotation that reset the
-    # watermark and replayed the whole file (the incident that hammered the webhook).
-    active = ts.resolve_active_transcript(Path(transcripts_base) / session,
-                                          prefer_session_id=mark.session_id or None)
-    if active is None:
-        return
-    sid = active.stem
-    try:
-        objs, end_offset = ts.read_transcript(active)
-    except OSError:
-        return
-    key = (session, conversation_id)
-
-    if mark.session_id != sid and mark.session_id:
-        # GENUINE rotation: the file we were pinned to is gone, so resolution fell
-        # back to a different active file. Resume on it from when the watcher last
-        # saw activity (its last watermark save): what came after is delivered, its
-        # older history is not — never reset last_delivered_uuid to "" and replay
-        # the whole file, which was the replay bug.
-        seen = ts.seen_until([], mark)
-        mark.session_id = sid
-        mark.byte_offset = end_offset
-        mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(objs, seen)
-        ts.save_watermark(state_dir, mark)
-        ss.settle_state.pop(key, None)
-        log_event("transcript_rotated", session=session, conversation_id=conversation_id,
-                  session_id=sid, **_resume_fields(mark, seen))
-        return
-
-    if not mark.session_id:
-        # FIRST transcript for a session that baselined before ANY file existed —
-        # a fresh aidc session: session_send starts the watcher and anchors BEFORE
-        # the prompt is injected, so the transcript dir is empty at baseline time
-        # (session_id left ""). This is NOT a rotation, and there is NO pre-existing
-        # history to skip — everything in this first file happened AFTER we
-        # connected. Pin to it and fall through to the normal resume/deliver path so
-        # its turns are delivered. Forward-baselining here (the old bug) swallowed
-        # the session's very first reply — the "reply never comes back" symptom.
-        # An empty session_id is set ONLY by the fresh-baseline no-file case; any
-        # later pin (baseline-with-history, rotation, stale-pin recovery) writes a
-        # real stem — so this can never fire on a session that actually had history.
-        mark.session_id = sid
-        ts.save_watermark(state_dir, mark)
-        log_event("transcript_first_pin", session=session, conversation_id=conversation_id,
-                  session_id=sid)
-
-    # Resume anchored on the last-delivered LINE (stable under coalescing).
-    suffix = ts.objs_after_uuid(objs, mark.last_delivered_uuid or None)
-    if suffix is None:
-        # The resume anchor is absent from the pinned transcript. A transient
-        # torn/partial copy-forward read drops it for a poll or two, then recovers
-        # — so we must NOT act on a single miss (that would re-introduce the
-        # mtime-flap replay bug: a sibling file re-touched newer, read while the
-        # active file is momentarily partial). Only a SUSTAINED absence means the
-        # pinned session is DEAD: its transcript lingers on disk (so the session
-        # pin keeps selecting it) but the anchor is gone for good — a torn final
-        # line from a session killed mid-write, or a compaction. After
-        # _TORN_READ_RECOVER_POLLS consecutive misses, if a strictly-newer
-        # transcript exists for this session, the pin is stale — rotate onto the
-        # newest (forward-baseline), exactly like a genuine rotation, instead of
-        # wedging forever (prod 019f1fde: the faidh watcher stuck in
-        # torn_read_skip for 40+ min after the runaway session was killed
-        # mid-write and the container was rebuilt onto a fresh session).
-        torn = ss.torn_read_counts.get(key, 0) + 1
-        ss.torn_read_counts[key] = torn
-        if torn >= _TORN_READ_RECOVER_POLLS:
-            # The pinned file has lost the line this conversation resumes from, for
-            # good: a torn final line from a session killed mid-write, or a compaction.
-            # Look for replies in it that were never delivered: anchored at the point
-            # this conversation last connected or last delivered, and checked against
-            # the ledger, so neither history from before the connect nor anything
-            # already delivered counts. If any are left, re-anchor INSIDE this file and
-            # let the ordinary pass deliver them. This runs whether or not another
-            # transcript exists: a compaction can lose the anchor with no new session at
-            # all, and gating it on a newer file (as first built) wedged the watcher
-            # silently in exactly that case, replies sitting on disk undelivered.
-            seen = ts.seen_until([], mark)
-            anchor = ts.resume_anchor_on_new_transcript(objs, seen)
-            left = ts.objs_after_uuid(objs, anchor or None) or []
-            delivered_before = ts.load_delivered(state_dir, session, conversation_id)
-            undelivered = [t for t in ts.extract_completed_turns(left)
-                           if (t.interrupted or not t.is_empty)
-                           and ts.delivery_fingerprint(t) not in delivered_before]
-            newest = ts.resolve_active_transcript(Path(transcripts_base) / session)
-            if undelivered:
-                mark.last_delivered_uuid = anchor
-                ts.save_watermark(state_dir, mark)
-                ss.settle_state.pop(key, None)
-                ss.torn_read_counts.pop(key, None)
-                log_event("transcript_torn_read_reanchored", session=session,
-                          conversation_id=conversation_id, session_id=sid,
-                          newer_session_id=newest.stem if newest is not None else "",
-                          torn_read_polls=torn, undelivered_turns=len(undelivered),
-                          **_resume_fields(mark, seen))
-                return
-            if newest is not None and newest.stem != sid:
-                try:
-                    newest_data = newest.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    return
-                mark.session_id = newest.stem
-                mark.byte_offset = len(newest_data.encode("utf-8"))
-                mark.last_delivered_uuid = ts.resume_anchor_on_new_transcript(
-                    ts.parse_jsonl(newest_data), ts.seen_until(objs, mark))
-                ts.save_watermark(state_dir, mark)   # loop-guard run kept, as above
-                ss.settle_state.pop(key, None)
-                ss.torn_read_counts.pop(key, None)
-                log_event("transcript_stale_pin_recovered", session=session,
-                          conversation_id=conversation_id, dead_session_id=sid,
-                          new_session_id=newest.stem, torn_read_polls=torn,
-                          **_resume_fields(mark, ts.seen_until(objs, mark)))
-                return
-        log_event("transcript_torn_read_skip", session=session,
-                  conversation_id=conversation_id,
-                  last_delivered_uuid=mark.last_delivered_uuid, torn_read_count=torn)
-        return
-    ss.torn_read_counts.pop(key, None)  # anchor resolved — reset the torn-read run
-
-    # Settle gate: only deliver once the transcript has held steady for
-    # settle_seconds. Claude can emit an empty end_turn and then continue with the
-    # real answer; waiting for quiet lets extract_completed_turns coalesce that
-    # burst into one delivery instead of signalling "ready" mid-stream. If the wait
-    # fires early anyway, the line-anchored resume still recovers: the continuation
-    # is delivered as a follow-up turn rather than wedging or replaying.
-    # Claude Code's end-of-turn record says the same thing directly (every Stop hook
-    # allowed the stop), so when the transcript ends on it there is nothing to wait
-    # for. Its absence falls back to the window: the record is not guaranteed.
-    # A reply whose Stop hooks have not reported yet waits longer (see
-    # _STOP_HOOK_WAIT_S): a slow blocking hook would otherwise reopen a turn that
-    # was already delivered as finished.
-    if settle_seconds > 0 and ts.ends_on_turn_end(suffix):
-        ss.settle_state.pop(key, None)
-    elif settle_seconds > 0:
-        quiet_needed = (max(settle_seconds, tn.STOP_HOOK_WAIT_S)
-                        if ts.awaiting_stop_hooks(suffix, objs) else settle_seconds)
-        now = now_fn()
-        last = ss.settle_state.get(key)
-        if last is None or last[0] != end_offset:
-            ss.settle_state[key] = (end_offset, now)
-            return  # grew (or first observation this cycle) — wait for quiet
-        if now - last[1] < quiet_needed:
-            return  # not quiet long enough yet
-
-    dropped: list[str] = []
-    new = ts.extract_completed_turns(suffix, dropped)
-    if screen_fn is not None:
-        if not tn.working_indicator_known(session) and ts.log_shows_turn_in_progress(suffix):
-            # Learn this session's working text while a turn is running, so an Esc
-            # before Claude writes anything can be recognized without waiting out
-            # _LOG_STALL_S. Stops once seen; a person-only session never touches
-            # the send path's own screen reads.
-            await screen_fn(session)
-        cut_off = await _interrupted_before_output(session, conversation_id, suffix, active,
-                                                   screen_fn, wall_now_fn())
-        if cut_off is not None:
-            new = [*new, cut_off]
-    for uid in dropped:
-        # A Stop hook pushed Claude back and Claude never produced another reply
-        # before the next prompt: nothing is left to deliver for that request.
-        drop_key = (session, conversation_id, uid)
-        if drop_key not in ss.logged_withdrawn_drops:
-            ss.logged_withdrawn_drops.add(drop_key)
-            log_event("transcript_withdrawn_reply_dropped", session=session,
-                      conversation_id=conversation_id, turn_uuid=uid)
-    if not new:
-        # No deliverable turns remain in the pinned session (its tail may hold
-        # trailing non-turn objects — a bare user/system line that never became a
-        # turn — so `suffix` can be non-empty while `new` is empty). The user's
-        # Claude may have rotated to a new session whose old transcript still
-        # lingers on disk, which the pin can't see on its own. Follow the rotation
-        # forward. Content-timestamp gated, so an active pinned session that is
-        # merely mid-turn is never abandoned — no sibling can out-timestamp it.
-        await _rotate_if_stale_pin(session, conversation_id, key, sid, objs,
-                                   transcripts_base, state_dir)
-        return
-    ss.consumed_idle_counts.pop(key, None)   # delivering — not a stale pin
-    if post_fn is None:
-        async def post_fn(turn, attempt):  # noqa: E306
-            return await cbk.post_turn(callback_base, conversation_id, turn,
-                                       attempt=attempt, session=session)
-    # The durable delivery ledger is the STRUCTURAL exactly-once guarantee: a
-    # content fingerprint in it was already confirmed delivered to this
-    # conversation, so it must never be POSTed again — no matter how it re-surfaced
-    # (a watermark rewind, a torn-read replay, a rotation flap, a reconnect
-    # catch-up). It is independent of the watermark on purpose: the watermark is a
-    # best-effort resume hint and has many ways to be wrong; the ledger is the
-    # backstop that turns every such bug into a wasted disk read instead of a
-    # duplicate that poisons the orchestrated agent's context. Loaded once per
-    # pass (under the per-key drain lock) and updated in place so multiple new
-    # turns in the same pass also dedup against each other.
-    delivered_fps = ts.load_delivered(state_dir, session, conversation_id)
-    for turn in new:
-        # Whose prompt does this turn answer? A person at the session's tmux pane
-        # can type straight into Claude, and that reply comes over this same
-        # webhook — but the orchestrator never saw the prompt, so it read the
-        # reply as an answer to whatever IT last sent. Prompts that match the
-        # MCP's own send record are the orchestrator's; the rest were typed at the
-        # terminal and are prepended to the delivered content so the reply reads
-        # in context. Resolved for EVERY turn (empty ones too) so each injected
-        # prompt consumes its record entry exactly once. The ledger fingerprint
-        # stays on the bare reply (turn.text): a re-surfaced turn must dedup even
-        # though its record entry is gone by then and its framing would differ —
-        # and a re-surfaced turn is NOT attributed at all, or its (already consumed)
-        # prompt would eat a fresh record entry meant for the next identical send.
-        # An interrupt is delivered even with no text: the orchestrator must hear
-        # that its task was cut off.
-        deliverable = turn.interrupted or not turn.is_empty
-        fingerprint = ts.delivery_fingerprint(turn) if deliverable else ""
-        already_delivered = bool(fingerprint) and fingerprint in delivered_fps
-        terminal_prompts, sent_by, batch = (
-            ([], "", None) if already_delivered
-            else _terminal_prompts(session, turn.prompts, state_dir)
-        )
-        # A prompt typed at the terminal outranks one sent for a person: the content
-        # then quotes it, and only one origin goes with the reply.
-        origin = ("terminal" if terminal_prompts else "person" if sent_by
-                  else "orchestrator" if turn.prompts else "")
-        sent_by = sent_by if origin == "person" else ""
-        if not already_delivered:
-            origin, sent_by, batch = _carry_prompt_origin(session, turn, origin, sent_by,
-                                                          batch, state_dir)
-            if deliverable:
-                batch = _with_joined(session, batch, state_dir)
-        outgoing = dataclasses.replace(
-            turn,
-            text=ts.render_delivery(turn.text, terminal_prompts, interrupted=turn.interrupted),
-            prompt_origin=origin,
-            sent_by=sent_by,
-            pasted_at=batch["pasted_at"] if batch else "",
-            batch=tuple(batch["prompts"]) if batch else (),
-            speaker=("human" if turn.prompts and len(terminal_prompts) == len(turn.prompts)
-                     else "agent"),
-        )
-        if terminal_prompts:
-            # record_remaining is the health signal: entries that keep piling up
-            # while replies arrive mean matching has drifted (every reply would then
-            # carry the note), which a real typed prompt never causes.
-            log_event("transcript_terminal_prompt", session=session,
-                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-                      prompts=len(terminal_prompts),
-                      prompt_len=sum(len(p) for p in terminal_prompts),
-                      record_remaining=ts.sent_prompts_remaining(state_dir, session))
-        if turn.superseded and not already_delivered:
-            # A reply followed by more assistant work with no Stop-hook pushback or
-            # prompt between them. A block that leaves no trace looks like this,
-            # and its first half may have been delivered as the finished reply.
-            log_event("transcript_terminal_superseded", session=session,
-                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-                      superseded=turn.superseded)
-        if turn.late_pushback and not already_delivered:
-            # The reply before this pushback already went out as finished: its Stop
-            # hook ran longer than the watcher held it. This delivery is the rest.
-            log_event("transcript_late_pushback", session=session,
-                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
-        if not deliverable:
-            log_event("transcript_empty_turn", session=session,
-                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
-        else:
-            if already_delivered:
-                # Already delivered this exact content to this conversation. A
-                # watermark bug re-surfaced it; drop it at the door. This is NOT a
-                # loop-guard event (it is a re-read, not a fresh echo) and is never
-                # re-POSTed — only the watermark advances past it below.
-                log_event("transcript_delivery_deduped", session=session,
-                          conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-                          fingerprint=fingerprint)
-            else:
-                # Loop guard: cap the run of CONSECUTIVE deliveries, or an
-                # orchestrator<->session runaway would deliver forever. Timing is not the
-                # signal — the runaway can be slow (context-bloated turns), which is
-                # what defeated the old rate-based reset. A genuinely IDLE gap
-                # (_LOOP_GUARD_IDLE_RESET_S — far longer than any single turn) resets
-                # the run, and a slow turn does not, so a session that truly goes quiet
-                # is not latched while a slow runaway still trips. State is durable so an
-                # MCP restart stays latched. On trip: DROP (dead-letter + advance, no POST) so the
-                # orchestrator stops receiving and the session idles out.
-                # Only replies to the orchestrator's prompts count toward the cap;
-                # every delivery counts toward the backstop (see the constants).
-                wall_now = wall_now_fn()
-                human = origin in ("terminal", "person")
-                if wall_now - mark.last_delivery_at > _LOOP_GUARD_IDLE_RESET_S:
-                    mark.consecutive_deliveries = 0
-                    mark.deliveries_since_idle = 0
-                if human:
-                    mark.consecutive_deliveries = 0
-                else:
-                    mark.consecutive_deliveries += 1
-                mark.deliveries_since_idle += 1
-                mark.last_delivery_at = wall_now
-                if (mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
-                        or mark.deliveries_since_idle > _LOOP_GUARD_BACKSTOP):
-                    cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
-                    log_event("transcript_delivery_loop_guard_tripped", session=session,
-                              conversation_id=conversation_id, turn_uuid=turn.terminal_uuid,
-                              consecutive_deliveries=mark.consecutive_deliveries,
-                              deliveries_since_idle=mark.deliveries_since_idle,
-                              cap=(_LOOP_GUARD_MAX_CONSECUTIVE
-                                   if mark.consecutive_deliveries > _LOOP_GUARD_MAX_CONSECUTIVE
-                                   else _LOOP_GUARD_BACKSTOP))
-                elif await cbk.deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn):
-                    # Record ONLY a confirmed delivery, so a dead-lettered or
-                    # dropped turn stays eligible for a later resend.
-                    delivered_fps.add(fingerprint)
-                    ts.record_delivered(state_dir, session, conversation_id, fingerprint)
-                else:
-                    cbk.write_dead_letter(state_dir, session, conversation_id, outgoing)
-                    log_event("transcript_delivery_abandoned", session=session,
-                              conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
-        mark.last_delivered_uuid = turn.terminal_uuid
-        mark.byte_offset = end_offset
-        ts.save_watermark(state_dir, mark)
-
-
-async def _resend_reply(session: str, conversation_id: str, callback_base: str, *,
-                        turn_uuid: str | None = None,
-                        force: bool = False,
-                        transcripts_base: Path | None = None,
-                        state_dir: Path | None = None,
-                        post_fn=None,
-                        sleep_fn=asyncio.sleep) -> tuple[str, ts.Turn | None]:
-    """Re-deliver ONE already-produced reply to the orchestrator, out-of-band.
-
-    Recovers a reply that was lost or never arrived (a dropped callback, a watcher
-    gap, an MCP restart at the wrong moment) WITHOUT replaying the backlog: it
-    posts exactly one completed turn and DELIBERATELY does not touch the delivery
-    watermark. The forward-only watcher keeps its own anchor, so a resend can never
-    cause the connect-catch-up flood — that separation is the whole point.
-
-    NEVER re-POSTs a turn the delivery ledger already holds, unless ``force``.
-    The ledger records only fingerprints CONFIRMED delivered (a 2xx ack), so
-    "in the ledger" means the orchestrator demonstrably received this exact content — and
-    POSTing it again injects a verbatim duplicate into the conversation, which is
-    strictly harmful: it re-answers a question that was already answered and
-    corrupts the history the next turn reads. Returning the content to the CALLER
-    instead gives the model everything it needs with none of that damage.
-
-    This distinction is why the gate is the ledger and not the watermark. The
-    watermark advances past a turn even when delivery was abandoned to the
-    dead-letter dir, so a genuinely-lost reply is absent from the ledger and stays
-    resendable — exactly the case this tool exists for (prod 2026-08-22 conv
-    01a01cf6: a no-uuid resend of an already-acked turn put a verbatim 4851-char
-    duplicate of the previous answer into the conversation).
-
-    Picks the turn matching ``turn_uuid``; when unset, the LAST completed
-    (non-empty) turn — the session's most recent reply, the usual "it never came
-    back, send it again" case. Resolves the transcript preferring the watermark's
-    pinned session_id so it targets the same file the watcher tracks.
-
-    Returns ``(status, turn)`` where status is one of:
-      - ``"resent"``            — POSTed and acked;
-      - ``"already_delivered"`` — in the ledger, NOT posted (pass force to override);
-      - ``"no_reply"``          — nothing resendable (``turn`` is None);
-      - ``"failed"``            — POSTed but never acked.
-
-    The base dirs resolve at CALL time (not as def-time defaults) so patching the
-    module globals redirects this path too — the session_resend tool passes neither.
-    """
-    transcripts_base = ss.TRANSCRIPTS_BASE if transcripts_base is None else transcripts_base
-    state_dir = ss.WATCHER_STATE_DIR if state_dir is None else state_dir
-    mark = (
-        ts.load_watermark(state_dir, session, conversation_id)
-        if ts.watermark_exists(state_dir, session, conversation_id)
-        else None
-    )
-    prefer = mark.session_id if (mark and mark.session_id) else None
-    # The file the watcher tracks first, then the session's earlier files (newest
-    # first): Claude starts a new transcript on every restart, and the reply this tool
-    # is being asked for may be in the one before — which is exactly the case where a
-    # reply went missing (joint test scenario 10, 2026-09-17).
-    target = None
-    source = ""
-    for path in ts.session_transcripts(Path(transcripts_base) / session,
-                                       prefer_session_id=prefer):
-        try:
-            data = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            log_event("transcript_resend_unreadable", session=session,
-                      conversation_id=conversation_id, session_id=path.stem,
-                      error_type=type(exc).__name__)
-            continue
-        # Only non-empty (deliverable) turns can be resent — an empty tool-only turn
-        # was never a reply to the orchestrator in the first place.
-        deliverable = [t for t in ts.extract_completed_turns(ts.parse_jsonl(data))
-                       if t.interrupted or not t.is_empty]
-        if not deliverable:
-            continue
-        if turn_uuid:
-            target = next((t for t in deliverable if t.terminal_uuid == turn_uuid), None)
-        else:
-            target = deliverable[-1]
-        if target is not None:
-            source = path.stem
-            break
-    if target is None:
-        return ("no_reply", None)
-
-    # The ledger holds fingerprints CONFIRMED delivered (2xx). A hit means the orchestrator
-    # already has this exact content, so re-POSTing can only duplicate it. Refuse
-    # by default and let the caller read the content from the tool result instead.
-    fingerprint = ts.delivery_fingerprint(target)
-    if not force and fingerprint in ts.load_delivered(state_dir, session, conversation_id):
-        log_event("transcript_resend_suppressed", session=session,
-                  conversation_id=conversation_id, turn_uuid=target.terminal_uuid,
-                  content_len=len(target.text), fingerprint=fingerprint)
-        return ("already_delivered", target)
-
-    if post_fn is None:
-        async def post_fn(turn, attempt):  # noqa: E306
-            return await cbk.post_turn(callback_base, conversation_id, turn,
-                                       attempt=attempt, session=session)
-    # The bare reply, as the resend contract says -- except that an interrupt keeps
-    # its note: without it an interrupt with nothing written would post as empty.
-    outgoing = dataclasses.replace(
-        target, text=ts.render_delivery(target.text, [], interrupted=target.interrupted))
-    ok = await cbk.deliver_with_retry(outgoing, post_fn=post_fn, sleep_fn=sleep_fn)
-    if ok:
-        # Record the resent turn in the delivery ledger so the watcher never ALSO
-        # delivers it (a double-send). Once it lands, the exactly-once invariant
-        # must hold for every other delivery path too.
-        ts.record_delivered(state_dir, session, conversation_id, fingerprint)
-    log_event("transcript_resend", session=session, conversation_id=conversation_id,
-              turn_uuid=target.terminal_uuid, content_len=len(target.text), ok=ok,
-              forced=force, session_id=source,
-              from_earlier_transcript=bool(prefer) and source != prefer)
-    return ("resent" if ok else "failed", target)
-
-
-async def _run_transcript_watcher(session: str, conversation_id: str, callback_base: str, *,
-                                  poll_interval: float = 2.0,
-                                  settle_seconds: float | None = None) -> None:
-    """Polling loop around _drain_transcript_once. The live delivery path behind
-    session_send / session_run / session_watch. The settle window (how long the
-    transcript must be quiet before a turn is delivered) is read from config once
-    per watcher; pass settle_seconds to override (tests)."""
-    if settle_seconds is None:
-        settle_seconds = orc.orchestrator_turn_settle_seconds()
-    while True:
-        await asyncio.sleep(poll_interval)
-        try:
-            await _drain_transcript_once(session, conversation_id, callback_base,
-                                         settle_seconds=settle_seconds,
-                                         screen_fn=_screen_for_watcher)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # prawduct:allow prawduct/broad-except -- watcher must survive
-            log_event("transcript_watcher_error", session=session,
-                      conversation_id=conversation_id, error_type=type(exc).__name__,
-                      error=repr(exc))
-
-
-def _make_watcher_done_callback(name: str):
-    """Done-callback for a watcher task: deregister it and evict the per-session
-    state that would otherwise leak (send lock, settle entries).
-
-    Identity-guarded: only cleans up if this task is still the registered watcher
-    for `name`. On a session_watch replacement the old task's callback fires after
-    a new task has taken the slot — without the guard it would evict the live
-    replacement's state."""
-    def _cb(task: asyncio.Task[None]) -> None:
-        if ss.session_watchers.get(name) is task:
-            ss.session_watchers.pop(name, None)
-            ss.evict_session_state(name)
-    return _cb
-
-
-def _register_watcher(name: str, conversation_id: str, base_url: str) -> None:
-    existing = ss.session_watchers.get(name)
-    if existing is not None:
-        existing.cancel()
-    task = asyncio.create_task(_run_transcript_watcher(name, conversation_id, base_url))
-    ss.session_watchers[name] = task
-    task.add_done_callback(_make_watcher_done_callback(name))
-
-
-async def _start_watcher(app: Any, name: str, conversation_id: str, base_url: str,
-                         ctx: Context | None = None) -> None:
-    """Baseline forward-only, spawn the transcript watcher, register it, and
-    announce the change. Shared by session_send / session_watch.
-
-    session_run deliberately does NOT use this: it is the synchronous inline path
-    (it blocks and returns the transcript), so opening a webhook would deliver each
-    turn twice — once inline, once via the callback (see session_run for the note)."""
-    # Register the watcher SYNCHRONOUSLY — cancel any existing one and install the
-    # new task with NO await in between — so this is the single point that enforces
-    # one watcher per session. The streamable-HTTP server handles tool calls as
-    # concurrent tasks, so session_watch ("call this first") racing session_send's
-    # auto-watch (or two rapid sends) could otherwise both pass their check-then-act
-    # guard while an `await` sat between the check and the registration, leaving TWO
-    # watcher tasks polling the same session. Two watchers share one durable
-    # watermark and each POST every turn -> every reply delivered twice.
-    _register_watcher(name, conversation_id, base_url)
-    _, instance = await tn.session_instance(name)
-    try:
-        ts.save_watch(ss.WATCHER_STATE_DIR, name, conversation_id, base_url,
-                      session_instance=instance)
-    except OSError as exc:
-        log_event("session_watch_persist_failed", session=name, error_type=type(exc).__name__)
-    # Baseline forward-only AFTER registering. The watcher sleeps one poll interval
-    # before its first drain and _drain_transcript_once self-baselines defensively,
-    # and this await completes before the caller injects any prompt, so the anchor
-    # is still established before the first delivery.
-    await _baseline_watermark(name, conversation_id)
-    await _announce_watchers(app, ctx)
 
 
 # ---- low-level CLI runner ---------------------------------------------------
@@ -2212,7 +539,7 @@ async def _session_report(name: str) -> dict[str, Any]:
         # names no work.
         **(tv.turn_info(objs) if working else tv.NO_TURN),
         "last_reply_at": tv.last_reply_at(objs),
-        "watched_conversation_id": _watched_conversation(name) or None,
+        "watched_conversation_id": dlv.watched_conversation(name) or None,
     }
 
 
@@ -2441,7 +768,7 @@ def register(app: Any) -> None:
         queue = [{"prompt_id": q.prompt_id, "prompt_preview": q.text[:120],
                   "enqueued_at": q.enqueued_at,
                   "waiting_reason": q.waiting_reason,
-                  "waiting_because": _WAITING_EXPLAINED.get(q.waiting_reason, ""),
+                  "waiting_because": snd.WAITING_EXPLAINED.get(q.waiting_reason, ""),
                   "paste_attempts": q.paste_attempts}
                  for q in ss.pending_sends.get(name, [])]
         return com.envelope_ok({**report, "send_queue": queue,
@@ -2771,7 +1098,7 @@ def register(app: Any) -> None:
         sent_by: Annotated[str | None, Field(description=_SENT_BY_DESC)] = None,
         sender_label: Annotated[str | None, Field(description=_SENDER_LABEL_DESC)] = None,
         deliver: Annotated[str, Field(description=_DELIVER_DESC, json_schema_extra={
-            "enum": [DELIVER_QUEUE, DELIVER_JOIN]})] = DELIVER_QUEUE,
+            "enum": [snd.DELIVER_QUEUE, snd.DELIVER_JOIN]})] = snd.DELIVER_QUEUE,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """The place for anything long or that does work: tasks, edits, builds, tests.
@@ -2848,13 +1175,14 @@ def register(app: Any) -> None:
         # and this, so the orchestrator answers it as that person's and not as a
         # report on its own prompt.
         sent_by = (sent_by or "").strip()
-        deliver = (deliver or DELIVER_QUEUE).strip()
+        deliver = (deliver or snd.DELIVER_QUEUE).strip()
         log_event("tool_call", tool="session_send", session=name, prompt_len=len(prompt),
                   sent_by=sent_by, sender_label=ts.clean_sender_label(sender_label),
                   deliver=deliver)
-        if deliver not in (DELIVER_QUEUE, DELIVER_JOIN):
-            return com.envelope_err(f'deliver must be "{DELIVER_QUEUE}" or "{DELIVER_JOIN}", '
-                                    f"not {deliver!r}", code="invalid_argument")
+        if deliver not in (snd.DELIVER_QUEUE, snd.DELIVER_JOIN):
+            return com.envelope_err(
+                f'deliver must be "{snd.DELIVER_QUEUE}" or "{snd.DELIVER_JOIN}", '
+                f"not {deliver!r}", code="invalid_argument")
         container = backend.target(name)
         if (await tn.session_instance(name))[0] == tn.SESSION_GONE:
             # Checked before anything else, so a send to a session that does not exist
@@ -2891,7 +1219,8 @@ def register(app: Any) -> None:
                     f"{orc.callback_url_unset()}; replies have nowhere to be POSTed"
                 )
             else:
-                await _start_watcher(app, name, conversation_id, base_url, ctx)
+                await dlv.start_watcher(name, conversation_id, base_url,
+                                        lambda: _announce_watchers(app, ctx))
                 log_event("tool_call", tool="session_send_auto_watch", session=name,
                           conversation_id=conversation_id)
 
@@ -2902,7 +1231,7 @@ def register(app: Any) -> None:
         # The prompt as one queue entry, whether it goes in now or waits (then this
         # object is what is queued): its id is what this call returns, what
         # session_queue_cancel takes and what the reply's `prompts` names.
-        prompt_conversation = conversation_id or _watched_conversation(name)
+        prompt_conversation = conversation_id or dlv.watched_conversation(name)
         # Framed here, once, so every path that pastes it (now, joined into a running
         # turn, or later from the queue) and everything that matches the paste against
         # the transcript afterwards (the send record, the echo hold, an unsubmitted
@@ -2920,7 +1249,7 @@ def register(app: Any) -> None:
         async with lock:
             # A queue saved before a restart goes first, even if this send arrives
             # before startup has resumed it.
-            await _load_persisted_queue(container, name)
+            await snd.load_persisted_queue(container, name)
 
             # Inject only when free so we never paste into a turn already in flight
             # or on top of a person's unsent text. A busy session does not cost the
@@ -2936,7 +1265,7 @@ def register(app: Any) -> None:
 
             async def try_join() -> str:
                 nonlocal joined, join_declined, wait_reason, attempts
-                outcome = await _join_running_turn(container, name, this_prompt)
+                outcome = await snd.join_running_turn(container, name, this_prompt)
                 if outcome == "joined":
                     joined, wait_reason = True, ""
                 elif outcome == "paste_failing":
@@ -2947,20 +1276,20 @@ def register(app: Any) -> None:
 
             if ss.pending_sends.get(name):
                 wait_reason = "queued_behind"
-                if deliver == DELIVER_JOIN:
+                if deliver == snd.DELIVER_JOIN:
                     join_declined = "queued_behind"
             else:
-                first = await try_join() if deliver == DELIVER_JOIN else "idle"
+                first = await try_join() if deliver == snd.DELIVER_JOIN else "idle"
                 if not joined and not wait_reason:
-                    wait_reason = await _wait_until_free(container, name,
-                                                         timeout=_SEND_FREE_WAIT_S)
-                if deliver == DELIVER_JOIN and first == "idle" and wait_reason == "claude_busy":
+                    wait_reason = await snd.wait_until_free(container, name,
+                                                            timeout=snd.SEND_FREE_WAIT_S)
+                if deliver == snd.DELIVER_JOIN and first == "idle" and wait_reason == "claude_busy":
                     # Idle at the first reading, and a turn started during the wait.
                     await try_join()
             if (not joined and not wait_reason
-                    and not await _inject(container, this_prompt.paste(), tmx.SESSION_WINDOW,
-                                          session=name, sent_by=sent_by,
-                                          prompts=[this_prompt])):
+                    and not await snd.inject(container, this_prompt.paste(), tmx.SESSION_WINDOW,
+                                             session=name, sent_by=sent_by,
+                                             prompts=[this_prompt])):
                 # A paste that did not land is a fact about one attempt, not about the
                 # session: queue it, and the drainer retries with backoff.
                 wait_reason = "paste_failing"
@@ -2969,13 +1298,13 @@ def register(app: Any) -> None:
                           prompt_len=len(prompt))
             if wait_reason:
                 this_prompt.paste_attempts = attempts
-                queued_depth = await _enqueue_send(name, container, this_prompt, wait_reason)
+                queued_depth = await snd.enqueue_send(name, container, this_prompt, wait_reason)
                 if queued_depth == 0:
                     log_event("tool_call", tool="session_send_failed", session=name,
                               prompt_len=len(prompt), reason="queue_full",
-                              depth=_PENDING_MAX_DEPTH)
+                              depth=snd.PENDING_MAX_DEPTH)
                     return com.envelope_err(
-                        f"{_PENDING_MAX_DEPTH} prompts are already queued for this "
+                        f"{snd.PENDING_MAX_DEPTH} prompts are already queued for this "
                         "session and none has been injected yet — the session is "
                         "wedged or the agent is not consuming them. Stop sending and "
                         "tell the user to check the session.", code="queue_full"
@@ -2988,16 +1317,16 @@ def register(app: Any) -> None:
         watching = name in ss.session_watchers
         log_event("tool_call", tool="session_send_sent", session=name, watching=watching,
                   no_watch_reason=no_watch_reason, queued_depth=queued_depth)
-        waiting_why = _WAITING_EXPLAINED.get(wait_reason, wait_reason)
+        waiting_why = snd.WAITING_EXPLAINED.get(wait_reason, wait_reason)
         # One webhook per session: a caller that did not open it does not get the
         # reply. Saying "delivered to this conversation" then is false, and the
         # caller waits for a reply that goes elsewhere (live 2026-10-08: a project's
         # brief and every reply to it went to the conversation that sent a stray
         # task first).
-        watched = _watched_conversation(name) if watching else ""
+        watched = dlv.watched_conversation(name) if watching else ""
         elsewhere = bool(conversation_id and watched and watched != conversation_id)
         not_joined = (f"Not joined to the running turn: "
-                      f"{_WAITING_EXPLAINED.get(join_declined, join_declined)}. "
+                      f"{snd.WAITING_EXPLAINED.get(join_declined, join_declined)}. "
                       if join_declined else "")
         if joined:
             delivery = (
@@ -3155,7 +1484,7 @@ def register(app: Any) -> None:
                 )
 
             for i, turn_prompt in enumerate(turns):
-                reason = await _wait_until_free(container, name, timeout=_PRE_IDLE_TIMEOUT_S)
+                reason = await snd.wait_until_free(container, name, timeout=_PRE_IDLE_TIMEOUT_S)
                 if reason:
                     err = f"session not ready before turn {i + 1} ({reason})"
                     return com.envelope_err(err, {"completed_turns": transcript},
@@ -3167,7 +1496,7 @@ def register(app: Any) -> None:
                                          sender_label=label,
                                          conversation_id=conversation_id or "")
                 sent_at = time.time()
-                if not await _inject(container, pasted, tmx.SESSION_WINDOW, session=name):
+                if not await snd.inject(container, pasted, tmx.SESSION_WINDOW, session=name):
                     # Not retried: if the paste shows in the box later, it stays there
                     # as unsent input, held like a person's (see _own_unsent_text).
                     ss.unsubmitted_paste.pop(name, None)
@@ -3222,7 +1551,8 @@ def register(app: Any) -> None:
             )
         # _start_watcher atomically cancels any existing watcher and installs the
         # new one, so a re-call (or a racing auto-watch) never leaves two watchers.
-        await _start_watcher(app, name, conversation_id, base_url, ctx)
+        await dlv.start_watcher(name, conversation_id, base_url,
+                                lambda: _announce_watchers(app, ctx))
         log_event("tool_call", tool="session_watch", session=name, conversation_id=conversation_id)
         return com.envelope_ok(
             {"status": "watching", "session": name, "conversation_id": conversation_id}
@@ -3291,8 +1621,8 @@ def register(app: Any) -> None:
         # answer while the real turn had 16 minutes left to run).
         state = await tn.session_state(backend.target(name), name)
         busy = state.claude_running and state.turn == tn.TURN_RUNNING
-        status, turn = await _resend_reply(name, conversation_id, base_url,
-                                           turn_uuid=turn_uuid, force=force)
+        status, turn = await dlv.resend_reply(name, conversation_id, base_url,
+                                              turn_uuid=turn_uuid, force=force)
         if turn is None:
             return com.envelope_err(
                 "no completed reply found to resend for this session "
@@ -3611,12 +1941,12 @@ def register(app: Any) -> None:
         async with lock:
             # Under the send lock, the one the drainer chooses and pastes its batch
             # under, so a prompt cannot be pasted and taken back at once.
-            await _load_persisted_queue(container, name)
+            await snd.load_persisted_queue(container, name)
             queue = ss.pending_sends.get(name, [])
             listed = [(i + 1, q) for i, q in enumerate(queue)]
             # A batch pasted into the input box and waiting for its Enter is the
             # session's already: the drainer submits it as it is.
-            in_box = set(_batch_in_box(name))
+            in_box = set(snd.batch_in_box(name))
             if prompt_id:
                 taken = [(i, q) for i, q in listed if q.prompt_id == prompt_id]
                 if taken and prompt_id in in_box:
@@ -3646,10 +1976,10 @@ def register(app: Any) -> None:
             if taken:
                 if not queue:
                     ss.pending_sends.pop(name, None)
-                    await _show_waiting_on_input(container, name, False)
-                _persist_queue(name)
+                    await snd.show_waiting_on_input(container, name, False)
+                snd.persist_queue(name)
                 for _, q in taken:
-                    _write_send_dead_letter(name, q, "cancelled")
+                    snd.write_send_dead_letter(name, q, "cancelled")
         state = await tn.session_state(container, name)
         working = state.claude_running and state.turn == tn.TURN_RUNNING
         objs, _, _ = tn.session_transcript(name)

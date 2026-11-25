@@ -19,6 +19,7 @@ from mcp.server.mcpserver import MCPServer
 from aidc_mcp import backend, scope, tools
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
@@ -527,8 +528,8 @@ def watch_stubs(monkeypatch):
         return None
 
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
-    monkeypatch.setattr(tools, "_baseline_watermark", baseline)
-    monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
+    monkeypatch.setattr(dlv, "_baseline_watermark", baseline)
+    monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
 
 

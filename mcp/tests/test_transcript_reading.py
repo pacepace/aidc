@@ -12,8 +12,8 @@ import time
 
 import pytest
 
-from aidc_mcp import tools
 from aidc_mcp import transcript as ts
+from aidc_mcp.service import delivery as dlv
 
 OLD = time.time() - 3600  # long past the settle window: the stamp alone is believed
 
@@ -191,7 +191,7 @@ class _Recorder:
 
 
 async def _poll(base, state, rec):
-    await tools._drain_transcript_once("sess", "conv", "http://x", transcripts_base=base,
+    await dlv._drain_transcript_once("sess", "conv", "http://x", transcripts_base=base,
                                  state_dir=state, post_fn=rec)
 
 
@@ -233,7 +233,7 @@ class TestTheWatchersIdlePoll:
         _write(base / "sess" / "old0.jsonl",
                _jsonl([_line("n0", role="user", stamp="2026-10-12T09:00:00.000Z"),
                        _line("n1", stamp="2026-10-12T09:00:01.000Z")]), mtime=OLD + 20)
-        for _ in range(tools._STALE_PIN_RECOVER_POLLS):
+        for _ in range(dlv._STALE_PIN_RECOVER_POLLS):
             await _poll(base, state, rec)
 
         assert ts.load_watermark(state, "sess", "conv").session_id == "old0"

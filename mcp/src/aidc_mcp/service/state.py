@@ -81,13 +81,13 @@ last_free_verdict: dict[str, tuple[str, str]] = {}
 
 
 # Last raw screen capture per session: the unrecognized-screen excerpt, and the
-# screen _inject judges the paste against (the one the free check just read).
+# screen inject judges the paste against (the one the free check just read).
 last_screen_raw: dict[str, str] = {}
 
 
-# session -> (text, prompt ids) of a paste _inject made but did not submit because it
+# session -> (text, prompt ids) of a paste inject made but did not submit because it
 # had not shown in the input box in time. If it shows there later, it is ours, not a
-# person's unsent text: the next free check lets it through and _inject presses Enter
+# person's unsent text: the next free check lets it through and inject presses Enter
 # on it. Its prompts count as pasted from then on: the drainer submits exactly that
 # batch, and session_queue_cancel answers "too late" for them.
 unsubmitted_paste: dict[str, tuple[str, tuple[str, ...]]] = {}

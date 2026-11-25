@@ -32,6 +32,8 @@ from aidc_mcp import auth, tools
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
+from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -145,13 +147,13 @@ def harness(tmp_path, monkeypatch):
 
     # Redirect the REAL baseline onto the tmp dirs (session_send/_start_watcher
     # call it by module-global name, so this rebinding takes effect).
-    real_baseline = tools._baseline_watermark
+    real_baseline = dlv._baseline_watermark
 
     async def baseline_tmp(name, conversation_id):
         await real_baseline(name, conversation_id, transcripts_base=base, state_dir=state)
 
     monkeypatch.setattr(tmx, "is_claude_running", is_running)
-    monkeypatch.setattr(tools, "_check_free", check_free)
+    monkeypatch.setattr(snd, "_check_free", check_free)
 
     async def session_instance(name):
         return rig.session_state, rig.instance
@@ -161,8 +163,8 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
     monkeypatch.setattr(tmx, "capture_screen", capture)
     monkeypatch.setattr(tools, "_announce_watchers", announce)
-    monkeypatch.setattr(tools, "_run_transcript_watcher", fake_watcher)
-    monkeypatch.setattr(tools, "_baseline_watermark", baseline_tmp)
+    monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
+    monkeypatch.setattr(dlv, "_baseline_watermark", baseline_tmp)
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://orchestrator.local")
     # The session_resend TOOL passes no base dirs — it resolves the module globals
     # at call time — so point those at the tmp dirs as well. (conftest already
@@ -180,14 +182,14 @@ def harness(tmp_path, monkeypatch):
     async def drain():
         """One REAL delivery pass (what the background watcher would run), pointed
         at the tmp dirs, using the REAL _post_turn -> FakeOrchestrator HTTP boundary."""
-        await tools._drain_transcript_once(
+        await dlv._drain_transcript_once(
             "proj", "conv-1", "http://orchestrator.local",
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
     async def resend(turn_uuid=None, force=False):
         """The REAL resend path, pointed at the tmp dirs + FakeOrchestrator boundary."""
-        return await tools._resend_reply(
+        return await dlv.resend_reply(
             "proj", "conv-1", "http://orchestrator.local", turn_uuid=turn_uuid, force=force,
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
@@ -342,7 +344,7 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
                         session_instance="id-1", sent_by="pace", prompt_id="p-three"),
         ts.QueuedPrompt("[agent] four", now, conversation_id="conv-2",
                         session_instance="id-1", prompt_id="p-four")]
-    await tools._drain_pending_sends("aidc-proj-dev", "proj")
+    await snd._drain_pending_sends("aidc-proj-dev", "proj")
     joined = "[agent] two [next message] [from pace] three [next message] [agent] four"
     assert h.paste_calls[-1] == joined
 
@@ -538,9 +540,9 @@ async def test_a_long_wait_is_reported_once_as_a_status_not_an_error(harness):
         ts.QueuedPrompt("no webhook", LONG_AGO, waiting_reason="queued_behind",
                         session_instance="id-1")]
 
-    tools._notify_long_waits("proj")
+    snd._notify_long_waits("proj")
     await _settle_background()
-    tools._notify_long_waits("proj")
+    snd._notify_long_waits("proj")
     await _settle_background()
 
     bodies = [p["json"] for p in h.orchestrator.posts]
@@ -566,7 +568,7 @@ async def test_a_restart_does_not_repeat_the_waiting_notice(harness):
                         conversation_id="conv-1", session_instance="id-1",
                         waiting_notified=True)])
     ss.pending_sends["proj"] = ts.load_send_queues(h.state)[0]["proj"]
-    tools._notify_long_waits("proj")
+    snd._notify_long_waits("proj")
     await _settle_background()
     assert h.orchestrator.posts == []
 
@@ -585,7 +587,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
         ts.QueuedPrompt("no webhook", "2026-09-17T04:00:01Z", session_instance="id-1")]
     h.session_state = tn.SESSION_GONE
 
-    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await snd._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
 
     assert "proj" not in ss.pending_sends
@@ -609,7 +611,7 @@ async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harnes
                         session_instance="id-2")]
     h.instance = "id-2"   # killed and created again under the same name
 
-    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await snd._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     await _settle_background()
 
     assert [q.text for q in ss.pending_sends["proj"]] == ["for the new one"]
@@ -623,7 +625,7 @@ async def test_docker_not_answering_drops_nothing(harness, monkeypatch):
                                                     session_instance="id-1")]
     h.session_state = tn.SESSION_UNKNOWN
     h.instance = ""
-    await tools._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
+    await snd._drop_prompts_of_removed_session("aidc-proj-dev", "proj")
     assert [q.text for q in ss.pending_sends["proj"]] == ["keep"]
     assert not h.orchestrator.posts
 

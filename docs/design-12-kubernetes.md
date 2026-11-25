@@ -14,7 +14,8 @@ history work across the cluster and the user's own machines.
 NET-02, NET-03, NET-09, NET-14, NET-15, MCP-12 and the git rules of GIT.
 
 **Status:** being built. Built and checked on the reference cluster (`tests/smoke/k8s.sh`): the
-backend seam, the in-cluster images, users' disks, and sessions (create with a size, attach,
+backend seam, the in-cluster images, users' disks and their own namespace-scoped credentials
+("Users and credentials"), and sessions (create with a size, attach,
 list, status, logs, restart, upgrade, refresh, kill) with the lockdown (NetworkPolicy and a
 public-only squid), Docker inside, the blocklist and its feeds in `aidc status`, taint and
 audit (with `aidc audit list|trim`), testament when configured, the git container ("Git",
@@ -33,7 +34,8 @@ cluster (the session node)
 ├─ namespace <prefix>-system                aidc's own: the image registry, builds
 │   ├─ registry                             loopback host port for pulls; pushes from builders only
 │   └─ builder (during `aidc k8s build`)    privileged, deleted after (see "Images")
-└─ namespace <prefix>-u-<user>              one per user; default-deny NetworkPolicy
+└─ namespace <prefix>-u-<user>              one per user; default-deny NetworkPolicy; Pod Security baseline
+    ├─ ServiceAccounts aidc-user, aidc-mcp  the user's and their MCP's credentials ("Users and credentials")
     ├─ PVC disk                             all the user's repos + worktrees (K8S-02)
     ├─ <session>-dev  (StatefulSet)         Claude, Docker, optional GPU; sysbox-runc
     ├─ <session>-proxy (Deployment)         squid, refresher, policy, audit, names: the only way out
@@ -433,6 +435,111 @@ NFS cannot carry Kubernetes' ID remapping, so a session's files would belong to 
 owner in every other pod, and after the session restarts. Sessions run only on the session node, so
 the per-user volume is a dataset on the node's local ZFS, one per user, mounted as a local volume
 (ruled 2026-11-24).
+
+## Users and credentials
+
+An admin (someone who may make namespaces) sets up the cluster (`aidc k8s setup|build`) and
+adds users. Each user then works with their own credentials, which reach their own namespace
+and nothing of anyone else's (K8S-14, K8S-20; plan-aidc-2.0 Q-K6 and Q-M2). Built and checked
+live on the reference cluster (W-K5): a test user ran the whole session lifecycle with only
+the kubeconfig `aidc user add` wrote, could do nothing in another user's namespace or
+cluster-wide, and was removed with everything made for it.
+
+**What `aidc user add <name>` makes** (scripts/k8s/manifests.sh):
+
+```
+namespace <prefix>-u-<name>     Pod Security enforce|audit|warn: baseline
+  ServiceAccount aidc-user      the user; Role + RoleBinding aidc-user (below)
+  ServiceAccount aidc-mcp       their MCP server (K8S-07, W-M2); Role + RoleBinding aidc-mcp
+  (no token mounted into any pod: automountServiceAccountToken false)
+ClusterRoleBinding <prefix>-u-<name>       -> ClusterRole <prefix>-user (shared)
+ClusterRoleBinding <prefix>-u-<name>-mcp   -> ClusterRole <prefix>-mcp  (shared)
+ValidatingAdmissionPolicy <prefix>-user-volumes (shared) + its binding
+kubeconfig ~/.config/aidc/users/<name>.kubeconfig (on the admin's machine, mode 0600)
+```
+
+**The user's Role** is exactly what aidc's commands do in the namespace, one table
+(`K8S_USER_RULES`) rendered into the Role, read by `aidc k8s check`, and held to the scripts
+by `tests/unit/test-k8s-rbac.sh`, which reads every kubectl call in `scripts/` and fails when a
+call needs a verb the Role lacks, or the Role grants one no call uses and no reason names:
+
+| Resource | Verbs | Used by |
+|---|---|---|
+| pods | get list watch create patch delete | status, taint, restart (delete), the repo folder pods (`aidc repo`, `aidc git setup`: apply, delete) |
+| pods/exec | create get | attach, kill, refresh, status, upgrade, the git container (exec is a websocket GET that API servers authorize as get or create) |
+| pods/log | get | logs, create and restart (the ready marker) |
+| services | get list watch create patch delete | create (apply), kill |
+| configmaps | get list watch create patch update delete | create (the audit seed), kill, the repo list (`git-repos`, replaced at a resourceVersion) |
+| persistentvolumeclaims | get list watch create patch delete | create, kill (annotate the kept trail), audit list and trim |
+| events | get list watch | `kubectl describe`, which aidc's errors point to |
+| serviceaccounts/token (aidc-user only) | create | `aidc user creds`: the user renews their own kubeconfig |
+| deployments, statefulsets | get list watch create patch delete | create, kill, list, upgrade (set image, rollout restart), git setup |
+| networkpolicies | get list watch create patch delete | create, kill, status, git setup |
+
+Not granted: Secrets (aidc keeps none: the token lives only in the kubeconfig), Roles and
+bindings (a user cannot widen their own rights), the namespace itself (a user cannot relabel
+it to drop Pod Security), any other ServiceAccount's token (not the MCP's). `watch` and `list`
+are on the table because `kubectl delete --wait`, `wait`, `rollout status` and `-l` selectors
+use them.
+
+**The shared ClusterRole** `<prefix>-user`: get runtime classes (create and git setup read the
+runtime class's node selector) and storage classes, list nodes (`aidc k8s check`), get, list,
+watch and patch volumes (`aidc audit` lists released trails; trim sets a volume to Delete
+before deleting its claim, so a retaining class keeps no data). RBAC cannot say "volumes
+claimed in your namespace", so the patch is narrowed by the admission policy: a change to a
+volume by any `system:serviceaccount:<prefix>-u-*:aidc-user` is refused unless the volume is
+claimed in that user's own namespace, the change sets its reclaim policy to `Delete`, and its
+claim reference stays as it was; deleting a volume is refused outright (and not granted).
+Needs ValidatingAdmissionPolicy (Kubernetes 1.30); on an older cluster `aidc user add` grants
+no patch and says so, and trim leaves a retained volume for an admin. Checked live: setting
+another user's disk volume to Delete, labelling one's own volume, or handing it to another
+namespace were each refused by the policy; setting one's own to Delete passed.
+
+**The MCP's Role** (`K8S_MCP_RULES`, Q-M2) is the session lifecycle in its own namespace:
+StatefulSets and Deployments (the proxy is a Deployment, so Q-M2's list gains it), Services,
+NetworkPolicies, ConfigMaps, claims, pods (get, list, watch, delete: restart), exec and logs.
+No bare pods, no repo list, no tokens, no volumes; its ClusterRole reads runtime classes only. A
+test fails if it ever grants what the user's Role does not.
+
+**Pod Security "baseline"** on every user namespace (enforce, audit, warn; version latest) is
+what bounds any pod a user or their MCP makes: no privileged containers, host namespaces,
+host paths or ports, capabilities beyond the default set, or unconfined seccomp. It admits
+everything aidc runs there, checked live: Sysbox session pods (`runtimeClassName`, `hostUsers:
+false`, root init steps with default capabilities), the proxy pod, the git container
+(`SETUID`, `SETGID`, `AUDIT_WRITE`, all in baseline's default set), the disk and repo folder
+steps (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`). Pod Security does not restrict the runtime
+class. `restricted` would refuse them (they start as root, and the git container allows
+privilege escalation for its user switch), so baseline is the narrowest standard level; no
+exemption is needed. The system namespace stays `privileged` for the builder alone ("Images").
+
+**The kubeconfig.** A TokenRequest token for `aidc-user` (`kubectl create token`), lifetime
+`kubernetes.user_token_ttl` (default 720h; the API server may cap it, and aidc prints the real
+expiry), and the cluster's server and CA from the credentials in use. Written mode 0600 in a
+0700 folder, never inside a git work tree unless the repo ignores the path, and never printed:
+`aidc user creds <name> --token` prints the bare token to stdout on request, and nothing else
+does. The admin hands the file over privately; the user points `kubernetes.kubeconfig` at it.
+`aidc user creds <name>` renews it (the admin, or the user with their own still-valid
+kubeconfig, which is renewed in place); `--revoke` (admin) replaces the ServiceAccount, which
+invalidates every token issued before. Tradeoff accepted: a stolen kubeconfig can renew itself
+until it is revoked. A user may instead bring their own kubeconfig; `aidc k8s check` says what
+it may and may not do.
+
+**`aidc k8s check`** asks the cluster what the credentials in use may do (one
+SelfSubjectRulesReview, which everyone may make) and compares it with the tables: missing
+namespace rights are `missing:`, missing cluster-wide reads a `note:` naming what is skipped
+without them (no node check, released trails unlisted), and the registry in the system
+namespace, which a user cannot see, is a note.
+
+**`aidc user remove <name>`** (admin) leaves nothing behind: it refuses while the user has
+sessions, lists exactly what goes and asks for the name (or `--yes`), sets every volume
+claimed in the namespace to Delete, deletes the namespace, waits for each volume to go, deletes
+the user's ClusterRoleBindings and, when no user namespace is left, the shared ClusterRoles
+and the admission policy, and removes the kubeconfig it wrote. The user's token dies with the
+ServiceAccount. Checked live: seven volumes (disk, a kept trail, git home, login and store, a
+session's home and state) and both bindings gone, the old kubeconfig `Unauthorized`.
+
+Not built here: K8S-14's tunnel (`kubectl port-forward`) will need `create` on pods/portforward
+in the user's Role when ports are built; the rules test will ask for it.
 
 ## Images: built in the cluster, kept in a private registry
 

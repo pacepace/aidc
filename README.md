@@ -780,7 +780,7 @@ attaching (`aidc attach git`) or with `aidc git approve|deny`.
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
 | `aidc k8s {check\|setup\|build}` | Check the cluster in the `kubernetes:` config, make its registry, build aidc's images in it (see "Kubernetes backend"). |
-| `aidc user add <name>` | Kubernetes backend: make a user's namespace and disk. |
+| `aidc user {add\|creds\|remove} <name>` | Kubernetes backend: make a user's namespace, disk and own credentials (a kubeconfig), renew or revoke the kubeconfig, remove the user and everything made for them (see "Admins and users"). |
 | `aidc git {setup\|login\|logout\|attach\|status\|push\|pr\|merge\|tidy\|protect\|requests\|approve\|deny\|mode}` | Your git container (Docker or Kubernetes), which holds your GitHub login and pushes, opens and merges PRs for you and your sessions (see "The git container"). |
 | `aidc repo {add\|list\|remove}` | The repos your git container works on: your own working copies on Docker, clones on your disk in a cluster. |
 
@@ -801,7 +801,8 @@ attaching (`aidc attach git`) or with `aidc git approve|deny`.
 Being built (design: [docs/design-12-kubernetes.md](docs/design-12-kubernetes.md)). Sessions
 will also run on a Kubernetes cluster, with the same commands. What works today:
 
-- `aidc k8s check`: whether the cluster can run sessions, and what is missing (read-only).
+- `aidc k8s check`: whether the cluster can run sessions, what is missing, and what the
+  credentials in use may and may not do (read-only).
 - `aidc k8s setup`: the `<prefix>-system` namespace and a private image registry in it, on the
   session node(s). Pulls go through the node's loopback (no node configuration); only aidc's
   builder pods can push.
@@ -810,7 +811,8 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   build (the squid image's base owns files as a UID no user namespace has), takes no
   connections, and is deleted afterwards. Its namespace is the only one aidc labels to allow
   privileged pods.
-- `aidc user add <name>`: the user's namespace and disk.
+- `aidc user add|creds|remove <name>`: a user's namespace, disk and own credentials; see
+  "Admins and users" below.
 - `aidc git ...` and `aidc repo ...`: the user's git container, the one thing in the cluster
   that pushes and opens PRs (sessions cannot); see "The git container" above. In a cluster it
   runs in your namespace with its request folder at `/home/<user>/.aidc/git-requests` on your
@@ -936,6 +938,46 @@ kubernetes:
 
 With one registry on one node's loopback, only that node pulls: keep sessions on it (the node
 selector and the runtime class's own scheduling do).
+
+### Admins and users
+
+An **admin** (credentials that may make namespaces, such as the cluster's own kubeconfig) runs
+`aidc k8s setup`, `aidc k8s build` and, for each person:
+
+```bash
+aidc user add alice            # namespace aidc-u-alice, her disk, her credentials, a kubeconfig
+aidc user creds alice          # a new kubeconfig (renew; --revoke kills every earlier token)
+aidc user remove alice         # alice and everything made for her: refuses while she has sessions
+```
+
+`aidc user add` labels the namespace Pod Security `baseline` (no privileged pods, host paths,
+host network or extra capabilities; aidc's sessions, Sysbox included, and git container pass)
+and makes a ServiceAccount for the user whose Role may do exactly what aidc's commands do in
+that namespace and nothing in any other, a second one for the user's MCP server (sessions
+only), and read-only cluster-wide rights for the runtime class, storage class, nodes and
+volumes, plus setting her own volumes to Delete (`aidc audit trim`; an admission policy refuses
+any other volume change). It writes her kubeconfig (the cluster's server and CA, a token valid
+`user_token_ttl`, default 720h) to `~/.config/aidc/users/alice.kubeconfig`, mode 0600, and
+prints the path, never the token (`aidc user creds alice --token` prints only the token, when
+you want it). Hand the file over privately. `aidc user remove` sets the user's volumes to
+Delete, so her disk and kept audit trails go with their data, and asks for her name first
+unless `--yes`.
+
+A **user** puts the file somewhere private and points their config at it:
+
+```yaml
+backend: kubernetes
+kubernetes:
+  kubeconfig: ~/.kube/aidc-alice.kubeconfig
+  user: alice
+  storage_class: shared-zfs      # and the rest of the cluster's block, as the admin has it
+  # user_token_ttl: 720h         # lifetime of the kubeconfig aidc user creds issues
+```
+
+With it they run every session, git and repo command and `aidc audit`; `aidc k8s check` says
+what their credentials may and may not do (the registry is the admin's, so it shows as a note).
+They renew before the token expires with `aidc user creds alice` (their kubeconfig is renewed
+in place). A user may bring their own kubeconfig instead; the check says what it lacks.
 
 **testament** (optional): when your config names its repo, sessions on both backends come with
 testament (a distributed test runner) at its newest release. The repo is private for now, so this is opt-in and uses

@@ -2,8 +2,8 @@
 
 Pure, dependency-free logic for turning Claude Code's native per-session JSONL
 transcript into deliverable assistant turns, plus the durable high-water mark
-that makes delivery exactly-once across restarts. The watcher (tools.py) wires
-file I/O and the callback POST around this; everything here is unit-testable
+that makes delivery exactly-once across restarts. The watcher (service/delivery.py)
+wires file I/O and the callback POST around this; everything here is unit-testable
 against recorded `.jsonl` fixtures.
 
 Schema facts this relies on (verified 2026-06-09 against real transcripts; see
@@ -1146,8 +1146,8 @@ def line_text(obj: dict) -> str:
 
 
 def wall_time(obj: dict) -> float | None:
-    """The epoch seconds of a transcript line's timestamp, or None. Public: tools.py
-    reads the same lines."""
+    """The epoch seconds of a transcript line's timestamp, or None. Public:
+    service/sending.py and turns_view.py read the same lines."""
     raw = obj.get("timestamp")
     if not isinstance(raw, str):
         return None
@@ -1290,7 +1290,7 @@ class Watermark:
     # (the orchestrator stopped driving — far longer than any single turn) or a
     # person's prompt resets the count; a slow turn does NOT — those slow-turn gaps
     # are exactly what let the 019f1fde runaway dodge the old rate-based guard. See
-    # the loop guard in tools._drain_once_body.
+    # the loop guard in service.delivery._drain_once_body.
     consecutive_deliveries: int = 0
     # Every delivery since the last idle gap, whatever its prompt's origin: the
     # backstop for a runaway whose prompts were misread as typed at the terminal.
@@ -1307,8 +1307,8 @@ class Watermark:
 
 
 def now_iso() -> str:
-    """UTC timestamp in the form every aidc state file writes. Public: tools.py stamps
-    the same files."""
+    """UTC timestamp in the form every aidc state file writes. Public: the service
+    modules (service/sending.py, service/delivery.py) stamp the same files."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
@@ -1316,7 +1316,7 @@ def slug(value: str) -> str:
     """Filesystem-safe token for a (session|conversation_id) component.
 
     Public because it is a contract between the modules, not an implementation detail:
-    tools.py names the marker files for a session's send-path state with it, and those
+    service/state.py names the marker files for a session's send-path state with it, and those
     have to land beside the watermark and queue files this module writes.
     """
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
@@ -1679,7 +1679,7 @@ class QueuedPrompt:
     # The conversation that sent it, so a prompt that can never be pasted is reported
     # back there instead of vanishing ("" when it came with no webhook).
     conversation_id: str = ""
-    # The session's instance id when it was accepted (see tools._session_instance), so a
+    # The session's instance id when it was accepted (see service.turns.session_instance), so a
     # session killed and re-created under the same name is not handed the old
     # session's prompts, while one upgraded in place keeps them.
     session_instance: str = ""
@@ -1700,7 +1700,7 @@ class QueuedPrompt:
     # (session_queue_cancel) and match it to the reply that answers it.
     prompt_id: str = field(default_factory=lambda: new_prompt_id())
     # True while this prompt is part of a batch pasted into Claude's input box and not
-    # yet submitted (tools._unsubmitted_paste). Persisted so that, after an aidc-mcp
+    # yet submitted (service.state.unsubmitted_paste). Persisted so that, after an aidc-mcp
     # restart, the batch is still the session's: the drainer submits it as it is, and a
     # cancel of it is "already pasted" rather than taking back text left in the box.
     in_box: bool = False

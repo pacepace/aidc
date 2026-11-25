@@ -33,8 +33,9 @@ def parse_audit_dir(status: str) -> Path | None:
 
     The CLI prints a line like ``audit: /path/to/dir`` (or ``audit dir: ...``).
     Matched case-insensitively so a header-case change in the CLI does not
-    silently break audit reads — shared by resources here and tools.audit_get
-    (previously copy-pasted three times, one of which was case-sensitive)."""
+    silently break audit reads — used by the resources here (it was copy-pasted
+    three times, one of which was case-sensitive). service.sessions.audit_get does not
+    parse it: it reads the dir from the audit sidecar's mount (session_facts.audit_dir)."""
     for raw in status.splitlines():
         line = raw.strip()
         low = line.lower()

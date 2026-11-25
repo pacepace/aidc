@@ -308,14 +308,14 @@ class TestDrain:
         rec = Recorder()
         await _drain(base, state, rec)                       # baseline past SEED
         assert rec.delivered == []
-        # faidh blocks on a question — the transcript simply ends on the ask line.
+        # demo blocks on a question — the transcript simply ends on the ask line.
         blocked = seed + [_user("u1", "go"), _ask_line("ask1")]
         _mk_transcript(base, "sess", "sid1", blocked)
         await _drain(base, state, rec)
         assert rec.delivered == ["ask1"]                     # <-- was silently dropped before
         await _drain(base, state, rec)
         assert rec.delivered == ["ask1"]                     # dedup, no re-deliver
-        # The answer arrives (tool_result) and faidh continues to a normal turn.
+        # The answer arrives (tool_result) and demo continues to a normal turn.
         answered = blocked + [
             {"type": "user", "uuid": "tr1", "message": {"role": "user",
              "content": [{"type": "tool_result", "content": "A"}]}},
@@ -429,7 +429,7 @@ class TestDrain:
         dlv._TORN_READ_RECOVER_POLLS consecutive misses it rotates: forward-baselines
         onto the newest session and resumes delivery there.
 
-        Regression for prod 019f1fde: the faidh watcher was welded to the runaway
+        Regression for prod 019f1fde: the demo watcher was welded to the runaway
         session's 34MB transcript (killed mid-write → torn final line → anchor
         unparseable) and stuck in torn_read_skip for 40+ min while the live session
         (a fresh transcript after the container rebuild) went undelivered."""
@@ -681,7 +681,7 @@ class TestPostTurnInstrumentation:
             patch("aidc_mcp.auth.load_token", return_value="tok"),
             log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
-            ok = await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+            ok = await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="demo")
         return ok, logged
 
     async def test_payload_carries_session_name(self):
@@ -704,10 +704,10 @@ class TestPostTurnInstrumentation:
             log_event_patched(),
         ):
             ok = await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"),
-                                  attempt=0, session="faidh")
+                                  attempt=0, session="demo")
 
         assert ok is True
-        assert captured["session"] == "faidh"
+        assert captured["session"] == "demo"
         # the existing contract fields are unchanged
         assert captured["content"] == "hi"
         assert captured["source"] == "agent_watch"
@@ -729,7 +729,7 @@ class TestPostTurnInstrumentation:
         ):
             await cbk.post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="terminal"),
-                             attempt=0, session="faidh")
+                             attempt=0, session="demo")
         assert captured["prompt_origin"] == "terminal"
         assert "sent_by" not in captured
 
@@ -747,7 +747,7 @@ class TestPostTurnInstrumentation:
         ):
             await cbk.post_turn("http://cb", "conv",
                              ts.Turn("a1", "hi", prompt_origin="person", sent_by="u-1"),
-                             attempt=0, session="faidh")
+                             attempt=0, session="demo")
         assert (captured["prompt_origin"], captured["sent_by"]) == ("person", "u-1")
 
     async def test_failed_post_logs_type_and_nonempty_repr(self):
@@ -784,7 +784,7 @@ class TestPostTurnInstrumentation:
             log_event_patched(side_effect=lambda k, **f: logged.append((k, f))),
         ):
             try:
-                await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="faidh")
+                await cbk.post_turn("http://cb", "conv", ts.Turn("a1", "hi"), attempt=0, session="demo")
                 raised = False
             except cbk._PermanentDeliveryError as exc:
                 raised = True
@@ -1171,7 +1171,7 @@ class TestStalePinRotation:
         assert "a3" in rec.delivered
 
     async def test_follows_rotation_with_trailing_non_turn_tail(self, tmp_path):
-        """Real prod shape (faidh 1b968f61): the pinned session's tail holds a bare
+        """Real prod shape (demo 1b968f61): the pinned session's tail holds a bare
         user line AFTER the last delivered turn — so `suffix` is non-empty yet there
         are NO deliverable turns. Rotation must still follow (gate is 'no new turns',
         not 'empty suffix' — the bug the first fix shipped with)."""

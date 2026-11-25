@@ -288,7 +288,7 @@ _LOOP_GUARD_IDLE_RESET_S = 900.0
 # dead (not a transient partial read) and rotates onto the newest transcript. At
 # the 2 s poll interval this is ~30 s — far beyond any transient torn read, but
 # bounded so a wedged watcher self-heals instead of stalling forever (prod
-# 019f1fde: the faidh watcher was stuck for 40+ min).
+# 019f1fde: the demo watcher was stuck for 40+ min).
 _TORN_READ_RECOVER_POLLS = 15
 
 
@@ -336,7 +336,7 @@ async def _rotate_if_stale_pin(session: str, conversation_id: str,
     Claude never deletes a rotated-away transcript — so once the user's Claude
     starts a new session (a new sessionId file), the watcher stays welded to the
     old, fully-consumed file and delivers nothing forever (prod 019f1fde: pinned
-    to 1b968f61 while faidh moved on). This runs only when the pinned session is
+    to 1b968f61 while demo moved on). This runs only when the pinned session is
     fully consumed (no undelivered turns). It picks the transcript with the
     globally-newest message CONTENT timestamp; if that is a different, strictly
     newer session, it forward-baselines onto it (anchor at its end — never
@@ -550,7 +550,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # _TORN_READ_RECOVER_POLLS consecutive misses, if a strictly-newer
         # transcript exists for this session, the pin is stale — rotate onto the
         # newest (forward-baseline), exactly like a genuine rotation, instead of
-        # wedging forever (prod 019f1fde: the faidh watcher stuck in
+        # wedging forever (prod 019f1fde: the demo watcher stuck in
         # torn_read_skip for 40+ min after the runaway session was killed
         # mid-write and the container was rebuilt onto a fresh session).
         torn = ss.torn_read_counts.get(key, 0) + 1

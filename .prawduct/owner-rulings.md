@@ -459,6 +459,10 @@ Also (owner, same day): the git store is already a proper L3; the SQLite L3 is b
 
 ## 2026-11-25 — Finish the git L3 follow-ups with the SQLite L3
 
-While adding the SQLite L3, build the proper shared L3 contract suite (Postgres, SQLite, git) and finish the git L3's open follow-ups in 3tears: hand edits re-versioned so CAS cannot overwrite them, one-commit batched flush, the table/store mapping and public adopt-row hooks Scriob works around, stale docstrings, a format version, and deletes joining a caller transaction.
+While adding the SQLite L3, build the proper shared L3 contract suite (Postgres, SQLite, git) and finish the git L3's open follow-ups in 3tears: hand edits re-versioned so CAS cannot overwrite them, one-commit batched flush, the table/store mapping and public adopt-row hooks another project works around, stale docstrings, a format version, and deletes joining a caller transaction.
 
-Scriob and Samhla adopt these changes themselves, in their own agents, once the 3tears release ships; aidc work does not touch those repos.
+Other projects that use the git store adopt these changes themselves, in their own agents, once the 3tears release ships; aidc work does not touch those repos.
+
+## 2026-11-25 — No other product names in public repos
+
+The owner's other products and projects are never named in code, tests or docs of a repo that goes to public GitHub (aidc, 3tears). Refer to them generically ("another project that uses the git store"). History files already released are left as they are unless the owner says otherwise.

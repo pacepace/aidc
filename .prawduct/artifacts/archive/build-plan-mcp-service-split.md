@@ -24,7 +24,12 @@ governed_by:
       - "a value produced in one place and consumed in another must resolve in the same namespace and lifetime → applies: state moves between Python modules, so every reader must read the one module that owns it at call time (no `from x import name` copies, which a test's patch or a reassignment would not reach)"
       - "run the real path once before calling it done → applies: `make smoke` on Docker from a separate checkout closes the wave"
 partition: serial — every chunk edits tools.py and moves code the next chunk's code calls
+lifecycle: completed
+archived: 2026-11-25
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — MCP service split (W-T2)
 

@@ -54,19 +54,34 @@ assert_not_has() {
 #   logs ... -c dev           the ready marker
 #   get deployment,statefulset -l   a row when K_EXISTS=1
 #   get pvc -l                the session's home and audit claims
+#   get deployment,statefulset -l   honours the selector's `app in (...)` clause, as the API does:
+#                             K_RELAY_LEFT=1 adds a relay Deployment (app=egress) of demo
+#   get ingressclass          its spec.controller: K_IC (default Traefik's)
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
+# pick: print the rows ("<app> <kind/name>" on stdin) whose app the -l selector's
+# `app in (...)` clause admits; every row when it has none.
+pick() {
+    apps=$(printf '%s\n' "$ARGS" | sed -n 's/.*,app in (\([^)]*\)).*/\1/p' | tr ',' ' ')
+    while read -r a n; do
+        [ -n "$n" ] || continue
+        if [ -z "$apps" ]; then echo "$n"; else case " $apps " in *" $a "*) echo "$n" ;; esac; fi
+    done
+}
+ARGS="$*"
 case "$*" in
+    *"get ingressclass"*) printf '%s' "${K_IC:-traefik.io/ingress-controller}" ;;
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -n "${K_DISK_PHASE:-}" ] && { printf '%s' "$K_DISK_PHASE"; exit 0; }
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
     *"get deployment,statefulset -l aidc/session=git"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
-        [ "${K_GIT:-}" = 1 ] && echo "deployment.apps/git" ;;
+        [ "${K_GIT:-}" = 1 ] && echo "git deployment.apps/git" | pick ;;
     *"get deployment,statefulset -l"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
-        [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
+        { [ "${K_EXISTS:-}" = 1 ] && echo "proxy deployment.apps/demo-proxy"
+          [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
     *"get deployment -l app=git,aidc/session=git"*) [ "${K_GIT:-}" = 1 ] && printf '1\t2026-11-24T03:00:00Z\n' ;;
     *"get pod -l app=git"*) echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}' ;;
     *"get deployment "*"-proxy"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
@@ -281,6 +296,31 @@ assert_has "and the policy sidecar (taint_response)" '{"name":"AIDC_TAINT_RESPON
     "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "policy") | .env' | tail -1)"
 sed -i '/^claude_mode: safe$/d; /^taint_response: notify$/d' "$HOME/.config/aidc/config.yaml"
 
+echo "=== a page with --login: the login is checked, not assumed ==="
+# curl stub: every page answers K_CURL without a login.
+cat > "$SCRATCH/bin/curl" <<'STUB'
+#!/bin/sh
+printf '%s' "${K_CURL:-401}"
+STUB
+chmod +x "$SCRATCH/bin/curl"
+cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/config.plain"
+printf '  ingress: {domain: pages.example.org, class: web}\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(K_CURL=401 run create demo --backend kubernetes --expose 8080 --login)
+assert_has "a page that answers 401 without the login is kept, and its login printed" "login for these pages (shown once" "$out"
+assert_has "  (the controller read from IngressClass web: Traefik's Middleware)" "kind: Middleware" "$(cat "$K_APPLIED")"
+assert_not_has "  nothing removed" "delete ingress" "$(cat "$K_LOG")"
+assert_has "  create succeeds" "exit=0" "$out"
+out=$(K_CURL=200 AIDC_K8S_LOGIN_PROBE_WAIT=1 run create demo --backend kubernetes --expose 8080 --login)
+assert_has "a page that answers 200 without the login is said, by name and status" \
+    "https://demo-alice.pages.example.org/ answered 200 without the login, not 401" "$out"
+assert_has "  removed again" "delete ingress,secret -l aidc/session=demo,app=expose" "$(cat "$K_LOG")"
+assert_has "  said loudly" "the pages were REMOVED" "$out"
+assert_not_has "  its login is never printed (it guards nothing)" "login for these pages" "$out"
+assert_not_has "  nor the page offered" "page: https://" "$out"
+assert_has "  and create fails" "exit=1" "$out"
+assert_has "  though the session itself runs" "session demo runs, but WITHOUT its pages" "$out"
+cp "$SCRATCH/config.plain" "$HOME/.config/aidc/config.yaml"
+
 echo "=== create refusals ==="
 out=$(K_NO_DENY=1 run create demo --backend kubernetes)
 assert_has "a namespace without its default-deny is refused, with the fix" "run \`aidc user add alice\` again" "$out"
@@ -359,6 +399,27 @@ assert_has "with no StatefulSet to name it, the newest claim is the session's" \
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 
+echo "=== a relay left behind is not the session ==="
+# A kill the cluster stopped answering in the middle of can leave a TCP egress relay (app=egress)
+# with the session's label and no dev or proxy: that is litter for clean-env, not a session.
+(
+    # shellcheck source=../../scripts/k8s/lib.sh
+    . "$AIDC_SCRIPTS/k8s/lib.sh"; k8s_load_settings
+    out=$(K_RELAY_LEFT=1 k8s_session_lookup aidc-u-alice demo); rc=$?
+    assert_eq "lookup: only a relay left is no session" "absent 1" "${out} ${rc}"
+    out=$(K_EXISTS=1 K_RELAY_LEFT=1 k8s_session_lookup aidc-u-alice demo); rc=$?
+    assert_eq "  with its proxy still there it is one" "found 0" "${out} ${rc}"
+    echo "$PASS $FAIL" > "$SCRATCH/counts"
+)
+read -r PASS FAIL < "$SCRATCH/counts"
+K_RELAY_LEFT=1 bash "$AIDC_SCRIPTS/k8s/session-where.sh" demo; rc=$?
+assert_eq "where: only a relay left is no session in the cluster" 1 "$rc"
+assert_has "  (asked for the session's own workloads only)" "-l aidc/session=demo,app in (dev,proxy,git)" "$(tail -n1 "$K_LOG")"
+K_EXISTS=1 K_RELAY_LEFT=1 bash "$AIDC_SCRIPTS/k8s/session-where.sh" demo; rc=$?
+assert_eq "  with its proxy still there it is" 0 "$rc"
+out=$(K_RELAY_LEFT=1 run kill demo --backend kubernetes)
+assert_has "kill of a session whose relay alone is left says there is no session" "no session 'demo'" "$out"
+assert_not_has "  and deletes nothing" " delete " "$(cat "$K_LOG")"
 echo "=== restart, upgrade and refresh on Kubernetes ==="
 rm -f "$K_UID_FILE"
 out=$(K_EXISTS=1 run restart demo)
@@ -472,6 +533,8 @@ assert_has "a cluster session's network verb goes to its cluster form" "no netwo
 assert_eq "  (and Docker is not asked)" "" "$(cat "$D_LOG")"
 out=$(K_EXISTS=1 run kill demo)
 assert_has "kill finds a cluster session without the flag" "session demo removed" "$out"
+: > "$D_LOG"; out=$(K_RELAY_LEFT=1 run logs demo --component squid)
+assert_has "a session whose relay alone is left in the cluster is not taken for a cluster session" "docker " "$(cat "$D_LOG")"
 
 : > "$D_LOG"; out=$(K_DOWN=1 run logs demo --component squid)
 assert_has "an unreachable cluster is said, not taken for 'no such session'" "the configured cluster did not answer" "$out"

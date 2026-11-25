@@ -64,7 +64,7 @@ machinery; checked live end to end).
 
 ### Chunk 01: tunnel (K8S-14) and status lists ports (#74)
 - `aidc create --backend kubernetes --port N|H:C` (repeatable, merges the `ports:` config as
-  on Docker) records the ports on the dev StatefulSet (`aidc/ports`, metadata only: no restart)
+  on Docker) records the ports on the dev StatefulSet (its aidc-ports annotation, metadata only: no restart)
   and starts one local supervisor per port on this machine: `kubectl port-forward` (through
   `k8s_kubectl`, the user's own credentials) to the session's dev pod on 127.0.0.1:H, started
   again when it exits or when the dev pod is replaced (uid watch), logging to a file the user

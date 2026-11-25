@@ -11,7 +11,10 @@
 #     2026-11-24), a generated username and password, printed once and kept only as an htpasswd
 #     hash, put in front of every exposed port by the controller's own mechanism: a Traefik
 #     basicAuth Middleware, or ingress-nginx's auth annotations. Another controller refuses
-#     --login rather than expose the page without the login asked for.
+#     --login rather than expose the page without the login asked for. The controller is the
+#     config's kubernetes.ingress.controller or the IngressClass's exact spec.controller, never
+#     a guess from a name; after the page is made, create opens it once without the login and
+#     removes it again unless it answered 401.
 # TLS: a Secret in the user's namespace (tls_secret), a cert-manager ClusterIssuer
 # (cluster_issuer), or else the controller's default certificate (a wildcard one serves every
 # name under the domain). `aidc kill` removes all of it (labelled with the session).
@@ -40,17 +43,19 @@ k8s_expose_check() {
     [ -n "$AIDC_K8S_INGRESS_CLASS" ] || {
         printf -- '--expose needs kubernetes.ingress.class in your config: the IngressClass of the controller that serves the domain\n' >&2
         return 1; }
+    k8s_ingress_controller_settle || return 1
     if [ -z "$AIDC_K8S_INGRESS_CONTROLLER_NS" ] || [ -z "$AIDC_K8S_INGRESS_CONTROLLER_LABELS" ]; then
         printf -- '--expose needs kubernetes.ingress.controller_namespace and controller_labels for a %s controller: only its pods are let in to the port\n' "$AIDC_K8S_INGRESS_CONTROLLER" >&2
         return 1
     fi
     if [ "$login" = 1 ]; then
         case "$AIDC_K8S_INGRESS_CONTROLLER" in
-            traefik|nginx) ;;
-            *) printf -- '--login: aidc puts a login in front of a page with Traefik or ingress-nginx; kubernetes.ingress.controller is %s (README, Kubernetes backend, says how to add one by hand)\n' "'$AIDC_K8S_INGRESS_CONTROLLER'" >&2
+            traefik|ingress-nginx) ;;
+            *) printf -- '--login: aidc puts a login in front of a page with Traefik or ingress-nginx; the controller of IngressClass %s is %s (set kubernetes.ingress.controller when it is one of those; README, Kubernetes backend, says how to add one by hand)\n' "'$AIDC_K8S_INGRESS_CLASS'" "'$AIDC_K8S_INGRESS_CONTROLLER'" >&2
                return 1 ;;
         esac
         command -v openssl >/dev/null 2>&1 || { printf -- '--login needs openssl on this machine (it hashes the password)\n' >&2; return 1; }
+        command -v curl >/dev/null 2>&1 || { printf -- '--login needs curl on this machine (it checks the page asks for the login)\n' >&2; return 1; }
     fi
     for p in "$@"; do
         host=$(k8s_expose_host "$s" "$p" "$first")
@@ -134,7 +139,7 @@ spec:
   basicAuth: {secret: ${s}-login, realm: ${s}}
 EOF
                 ann="traefik.ingress.kubernetes.io/router.middlewares: ${ns}-${s}-login@kubernetescrd" ;;
-            nginx)
+            ingress-nginx)
                 cat <<EOF
 ---
 apiVersion: v1
@@ -176,6 +181,38 @@ spec:
           - {path: /, pathType: Prefix, backend: {service: {name: ${s}-dev, port: {number: ${p}}}}}
 EOF
     done
+}
+
+# k8s_expose_login_probe <namespace> <session> <port>...: whether every page asks for the login:
+# each is opened once without it and must answer 401. A controller that ignores the login (one
+# that only looks like ingress-nginx) would serve the page to anyone, so anything else fails: 2xx
+# or 3xx at once (the page answered), a 404, 5xx or no answer once AIDC_K8S_LOGIN_PROBE_WAIT
+# seconds (default 60) have passed (the controller takes a few seconds to pick a new Ingress up).
+# The page is reached at its Ingress's load balancer address when the cluster gives one (so the
+# check does not hang on this machine's DNS for the domain), else by its name. Prints
+# "<host> <last status>" for each page that did not, and returns 1 then. The certificate is not
+# checked: only the status counts.
+k8s_expose_login_probe() {
+    local ns="$1" s="$2" p h code end lb first=1 bad=0
+    shift 2
+    for p in "$@"; do
+        h=$(k8s_expose_host "$s" "$p" "$first"); first=0
+        end=$(( $(date +%s) + ${AIDC_K8S_LOGIN_PROBE_WAIT:-60} ))
+        while :; do
+            lb=$(k8s_kubectl -n "$ns" get ingress "${s}-expose-${p}" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+                --request-timeout=10s </dev/null 2>/dev/null) || lb=""
+            code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 ${lb:+--resolve "${h}:443:${lb}"} \
+                "https://${h}/" </dev/null 2>/dev/null) || true
+            code="${code:-000}"
+            case "$code" in
+                401) break ;;
+                2??|3??) printf '%s %s\n' "$h" "$code"; bad=1; break ;;
+            esac
+            if [ "$(date +%s)" -ge "$end" ]; then printf '%s %s\n' "$h" "$code"; bad=1; break; fi
+            sleep 2
+        done
+    done
+    [ "$bad" = 0 ]
 }
 
 # k8s_exposed <namespace> <session>: the session's pages, "<port> <host> <login yes|no>" per line.

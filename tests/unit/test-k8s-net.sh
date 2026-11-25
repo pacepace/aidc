@@ -58,15 +58,40 @@ assert_not_has() {
 #   relays.json   what `get deployment -l ...app=egress -o json` answers
 #   names         what the names responder was last given (exec -i ... -c names)
 #   pf.<n>        each port-forward the supervisor started
-# K_EXISTS=1 the session demo exists. K_PF_BUSY=1 port-forward cannot listen.
+#   sts_gone      present: the dev StatefulSet is not found (the session was killed elsewhere)
+# K_EXISTS=1 the session demo exists (its dev StatefulSet). K_RELAY_LEFT=1 a relay Deployment of
+# demo is left (app=egress). The workload lookup honours the selector's `app in (...)` clause, as
+# the API does. K_LEFT what clean-env's listing answers. K_EXPOSE_JSON what the session's pages
+# read answers. K_PF_BUSY=1 port-forward cannot listen.
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
+# pick: print the rows ("<app> <kind/name>" on stdin) whose app the -l selector's
+# `app in (...)` clause admits; every row when it has none.
+pick() {
+    apps=$(printf '%s\n' "$ARGS" | sed -n 's/.*,app in (\([^)]*\)).*/\1/p' | tr ',' ' ')
+    while read -r a n; do
+        [ -n "$n" ] || continue
+        if [ -z "$apps" ]; then echo "$n"; else case " $apps " in *" $a "*) echo "$n" ;; esac; fi
+    done
+}
+ARGS="$*"
 case "$*" in
+    *"get statefulset demo-dev --ignore-not-found -o name"*)
+        [ -e "$K_STATE/sts_fail" ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ -e "$K_STATE/sts_gone" ] || echo "statefulset.apps/demo-dev" ;;
+    *"get ingressclass"*) [ "${K_IC:-}" = fail ] && { echo 'Error from server (Forbidden): ingressclasses' >&2; exit 1; }
+        printf '%s' "${K_IC:-traefik.io/ingress-controller}" ;;
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"apply -f -"*) cat >> "$K_APPLIED" ;;
     *"rollout status"*) : ;;
-    *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_EXISTS:-}" = 1 ] && echo "statefulset.apps/demo-dev" ;;
+    *"get deployment,statefulset -l aidc/session=demo"*)
+        { [ "${K_EXISTS:-}" = 1 ] && echo "dev statefulset.apps/demo-dev"
+          [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
+    *"get deployment,service,networkpolicy,configmap,ingress,secret,pvc -l aidc/session=demo "*) printf '%s' "${K_LEFT:-}" ;;
+    *"get pvc -l aidc/session=demo,aidc/kept=audit -o name"*) echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
+    *"get ingress -l aidc/session=demo,app=expose -o json"*) printf '%s' "${K_EXPOSE_JSON:-}" ;;
+    *"get ingress demo-expose-"*"loadBalancer"*) printf '%s' "${K_LB:-}" ;;
     *"get deployment,statefulset -l"*) : ;;
     *"get statefulset demo-dev -o jsonpath={.metadata.annotations.aidc/audit}"*) printf 'demo-audit-20261124050000' ;;
     *"get statefulset demo-dev -o jsonpath={.metadata.annotations.aidc/ports}"*) printf '%s' "${K_PORTS:-}" ;;
@@ -78,7 +103,8 @@ case "$*" in
     *"get pod -l aidc/session=demo,app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec -i pod/demo-proxy-abc -c names"*) cat > "$K_STATE/names" ;;
     *"exec demo-dev-0 -c dev -- getent hosts"*) exit 0 ;;
-    *"get pod demo-dev-0"*"jsonpath="*) printf '%s|Running|' "$(cat "$K_STATE/uid" 2>/dev/null || echo uid1)" ;;
+    *"get pod demo-dev-0"*"jsonpath="*) u=$(cat "$K_STATE/uid" 2>/dev/null || echo uid1)
+        [ "$u" = none ] || printf '%s|Running|' "$u" ;;
     *"port-forward pod/demo-dev-0"*)
         n=$(ls "$K_STATE" | grep -c '^pf\.')
         printf '%s\n' "$*" > "$K_STATE/pf.$n"
@@ -96,6 +122,17 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/kubectl"
+# curl stub: the status the page answers without a login, from $K_STATE/codes (one per call, the
+# last one repeating), logging each URL to $K_STATE/curl.log.
+cat > "$SCRATCH/bin/curl" <<'STUB'
+#!/bin/sh
+r=""
+for a in "$@"; do case "$a" in *:443:*) r="$a " ;; https://*) echo "${r}${a}" >> "$K_STATE/curl.log" ;; esac; done
+n=$(wc -l < "$K_STATE/curl.log")
+code=$(sed -n "${n}p" "$K_STATE/codes"); [ -n "$code" ] || code=$(tail -n1 "$K_STATE/codes")
+printf '%s' "$code"
+STUB
+chmod +x "$SCRATCH/bin/curl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
     K_APPLIED="$SCRATCH/applied.yaml" K_STATE="$SCRATCH/state" PATH="$SCRATCH/bin:$PATH" \
@@ -121,6 +158,7 @@ EOF
 # shellcheck source=../../scripts/k8s/expose.sh
 . "$AIDC_SCRIPTS/k8s/expose.sh"
 k8s_load_settings
+k8s_ingress_controller_settle
 SEL='{"kubernetes.io/hostname":"n1"}'
 yj() { printf '%s\n' "$2" | yq -N ea "$1" -o=json -I=0 -; }
 
@@ -147,6 +185,9 @@ assert_eq "the relay has no DNS, no API token" '["None",["192.0.2.1"],false]' \
     "$(yj 'select(.kind == "Deployment") | .spec.template.spec | [.dnsPolicy, .dnsConfig.nameservers, .automountServiceAccountToken]' "$r")"
 assert_eq "the session reaches it by the destination's own name" '"db.lan.example.org"' \
     "$(yj 'select(.kind == "Deployment") | .metadata.annotations["aidc/egress-reach-as"]' "$r")"
+assert_eq "it runs on the node of the session's proxy pod, which holds the audit claim (RWO)" \
+    '{"podAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchLabels":{"aidc/session":"demo","app":"proxy"}},"topologyKey":"kubernetes.io/hostname"}]}}' \
+    "$(yj 'select(.kind == "Deployment") | .spec.template.spec.affinity' "$r")"
 r=$(k8s_render_relay demo 192.168.5.21 192.168.5.21 live demo-audit-1 "$SEL" 22)
 assert_eq "an IPv4 destination is reached by the relay's name, as on Docker" '"aidc-demo-egress-192-168-5-21"' \
     "$(yj 'select(.kind == "Deployment") | .metadata.annotations["aidc/egress-reach-as"]' "$r")"
@@ -241,7 +282,7 @@ assert_eq "Traefik: a basicAuth Middleware on the login Secret" '{"secret":"demo
 assert_eq "  the Ingress goes through it" '"aidc-u-alice-demo-login@kubernetescrd"' \
     "$(yj 'select(.kind == "Ingress") | .metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]' "$e")"
 assert_eq "  the Secret holds the hash" "\"$line\"" "$(yj 'select(.kind == "Secret") | .stringData.users' "$e" | sed 's/\\\$/$/g')"
-e=$(AIDC_K8S_INGRESS_CONTROLLER=nginx AIDC_K8S_INGRESS_TLS_SECRET=wild k8s_render_expose demo "$line" 8080)
+e=$(AIDC_K8S_INGRESS_CONTROLLER=ingress-nginx AIDC_K8S_INGRESS_TLS_SECRET=wild k8s_render_expose demo "$line" 8080)
 assert_eq "ingress-nginx: its auth annotations on the login Secret" '["basic","demo-login"]' \
     "$(yj 'select(.kind == "Ingress") | [.metadata.annotations["nginx.ingress.kubernetes.io/auth-type"], .metadata.annotations["nginx.ingress.kubernetes.io/auth-secret"]]' "$e")"
 assert_eq "  and no Traefik Middleware" "" "$(yj 'select(.kind == "Middleware") | .kind' "$e")"
@@ -258,21 +299,66 @@ assert_has "--expose without a domain in the config says where it goes" "kuberne
 out=$(k8s_expose_check "s$(printf 'x%.0s' $(seq 1 60))" 0 8080 2>&1)
 assert_has "a page name longer than a DNS label is refused" "longer than 63" "$out"
 
+echo "=== which controller, and is the login really there ==="
+# settle_as <IngressClass controller> [config controller]: the controller aidc settles on.
+settle_as() {
+    ( AIDC_K8S_INGRESS_CONTROLLER="${2:-}" AIDC_K8S_INGRESS_CONTROLLER_NS="" AIDC_K8S_INGRESS_CONTROLLER_LABELS=""
+      K_IC="$1" k8s_ingress_controller_settle || exit 1
+      printf '%s %s' "$AIDC_K8S_INGRESS_CONTROLLER" "$AIDC_K8S_INGRESS_CONTROLLER_NS" )
+}
+assert_eq "an IngressClass of Traefik's is Traefik" "traefik kube-system" "$(settle_as traefik.io/ingress-controller)"
+assert_eq "one of k8s.io/ingress-nginx is ingress-nginx" "ingress-nginx ingress-nginx" "$(settle_as k8s.io/ingress-nginx)"
+assert_eq "F5's NGINX (nginx.org/ingress-controller) is not: other" "other " "$(settle_as nginx.org/ingress-controller)"
+assert_eq "the class's name is never the evidence (the config's class here is traefik)" "other " "$(settle_as example.com/ingress)"
+assert_eq "the config's controller wins over the class" "ingress-nginx ingress-nginx" "$(settle_as traefik.io/ingress-controller ingress-nginx)"
+out=$(settle_as x nginx 2>&1); rc=$?
+assert_has "a config that says just nginx is refused as ambiguous" "nginx is ambiguous" "$out"
+assert_eq "  (refused)" 1 "$rc"
+out=$(settle_as fail 2>&1); rc=$?
+assert_has "an IngressClass aidc cannot read is said, not guessed" "cannot read IngressClass traefik" "$out"
+assert_eq "  (refused)" 1 "$rc"
+out=$( export AIDC_K8S_INGRESS_CONTROLLER="" AIDC_K8S_INGRESS_CONTROLLER_NS=nginx-ingress AIDC_K8S_INGRESS_CONTROLLER_LABELS='{"app":"nginx-ingress"}'
+       K_IC=nginx.org/ingress-controller k8s_expose_check demo 1 8080 2>&1 ); rc=$?
+assert_has "--login on an F5 NGINX class (its pods configured) is refused, not published without its login" "puts a login in front of a page with Traefik or ingress-nginx" "$out"
+assert_eq "  (refused)" 1 "$rc"
+: > "$K_STATE/curl.log"; echo 401 > "$K_STATE/codes"
+k8s_expose_login_probe aidc-u-alice demo 8080 3000; rc=$?
+assert_eq "the probe passes when each page answers 401 without the login" 0 "$rc"
+assert_eq "  each page opened once, by its https name" "https://demo-alice.pages.example.org/ https://demo-3000-alice.pages.example.org/" \
+    "$(paste -sd' ' "$K_STATE/curl.log")"
+: > "$K_STATE/curl.log"
+K_LB=192.168.5.80 k8s_expose_login_probe aidc-u-alice demo 8080
+assert_eq "  at its Ingress's load balancer address when the cluster gives one (not this machine's DNS)" \
+    "demo-alice.pages.example.org:443:192.168.5.80 https://demo-alice.pages.example.org/" "$(cat "$K_STATE/curl.log")"
+: > "$K_STATE/curl.log"; printf '404\n503\n401\n' > "$K_STATE/codes"
+k8s_expose_login_probe aidc-u-alice demo 8080; rc=$?
+assert_eq "a controller still picking the Ingress up (404, 503) is waited for" 0 "$rc"
+: > "$K_STATE/curl.log"; printf '404\n200\n' > "$K_STATE/codes"
+out=$(k8s_expose_login_probe aidc-u-alice demo 8080); rc=$?
+assert_eq "a page that answers 200 without the login fails the probe" 1 "$rc"
+assert_eq "  at once, saying which and what it answered" "demo-alice.pages.example.org 200" "$out"
+: > "$K_STATE/curl.log"; echo 000 > "$K_STATE/codes"
+out=$(AIDC_K8S_LOGIN_PROBE_WAIT=1 k8s_expose_login_probe aidc-u-alice demo 8080); rc=$?
+assert_eq "no 401 within the wait (here no answer) fails too" "1 demo-alice.pages.example.org 000" "${rc} ${out}"
+
 echo "=== tunnels (K8S-14) ==="
+# set_uid <uid>: the dev pod's uid, written whole (aside, then renamed) so a supervisor reading
+# it at that moment never sees an empty file, which would be "no pod".
+set_uid() { printf '%s\n' "$1" > "$K_STATE/uid.new" && mv "$K_STATE/uid.new" "$K_STATE/uid"; }
 assert_eq "N is N:N" "3000 3000" "$(k8s_port_spec 3000)"
 assert_eq "H:C" "18080 8080" "$(k8s_port_spec 18080:8080)"
 for bad in 0 70000 abc 1:2:3 :80 080; do
     if k8s_port_spec "$bad" >/dev/null 2>&1; then echo "  FAIL: '$bad' is refused"; FAIL=$((FAIL + 1)); else echo "  PASS: '$bad' is refused"; PASS=$((PASS + 1)); fi
 done
 export AIDC_K8S_TUNNEL_CHECK=1 AIDC_K8S_TUNNEL_WAIT=10
-echo uid1 > "$K_STATE/uid"; rm -f "$K_STATE"/pf.*
+set_uid uid1; rm -f "$K_STATE"/pf.*
 k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
 pid=$(k8s_tunnel_pid aidc-u-alice demo 18080) || pid=""
 assert_eq "a tunnel's supervisor runs, detached" "yes" "$([ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo yes)"
 assert_has "it runs kubectl port-forward on 127.0.0.1 only" "port-forward pod/demo-dev-0 --address 127.0.0.1 18080:8080" "$(cat "$K_STATE/pf.0" 2>/dev/null)"
 assert_eq "it is listed" "18080 8080 ${pid}" "$(k8s_tunnels aidc-u-alice demo)"
 # A new dev pod (restart, upgrade, node reboot): the forward is started again on it.
-echo uid2 > "$K_STATE/uid"
+set_uid uid2
 for _ in $(seq 1 20); do [ -e "$K_STATE/pf.1" ] && break; sleep 0.5; done
 assert_eq "a new dev pod gets a new port-forward" "yes" "$([ -e "$K_STATE/pf.1" ] && echo yes)"
 log=$(cat "$(k8s_tunnel_dir aidc-u-alice)/demo-18080.log")
@@ -291,10 +377,31 @@ assert_has "a host port in use here is said so" "localhost:18080 is taken on thi
 assert_eq "  start fails" 1 "$rc"
 assert_eq "  and leaves no supervisor" "" "$(k8s_tunnels aidc-u-alice demo)"
 
+echo "=== a tunnel whose session was killed elsewhere ==="
+export AIDC_K8S_TUNNEL_GONE_CHECKS=2
+set_uid uid1; rm -f "$K_STATE"/pf.* "$K_STATE/sts_gone" "$K_STATE/sts_fail"
+k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
+pid=$(k8s_tunnel_pid aidc-u-alice demo 18080) || pid=""
+# The dev pod goes (a restart replacing it, or a kill): while its StatefulSet is there, the
+# supervisor waits for the next pod.
+set_uid none
+sleep 4
+assert_eq "no dev pod but its StatefulSet there (a restart): the supervisor waits" "running" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+# The cluster not answering is never "the session is gone".
+touch "$K_STATE/sts_fail"; sleep 4
+assert_eq "a read of the StatefulSet that fails is not 'gone'" "running" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+rm -f "$K_STATE/sts_fail"; touch "$K_STATE/sts_gone"
+for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+assert_eq "the StatefulSet not found (aidc kill on another machine): the supervisor stops by itself" "gone" \
+    "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+assert_has "  saying why" "the session is gone (no demo-dev StatefulSet); stopping" "$(cat "$(k8s_tunnel_dir aidc-u-alice)/demo-18080.log")"
+assert_eq "  and the tunnel is forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
+rm -f "$K_STATE/sts_gone"; unset AIDC_K8S_TUNNEL_GONE_CHECKS
+
 run() { : > "$K_APPLIED"; : > "$K_LOG"; (cd "$HOME" && "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null); echo "exit=$?"; }
 
 echo "=== aidc proxy on Kubernetes ==="
-echo uid1 > "$K_STATE/uid"; rm -f "$K_STATE"/pf.*
+set_uid uid1; rm -f "$K_STATE"/pf.*
 out=$(K_EXISTS=1 run proxy demo add 18080:8080)
 assert_has "add starts a tunnel" "tunnel: localhost:18080 -> demo:8080" "$out"
 out=$(K_EXISTS=1 K_PORTS=18080:8080 run proxy demo ls)
@@ -342,6 +449,21 @@ out=$(K_EXISTS=1 run network demo add shop)
 assert_has "add lets the session reach the namespace" "network: demo -> every pod of shop, any port" "$out"
 assert_has "  says it bypasses squid" "NOT proxied by squid" "$out"
 assert_has "  by its own policy" "name: demo-net-shop" "$(cat "$K_APPLIED")"
+# A Service made in shop later: the names are read again on sync, and on add of shop again.
+echo '{"items":[{"metadata":{"annotations":{"aidc/network":"shop"}}}]}' > "$K_STATE/nets.json"
+rm -f "$K_STATE/names"
+out=$(K_EXISTS=1 run network demo sync)
+assert_has "sync reads the given namespaces' Services again" "-n shop get service -o json" "$(cat "$K_LOG")"
+assert_has "  and writes them into the responder" "10.45.8.8 db.shop db.shop.svc db.shop.svc.cluster.local" "$(cat "$K_STATE/names" 2>/dev/null)"
+assert_has "  saying so" "as they are now" "$out"
+rm -f "$K_STATE/names"
+out=$(K_EXISTS=1 run network demo add shop)
+assert_has "add of a namespace already given reads its Services again" "reading its Services again" "$out"
+assert_has "  into the responder" "10.45.8.8 db.shop" "$(cat "$K_STATE/names" 2>/dev/null)"
+assert_eq "  and changes no policy" "" "$(cat "$K_APPLIED")"
+out=$(K_EXISTS=1 run network demo --help)
+assert_has "help says the names are read on create, add, rm, sync and egress changes" "resolves after the next sync" "$out"
+rm -f "$K_STATE/nets.json"
 
 echo "=== aidc create: the new flags ==="
 mkdir -p "$HOME/code/p"
@@ -372,6 +494,55 @@ out=$(K_EXISTS=1 run clean-env demo --yes --backend kubernetes)
 assert_has "a running session is refused (aidc kill is for that)" "is running: aidc kill demo" "$out"
 out=$(run clean-env demo --project /x --backend kubernetes)
 assert_has "--project is the Docker backend's" "--project is the Docker backend's" "$out"
+
+# What a session left behind: a relay (app=egress, so not the session), a page with a
+# cert-manager certificate, a claim; and a tunnel on this machine.
+export K_EXPOSE_JSON='{"items":[{"metadata":{"annotations":{"cert-manager.io/cluster-issuer":"le"}},"spec":{"tls":[{"hosts":["demo-alice.pages.example.org"],"secretName":"demo-expose-8080-tls"}]}}]}'
+export K_LEFT='Deployment/demo-egress-db-lan-example-org
+Ingress/demo-expose-8080
+PersistentVolumeClaim/demo-home
+'
+set_uid uid1; rm -f "$K_STATE"/pf.*
+k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
+pid=$(k8s_tunnel_pid aidc-u-alice demo 18080) || pid=""
+for answer in n "" yes; do
+    : > "$K_LOG"
+    out=$( (cd "$HOME" && printf '%s\n' "$answer" | K_RELAY_LEFT=1 "$AIDC_ROOT/scripts/aidc" clean-env demo --backend kubernetes 2>&1); echo "exit=$?")
+    assert_has "clean-env lists what is left before asking (answer '${answer}')" "Ingress/demo-expose-8080" "$out"
+    assert_has "  this machine's tunnel too" "tunnel localhost:18080 (this machine)" "$out"
+    assert_has "  any answer but y removes nothing" "aborted" "$out"
+    assert_eq "  (no delete issued)" "" "$(grep ' delete ' "$K_LOG")"
+    assert_eq "  (the tunnel still runs)" "running" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+done
+: > "$K_LOG"
+out=$( (cd "$HOME" && printf 'y\n' | K_RELAY_LEFT=1 "$AIDC_ROOT/scripts/aidc" clean-env demo --backend kubernetes 2>&1); echo "exit=$?")
+assert_has "a session whose relay alone is left is not 'running': y removes what is left" "removed what demo left behind" "$out"
+assert_eq "  exactly these deletes: the pages, login, certificate, then the session's objects, then its claims but the kept audit one" \
+"-n aidc-u-alice delete ingress,secret -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete middlewares.traefik.io -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found
+-n aidc-u-alice delete deployment,service,networkpolicy,configmap -l aidc/session=demo --ignore-not-found
+-n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --ignore-not-found --wait=false" \
+    "$(grep ' delete ' "$K_LOG")"
+assert_eq "  this machine's tunnel is stopped" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
+
+echo "=== kill on Kubernetes: the pages and this machine's tunnels ==="
+set_uid uid1; rm -f "$K_STATE"/pf.*
+k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1
+pid=$(k8s_tunnel_pid aidc-u-alice demo 18080) || pid=""
+out=$(K_EXISTS=1 run kill demo --backend kubernetes)
+assert_has "kill says which tunnels it stopped" "stopped this machine's tunnels on localhost:18080" "$out"
+assert_eq "  the supervisor is gone" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
+assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
+assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one" \
+"-n aidc-u-alice delete ingress,secret -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete middlewares.traefik.io -l aidc/session=demo,app=expose --ignore-not-found
+-n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found
+-n aidc-u-alice delete statefulset,deployment,service,networkpolicy,configmap -l aidc/session=demo --wait=true
+-n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --wait=false" \
+    "$(grep ' delete ' "$K_LOG")"
+unset K_EXPOSE_JSON K_LEFT
 
 echo
 echo "passed: $PASS  failed: $FAIL"

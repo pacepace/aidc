@@ -847,7 +847,8 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   drops or the dev pod is replaced (restart, upgrade, a node reboot). `aidc proxy <name>
   add|rm|ls|clear` manages tunnels on this machine; `aidc proxy <name> up` starts the session's
   declared ports on another machine. Logs: `~/.local/state/aidc/tunnels/`. `aidc kill` stops
-  them, and `aidc status` lists them.
+  them, and `aidc status` lists them; a tunnel on another machine stops by itself once the
+  session is gone.
 - **A page on your network:** `--expose <port>` serves the port through the cluster's ingress at
   `<name>-<user>.<domain>` (a further port: `<name>-<port>-<user>.<domain>`), only the ingress
   controller's pods being let in to it. No login unless you add `--login`, which prints a
@@ -868,9 +869,11 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   instead of Quad9. Squid still refuses private addresses, so a resolver's internal names are
   refused, not reached: reach an internal service with `--egress-tcp`, whose names this machine
   resolves.
-- **`--network <namespace>`** (and `networks:`) and `aidc network <name> add|rm|ls`: the session
-  may reach every pod of that namespace on any port, and its Services by name
-  (`<svc>.<namespace>`). Like Docker's `--network` this widens the sandbox: that traffic does
+- **`--network <namespace>`** (and `networks:`) and `aidc network <name> add|rm|ls|sync`: the
+  session may reach every pod of that namespace on any port, and its Services by name
+  (`<svc>.<namespace>`). The names are read at create and on each `add`, `rm`, `sync` and egress
+  change: a Service made there later resolves after `aidc network <name> sync` (its pods are
+  reachable by address at once). Like Docker's `--network` this widens the sandbox: that traffic does
   not pass Squid. aidc's own namespaces and the cluster's system ones are refused, and that
   namespace's own NetworkPolicies may still refuse.
 - `aidc clean-env <name> --backend kubernetes` removes what a session that is no longer running
@@ -917,8 +920,10 @@ kubernetes:
     tls_secret: ""               # a TLS Secret in your namespace, or
     cluster_issuer: ""           # a cert-manager ClusterIssuer; neither: the controller's default
                                  # certificate (a wildcard one serves every page)
-    controller: ""               # traefik | nginx | other (default from the class name): how a
-                                 # --login is put in front
+    controller: ""               # traefik | ingress-nginx | other (default: the IngressClass's
+                                 # spec.controller, matched exactly): how a --login is put in
+                                 # front. create then opens each page once without the login and
+                                 # removes it again unless it answers 401
     controller_namespace: ""     # the controller's pods, the only ones let in to a page (default
     controller_labels: {}        # kube-system + app.kubernetes.io/name=traefik for Traefik, as
                                  # k3s installs it; ingress-nginx + app.kubernetes.io/name=ingress-nginx)

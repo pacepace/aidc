@@ -68,8 +68,18 @@ exit 0
 STUB
 cat > "$S/bin/kubectl" <<'STUB'
 #!/bin/sh
+# pick: print the rows ("<app> <kind/name>" on stdin) whose app the -l selector's
+# `app in (...)` clause admits (every row when it has none), as the API does.
+pick() {
+    apps=$(printf '%s\n' "$ARGS" | sed -n 's/.*,app in (\([^)]*\)).*/\1/p' | tr ',' ' ')
+    while read -r a n; do
+        [ -n "$n" ] || continue
+        if [ -z "$apps" ]; then echo "$n"; else case " $apps " in *" $a "*) echo "$n" ;; esac; fi
+    done
+}
+ARGS="$*"
 case "$*" in
-    *"get deployment,statefulset -l aidc/session=s "*|*"get deployment,statefulset -l aidc/session=s"*) echo "deployment.apps/s-proxy" ;;
+    *"get deployment,statefulset -l aidc/session=s"*) echo "proxy deployment.apps/s-proxy" | pick ;;
     *"get statefulset s-dev -o json"*) echo '{"metadata":{"annotations":{}}}' ;;
     *"get pod -l aidc/session=s,app=proxy"*) echo "pod/s-proxy-abc" ;;
     *"exec pod/s-proxy-abc -c refresher"*"aidc-feeds.state"*)

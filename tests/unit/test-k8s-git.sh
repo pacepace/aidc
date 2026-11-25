@@ -66,6 +66,16 @@ assert_not_has() {
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
+# pick: print the rows ("<app> <kind/name>" on stdin) whose app the -l selector's
+# `app in (...)` clause admits (every row when it has none), as the API does.
+pick() {
+    apps=$(printf '%s\n' "$ARGS" | sed -n 's/.*,app in (\([^)]*\)).*/\1/p' | tr ',' ' ')
+    while read -r a n; do
+        [ -n "$n" ] || continue
+        if [ -z "$apps" ]; then echo "$n"; else case " $apps " in *" $a "*) echo "$n" ;; esac; fi
+    done
+}
+ARGS="$*"
 [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
 case "$*" in
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
@@ -83,7 +93,7 @@ case "$*" in
     *"exec git-7d9f-abc -c git -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
     *"exec git-7d9f-abc -c git -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
     *"exec -i git-7d9f-abc -c git -- git-requests mode"*) cat > "$K_STDIN"; echo "mode set" ;;
-    *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_NO_SESSION:-}" = 1 ] || echo "statefulset.apps/demo-dev" ;;
+    *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_NO_SESSION:-}" = 1 ] || echo "dev statefulset.apps/demo-dev" | pick ;;
     *"get statefulset demo-dev -o jsonpath"*) printf '%s' "${K_TOKEN-$(printf 'f%.0s' $(seq 64))}" ;;
     *"exec git-7d9f-abc -c git -- gitctl"*|*"exec -i git-7d9f-abc -c git -- bash -c"*|*"exec git-7d9f-abc -c git -- git-requests"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }

@@ -616,11 +616,13 @@ survived `aidc restart`; `getent hosts github.com` still failed.
   a session's proxy says the user chose it (`AIDC_DNS_USER_CHOSEN=1`), and squid's address check
   still refuses every private answer. So on this backend `--dns` changes which resolver answers
   public names; an internal name is reached with `--egress-tcp`, resolved on the user's machine.
-- `--network <namespace>` (and `networks:`; live: `aidc network <s> add|rm|ls`): Docker attaches
+- `--network <namespace>` (and `networks:`; live: `aidc network <s> add|rm|ls|sync`): Docker attaches
   the dev container to another stack's bridge; here a NetworkPolicy lets the dev pod open every
   pod of that namespace on any port, and the names responder serves its Services as
-  `<svc>.<ns>[.svc[.cluster.local]]`. It widens the sandbox the same way (not through squid,
-  invisible to taint). The user's own namespace (the git login, other sessions), aidc's other
+  `<svc>.<ns>[.svc[.cluster.local]]`, as read at create and on each `aidc network` add, rm or
+  sync and each egress change (the proxy pod holds no API token to read them itself, so a Service
+  made later resolves after `aidc network <s> sync`). It widens the sandbox the same way (not
+  through squid, invisible to taint). The user's own namespace (the git login, other sessions), aidc's other
   namespaces and the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`,
   `default`) are refused. Measured: a session given a scratch namespace fetched its web Service by
   name; cluster DNS stayed refused.
@@ -649,7 +651,9 @@ Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeat
   that is gone does not always exit by itself). Works from anywhere the user reaches the cluster.
   The declared ports are recorded on the dev StatefulSet's metadata (`aidc/ports`), so `aidc
   proxy <s> up` starts them on another machine (K8S-21) and `aidc status` lists them with this
-  machine's tunnels; `aidc kill` stops this machine's. Measured 2026-11-24: the port answered on
+  machine's tunnels; `aidc kill` stops this machine's, and a supervisor elsewhere stops by itself
+  once the dev StatefulSet is not found for three checks running (a restart keeps it; a failed
+  read is not "gone"). Measured 2026-11-24: the port answered on
   localhost, and again by itself after `aidc restart` replaced the dev pod.
 - **Home network** (K8S-15, optional at create): `--expose <port>` makes a ClusterIP Service for
   the dev pod, an Ingress per port at `<session>-<user>.<domain>` (further ports
@@ -661,7 +665,11 @@ Measured 2026-11-24 on the reference cluster (`tests/smoke/k8s.sh` step 3 repeat
   password, prints them once, keeps only an htpasswd (apr1) hash in a Secret, and puts it in
   front of every page by the controller's own mechanism: a Traefik basicAuth Middleware, or
   ingress-nginx's auth annotations. Another controller refuses `--login` rather than serve the
-  page without the login asked for. A page name another Ingress already serves is refused. Needs
+  page without the login asked for. Which controller it is comes from `kubernetes.ingress.controller`
+  or else the IngressClass's `spec.controller` matched exactly (`traefik.io/ingress-controller`,
+  `k8s.io/ingress-nginx`), never the class's name (F5's NGINX controller also defaults to a class
+  named `nginx` and ignores ingress-nginx's annotations); and create opens each page once
+  without the login afterwards, removing the pages and failing unless each answers 401. A page name another Ingress already serves is refused. Needs
   DNS that points the domain's names at the ingress (a wildcard record); a phone reaches it over
   whatever network or VPN already reaches the cluster. `aidc kill` removes the Ingresses,
   Service, policy, login (and a cert-manager certificate made for them). Measured 2026-11-24 on

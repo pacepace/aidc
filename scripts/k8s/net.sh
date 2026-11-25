@@ -113,6 +113,14 @@ spec:
       enableServiceLinks: false
       nodeSelector: ${sel}
       tolerations: ${AIDC_K8S_TOLERATIONS}
+      # It mounts the session's audit claim (ReadWriteOnce), which the proxy pod holds: on the
+      # proxy pod's node, so a node pool with more than one node does not leave it waiting on
+      # a second attach.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {aidc/session: ${session}, app: proxy}}
+              topologyKey: kubernetes.io/hostname
       # It connects to an address, never a name: no DNS at all.
       dnsPolicy: None
       dnsConfig: {nameservers: [192.0.2.1]}

@@ -7,6 +7,9 @@
 # replaced: a port-forward to a pod that is gone does not always exit by itself, so the
 # supervisor watches the pod's uid and restarts the forward when it changes. Between attempts it
 # waits a little longer each time (up to 10 s). TERM stops the forward and the supervisor.
+# When the session itself is gone (its dev StatefulSet not found, a few checks running: an
+# `aidc kill` made on another machine), the supervisor stops by itself; a restart or upgrade keeps
+# the StatefulSet, and a read that fails (the cluster not answering) is never "gone".
 
 set -uo pipefail
 : "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}"
@@ -39,14 +42,34 @@ pod_uid() {
         | awk -F'|' '$2 == "Running" && $3 == "" { print $1 }'
 }
 
+# session_gone: 0 when the API says the dev StatefulSet does not exist; 1 when it exists or the
+# read failed.
+session_gone() {
+    local out
+    out=$(k8s_kubectl -n "$NS" get statefulset "${S}-dev" --ignore-not-found -o name --request-timeout=10s \
+        </dev/null 2>/dev/null) || return 1
+    [ -z "$out" ]
+}
+
 # nap <seconds>: a sleep TERM interrupts (a foreground sleep would hold the trap until it ends).
 nap() { sleep "$1" & wait $! 2>/dev/null; }
 
-wait_s=1
+wait_s=1 gone=0
+GONE_CHECKS="${AIDC_K8S_TUNNEL_GONE_CHECKS:-3}"
 say "started"
 while :; do
     uid=$(pod_uid)
     if [ -z "$uid" ]; then
+        if session_gone; then
+            gone=$((gone + 1))
+            if [ "$gone" -ge "$GONE_CHECKS" ]; then
+                say "the session is gone (no ${S}-dev StatefulSet); stopping"
+                rm -f "$PIDFILE" "${PIDFILE%.pid}.spec"
+                exit 0
+            fi
+        else
+            gone=0
+        fi
         nap "$wait_s"
         [ "$wait_s" -ge 10 ] || wait_s=$((wait_s + 1))
         continue

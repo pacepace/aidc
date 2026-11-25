@@ -314,6 +314,7 @@ k8s_wait_dev_ready "$ns" "$NAME" "" "${AIDC_K8S_READY_WAIT:-600}" \
     || die "the dev pod did not report ready; its log: kubectl -n ${ns} logs ${pod} -c dev"
 info "session ${NAME} is ready"
 # Pages on the network (K8S-15): the login, when asked for, is made here and printed once.
+EXPOSE_FAILED=0
 if [ -n "$EXPOSE_PORTS" ]; then
     htpasswd="" login_user="" login_pw=""
     if [ "$LOGIN" = 1 ]; then
@@ -323,14 +324,32 @@ if [ -n "$EXPOSE_PORTS" ]; then
     fi
     # shellcheck disable=SC2086  # one port per word
     k8s_render_expose "$NAME" "$htpasswd" $EXPOSE_PORTS | k8s_kubectl apply -f - >&2
-    first=1
-    for _p in $EXPOSE_PORTS; do
-        info "page: https://$(k8s_expose_host "$NAME" "$_p" "$first")/ -> ${NAME}:${_p}"; first=0
-    done
+    # A login asked for is checked, not assumed: each page is opened once without it and must
+    # answer 401. One that does not is removed again, the session kept, and create fails.
     if [ "$LOGIN" = 1 ]; then
-        info "login for these pages (shown once, kept only as a hash): user ${login_user}  password ${login_pw}"
-    else
-        info "  no login: anyone on your network can open these pages"
+        info "checking each page asks for the login"
+        # shellcheck disable=SC2086  # one port per word
+        if ! unlocked=$(k8s_expose_login_probe "$ns" "$NAME" $EXPOSE_PORTS); then
+            k8s_expose_remove "$ns" "$NAME" || true
+            while read -r _h _code; do
+                [ -n "$_h" ] || continue
+                err "https://${_h}/ answered ${_code} without the login, not 401 (000: no answer reached this machine)"
+            done <<<"$unlocked"
+            err "the pages were REMOVED: the ingress controller did not put the login in front of them"
+            err "  (kubernetes.ingress.controller is ${AIDC_K8S_INGRESS_CONTROLLER}; is IngressClass ${AIDC_K8S_INGRESS_CLASS} really that controller, and does this machine resolve and reach the domain?)"
+            EXPOSE_FAILED=1
+        fi
+    fi
+    if [ "$EXPOSE_FAILED" != 1 ]; then
+        first=1
+        for _p in $EXPOSE_PORTS; do
+            info "page: https://$(k8s_expose_host "$NAME" "$_p" "$first")/ -> ${NAME}:${_p}"; first=0
+        done
+        if [ "$LOGIN" = 1 ]; then
+            info "login for these pages (shown once, kept only as a hash): user ${login_user}  password ${login_pw}"
+        else
+            info "  no login: anyone on your network can open these pages"
+        fi
     fi
 fi
 # Tunnels (K8S-14) to this machine.
@@ -352,3 +371,7 @@ else
     info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"
 fi
 info "attach: aidc attach ${NAME} --backend kubernetes (or: kubectl -n ${ns} exec -it ${pod} -c dev -- sudo -u vscode tmux attach -t main)"
+if [ "$EXPOSE_FAILED" = 1 ]; then
+    err "session ${NAME} runs, but WITHOUT its pages: the login could not be confirmed (see above)"
+    exit 1
+fi

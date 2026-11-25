@@ -72,8 +72,8 @@ _k8s_cfg_json() {
 #                           user's, never aidc's), _CLASS the IngressClass, _TLS_SECRET a TLS
 #                           Secret in the user's namespace or _CLUSTER_ISSUER a cert-manager
 #                           ClusterIssuer (neither: the controller's default certificate),
-#                           _CONTROLLER traefik | nginx | other (how a login is put in front;
-#                           default from the class name), _CONTROLLER_NS and _CONTROLLER_LABELS
+#                           _CONTROLLER traefik | ingress-nginx | other (how a login is put in
+#                           front; default from the IngressClass's spec.controller), _CONTROLLER_NS and _CONTROLLER_LABELS
 #                           (JSON) the controller's pods, the only ones let in to an exposed port
 k8s_load_settings() {
     local cfg
@@ -121,25 +121,13 @@ k8s_load_settings() {
     AIDC_K8S_INGRESS_CLASS=$(_k8s_cfg '.kubernetes.ingress.class')
     AIDC_K8S_INGRESS_TLS_SECRET=$(_k8s_cfg '.kubernetes.ingress.tls_secret')
     AIDC_K8S_INGRESS_CLUSTER_ISSUER=$(_k8s_cfg '.kubernetes.ingress.cluster_issuer')
+    # The controller is never guessed from the class name: a class called "nginx" may be F5's
+    # NGINX, which ignores ingress-nginx's login annotations. Unset, the IngressClass's own
+    # spec.controller says which (k8s_ingress_controller_settle, when a page is made).
     AIDC_K8S_INGRESS_CONTROLLER=$(_k8s_cfg '.kubernetes.ingress.controller')
-    if [ -z "$AIDC_K8S_INGRESS_CONTROLLER" ]; then
-        case "$AIDC_K8S_INGRESS_CLASS" in
-            *traefik*) AIDC_K8S_INGRESS_CONTROLLER=traefik ;;
-            *nginx*) AIDC_K8S_INGRESS_CONTROLLER=nginx ;;
-            *) AIDC_K8S_INGRESS_CONTROLLER=other ;;
-        esac
-    fi
-    # Where the controller's pods run, by its usual install (k3s puts Traefik in kube-system).
     AIDC_K8S_INGRESS_CONTROLLER_NS=$(_k8s_cfg '.kubernetes.ingress.controller_namespace')
     AIDC_K8S_INGRESS_CONTROLLER_LABELS=$(_k8s_cfg_json '.kubernetes.ingress.controller_labels' '')
-    case "$AIDC_K8S_INGRESS_CONTROLLER" in
-        traefik)
-            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-kube-system}"
-            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"traefik\"\}}" ;;
-        nginx)
-            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-ingress-nginx}"
-            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"ingress-nginx\"\}}" ;;
-    esac
+    _k8s_ingress_controller_defaults
     export AIDC_K8S_CONFIGURED AIDC_K8S_CONTEXT AIDC_K8S_KUBECONFIG AIDC_K8S_PREFIX AIDC_K8S_USER \
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
@@ -150,6 +138,47 @@ k8s_load_settings() {
         AIDC_K8S_INGRESS_DOMAIN AIDC_K8S_INGRESS_CLASS AIDC_K8S_INGRESS_TLS_SECRET \
         AIDC_K8S_INGRESS_CLUSTER_ISSUER AIDC_K8S_INGRESS_CONTROLLER AIDC_K8S_INGRESS_CONTROLLER_NS \
         AIDC_K8S_INGRESS_CONTROLLER_LABELS
+}
+
+# _k8s_ingress_controller_defaults: where the controller's pods run, by its usual install (k3s
+# puts Traefik in kube-system), unless the config names them.
+_k8s_ingress_controller_defaults() {
+    case "$AIDC_K8S_INGRESS_CONTROLLER" in
+        traefik)
+            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-kube-system}"
+            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"traefik\"\}}" ;;
+        ingress-nginx)
+            AIDC_K8S_INGRESS_CONTROLLER_NS="${AIDC_K8S_INGRESS_CONTROLLER_NS:-ingress-nginx}"
+            AIDC_K8S_INGRESS_CONTROLLER_LABELS="${AIDC_K8S_INGRESS_CONTROLLER_LABELS:-{\"app.kubernetes.io/name\":\"ingress-nginx\"\}}" ;;
+    esac
+}
+
+# k8s_ingress_controller_settle: AIDC_K8S_INGRESS_CONTROLLER from the config, or else from the
+# IngressClass's spec.controller, matched exactly: k8s.io/ingress-nginx is ingress-nginx,
+# traefik.io/ingress-controller is Traefik, anything else (F5 NGINX's nginx.org/ingress-controller
+# among them) is "other". Returns 1, saying why on stderr, for a controller value aidc does not
+# know or an IngressClass it could not read.
+k8s_ingress_controller_settle() {
+    local c
+    case "$AIDC_K8S_INGRESS_CONTROLLER" in
+        traefik|ingress-nginx|other) _k8s_ingress_controller_defaults; return 0 ;;
+        nginx) printf 'kubernetes.ingress.controller: nginx is ambiguous: say ingress-nginx (the Kubernetes project'"'"'s controller) or other (F5 NGINX and the rest)\n' >&2; return 1 ;;
+        '') ;;
+        *) printf 'kubernetes.ingress.controller %s: expected traefik, ingress-nginx or other\n' "'$AIDC_K8S_INGRESS_CONTROLLER'" >&2; return 1 ;;
+    esac
+    [ -n "$AIDC_K8S_INGRESS_CLASS" ] || return 0
+    if ! c=$(k8s_kubectl get ingressclass "$AIDC_K8S_INGRESS_CLASS" -o jsonpath='{.spec.controller}' \
+            --request-timeout=10s </dev/null 2>&1); then
+        printf 'cannot read IngressClass %s to tell its controller (%s): set kubernetes.ingress.controller in your config\n' \
+            "$AIDC_K8S_INGRESS_CLASS" "$(printf '%s' "$c" | tail -n1)" >&2
+        return 1
+    fi
+    case "$c" in
+        k8s.io/ingress-nginx) AIDC_K8S_INGRESS_CONTROLLER=ingress-nginx ;;
+        traefik.io/ingress-controller) AIDC_K8S_INGRESS_CONTROLLER=traefik ;;
+        *) AIDC_K8S_INGRESS_CONTROLLER=other ;;
+    esac
+    _k8s_ingress_controller_defaults
 }
 
 # k8s_kubectl <args...>: kubectl against the configured cluster.

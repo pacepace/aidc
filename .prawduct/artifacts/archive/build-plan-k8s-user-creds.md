@@ -16,7 +16,13 @@ governed_by:
       - "bash CLI, shellcheck, shell tests stub kubectl on PATH → conforms"
       - "no private names in the repo → conforms (the owner's cluster values stay in their private repos)"
 partition: serial, one subagent (this wave, W-K5 of plan-aidc-2.0); the main agent runs the Critic
+lifecycle: completed
+archived: 2026-11-25
+unbuilt_at_archive: 5 of 5 chunks not done (Chunk 01, Chunk 02, Chunk 03, …) — the scope shipped, but this plan did not finish with it
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — per-user cluster credentials (W-K5)
 

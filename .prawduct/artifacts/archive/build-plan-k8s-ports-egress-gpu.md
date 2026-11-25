@@ -18,7 +18,13 @@ governed_by:
       - "no private names in the repo (cluster, nodes, domains, other projects) → conforms: the wildcard domain, ingress class and TLS source live only in the user's config; tests and docs use example.org names; every added line is grepped before commit"
       - "supply-chain cooldown (REL-09) → conforms: dnsmasq comes from the forwarder image's pinned alpine base, like socat"
 partition: serial, one delegate on this branch (every chunk touches scripts/k8s/manifests.sh and session-create.sh); the main agent runs the Critic and integrates
+lifecycle: completed
+archived: 2026-11-25
+unbuilt_at_archive: 5 of 5 chunks not done (Chunk 01, Chunk 02, Chunk 03, …) — the scope shipped, but this plan did not finish with it
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build Plan — Kubernetes ports, LAN pages, TCP egress, GPU, DNS and networks (W-K2)
 

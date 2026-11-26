@@ -245,16 +245,17 @@ pr_base() {
     printf '%s\n' "$base"
 }
 
-ALLOWED='["version","id","session","action","repo","worktree","branch","base","title","body","number","state","head","created","token","method","path","input","include","etag"]'
-FIELDS=(version id session action repo worktree branch base title body number state head token method path input include etag)
+ALLOWED='["version","id","session","action","repo","worktree","branch","base","title","body","number","state","head","created","token","method","path","input","headers","etag"]'
+FIELDS=(version id session action repo worktree branch base title body number state head token method path input headers etag)
 # The request's fields, set by check and load (printf -v Q_<field>). Q_slug, Q_sha, Q_mode and
 # Q_kind are not the session's: check records them (the repo and the branch's commit when the
 # request is taken, the mode that applies to it, and whether an api call reads or writes). The
 # token is checked, then dropped: never saved. method, path, input (a write's JSON body),
-# include and etag are an api request's (GIT-07: the issue-scoped GitHub API passthrough).
+# headers (1: read with its headers) and etag are an api request's (GIT-07: the issue-scoped
+# GitHub API passthrough). The field is not "include", a word jq keeps for itself.
 Q_version="" Q_id="" Q_session="" Q_action="" Q_repo="" Q_worktree="" Q_branch="" Q_base=""
 Q_title="" Q_body="" Q_number="" Q_state="" Q_head="" Q_token="" Q_received="" Q_slug="" Q_sha="" Q_mode=""
-Q_method="" Q_path="" Q_input="" Q_include="" Q_etag="" Q_kind=""
+Q_method="" Q_path="" Q_input="" Q_headers="" Q_etag="" Q_kind=""
 MAX_API_BYTES=8388608
 
 # In the request folder (relative: every verb that reads it enters the folder first).
@@ -299,7 +300,7 @@ check() {
     if ! mapfile -t lines < <(printf '%s' "$raw" | jq -r --argjson allowed "$ALLOWED" '
             if type != "object" then error("not an object") else . end
             | if ((keys - $allowed) | length) > 0 then error("unknown field") else . end
-            | [.version, .id, .session, .action, .repo, .worktree, .branch, .base, .title, .body, .number, .state, .head, .token, .method, .path, .input, .include, .etag]
+            | [.version, .id, .session, .action, .repo, .worktree, .branch, .base, .title, .body, .number, .state, .head, .token, .method, .path, .input, .headers, .etag]
             | map(if . == null then "" elif type == "string" or type == "number" then tostring else error("not text") end)
             | .[] | @base64' 2>/dev/null) || [ ${#lines[@]} != ${#FIELDS[@]} ]; then
         WHY="not a request: a JSON object with only known, text fields"; return 1
@@ -309,7 +310,7 @@ check() {
         printf -v "Q_${FIELDS[$i]}" '%s' "$v"
     done
     # Control characters: none anywhere but newline, tab and CR in the body.
-    for i in version id session action repo worktree branch base title number state head token method path include etag; do
+    for i in version id session action repo worktree branch base title number state head token method path headers etag; do
         v="Q_${i}"
         # Counted, not captured: a command substitution would drop a trailing newline.
         if [ "$(printf '%s' "${!v}" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then WHY="${i} has control characters"; return 1; fi
@@ -325,7 +326,7 @@ check() {
     Q_mode=$(mode_for "$Q_session" "$Q_token") Q_token=""
     case "$Q_action" in push|pr-create|pr-merge|pr-view|pr-list|api) ;; *) WHY="action: not one of push, pr-create, pr-merge, pr-view, pr-list, api"; return 1 ;; esac
     if [ "$Q_action" = api ]; then check_api; return; fi
-    for i in method path input include etag; do
+    for i in method path input headers etag; do
         v="Q_${i}"; [ -z "${!v}" ] || { WHY="${i}: only an api request has one"; return 1; }
     done
     path_ok "$Q_repo" || { WHY="repo: not a folder on the user's disk"; return 1; }
@@ -373,9 +374,9 @@ check_api() {
     Q_repo="" Q_worktree=""
     gitctl_api_check "$REAL_GIT" "$Q_method" "$Q_path" || { WHY="$GITCTL_REASON"; return 1; }
     Q_path="$GITCTL_API_PATH" Q_slug="$GITCTL_API_SLUG" Q_kind="$GITCTL_API_KIND" Q_sha=""
-    case "$Q_include" in ""|1) ;; *) WHY="include: not 1"; return 1 ;; esac
-    if [ -n "$Q_etag" ]; then gitctl_api_etag "$Q_etag" || { WHY="$GITCTL_REASON"; return 1; }; Q_include=1; fi
-    [ -z "$Q_include" ] || [ "$Q_method" = GET ] || { WHY="only a GET is read with its headers"; return 1; }
+    case "$Q_headers" in ""|1) ;; *) WHY="headers: not 1"; return 1 ;; esac
+    if [ -n "$Q_etag" ]; then gitctl_api_etag "$Q_etag" || { WHY="$GITCTL_REASON"; return 1; }; Q_headers=1; fi
+    [ -z "$Q_headers" ] || [ "$Q_method" = GET ] || { WHY="only a GET is read with its headers"; return 1; }
     Q_input=$(gitctl_api_body "$GITCTL_API_BODY" "$Q_input") || { WHY="$GITCTL_REASON"; return 1; }
 }
 
@@ -387,7 +388,7 @@ save() {
     jq -n "${a[@]}" --arg received "$(now)" --arg slug "$Q_slug" --arg sha "$Q_sha" --arg mode "$Q_mode" --arg kind "$Q_kind" \
         '{version: 1, id: $id, session: $session, action: $action, repo: $repo, worktree: $worktree,
           branch: $branch, base: $base, title: $title, body: $body, number: $number, state: $state,
-          head: $head, method: $method, path: $path, input: $input, include: $include, etag: $etag,
+          head: $head, method: $method, path: $path, input: $input, headers: $headers, etag: $etag,
           received: $received, slug: $slug, sha: $sha, mode: $mode, kind: $kind}' > "work/${1}.json.tmp" \
         && mv -f -- "work/${1}.json.tmp" "work/${1}.json"
 }
@@ -506,7 +507,7 @@ run() {
     case "$Q_action" in
         api)
             local opts=()
-            [ -z "$Q_include" ] || opts+=(--include)
+            [ -z "$Q_headers" ] || opts+=(--include)
             [ -z "$Q_etag" ] || opts+=(--if-none-match "$Q_etag")
             out=$(printf '%s' "$Q_input" | "$GITCTL" api "$Q_method" "$Q_path" ${opts[@]+"${opts[@]}"} "${ASK[@]}" 2>"work/${id}.err") || rc=$?
             R_STDOUT=$(printf '%s' "$out" | printable "$MAX_API_BYTES")

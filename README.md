@@ -700,7 +700,10 @@ must be inside the working copy, and the session must have been created after `a
 or created again, to get the request folder). Its `gh` is aidc's stand-in, not GitHub's CLI:
 `gh pr create` (pushing the branch first), `gh aidc push`, `gh pr merge` (merge commit only),
 `gh pr view`, `gh pr list` and `gh pr status` become requests the git container answers, so
-`/prawduct:pr` and plain `gh pr create` work unchanged. `git push` in a session fails and says to
+`/prawduct:pr` and plain `gh pr create` work unchanged. GitHub issues work the same way:
+`gh issue list|view|create|edit|comment|close|reopen` and `gh api` on the issue endpoints (what
+prawduct's backlog uses) run at once, on repos you added, with no AI attribution, and never
+delete, transfer or lock an issue. `git push` in a session fails and says to
 use `gh pr create`. The stand-in waits up to a minute for the answer, then prints
 "requested; waiting for approval" with the request's id (`gh aidc request <id>` reads it later);
 when the git container has not taken the request at all it says so instead, and fails.

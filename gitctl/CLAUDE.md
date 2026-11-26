@@ -90,6 +90,10 @@ its own path on their machine (`$AIDC_GIT_DISK` is their home).
   allowed, tell the user and offer the command that turns them on, for them to run:
   `aidc git protect <repo>` (it only adds protections, never removes any).
 - **Fetch**: `gitctl fetch <repo>` brings origin's branches into a working copy.
+- **Issues**: `gh issue list|view|create|edit|comment|close|reopen` (in a working copy, or with
+  `-R owner/name`), or `gh api` on the issue endpoints. They are requests too, checked by the
+  holder (added repos only, those endpoints only, no attribution) and run at once in every mode,
+  with no approval. There is no delete, transfer or lock.
 
 ## Not here
 

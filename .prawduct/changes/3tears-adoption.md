@@ -46,15 +46,13 @@ ruling 2026-11-26).
   holder (handoff), not by the watcher typing in. The agent's question names the request id, and
   it answers with the `aidc git approve|deny` to run. Setup gives the holder a request folder the
   agent held, contents included.
-
-## Consumer note (chunk 13)
-- `aidc git setup` must run again on each backend (new image, the gitreq container on
-  Kubernetes, the settings file). Sessions must be created again: their gh stand-in checks the
-  request folder is gitreq's. Sessions' own modes start again from the user's mode.
-- Answering the git agent's question in its terminal no longer approves: run
-  `aidc git approve|deny <id>`. Asking the agent to push or open a pull request makes a request.
-- The MCP server's entry point for an orchestrator's answer is `git-requests approve|deny <id>`
-  by exec as gitreq (build plan chunk 13, notes).
+- Chunk 13, GIT-07 (owner rulings 2026-11-26): GitHub issues through the git container, as an
+  issue-scoped API passthrough. `gitctl api` passes on only the endpoints of one table
+  (`GITCTL_API_TABLE`, gitctl-rules.sh: the calls prawduct's backlog makes, and the `gh issue`
+  forms), each with its query and body keys, on added repos, with the attribution check and the
+  conditional read; writes run only for gitreq. The gh stand-in sends `gh api` and `gh issue`
+  as `api` requests; the holder runs them at once in every mode (Q-G1) and the caller gets
+  GitHub's stdout, messages and exit status.
 
 - Chunk 03: the local face is 3tears-mcp's `McpServer` (`server.py`), stateful Streamable HTTP on
   SSE responses, serving the TearsTools through the bridge under their 1.x names, with the
@@ -101,3 +99,16 @@ Chunks 03-04 change what a caller sees (aidc 2.0; the CHANGELOG's Unreleased upg
 - Progress notifications for `session_create` and `session_invoke` phases; resource update
   notifications for a session's status and the session list; `mesh_name` in the published list.
 - `file_put` overwrites an existing file (#76).
+
+## Consumer note (chunk 13)
+- `aidc git setup` must run again on each backend (new image, the gitreq container on
+  Kubernetes, the settings file). Sessions must be created again: their gh stand-in checks the
+  request folder is gitreq's. Sessions' own modes start again from the user's mode.
+- Answering the git agent's question in its terminal no longer approves: run
+  `aidc git approve|deny <id>`. Asking the agent to push or open a pull request makes a request.
+- The MCP server's entry point for an orchestrator's answer is `git-requests approve|deny <id>`
+  by exec as gitreq (build plan chunk 13, notes).
+- A session's `gh api` (the issue endpoints) and `gh issue list|view|create|edit|comment|close|
+  reopen` work through the git container, so prawduct's backlog on GitHub issues works in a
+  session. Issue writes run at once in every mode, checked by gitreq; there is no delete,
+  transfer or lock.

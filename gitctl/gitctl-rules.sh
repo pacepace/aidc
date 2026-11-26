@@ -223,7 +223,7 @@ gitctl_api_check() {
         gitctl_slug_ok "$GITCTL_API_SLUG" || { GITCTL_API_SLUG=""; return 1; }
     fi
     while read -r m pat kind qkeys bkeys; do
-        [ -n "$m" ] && [ "$m" = "$method" ] || continue
+        { [ -n "$m" ] && [ "$m" = "$method" ]; } || continue
         re="${pat//'{n}'/$n_re}"
         re="${re//'{label}'/$label_re}"
         re="${re//'{id}'/$id_re}"
@@ -231,7 +231,7 @@ gitctl_api_check() {
         [[ "$rest" =~ ^${re}$ ]] || continue
         if [[ "$pat" == *"{branch}"* ]]; then gitctl_branch_ok "$git" "${BASH_REMATCH[1]}" || return 1; fi
         if [ -n "$query" ]; then
-            [ "$method" = GET ] && [ "$qkeys" != - ] || { gitctl_refuse "${method} ${pat} takes no query"; return 1; }
+            if [ "$method" != GET ] || [ "$qkeys" = - ]; then gitctl_refuse "${method} ${pat} takes no query"; return 1; fi
             IFS='&' read -ra q <<<"$query"
             for seg in "${q[@]}"; do
                 k="${seg%%=*}" v="${seg#*=}"

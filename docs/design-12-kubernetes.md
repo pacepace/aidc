@@ -308,6 +308,21 @@ and 14). The one request the agent may be asking about is the one last handed ov
 it last ran `prompt` for; after a watcher start, when which one is open is not known, it is every
 request then waiting, until each is decided or the agent runs `prompt` for one.
 
+GitHub issues (GIT-07; owner rulings 2026-11-26, Q-G1) go through the git container as an
+issue-scoped API passthrough, not as a general one. `gitctl api <method> <path>` passes a call
+to GitHub's REST API only when it is a row of one table (`GITCTL_API_TABLE`,
+`gitctl/gitctl-rules.sh`): the issue, comment, label, sub-issue, dependency and timeline
+endpoints prawduct's backlog calls through `gh api`, plus `GET user` and `GET branches/{b}`;
+each path part of its shape (an issue number, a URL-encoded label with no encoded dot, a branch
+name git accepts), only the query keys the row lists, and a write's JSON body of only the row's
+keys, typed, compacted, with no AI attribution and no control characters. Its repo must be one
+the user added, checked again as gitcred. The conditional read is kept (`--include`,
+`--if-none-match`, gh's exit 1 on a 304, its headers on stdout). There is no row to delete,
+transfer or lock an issue. Reads are the agent's too; writes run only for gitreq (WRITE_VERBS).
+A session's `gh api` and `gh issue list|view|create|edit|comment|close|reopen` are `api`
+requests the holder checks and runs at once in every mode, never waiting for approval; the
+result carries gh's stdout, stderr and exit status, which the stand-in gives back as gh would.
+
 Residuals of the git agent, recorded rather than closed:
 
 - Its allow list is a courtesy, not a boundary. `Bash(git *)` lets it run any command as the git

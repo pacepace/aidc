@@ -421,7 +421,7 @@ ISSUE_JQ='{number, title, body: (.body // ""), state: (.state | ascii_upcase),
 api_request() {
     local state
     REPO="" WORKTREE=""
-    submit api --arg method "$1" --arg path "${2#/}" --arg input "${3:-}" --arg include "${4:-}" --arg etag "${5:-}"
+    submit api --arg method "$1" --arg path "${2#/}" --arg input "${3:-}" --arg headers "${4:-}" --arg etag "${5:-}"
     if ! await "$ID" "$WAIT"; then
         untaken "$ID" && die "$(not_taken_msg "$ID")"
         state=$(field state)

@@ -53,13 +53,13 @@ case "$1 $2" in
     "auth login") exit "$(cat "$d/login.rc" 2>/dev/null || echo 0)" ;;
 esac
 # gh api <path>: the answer in api/<path, / as _>, or its .err text and a failure; with no
-# file for it, GH_API_DEFAULT when set.
+# file for it, api.default when there is one (gh runs with a cleared environment).
 if [ "$1" = api ]; then
     shift
     while [ $# -gt 0 ]; do case "$1" in --method|-F|--input) shift 2 ;; -*) shift ;; *) break ;; esac; done
     f="$d/api/$(printf '%s' "$1" | tr / _)"
     [ -e "$f" ] && { cat "$f"; exit 0; }
-    [ ! -e "$f.err" ] && [ -n "${GH_API_DEFAULT:-}" ] && { printf '%s\n' "$GH_API_DEFAULT"; exit 0; }
+    [ ! -e "$f.err" ] && [ -e "$d/api.default" ] && { cat "$d/api.default"; exit 0; }
     cat "$f.err" 2>/dev/null || echo "gh: Not Found (HTTP 404)"
     exit 1
 fi
@@ -1211,8 +1211,8 @@ echo ""
 echo "=== api: GitHub issues, only the table's endpoints, on added repos (GIT-07) ==="
 # Every row of the table (gitctl-rules.sh, GITCTL_API_TABLE) passes, with a sample of each
 # placeholder and, for a write, a body of its first key; gh is given exactly that call. GitHub
-# answers {} (the stub's GH_API_DEFAULT) unless a test gives it a file.
-export GH_API_DEFAULT='{}'
+# answers {} (the stub's api.default) unless a test gives it a file.
+printf '{}\n' > "$S/bin/api.default"
 sample_body() { # KEY: a JSON body holding that key
     case "$1" in
         title|body|name|description) printf '{"%s":"Some text"}' "$1" ;;
@@ -1276,7 +1276,7 @@ assert_eq "an issue read stays the agent's" "0|api --method GET repos/o/r/issues
 ctl_in '{"title":"T"}' api POST repos/o/r/issues
 ctl log 1
 assert_has "an issue write is in gitcred's action log" "api o/r POST:issues - asked-by=direct caller=gitreq ok" "$OUT"
-unset GH_API_DEFAULT
+rm -f "$S/bin/api.default"
 
 echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="

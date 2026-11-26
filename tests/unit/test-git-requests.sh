@@ -45,6 +45,20 @@ case "$1" in
     pr-view-json) echo '{"number":12,"title":"Add it","state":"OPEN","url":"https://github.com/o/r/pull/12","headRefName":"feat","baseRefName":"main","body":"B","headRefOid":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}' ;;
     pr-list-json) echo '[{"number":12,"title":"Add it","state":"OPEN","headRefName":"feat","url":"u"}]' ;;
     protection) printf 'repo o/r\ndefault main\nforce-push allowed\ndeletion blocked\nmerge-commit allowed\nsquash allowed\nrebase allowed\nend\n' ;;
+    # api METHOD PATH [options] --asked-by ID: GitHub's issue API (its body on stdin, kept).
+    api)
+        cat > "$d/api.in"
+        issue='{"number":12,"title":"Fix it","body":"B","state":"open","state_reason":null,"html_url":"https://github.com/o/r/issues/12","labels":[{"name":"bug"}],"assignees":[],"user":{"login":"u"},"milestone":null,"created_at":"c","updated_at":"u","closed_at":null}'
+        case "$2 $3 $4" in
+            "GET repos/o/r/issues/404 "*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+            "GET repos/o/r/issues?"*" --include"*)
+                printf 'HTTP/2.0 304 Not Modified\nEtag: "e1"\n\n'; exit 1 ;;
+            "GET repos/o/r/issues?"*) printf '[%s,{"number":13,"title":"A PR","pull_request":{}}]\n' "$issue" ;;
+            "GET repos/o/r/issues/12 "*|"PATCH repos/o/r/issues/12 "*) printf '%s\n' "$issue" ;;
+            "POST repos/o/r/issues "*) echo '{"number":14,"html_url":"https://github.com/o/r/issues/14"}' ;;
+            "POST repos/o/r/issues/12/comments "*) echo '{"id":1,"html_url":"https://github.com/o/r/issues/12#issuecomment-1"}' ;;
+            *) echo '{}' ;;
+        esac ;;
 esac
 STUB
 chmod +x "$S/bin/gitctl"
@@ -567,8 +581,8 @@ ghs pr create; assert_eq "no title and no --fill: refused (nothing prompts)" 1 "
 ghs pr create --title $'a\nb'; assert_eq "a two-line title is refused here already" 1 "$RC"
 ghs pr merge 12 --squash; assert_eq "squash merges are refused" 1 "$RC"; assert_has "..." "only merge commits" "$OUT"
 ghs pr merge 12 --rebase; assert_eq "rebase merges are refused" 1 "$RC"
-ghs issue list; assert_eq "other gh commands are refused, saying what works" 1 "$RC"; assert_has "..." "pr create" "$OUT"
-ghs api user; assert_eq "gh api is refused" 1 "$RC"
+ghs release list; assert_eq "other gh commands are refused, saying what works" 1 "$RC"; assert_has "..." "pr create" "$OUT"
+ghs api user -f x=y; assert_eq "gh api with a field option is refused (only --method, --input, -i and If-None-Match pass)" 1 "$RC"
 ( sleep 2; bash "$GR" once >/dev/null 2>&1 ) &
 OUT=$(AIDC_GH_WAIT=20 bash "$GH" pr view 12 --json number,title -q '.title' 2>&1); RC=$?
 wait
@@ -656,6 +670,58 @@ assert_eq "set before tmux and Claude start (they inherit it)" yes \
     "$([ "${um%%:*}" -lt "$(grep -n 'aidc-tmux-start.sh ||' "$AIDC_ROOT/.devcontainer/user-main.sh" | cut -d: -f1)" ] && echo yes || echo no)"
 
 echo ""
+echo "=== GitHub issues through the git container (GIT-07): gh api and gh issue ==="
+# A session's backlog (prawduct's, through gh api) and gh issue reach GitHub's issue API as
+# requests the holder checks and runs at once, in every mode (owner ruling 2026-11-26, Q-G1).
+# watching N: the watcher takes requests for N passes, in the background, as gitctl-main runs it.
+watching() { ( for _ in $(seq "${1:-8}"); do bash "$GR" once >/dev/null 2>&1; sleep 0.5; done ) & }
+issue_gh() { watching "${W_PASSES:-8}"; OUT=$(AIDC_GH_WAIT=15 bash "$GH" "$@" 2>"$S/gh.err"); RC=$?; ERR=$(cat "$S/gh.err"); wait; }
+reset_calls
+issue_gh api repos/o/r/issues/12
+assert_eq "gh api reads an issue at once, in ask mode: GitHub's answer, exit 0" "0|12" "$RC|$(printf '%s' "$OUT" | jq -r .number)"
+assert_has "the holder ran gitctl api for it" "api GET repos/o/r/issues/12 --asked-by" "$(calls)"
+issue_gh api repos/o/r/issues --method POST --input - <<<'{"title":"New","body":"Text.","labels":["bug"]}'
+assert_eq "an issue write runs at once too (no approval), its answer printed" "0|14" "$RC|$(printf '%s' "$OUT" | jq -r .number)"
+assert_eq "the body reached gitctl as checked JSON" '{"title":"New","body":"Text.","labels":["bug"]}' "$(cat "$S/bin/api.in")"
+issue_gh api -i 'repos/o/r/issues?state=all&since=2026-11-01T00%3A00%3A00Z&sort=updated&direction=desc&per_page=1&page=1' -H 'If-None-Match: "e1"'
+assert_eq "a conditional read GitHub answers 304: exit 1, the status line on stdout (as gh)" "1|HTTP/2.0 304 Not Modified" \
+    "$RC|$(printf '%s\n' "$OUT" | head -n1)"
+assert_has "with --include and the ETag passed on" '--include --if-none-match \"e1\"' "$(calls)"
+issue_gh api repos/o/r/issues/404
+assert_eq "GitHub's failure is the caller's: exit 1, gh's message on stderr" "1|gh: Not Found (HTTP 404)" "$RC|$ERR"
+reset_calls
+issue_gh api repos/o/r/issues/12 --method DELETE
+assert_eq "an issue delete is refused before it reaches gitctl" "1|" "$RC|$(calls)"
+assert_has "saying why" "not an issue call the git container passes on" "$ERR"
+issue_gh api repos/o/r/issues --method POST --input - <<<'{"title":"T","body":"Co-Authored-By: Claude <noreply@anthropic.com>"}'
+assert_eq "AI attribution in an issue is refused" "1|" "$RC|$(calls)"
+issue_gh api repos/o/r/issues -H 'Authorization: token x'
+assert_eq "no header but If-None-Match passes" 1 "$RC"
+issue_gh issue view 12 --json state,labels -q '.state + " " + .labels[0].name'
+assert_eq "gh issue view, as gh's JSON (the pr skill reads .state)" "0|OPEN bug" "$RC|$OUT"
+issue_gh issue list --json number,title
+assert_eq "gh issue list leaves the pull requests out" "0|[12]" "$RC|$(printf '%s' "$OUT" | jq -c '[.[].number]')"
+issue_gh issue create -t "New" -b "Text." -l bug
+assert_eq "gh issue create prints the new issue's URL" "0|https://github.com/o/r/issues/14" "$RC|$OUT"
+issue_gh issue close 12 -r "not planned"
+assert_eq "gh issue close: closed, not planned" '0|{"state":"closed","state_reason":"not_planned"}' "$RC|$(cat "$S/bin/api.in")"
+issue_gh issue reopen 12
+assert_eq "gh issue reopen" '0|{"state":"open"}' "$RC|$(cat "$S/bin/api.in")"
+issue_gh issue comment 12 -b "Seen."
+assert_eq "gh issue comment prints the comment's URL" "0|https://github.com/o/r/issues/12#issuecomment-1" "$RC|$OUT"
+W_PASSES=12 issue_gh issue edit 12 --add-label ready --remove-label bug -t "Fixed it"
+assert_eq "gh issue edit: the labels from the issue's own, the title" '0|{"title":"Fixed it","labels":["ready"]}' "$RC|$(cat "$S/bin/api.in")"
+issue_gh issue delete 12
+assert_eq "gh issue delete is not offered" 1 "$RC"
+issue_gh issue transfer 12 o/other
+assert_eq "nor transfer" 1 "$RC"
+issue_gh issue lock 12
+assert_eq "nor lock" 1 "$RC"
+reset_calls
+watching 6; OUT=$(AIDC_SESSION=git AIDC_GIT_TOKEN="" AIDC_GH_WAIT=15 bash "$GH" issue comment 12 -b "From the agent." 2>&1); RC=$?; wait
+assert_eq "the git agent's own issue write runs at once as well (no token: ask mode holds no issue call)" "0" "$RC"
+
+echo ""
 echo "=== approve and deny race: exactly one happens, and each says what it did ==="
 # The hooks (run from a checkout only) run a command at a point in approve: before it takes the
 # request's lock, or once it holds it.
@@ -703,7 +769,8 @@ id=$(newid); put "$id" "$(req "$id" push "{\"token\":\"$OTHER\"}")"; reset_calls
 bash "$S/mut.sh" once >/dev/null 2>&1
 assert_eq "with the token's hash check removed, another token takes the session's mode (so the token test would fail)" "done" "$(state "$id")"
 printf '%s\n' "$TOKD" | bash "$GR" mode demo default >/dev/null 2>&1
-cp "$GR" "$S/mut.sh"; sed -i 's/if ! bound; then/if false; then/' "$S/mut.sh"
+cp "$GR" "$S/mut.sh"; sed -i 's/if \[ "\$Q_action" != api \] && ! bound; then/if false; then/' "$S/mut.sh"
+grep -q '! bound; then' "$S/mut.sh" && fail "mutation did not apply (binding)"
 id=$(newid); put "$id" "$(req "$id" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
 git -C "$P" remote set-url origin https://github.com/evil/x; reset_calls
 bash "$S/mut.sh" approve "$id" >/dev/null 2>&1

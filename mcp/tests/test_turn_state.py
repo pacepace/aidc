@@ -14,9 +14,8 @@ import time
 from pathlib import Path
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import audit, tools
+from aidc_mcp import audit
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp.screen import EMPTY, ScreenState, classify
@@ -25,6 +24,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 from tests.logs import patch_log_event
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
@@ -752,9 +752,7 @@ class TestQueuedPromptOnTheAgentListScreen:
         monkeypatch.setattr(tmx, "load_and_paste", load_paste)
         monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
         monkeypatch.setattr(asyncio, "sleep", no_wait)
-        app = MCPServer("t")
-        tools.register(app)
-        send = app._tool_manager._tools["session_send"].fn
+        send = toolcall.tool("session_send")
         ss.session_watchers["proj"] = Watching()
 
         session.screen = (SCREENS / "claude-2.1.300-idle-agent-panel.ansi").read_text()
@@ -814,10 +812,8 @@ class TestSendWhileABackgroundAgentRuns:
         monkeypatch.setattr(tmx, "load_and_paste", load_paste)
         monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
         monkeypatch.setattr(asyncio, "sleep", no_wait)
-        app = MCPServer("t")
-        tools.register(app)
         ss.session_watchers["proj"] = Watching()
-        return app._tool_manager._tools["session_send"].fn
+        return toolcall.tool("session_send")
 
     async def test_a_session_idle_at_its_prompt_takes_the_prompt_now(self, session,
                                                                      monkeypatch):
@@ -913,9 +909,7 @@ class TestSendWhileABackgroundAgentRuns:
                            conversation_id="c1")
         second = await send(name="proj", prompt="and the lexer", conversation_id="c1")
         assert second["data"]["status"] == "queued"
-        cancel = MCPServer("t")
-        tools.register(cancel)
-        d = (await cancel._tool_manager._tools["session_queue_cancel"].fn(
+        d = (await toolcall.tool("session_queue_cancel")(
             name="proj", prompt_id=first["data"]["prompt_id"]))["data"]
         assert d["outcome"] == "already_pasted" and d["note"].endswith("being submitted")
 
@@ -952,10 +946,7 @@ class TestSendWhileABackgroundAgentRuns:
         ss.unsubmitted_paste.clear()
         session.screen = session.screen.replace("❯\xa0", "❯\xa0" + _f("please look at the parser"), 1)
         pasted_before = len(self.pasted)
-
-        app = MCPServer("t")
-        tools.register(app)
-        d = (await app._tool_manager._tools["session_queue_cancel"].fn(
+        d = (await toolcall.tool("session_queue_cancel")(
             name="proj", prompt_id=pid))["data"]
         assert d["outcome"] == "already_pasted" and d["cancelled"] == []
         for _ in range(300):
@@ -1087,10 +1078,8 @@ class TestSendDeliverJoin:
         monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
         monkeypatch.setattr(asyncio, "sleep", no_wait)
         patch_log_event(monkeypatch, log)
-        app = MCPServer("t")
-        tools.register(app)
         ss.session_watchers["proj"] = Watching()
-        return app._tool_manager._tools["session_send"].fn
+        return toolcall.tool("session_send")
 
     def _stop_drainers(self):
         for task in ss.pending_drainers.values():

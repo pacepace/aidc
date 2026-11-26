@@ -1,18 +1,20 @@
 """A session-scoped MCP server (AIDC_MCP_ALLOWED_SESSIONS): its token must not reach any
 session but the named ones."""
 import asyncio
-import inspect
 import json
 import subprocess
+from types import MappingProxyType
 
 import pytest
-from mcp.server.mcpserver import MCPServer
+from threetears.mcp import Refusal, ResourceRequest
 
-from aidc_mcp import resources, scope, tools
+from aidc_mcp import authz, resources, scope, server
 from aidc_mcp.service import common as com
 from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
+from aidc_mcp.tearstools import build_tools
+from tests import toolcall
 
 NAMED_TOOLS = ["session_status", "session_exec", "session_invoke", "session_invoke_async",
                "session_send", "session_watch", "session_resend", "session_unwatch",
@@ -46,14 +48,6 @@ CALLS = {
 
 
 @pytest.fixture
-def app():
-    a = MCPServer("t")
-    tools.register(a)
-    resources.register(a)
-    return a
-
-
-@pytest.fixture
 def forbid_side_effects(monkeypatch):
     """Anything that would touch docker or the CLI fails the test."""
     def boom(*a, **k):
@@ -81,100 +75,118 @@ def test_names_split_on_commas_and_spaces(monkeypatch):
 
 @pytest.mark.parametrize("tool", NAMED_TOOLS)
 async def test_every_named_tool_refuses_a_session_outside_the_scope(
-        tool, app, monkeypatch, forbid_side_effects):
+        tool, monkeypatch, forbid_side_effects):
     monkeypatch.setenv(scope.ENV, "jointtest")
-    fn = app._tool_manager._tools[tool].fn
-    result = fn(name="orchestrator", **CALLS[tool])
-    if inspect.isawaitable(result):
-        result = await result
+    result = await toolcall.call(tool, name="orchestrator", **CALLS[tool])
     assert result["ok"] is False
     assert "outside this MCP server's scope" in result["error"]
 
 
-def _dummy_args(fn):
-    """Values for a tool's required parameters other than `name`, by annotation."""
+def _dummy_args(tool):
+    """Values for a tool's required arguments other than `name`, by schema type."""
+    schema = tool.mcp_schema().input_schema
     out = {}
-    for pname, param in inspect.signature(fn).parameters.items():
-        if pname in ("name", "ctx") or param.default is not inspect.Parameter.empty:
+    for pname in schema.get("required", []):
+        if pname == "name":
             continue
-        ann = str(param.annotation)
-        out[pname] = (1 if "int" in ann else ["x"] if "list" in ann
-                      else False if "bool" in ann else "x")
+        kind = schema["properties"][pname].get("type")
+        out[pname] = (1 if kind == "integer" else ["x"] if kind == "array"
+                      else False if kind == "boolean" else "x")
     return out
 
 
 async def test_every_tool_that_takes_a_session_name_refuses_out_of_scope(
-        app, monkeypatch, forbid_side_effects):
-    """Derived from the registry, not a list: a tool added later with a `name`
-    parameter and no scope check fails here."""
+        monkeypatch, forbid_side_effects):
+    """Derived from the tools, not a list: a tool added later with a `name` argument
+    that the authorizer does not scope fails here."""
     monkeypatch.setenv(scope.ENV, "jointtest")
     checked = 0
-    for tool_name, tool in app._tool_manager._tools.items():
-        if tool_name == "session_create" or "name" not in inspect.signature(tool.fn).parameters:
+    for tool in build_tools():
+        props = tool.mcp_schema().input_schema["properties"]
+        if tool.local_name == "session_create" or "name" not in props:
             continue
-        result = tool.fn(name="orchestrator", **_dummy_args(tool.fn))
-        if inspect.isawaitable(result):
-            result = await result
-        assert result["ok"] is False, tool_name
-        assert "outside this MCP server's scope" in result["error"], tool_name
-        assert result["error_code"] == "out_of_scope", tool_name
+        result = await toolcall.call(tool.local_name, name="orchestrator", **_dummy_args(tool))
+        assert result["ok"] is False, tool.local_name
+        assert "outside this MCP server's scope" in result["error"], tool.local_name
+        assert result["error_code"] == "out_of_scope", tool.local_name
         checked += 1
     assert checked >= len(NAMED_TOOLS)
 
 
-def test_scoping_keeps_the_tool_schemas_and_context_injection(app):
-    """The wrapper must not change what MCPServer sees: session_invoke still gets its
-    Context injected, and `ctx` is not advertised as an argument."""
-    invoke = app._tool_manager._tools["session_invoke"]
-    assert invoke.context_kwarg == "ctx"
-    assert "ctx" not in invoke.parameters["properties"]
-    assert set(invoke.parameters["properties"]) == {"name", "prompt"}
+async def test_the_authorizer_refuses_with_the_envelope_as_the_results_content(monkeypatch):
+    # TRS-05: the refusal reads as 1.x's did; its code also rides the protocol result
+    monkeypatch.setenv(scope.ENV, "jointtest")
+    from threetears.mcp import ToolCall
+    decision = await authz.AidcAuthorizer().authorize_call(authz.ADMIN, ToolCall(
+        tool_name="session_status", arguments=MappingProxyType({"name": "orchestrator"}),
+        required_permission=authz.PERMISSION))
+    assert isinstance(decision, Refusal)
+    assert decision.code == "out_of_scope" and decision.argument == "name"
+    assert decision.content == {"ok": False, "error": decision.message,
+                                "error_code": "out_of_scope"}
+
+
+def test_the_context_is_passed_and_not_advertised_as_an_argument():
+    """session_invoke is handed the call's context by the face, and `ctx` is not one of
+    the arguments a client sees."""
+    invoke = next(t for t in server.Face().listing() if t.name == "session_invoke")
+    assert invoke.context_parameter is not None
+    assert set(invoke.input_schema["properties"]) == {"name", "prompt"}
 
 
 async def test_session_create_is_refused_when_scoped(monkeypatch, forbid_side_effects):
     """Even with the operator's opt-in, a scoped server refuses to create sessions."""
     monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
-    a = MCPServer("t")
-    tools.register(a)
     monkeypatch.setenv(scope.ENV, "jointtest")
-    result = await a._tool_manager._tools["session_create"].fn(
-        name="jointtest", repo="/tmp")
+    result = await toolcall.call("session_create", name="jointtest", repo="/tmp")
     assert result["ok"] is False and "cannot create sessions" in result["error"]
     assert result["error_code"] == "create_not_allowed"
 
 
-async def test_session_list_shows_only_allowed_sessions(app, monkeypatch):
+async def test_session_list_shows_only_allowed_sessions(monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     raw = ("SESSION   STATUS   PROFILE\n"
            "jointtest Up 1 min multi\n"
            "other     Up 2 days multi\n")
     monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": raw, "stderr": ""})
-    out = (await app._tool_manager._tools["session_list"].fn())["data"]["raw"]
+    out = (await toolcall.call("session_list"))["data"]["raw"]
     assert out == "SESSION   STATUS   PROFILE\njointtest Up 1 min multi\n"
 
 
-async def test_in_scope_calls_go_through(app, monkeypatch, idle_session):
+async def test_in_scope_calls_go_through(monkeypatch, idle_session):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "status ok", "stderr": ""})
-    res = await app._tool_manager._tools["session_status"].fn(name="jointtest")
+    res = await toolcall.call("session_status", name="jointtest")
     assert res["ok"] is True
+
+
+def _request(uri, action="read", **variables):
+    return ResourceRequest(uri=uri, variables=MappingProxyType(variables),
+                           required_permission=authz.PERMISSION, action=action)
 
 
 async def test_resources_refuse_outside_the_scope_and_hide_config(monkeypatch):
     monkeypatch.setenv(scope.ENV, "jointtest")
     monkeypatch.setattr(resources, "_run", lambda args: "SESSION X\norchestrator Up\njointtest Up\n")
-    a = MCPServer("r")
-    resources.register(a)
-    fns = {str(t.uri_template): t.fn for t in a._resource_manager._templates.values()}
-    fns.update({str(r.uri): r.fn for r in a._resource_manager._resources.values()})
-    assert "outside" in json.loads(await fns["aidc://sessions/{name}/status"](name="orchestrator"))["error"]
-    assert "outside" in json.loads(await fns["aidc://sessions/{name}/audit"](name="orchestrator"))["error"]
-    assert "outside" in json.loads(
-        await fns["aidc://sessions/{name}/audit/{filename}"](name="orchestrator", filename="a"))["error"]
-    assert "error" in json.loads(await fns["aidc://config"]())
-    assert json.loads(await fns["aidc://sessions"]())["raw"] == "SESSION X\njointtest Up\n"
+    authorizer = authz.AidcAuthorizer()
+
+    async def decide(uri, **variables):
+        return await authorizer.authorize_resource(authz.ADMIN, _request(uri, **variables))
+    for uri, variables in (("aidc://sessions/orchestrator/status", {"name": "orchestrator"}),
+                           ("aidc://sessions/orchestrator/audit", {"name": "orchestrator"}),
+                           ("aidc://sessions/orchestrator/audit/a",
+                            {"name": "orchestrator", "filename": "a"})):
+        decision = await decide(uri, **variables)
+        assert isinstance(decision, Refusal) and "outside" in decision.message, uri
+        assert decision.code == "out_of_scope"
+    assert await decide("aidc://sessions/jointtest/status", name="jointtest") is True
+    config = await decide("aidc://config")
+    assert isinstance(config, Refusal) and config.code == "out_of_scope"
+    # the session list is served, holding only the scope's sessions
+    assert await decide("aidc://sessions") is True
+    assert json.loads(await resources.list_all_sessions())["raw"] == "SESSION X\njointtest Up\n"
 
 
 async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):

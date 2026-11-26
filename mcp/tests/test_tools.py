@@ -1,4 +1,4 @@
-"""Behavioral tests for the tool surface in aidc_mcp.tools.
+"""Behavioral tests for the tool surface (aidc_mcp/tearstools, served by aidc_mcp/server.py).
 
 Every tool shells out (docker exec / the aidc CLI). We mock exactly that layer —
 `_run_cli`, `subprocess.run`, and `asyncio.create_subprocess_exec` — and assert on
@@ -14,21 +14,24 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import backend, scope, tools
+from aidc_mcp import backend, scope, server
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
+
+
+def _offered():
+    """The tool names the local face lists, with the operator's settings as they are."""
+    return {t.name for t in server.Face().listing()}
 
 
 def _create_tool(monkeypatch):
@@ -111,23 +114,17 @@ def _patch_cli(monkeypatch, result, record=None):
 class TestSessionCreate:
     def test_absent_unless_the_operator_enabled_it(self, monkeypatch):
         monkeypatch.delenv(scope.ENABLE_CREATE_ENV, raising=False)
-        app = MCPServer("t")
-        tools.register(app)
-        assert "session_create" not in app._tool_manager._tools
-        assert "session_send" in app._tool_manager._tools   # the rest are unaffected
+        assert "session_create" not in _offered()
+        assert "session_send" in _offered()   # the rest are unaffected
 
     def test_present_when_enabled(self, monkeypatch):
         monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
-        app = MCPServer("t")
-        tools.register(app)
-        assert "session_create" in app._tool_manager._tools
+        assert "session_create" in _offered()
 
     def test_any_other_value_leaves_it_off(self, monkeypatch):
         for value in ("1", "yes", "TRUE ", ""):
             monkeypatch.setenv(scope.ENABLE_CREATE_ENV, value)
-            app = MCPServer("t")
-            tools.register(app)
-            present = "session_create" in app._tool_manager._tools
+            present = "session_create" in _offered()
             assert present is (value.strip().lower() == "true"), value
 
     async def test_requires_repo(self, monkeypatch):
@@ -193,6 +190,18 @@ class TestSessionCreate:
         _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
         res = await _create_tool(monkeypatch)(name="proj", repo="/r", ctx=None)
         assert res["ok"] is False and res["error"] == "boom"
+
+    async def test_a_created_session_is_reported_changed_and_a_failed_one_is_not(
+            self, monkeypatch):
+        # the session list and its status resource change with a create (MCP-09)
+        seen = []
+        monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+        _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
+        await _create_tool(monkeypatch)(name="proj", repo="/r")
+        assert seen == []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        await _create_tool(monkeypatch)(name="proj", repo="/r")
+        assert seen == ["proj"]
 
 
 def _configure_backend(value):
@@ -301,9 +310,7 @@ class TestSimpleCliTools:
         (prod audit 2026-07-04 17:53). Killing is operator-only via the
         ``aidc kill`` CLI; MCP clients must not be able to discover or call it.
         """
-        app = MCPServer("t")
-        tools.register(app)
-        assert "session_kill" not in app._tool_manager._tools
+        assert "session_kill" not in _offered()
 
 
 # --- session_exec ------------------------------------------------------------
@@ -385,13 +392,11 @@ class TestSessionRun:
 
         Its synchronous, multi-turn round-trip regularly outlasts the orchestrator
         request window and times out the whole session (see the comment in
-        tools.register). The wrapper is retained for easy re-advertisement, but
+        the session tools). The service keeps it for easy re-advertisement, but
         MCP clients must not be able to discover or call it; multi-turn work is
         driven as repeated session_send calls instead.
         """
-        app = MCPServer("t")
-        tools.register(app)
-        assert "session_run" not in app._tool_manager._tools
+        assert "session_run" not in _offered()
 
 
 # --- file_get ----------------------------------------------------------------
@@ -510,9 +515,7 @@ class TestTaintMark:
     def test_not_advertised(self):
         """Taint is the policy sidecar's finding about where a session went; an MCP
         client marking it is not a policy signal, so the tool is not offered."""
-        app = MCPServer("t")
-        tools.register(app)
-        assert "taint_mark" not in app._tool_manager._tools
+        assert "taint_mark" not in _offered()
 
 
 # --- session_watch / session_unwatch -----------------------------------------
@@ -524,14 +527,9 @@ def watch_stubs(monkeypatch):
 
     async def fake_watcher(*a, **k):
         await asyncio.Event().wait()  # live until the cleanup fixture cancels it
-
-    async def announce(app_, ctx=None):
-        return None
-
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(dlv, "_baseline_watermark", baseline)
     monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
-    monkeypatch.setattr(tools, "_announce_watchers", announce)
 
 
 class TestSessionWatch:
@@ -565,9 +563,6 @@ class TestSessionWatch:
 
 class TestSessionUnwatch:
     async def test_stops_and_evicts_state(self, monkeypatch):
-        async def announce(app_, ctx=None):
-            return None
-        monkeypatch.setattr(tools, "_announce_watchers", announce)
 
         async def _sleeper():
             await asyncio.sleep(100)
@@ -588,9 +583,6 @@ class TestSessionUnwatch:
         assert ("other", "c1") in ss.settle_state  # only the named session evicted
 
     async def test_noop_when_not_watching(self, monkeypatch):
-        async def announce(app_, ctx=None):
-            return None
-        monkeypatch.setattr(tools, "_announce_watchers", announce)
         res = await _tool("session_unwatch")(name="never-watched")
         assert res["ok"] is True and res["data"]["status"] == "stopped"
 
@@ -866,9 +858,13 @@ def test_every_error_envelope_carries_a_known_code():
     import pkgutil
 
     import aidc_mcp.service as service
-    # Every module that builds envelopes: the tools and the whole service package.
-    modules = [tools] + [importlib.import_module(f"aidc_mcp.service.{m.name}")
-                         for m in pkgutil.iter_modules(service.__path__)]
+    import aidc_mcp.tearstools as tearstools
+    from aidc_mcp import authz
+    # Every module that builds envelopes: the authorizer, the tools and the whole service.
+    modules = [authz] + [importlib.import_module(f"aidc_mcp.tearstools.{m.name}")
+                         for m in pkgutil.iter_modules(tearstools.__path__)] + [
+        importlib.import_module(f"aidc_mcp.service.{m.name}")
+        for m in pkgutil.iter_modules(service.__path__)]
     used = set()
     for module in modules:
         for node in ast.walk(ast.parse(_inspect.getsource(module))):
@@ -893,3 +889,21 @@ def test_every_error_code_is_in_the_documented_table():
               / "docs" / "design-10-turn-state-and-sending.md").read_text(encoding="utf-8")
     missing = sorted(code for code in com.ERROR_CODES if f"`{code}`" not in design)
     assert not missing, f"error codes missing from design 10 D6: {missing}"
+
+
+def test_the_retryable_codes_are_d6s_retryable_column():
+    """A failed call carries `retryable` (TRS-05), and a client may act on it, so the set
+    is the documented one: design 10 D6's Retryable column, read from the table itself."""
+    import re
+    from pathlib import Path
+    design = (Path(__file__).resolve().parents[2]
+              / "docs" / "design-10-turn-state-and-sending.md").read_text(encoding="utf-8")
+    d6 = design[design.index("### D6."):design.index("### D7.")]
+    column = {}
+    for row in d6.splitlines():
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[3] in ("yes", "no"):
+            for code in re.findall(r"`([a-z_]+)`", cells[0]):
+                column[code] = cells[3] == "yes"
+    assert set(column) == set(com.ERROR_CODES), set(column) ^ set(com.ERROR_CODES)
+    assert com.RETRYABLE_ERROR_CODES == {c for c, yes in column.items() if yes}

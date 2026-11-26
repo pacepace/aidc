@@ -11,9 +11,8 @@ import os
 import time
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import repo, scope, tools
+from aidc_mcp import repo, scope
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
@@ -21,6 +20,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 
 OLD = time.time() - 3600
 
@@ -31,9 +31,7 @@ class _StubTask:
 
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
 
 
 @pytest.fixture
@@ -201,6 +199,27 @@ async def test_interrupt_with_nothing_running_does_nothing(facts, monkeypatch):
     d = (await _tool("session_interrupt")(name="proj"))["data"]
     assert d["interrupted"] is False and d["was_running"] is None
     assert d["note"] == "nothing was running"
+
+
+async def test_only_an_interrupt_that_stopped_a_turn_reports_the_session_changed(facts,
+                                                                                monkeypatch):
+    # the status resource's subscribers hear of a turn stopped (MCP-09), and of nothing else
+    seen = []
+    monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+    rc = {"value": 1}
+
+    async def tmux(container, args):
+        return rc["value"]
+    monkeypatch.setattr(tmx, "tmux_exec", tmux)
+    res = await _tool("session_interrupt")(name="proj")
+    assert res["error_code"] == "command_failed" and seen == []   # the Esc did not go in
+    rc["value"] = 0
+    assert (await _tool("session_interrupt")(name="proj"))["data"]["interrupted"] is True
+    assert seen == ["proj"]
+    facts["working"] = False
+    seen.clear()
+    assert (await _tool("session_interrupt")(name="proj"))["data"]["interrupted"] is False
+    assert seen == []                                            # nothing was running
 
 
 @pytest.fixture

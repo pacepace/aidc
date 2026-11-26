@@ -8,12 +8,13 @@ the call each way a client can: a `notifications/cancelled`, closing the session
 (DELETE), and dropping the connection. Docker is faked: the run is a process that
 never ends by itself, and stopping it in the container is recorded.
 
-Measured on MCP SDK 2.3 with the 2025-11-25 protocol: the SDK cancels the handler on a
-cancel notification and on DELETE, but not on a dropped connection; the handler then
-runs on with nobody to answer. disconnect.StopInvokeOnDisconnect covers that case. A
-client that abandons a call without any of the three (the orchestrator's stop button, on the
-evidence of 23:04Z) cannot be seen; the one-run-per-session guard and session_status's
-headless_runs are what is left for it.
+All three reach the tool as the call context's cancellation (TRS-09): 3tears-mcp cancels
+the handler on a cancel notification, on DELETE and when the client drops the HTTP
+request carrying the call (the MCP SDK alone does not do the last; 3tears does, on SSE
+responses, which this server answers with). aidc needs no ASGI watcher of its own. A
+client that abandons a call without any of the three (the orchestrator's stop button, on
+the evidence of 23:04Z) cannot be seen; the one-run-per-session guard and
+session_status's headless_runs are what is left for it.
 """
 import asyncio
 import socket
@@ -24,7 +25,7 @@ import httpx
 import pytest
 import uvicorn
 
-from aidc_mcp import audit, auth, headless, server, tools
+from aidc_mcp import audit, auth, headless, server
 from tests.logs import patch_log_event
 
 TOKEN = "cancel-wire-token"
@@ -64,10 +65,10 @@ def served(tmp_path, monkeypatch):
     token_file.write_text(TOKEN + "\n", encoding="utf-8")
     monkeypatch.setattr(auth, "_TOKEN_PATH", token_file)
 
-    async def no_resume(app):
+    async def no_resume(self):
         return None
 
-    monkeypatch.setattr(tools, "resume_on_startup", no_resume)
+    monkeypatch.setattr(server.Face, "resume", no_resume)
     state = {"started": threading.Event(), "stopped": threading.Event(), "procs": [],
              "events": []}
 

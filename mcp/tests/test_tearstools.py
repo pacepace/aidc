@@ -84,11 +84,43 @@ def test_every_parameter_description_is_the_1x_one_word_for_word(name):
         assert ours[param].get("description") == spec.get("description"), param
 
 
+def _nullable_in_1x(schema):
+    return {n for n, spec in schema["properties"].items()
+            if {"type": "null"} in spec.get("anyOf", [])}
+
+
 @pytest.mark.parametrize("name", sorted(V1_BY_NAME))
 def test_the_schema_is_the_1x_schema_made_self_contained(name):
-    # the only schema change is tool-schema's flattening, which the CHANGELOG names
-    expected = self_contained_input_schema(V1_BY_NAME[name]["input_schema"], tool_name=name)
+    # tool-schema's flattening, with null still allowed where 1.x allowed it
+    v1 = V1_BY_NAME[name]["input_schema"]
+    expected = self_contained_input_schema(v1, tool_name=name)
+    for param in _nullable_in_1x(v1):
+        expected["properties"][param]["type"] = [expected["properties"][param]["type"], "null"]
     assert _tool(name).mcp_schema().input_schema == expected
+
+
+def test_every_argument_1x_let_be_null_may_still_be_null():
+    # a null sent_by or conversation_id refused before the tool runs would be a prompt
+    # silently not sent; the listing keeps null legal for exactly those arguments
+    seen = 0
+    for name, tool in V1_BY_NAME.items():
+        ours = _tool(name).mcp_schema().input_schema["properties"]
+        for param, spec in ours.items():
+            nullable = isinstance(spec.get("type"), list) and "null" in spec["type"]
+            assert nullable is (param in _nullable_in_1x(tool["input_schema"])), (name, param)
+            seen += nullable
+    assert seen >= 10
+
+
+async def test_a_null_optional_argument_reaches_the_service_as_not_given(monkeypatch):
+    seen = {}
+
+    async def audit_get(name, since=None, kind=None):
+        seen.update(since=since, kind=kind)
+        return com.envelope_ok({})
+    monkeypatch.setattr(ses, "audit_get", audit_get)
+    result = await _tool("audit_get").run(name="proj", since=None, kind=None)
+    assert result.success and seen == {"since": None, "kind": None}
 
 
 def test_no_schema_has_a_ref_or_defs():
@@ -181,13 +213,19 @@ async def test_a_blocking_service_call_runs_off_the_event_loop(monkeypatch):
 # --- what a tool tells its caller while it runs ---------------------------------------
 
 class _Ctx:
-    """A call context's log channel, recording what the tool sends."""
+    """A real call context whose channels record what the tool sends."""
 
-    def __init__(self):
-        self.logged = []
+    def __init__(self, progress_token="tok"):
+        from threetears.mcp import CallContext
+        self.logged, self.progress = [], []
 
-    async def log(self, level, data, *, logger=None):
-        self.logged.append((level, data))
+        async def log(level, data, logger):
+            self.logged.append((level, data))
+
+        async def progress(value, total, message):
+            self.progress.append((value, message))
+        self.ctx = CallContext(tool_name="t", progress_token=progress_token,
+                               progress_sender=progress, log_sender=log)
 
 
 async def test_create_reports_each_phase_to_the_caller_as_a_log_line(monkeypatch):
@@ -197,9 +235,21 @@ async def test_create_reports_each_phase_to_the_caller_as_a_log_line(monkeypatch
         return com.envelope_ok({"name": kwargs["name"]})
     monkeypatch.setattr(ses, "create", create)
     ctx = _Ctx()
-    result = await _tool("session_create").execute(ctx, name="proj", repo="/r")
+    result = await _tool("session_create").execute(ctx.ctx, name="proj", repo="/r")
     assert result.success is True
     assert ctx.logged == [("info", "building"), ("info", "starting")]
+    # TRS-04: each phase is also a progress notification, counting up
+    assert ctx.progress == [(1, "building"), (2, "starting")]
+
+
+async def test_without_a_progress_token_the_phases_are_still_logged(monkeypatch):
+    async def create(*, progress, **kwargs):
+        await progress("building")
+        return com.envelope_ok({})
+    monkeypatch.setattr(ses, "create", create)
+    ctx = _Ctx(progress_token=None)
+    await _tool("session_create").execute(ctx.ctx, name="proj", repo="/r")
+    assert ctx.logged == [("info", "building")] and ctx.progress == []
 
 
 async def test_without_a_call_context_the_service_gets_no_progress_hook(monkeypatch):
@@ -264,9 +314,17 @@ async def test_file_put_into_a_missing_directory_fails_and_says_why(monkeypatch,
     assert "No such file or directory" in _envelope(result)["error"]
 
 
-def test_file_put_passes_the_path_and_mode_as_arguments_not_in_the_script():
-    # a path holding a quote or `;` reaches bash as data, never as script text
-    assert "$1" in ses.FILE_PUT_SCRIPT and "$2" in ses.FILE_PUT_SCRIPT
+async def test_file_put_takes_a_path_with_quotes_spaces_and_semicolons_as_data(monkeypatch,
+                                                                              tmp_path):
+    # the path reaches bash as an argument, never as script text: written, nothing run
+    _run_file_put_locally(monkeypatch)
+    monkeypatch.chdir(tmp_path)          # where a `touch ran` would land
+    canary = tmp_path / "ran"
+    target = tmp_path / "it's a; touch ran #.txt"
+    result = await _tool("file_put").run(name="proj", path=str(target), content="data")
+    assert result.success, result.content
+    assert target.read_text() == "data"
+    assert not canary.exists()
 
 
 def test_the_package_exports_the_tool_set():
@@ -277,3 +335,14 @@ def test_file_put_does_not_write_with_install():
     # the host's GNU install overwrites, so the test above passes there either way; the
     # session image's uutils install does not (measured in ubuntu:26.04, uutils 0.10.0)
     assert "install" not in ses.FILE_PUT_SCRIPT.split()
+
+
+def test_prepare_arguments_turns_whole_numbers_in_text_into_numbers_only_for_integers():
+    queue_cancel = _tool("session_queue_cancel")   # position: integer or null
+    assert queue_cancel.prepare_arguments({"name": "7", "position": "-2"}) == {
+        "name": "7", "position": -2}
+    assert queue_cancel.prepare_arguments({"position": "2.0"}) == {"position": "2.0"}
+    assert queue_cancel.prepare_arguments({"position": None}) == {"position": None}
+    transcript = _tool("session_transcript")
+    assert transcript.prepare_arguments({"last_n": "+4", "since_uuid": "12"}) == {
+        "last_n": 4, "since_uuid": "12"}

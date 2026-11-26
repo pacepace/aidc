@@ -4,43 +4,30 @@
     "input_schema": {
       "properties": {
         "kind": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Only events whose trigger or outcome contains this (e.g. 'tainted', 'tld').",
-          "title": "Kind"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "since": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "ISO 8601 lower bound, UTC.",
-          "title": "Since"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name"
       ],
-      "title": "audit_getArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.audit_get",
     "name": "audit_get"
   },
   {
@@ -50,23 +37,19 @@
         "limit": {
           "default": 100000,
           "description": "Most bytes to return, 1 to 200000.",
-          "title": "Limit",
           "type": "integer"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "offset": {
           "default": 0,
           "description": "Byte to start at; 0 is the start.",
-          "title": "Offset",
           "type": "integer"
         },
         "path": {
           "description": "The file: relative to the session's repository, or an absolute path inside it.",
-          "title": "Path",
           "type": "string"
         }
       },
@@ -74,9 +57,9 @@
         "name",
         "path"
       ],
-      "title": "file_getArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.file_get",
     "name": "file_get"
   },
   {
@@ -86,33 +69,29 @@
         "limit": {
           "default": 500,
           "description": "Most paths to return, 1 to 5000.",
-          "title": "Limit",
           "type": "integer"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "default": "",
           "description": "A directory in the repository; empty for all.",
-          "title": "Path",
           "type": "string"
         },
         "pattern": {
           "default": "",
           "description": "A glob such as *.py or src/*/test_*.py; empty for every file.",
-          "title": "Pattern",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "file_listArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.file_list",
     "name": "file_list"
   },
   {
@@ -120,20 +99,16 @@
     "input_schema": {
       "properties": {
         "content": {
-          "title": "Content",
           "type": "string"
         },
         "mode": {
           "default": "0644",
-          "title": "Mode",
           "type": "string"
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
@@ -142,9 +117,9 @@
         "path",
         "content"
       ],
-      "title": "file_putArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.file_put",
     "name": "file_put"
   },
   {
@@ -154,29 +129,24 @@
         "limit": {
           "default": 200,
           "description": "Most matching lines to return, 1 to 2000.",
-          "title": "Limit",
           "type": "integer"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "default": "",
           "description": "A directory or file to search in; empty for all.",
-          "title": "Path",
           "type": "string"
         },
         "pattern": {
           "description": "The text to find (a regex when regex is true).",
-          "title": "Pattern",
           "type": "string"
         },
         "regex": {
           "default": false,
           "description": "Read pattern as a regular expression.",
-          "title": "Regex",
           "type": "boolean"
         }
       },
@@ -184,9 +154,9 @@
         "name",
         "pattern"
       ],
-      "title": "file_searchArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.file_search",
     "name": "file_search"
   },
   {
@@ -195,16 +165,15 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "repo_branchesArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.repo_branches",
     "name": "repo_branches"
   },
   {
@@ -213,34 +182,30 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "default": "",
           "description": "Only this file or directory; empty for all.",
-          "title": "Path",
           "type": "string"
         },
         "ref": {
           "default": "",
           "description": "A commit, branch or range to diff against (main, HEAD~3, main...HEAD); empty for the working tree's own changes.",
-          "title": "Ref",
           "type": "string"
         },
         "staged": {
           "default": false,
           "description": "The staged changes instead.",
-          "title": "Staged",
           "type": "boolean"
         }
       },
       "required": [
         "name"
       ],
-      "title": "repo_diffArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.repo_diff",
     "name": "repo_diff"
   },
   {
@@ -250,33 +215,29 @@
         "limit": {
           "default": 20,
           "description": "How many commits, 1 to 100.",
-          "title": "Limit",
           "type": "integer"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "default": "",
           "description": "Only commits touching this path.",
-          "title": "Path",
           "type": "string"
         },
         "ref": {
           "default": "",
           "description": "A branch, commit or range; empty for HEAD.",
-          "title": "Ref",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "repo_logArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.repo_log",
     "name": "repo_log"
   },
   {
@@ -285,16 +246,15 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "repo_statusArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.repo_status",
     "name": "repo_status"
   },
   {
@@ -303,52 +263,40 @@
       "properties": {
         "mcp_bearer": {
           "default": "",
-          "title": "Mcp Bearer",
           "type": "string"
         },
         "mcp_path": {
           "default": "",
-          "title": "Mcp Path",
           "type": "string"
         },
         "mcp_server": {
           "default": "",
-          "title": "Mcp Server",
           "type": "string"
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "profile": {
           "default": "multi",
-          "title": "Profile",
           "type": "string"
         },
         "repo": {
           "default": "",
-          "title": "Repo",
           "type": "string"
         },
         "workspace": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Workspace"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_createArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_create",
     "name": "session_create"
   },
   {
@@ -356,16 +304,13 @@
     "input_schema": {
       "properties": {
         "cmd": {
-          "title": "Cmd",
           "type": "string"
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "timeout_seconds": {
           "default": 60,
-          "title": "Timeout Seconds",
           "type": "integer"
         }
       },
@@ -373,9 +318,9 @@
         "name",
         "cmd"
       ],
-      "title": "session_execArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_exec",
     "name": "session_exec"
   },
   {
@@ -384,7 +329,6 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "target": {
@@ -394,16 +338,15 @@
             "agent",
             "headless"
           ],
-          "title": "Target",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_interruptArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_interrupt",
     "name": "session_interrupt"
   },
   {
@@ -412,12 +355,10 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "prompt": {
           "description": "The prompt / message text to send to the session.",
-          "title": "Prompt",
           "type": "string"
         }
       },
@@ -425,9 +366,9 @@
         "name",
         "prompt"
       ],
-      "title": "session_invokeArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_invoke",
     "name": "session_invoke"
   },
   {
@@ -436,17 +377,14 @@
       "properties": {
         "conversation_id": {
           "description": "Injected automatically by the orchestrator. Leave this unset — do NOT supply, invent, or reason about it.",
-          "title": "Conversation Id",
           "type": "string"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "prompt": {
           "description": "The prompt / message text to send to the session.",
-          "title": "Prompt",
           "type": "string"
         }
       },
@@ -455,18 +393,19 @@
         "prompt",
         "conversation_id"
       ],
-      "title": "session_invoke_asyncArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_invoke_async",
     "name": "session_invoke_async"
   },
   {
     "description": "List the running aidc sessions, one record each.\n\n`sessions` holds, per session: name, container status, profile, started,\ntainted ({at, trigger, domain} or null), repo, branch, claude_running, working\n(whether its coding agent is working on a turn right now), the conversation its\nwebhook delivers to, and how many sent prompts wait to be pasted. A container\nthat is up is not an agent that is working: read `working`. `raw` is the CLI's\nown table.\n",
     "input_schema": {
       "properties": {},
-      "title": "session_listArguments",
+      "required": [],
       "type": "object"
     },
+    "mesh_name": "aidc.session_list",
     "name": "session_list"
   },
   {
@@ -475,22 +414,18 @@
       "properties": {
         "bearer": {
           "description": "The token the session's Claude sends to the server. Kept in the session only.",
-          "title": "Bearer",
           "type": "string"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "description": "The server's path on your own API, such as /api/v1/mcp. This server adds the host.",
-          "title": "Path",
           "type": "string"
         },
         "server": {
           "description": "What the session's Claude calls the server: a short lowercase name.",
-          "title": "Server",
           "type": "string"
         }
       },
@@ -500,9 +435,9 @@
         "path",
         "bearer"
       ],
-      "title": "session_mcp_setArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_mcp_set",
     "name": "session_mcp_set"
   },
   {
@@ -511,42 +446,29 @@
       "properties": {
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "position": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Which waiting prompt, 1 for the next to go in (as session_status lists them); omit both this and prompt_id to take back every one.",
-          "title": "Position"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "prompt_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "The prompt_id session_send returned: take back that prompt only. Not together with position.",
-          "title": "Prompt Id"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_queue_cancelArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_queue_cancel",
     "name": "session_queue_cancel"
   },
   {
@@ -554,49 +476,35 @@
     "input_schema": {
       "properties": {
         "conversation_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Injected automatically by the orchestrator. Leave this unset — do NOT supply, invent, or reason about it.",
-          "title": "Conversation Id"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "force": {
           "default": false,
           "description": "Re-POST even if this reply was already confirmed delivered here. Almost never correct — the content comes back in this tool's result either way. Use ONLY when the orchestrator acknowledged the callback but genuinely lost the message downstream.",
-          "title": "Force",
           "type": "boolean"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "turn_uuid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Optional: target a specific reply by its turn uuid. Omit to target the session's most recent reply.",
-          "title": "Turn Uuid"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_resendArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_resend",
     "name": "session_resend"
   },
   {
@@ -604,17 +512,11 @@
     "input_schema": {
       "properties": {
         "conversation_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Injected automatically by the orchestrator. Leave this unset — do NOT supply, invent, or reason about it.",
-          "title": "Conversation Id"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "deliver": {
           "default": "queue",
@@ -623,53 +525,38 @@
             "queue",
             "join"
           ],
-          "title": "Deliver",
           "type": "string"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "prompt": {
           "description": "The prompt / message text to send to the session.",
-          "title": "Prompt",
           "type": "string"
         },
         "sender_label": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Optional: who is sending, as the session should read it (one line, at most 120 characters), e.g. \"Saoirse (an agent)\". aidc opens every prompt it pastes with a line naming the sender, so the session never reads it as typed at its terminal; without this it names \"the orchestrator\", or \"a person, through the orchestrator\" when sent_by is set.",
-          "title": "Sender Label"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "sent_by": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Set by the orchestrator when the prompt is a person's, not its own: who sent it. Leave this unset.",
-          "title": "Sent By"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name",
         "prompt"
       ],
-      "title": "session_sendArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_send",
     "name": "session_send"
   },
   {
@@ -677,16 +564,15 @@
     "input_schema": {
       "properties": {
         "name": {
-          "title": "Name",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_statusArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_status",
     "name": "session_status"
   },
   {
@@ -696,27 +582,24 @@
         "last_n": {
           "default": 5,
           "description": "How many turns, 1 to 20: the newest ones, or the first ones after since_uuid.",
-          "title": "Last N",
           "type": "integer"
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         },
         "since_uuid": {
           "default": "",
           "description": "Only turns after this one (a turn's uuid, or next_since_uuid from an earlier call); empty for the newest.",
-          "title": "Since Uuid",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_transcriptArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_transcript",
     "name": "session_transcript"
   },
   {
@@ -724,16 +607,15 @@
     "input_schema": {
       "properties": {
         "name": {
-          "title": "Name",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_unwatchArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_unwatch",
     "name": "session_unwatch"
   },
   {
@@ -741,30 +623,23 @@
     "input_schema": {
       "properties": {
         "conversation_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
           "description": "Injected automatically by the orchestrator. Leave this unset — do NOT supply, invent, or reason about it.",
-          "title": "Conversation Id"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The aidc session to use. Pick a running session (call session_list) or one of the open-webhook sessions named in this tool's description.",
-          "title": "Name",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
-      "title": "session_watchArguments",
       "type": "object"
     },
+    "mesh_name": "aidc.session_watch",
     "name": "session_watch"
   }
 ]

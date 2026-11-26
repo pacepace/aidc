@@ -7,13 +7,16 @@ that ships separately.
 ## Contract Surfaces
 
 ### The MCP tool surface (external consumer)
-- **Producer**: `mcp/src/aidc_mcp/tools.py` (registration), `resources.py`; the envelopes are
-  built in `mcp/src/aidc_mcp/service/` (`common.envelope_ok` / `envelope_err`).
+- **Producer**: `mcp/src/aidc_mcp/tearstools/` (one TearsTool per tool), served by
+  `server.py` (3tears-mcp) with the refusals in `authz.py`, and `resources.py`; the envelopes
+  are built in `mcp/src/aidc_mcp/service/` (`common.envelope_ok` / `envelope_err`).
 - **Consumer**: the orchestrator, over streamable HTTP with a bearer token. It is a
   separate product, developed by another session/agent.
 - **Contract**: every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": "...",
-  "error_code": "<kind>"}`, `isError` false either way; the code set is closed
-  (`service/common.py` `ERROR_CODES`) and documented in `docs/design-10-turn-state-and-sending.md` D6.
+  "error_code": "<kind>"}` as its content; from 2.0 a failure is also `isError: true` with the
+  same code (and `retryable`) under `_meta["threetears.mcp/error"]` (TRS-05). The code set is
+  closed (`service/common.py` `ERROR_CODE_DESCRIPTIONS`) and documented in
+  `docs/design-10-turn-state-and-sending.md` D6.
 - **Rule**: adding a tool or a code is additive and safe; removing one, renaming one, or changing
   what a code means is agreed with the orchestrator first. `session_create` exists only under
   MCP-38. A test fails if any failure path omits a code or invents one.

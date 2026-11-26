@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aidc_mcp import headless, session_facts, tools
+from aidc_mcp import headless, session_facts
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
@@ -73,14 +73,13 @@ def _isolate_audit_log(tmp_path, monkeypatch):
 async def clean_session_watchers():
     """Reset all per-session module state between tests so nothing leaks across
     them: watcher tasks, pending-send queues and their drainers, transcript settle
-    state, send locks, and the captured tool-description bases."""
+    state and send locks."""
     def _reset():
         ss.session_watchers.clear()
         ss.pending_sends.clear()
         ss.pending_drainers.clear()
         ss.settle_state.clear()
         ss.session_send_locks.clear()
-        tools._tool_base_desc.clear()
         ss.sent_awaiting_echo.clear()
         ss.working_indicator_seen.clear()
         ss.unanswered_polls.clear()

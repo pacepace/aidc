@@ -1,4 +1,5 @@
-"""The server's tool list as a file: every tool's name, description and input schema.
+"""The server's tool list as a file: every tool's name on the local MCP face, its name on a
+3tears mesh (`mesh_name`, TRS-15), its description and its input schema.
 
 An orchestrator classifies each tool it binds (what kind of thing it is, whether it can
 be undone), and a tool it has no row for arrives unclassified. So the list is published
@@ -6,40 +7,28 @@ with the code, as `mcp/published-tools.json`, and an orchestrator keeps a copy t
 its rows against. A test holds the file equal to what this code produces, so it cannot
 go stale. Regenerate it with `uv run python scripts/publish_tools.py`.
 
-Built with session_create on, so the list holds every tool a server can offer.
+Built with session_create on, so the list holds every tool a server can offer. The
+schemas are 3tears' self-contained form of 1.x's (TRS-11).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any
-
-from mcp.server.mcpserver import MCPServer
-
-from aidc_mcp import scope, tools
 
 PUBLISHED = Path(__file__).resolve().parents[2] / "published-tools.json"
 
 
 def published_tools() -> list[dict[str, Any]]:
-    """Every tool a server can offer, sorted by name."""
-    before = os.environ.get(scope.ENABLE_CREATE_ENV)
-    os.environ[scope.ENABLE_CREATE_ENV] = "true"
-    try:
-        app = MCPServer("aidc")
-        tools.register(app)
-        listed = asyncio.run(app.list_tools())
-    finally:
-        if before is None:
-            os.environ.pop(scope.ENABLE_CREATE_ENV, None)
-        else:
-            os.environ[scope.ENABLE_CREATE_ENV] = before
-        tools._tool_base_desc.clear()
-    return sorted(({"name": t.name, "description": t.description or "",
-                    "input_schema": t.input_schema} for t in listed),
+    """Every tool a server can offer, sorted by name, as the local MCP face lists it (with
+    no session watched)."""
+    from aidc_mcp import server
+
+    face = server.Face(include_create=True)
+    mesh = {t.local_name: t.mcp_name() for t in face.tools}
+    return sorted(({"name": t.name, "mesh_name": mesh[t.name], "description": t.description,
+                    "input_schema": t.input_schema} for t in face.listing()),
                   key=lambda t: str(t["name"]))
 
 

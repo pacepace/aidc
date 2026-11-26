@@ -1,7 +1,7 @@
 """Turn state (design-10 S1/S2): whether Claude is running, whether it is working on a
 turn, the markers that survive a restart, and whether a pasted prompt arrived.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations

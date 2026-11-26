@@ -10,11 +10,10 @@ import os
 import time
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import tools
 from aidc_mcp import turns_view as tv
 from aidc_mcp.service import state as ss
+from tests import toolcall
 
 OLD = time.time() - 3600
 TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
@@ -66,9 +65,7 @@ def transcript(tmp_path, monkeypatch):
 
 
 def _call(**kwargs):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools["session_transcript"].fn(name="proj", **kwargs)
+    return toolcall.tool("session_transcript")(name="proj", **kwargs)
 
 
 async def test_a_normal_turn_comes_back_whole(transcript):

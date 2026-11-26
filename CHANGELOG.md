@@ -13,6 +13,35 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Upgrading: the MCP server on 3tears (aidc 2.0)
+The MCP server is now served by 3tears-mcp (design 13). Tool names, arguments, descriptions
+and the envelope are unchanged; what an MCP caller sees differently:
+- **A failed call is now an MCP error result.** The envelope `{ok: false, error, error_code,
+  data?}` is still the content (as text and as `structuredContent`), and the result now has
+  `isError: true` with the same code under `_meta["threetears.mcp/error"]`
+  (`{code, message, retryable, argument?}`). `retryable` is design 10 D6's new Retryable column:
+  `cli_failed` and `invoke_busy`. A caller that branches on the envelope keeps working; one
+  that treats `isError` as a transport failure should read the envelope first.
+- **Input schemas are self-contained.** An optional parameter is listed as `type: [<type>,
+  "null"]` rather than `anyOf: [<type>, null]`, and schema titles are gone. Null for an optional
+  argument and a whole number sent as text (`"5"`) are still accepted, as before; leaving the
+  argument out and sending a real number are the forms to use. Other arguments a schema refuses
+  answer `INVALID_ARGUMENTS`, naming the argument, before the tool runs.
+- **`published-tools.json` gives each tool's `mesh_name`** (`aidc.<tool>`), its name on a
+  3tears mesh; the local names are unchanged.
+- **Progress**: with a `progressToken`, `session_create` and `session_invoke` send
+  `notifications/progress` for each phase, beside the log line each phase already sent.
+- **Live resources**: a client subscribed to `aidc://sessions/<name>/status` (or
+  `aidc://sessions`) on its MCP session is sent `notifications/resources/updated` when a prompt
+  goes in, a reply is delivered, or the session is created or interrupted (a scoped server
+  reports only the sessions in its scope).
+- **Scoped servers**: a resource of a session outside the scope is refused as a JSON-RPC error
+  rather than read as a JSON body holding `error`; `aidc://config` is not listed there.
+- **A rotated token** (`aidc mcp token rotate`) refuses an MCP session opened with the old
+  token on its next message.
+- **`file_put` overwrites an existing file** (#76: it failed on every overwrite in sessions on
+  the current image).
+
 ### Upgrading
 - **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,
   rename the top-level section holding `callback_url` (and `send_speaker`,

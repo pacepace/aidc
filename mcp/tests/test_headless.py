@@ -19,13 +19,14 @@ import time
 
 import httpx
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import audit, auth, headless, tools
+from aidc_mcp import audit, auth, headless, server
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import invoke as inv
 from aidc_mcp.service import repos as rps
+from aidc_mcp.service import state as ss
+from tests import toolcall
 from tests.logs import patch_log_event
 
 # The real listing: conftest stands it in for every test, and this one needs it.
@@ -33,9 +34,7 @@ _REAL_CONTAINER_RUNS = headless.container_runs
 
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
 
 
 # --- the in-container scripts, on real processes ------------------------------------
@@ -382,8 +381,8 @@ async def test_interrupting_the_headless_run_stops_a_call_still_waiting(docker, 
         return None
     monkeypatch.setattr(rps, "tree", tree)
     docker["release_now"] = False
-    ctx = type("Ctx", (), {"headers": {"mcp-session-id": "s1"}, "request_id": "7",
-                           "info": staticmethod(lambda chunk: asyncio.sleep(0))})()
+    ctx = type("Ctx", (), {"log": staticmethod(
+        lambda level, data, logger=None: asyncio.sleep(0))})()
     call = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit", ctx=ctx))
     for _ in range(20):
         await asyncio.sleep(0)
@@ -417,6 +416,21 @@ async def test_interrupting_with_no_headless_run_does_nothing(docker, monkeypatc
     assert d["stopped"] == [] and docker["stopped"] == []
 
 
+async def test_stopping_a_headless_run_reports_the_session_changed_and_nothing_does_not(
+        docker, monkeypatch):
+    async def tree(name):
+        return None
+    monkeypatch.setattr(rps, "tree", tree)
+    seen = []
+    monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+    await _tool("session_interrupt")(name="proj", target="headless")
+    assert seen == []                                   # no run was going
+    docker["found"] = [{"pid": 77, "started_at": 1.0, "run_id": "session_invoke-aa",
+                        "prompt": "x"}]
+    await _tool("session_interrupt")(name="proj", target="headless")
+    assert seen == ["proj"]
+
+
 async def test_an_unknown_interrupt_target_is_refused(docker):
     res = await _tool("session_interrupt")(name="proj", target="everything")
     assert res["error_code"] == "invalid_argument"
@@ -425,9 +439,7 @@ async def test_an_unknown_interrupt_target_is_refused(docker):
 def test_the_descriptions_lead_with_the_rule():
     """A model skimming the first line must get it: invoke is for short, single-shot
     questions, and long work goes to session_send (Pace, 2026-10-22)."""
-    app = MCPServer("t")
-    tools.register(app)
-    t = app._tool_manager._tools
+    t = {tool.name: tool for tool in server.Face().listing()}
     for name in ("session_invoke", "session_invoke_async"):
         first = t[name].description.splitlines()[0]
         assert "SHORT, single-shot" in first and "session_send" in first, name
@@ -579,8 +591,8 @@ async def test_an_invoke_stopped_on_request_says_so(docker, monkeypatch):
         return None
     monkeypatch.setattr(rps, "tree", tree)
     docker["release_now"] = False
-    ctx = type("Ctx", (), {"headers": {"mcp-session-id": "s1"}, "request_id": "9",
-                           "info": staticmethod(lambda chunk: asyncio.sleep(0))})()
+    ctx = type("Ctx", (), {"log": staticmethod(
+        lambda level, data, logger=None: asyncio.sleep(0))})()
     call = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit", ctx=ctx))
     for _ in range(20):
         await asyncio.sleep(0)

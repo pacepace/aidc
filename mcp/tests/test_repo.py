@@ -9,10 +9,10 @@ import os
 import subprocess
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import repo, tools
+from aidc_mcp import repo
 from aidc_mcp import session_facts as sf
+from tests import toolcall
 
 
 def _git(cwd, *args):
@@ -48,9 +48,7 @@ def repo_dir(tmp_path, monkeypatch):
 
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
 
 
 # --- the argument list itself ----------------------------------------------------

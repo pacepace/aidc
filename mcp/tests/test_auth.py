@@ -132,3 +132,26 @@ def test_empty_token_file_raises_runtime_error(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "_TOKEN_PATH", p)
     with pytest.raises(RuntimeError, match="empty"):
         BearerAuthMiddleware(_InnerApp())
+
+
+async def test_a_token_file_gone_mid_rotation_is_a_logged_401_not_a_crash(token_file):
+    # `aidc mcp token rotate` rewrites the file; a request in that gap is refused and
+    # logged (MCP-14), never served and never an unhandled error
+    inner = _InnerApp()
+    mw = BearerAuthMiddleware(inner)
+    token_file.write_text("", encoding="utf-8")
+    send = _Send()
+    await mw(_http_scope("Bearer s3cr3t-token"), _receive, send)
+    assert inner.called is False
+    assert _status(send) == 401
+    from aidc_mcp import audit
+    assert '"reason":"token_unreadable"' in audit._AUDIT_PATH.read_text()
+
+
+async def test_a_rotated_token_is_refused_without_a_restart(token_file):
+    inner = _InnerApp()
+    mw = BearerAuthMiddleware(inner)
+    token_file.write_text("next-token\n", encoding="utf-8")
+    send = _Send()
+    await mw(_http_scope("Bearer s3cr3t-token"), _receive, send)
+    assert inner.called is False and _status(send) == 401

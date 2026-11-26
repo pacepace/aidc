@@ -487,3 +487,7 @@ The owner's other products and projects are never named in code, tests or docs o
   - Clicking Approve in the git terminal no longer approves. The agent replies with the `aidc git approve` command.
   - Every push, PR and merge goes through a request, including ones the user asks for in the terminal, so `gitctl` write verbs are no longer a way around approval.
   - rules mode stays, for unattended runs: requests that pass the hard rules run at once, with the check done by gitreq, out of the agent's reach. Only the user (config or `aidc git mode`) can change a mode.
+
+- 2026-11-26 (local mode may carry asyncpg and SQLAlchemy): yes. aidc's state is on the 3tears SQLite L3, which raises asyncpg's error types (ruling of 2026-11-25), so local mode installs and imports 3tears core with asyncpg and SQLAlchemy. They are used only for those error types and the store's code; nothing connects to Postgres. Local mode still installs and imports no NATS client, LangGraph or LangChain, and starts no network service besides the MCP server. TRS-01 and TRS-17 are amended to match.
+
+- 2026-11-26 (Q-G1, GitHub issue writes): issue writes run at once in every git mode, checked by the request handler (gitreq). They are limited to added repos and the fixed allow-list of issue operations, carry no AI attribution, and cannot delete, transfer or lock an issue. They do not wait for approval in ask mode. Pushes, pull requests and merges still do.

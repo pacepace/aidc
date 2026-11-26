@@ -355,7 +355,8 @@ risk_surfaces:
   - mcp/src/aidc_mcp/auth.py
   - mcp/src/aidc_mcp/scope.py
   - mcp/src/aidc_mcp/server.py
-  - mcp/src/aidc_mcp/tools.py
+  - mcp/src/aidc_mcp/tearstools/
+  - mcp/src/aidc_mcp/authz.py
   - mcp/src/aidc_mcp/resources.py
   - mcp/src/aidc_mcp/transcript.py
   - scripts/cmd-mcp.sh

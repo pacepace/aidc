@@ -37,6 +37,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   reports only the sessions in its scope).
 - **Scoped servers**: a resource of a session outside the scope is refused as a JSON-RPC error
   rather than read as a JSON body holding `error`; `aidc://config` is not listed there.
+- **Logs go through 3tears-observe**, each tool call's lines carrying a correlation id; the
+  access log is unchanged. Tracing export (`AIDC_MCP_OTEL_ENDPOINT`) and metrics
+  (`AIDC_MCP_METRICS=true`, at `/metrics`) are off unless configured.
 - **A rotated token** (`aidc mcp token rotate`) refuses an MCP session opened with the old
   token on its next message.
 - **`file_put` overwrites an existing file** (#76: it failed on every overwrite in sessions on

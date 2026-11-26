@@ -26,7 +26,14 @@ dependencies = [
 # Mesh mode's dependencies (TRS-17): the 3tears ToolServer, registry and audit. Empty until
 # the mesh face is built.
 mesh = []
+# Tracing export (AIDC_MCP_OTEL_ENDPOINT, OTLP/HTTP) and metrics (AIDC_MCP_METRICS); both off
+# unless configured, and not in the default image (TRS-14).
+otel = ["3tears-observe[otel-http]>=0.95,<0.96"]
+prometheus = ["prometheus-client>=0.20"]
 dev = [
+    # the export paths are tested too
+    "3tears-observe[otel-http]>=0.95,<0.96",
+    "prometheus-client>=0.20",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",

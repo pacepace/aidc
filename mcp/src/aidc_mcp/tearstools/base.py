@@ -25,10 +25,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pydantic
+from threetears.observe import set_span_attribute, traced
 from threetears.tool_contract import MCPToolDefinition, TearsTool, ToolResult
 from threetears.tool_schema import self_contained_input_schema
 
-from aidc_mcp import __version__
+from aidc_mcp import __version__, observability
 from aidc_mcp.service import common as com
 from aidc_mcp.tearstools.descriptions import watching_suffix
 
@@ -128,12 +129,23 @@ class AidcTool(TearsTool):
         )
 
     async def execute(self, ctx: CallContext | None = None, **arguments: Any) -> ToolResult:
+        """Run one call of the tool in its own observability scope (a correlation id every
+        log line of the call carries, one span, its duration counted; TRS-14)."""
+        with observability.tool_call(self.local_name) as call:
+            result = await self._traced_call(ctx, arguments)
+            call["outcome"] = "ok" if result.success else "failed"
+            return result
+
+    @traced(name=observability.TOOL_SPAN)
+    async def _traced_call(self, ctx: CallContext | None,
+                           arguments: dict[str, Any]) -> ToolResult:
         """Check the arguments against `call`'s signature, call it, and wrap its envelope.
 
         The arguments are read as the 1.x server read them (pydantic, lax): defaults
         filled, a number sent as text taken as the number, an argument the tool does not
         have ignored. One that cannot be read is refused with `invalid_argument` before
         the tool does anything."""
+        set_span_attribute("aidc.tool", self.local_name)
         try:
             parsed = self._arguments_model.model_validate(arguments)
         except pydantic.ValidationError as exc:

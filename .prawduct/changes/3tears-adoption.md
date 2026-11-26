@@ -53,11 +53,19 @@ ruling 2026-11-26).
   D6's new Retryable column (`cli_failed`, `invoke_busy`), held to it by a test. A token file
   unreadable for a moment (mid-rotation) answers a logged 401.
 
-**Proof:** chunk 03: the built image (test tag, a test-only container with the token mounted as `aidc mcp start` mounts it) answered 401 without a token, the handshake with aidc's name, version and instructions, the tool list, a call failing with its code on the protocol result and the envelope as structured content, the resource list, and a token rotation refusing the old token at once and serving the new one, each request in the access log. The MCP suite is green, the wire suite against the new server included (cancel, DELETE and dropped connection each stop a blocking invoke; a rotated token refuses an open session; every aidc code rides the protocol result; local mode starts, lists and calls every tool in a fresh interpreter with no NATS, Postgres, LangGraph or 3tears core loaded). Chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
+- Chunk 04: each phase `session_create` and `session_invoke` report is `notifications/progress`
+  (counting up, the phase as its message) as well as a log line. The service reports a session
+  changed (`common.session_changed`: a paste, a delivered reply, a create, an interrupt), and
+  the face sends `notifications/resources/updated` for the session's status and the session
+  list to subscribed clients, which 1.x never did (MCP-09). `published-tools.json` names each
+  tool's `mesh_name`. The CHANGELOG's Unreleased section has the 2.0 upgrade notes; the README's
+  MCP section says what changed.
+
+**Proof:** chunk 04: `AIDC_SMOKE_GIT=0 make smoke` from a separate checkout with a test version tag: 122 of 123, the one failure the test-tag version line (the image reports the package's 1.9.10), as on the service split's run; its MCP part initializes, lists and calls through the new server. The MCP suite is green, with wire tests reading a progress notification and a log line before the result for both tools, and a real uvicorn server pushing `notifications/resources/updated` to a subscribed client's stream. Chunk 03: the built image (test tag, a test-only container with the token mounted as `aidc mcp start` mounts it) answered 401 without a token, the handshake with aidc's name, version and instructions, the tool list, a call failing with its code on the protocol result and the envelope as structured content, the resource list, and a token rotation refusing the old token at once and serving the new one, each request in the access log. The MCP suite is green, the wire suite against the new server included (cancel, DELETE and dropped connection each stop a blocking invoke; a rotated token refuses an open session; every aidc code rides the protocol result; local mode starts, lists and calls every tool in a fresh interpreter with no NATS, Postgres, LangGraph or 3tears core loaded). Chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
 (`docker build`, test tag) and imports the server with no git left in it.
 
 ## Consumer note
-Chunk 03 changes what a caller sees (aidc 2.0, in the CHANGELOG with chunk 04):
+Chunks 03-04 change what a caller sees (aidc 2.0; the CHANGELOG's Unreleased upgrade notes):
 - A failed call (`ok: false`) is now `isError: true`, its code also under
   `_meta["threetears.mcp/error"]` with `retryable`; the envelope text is unchanged.
 - Input schemas are self-contained: an optional parameter is `type: [type, "null"]` rather
@@ -66,4 +74,6 @@ Chunk 03 changes what a caller sees (aidc 2.0, in the CHANGELOG with chunk 04):
   Arguments a schema refuses answer `INVALID_ARGUMENTS` before the tool runs.
 - A resource of a session outside a scoped server's scope is refused as a JSON-RPC error, and
   `aidc://config` is not listed on a scoped server.
+- Progress notifications for `session_create` and `session_invoke` phases; resource update
+  notifications for a session's status and the session list; `mesh_name` in the published list.
 - `file_put` overwrites an existing file (#76).

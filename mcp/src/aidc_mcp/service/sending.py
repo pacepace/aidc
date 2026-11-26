@@ -329,6 +329,7 @@ async def inject(container: str, text: str, window: str, *, session: str,
     sent_at = time.time()
     ss.sent_awaiting_echo[session] = (text, sent_at)
     com.fire(tn.watch_for_echo(session, text, sent_at))
+    com.session_changed(session)
     return True
 
 

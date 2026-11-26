@@ -123,6 +123,7 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
     audit.log_event("tool_call", tool="session_interrupt", session=name, target="headless",
               interrupted=not failed, runs=[r["run_id"] for r in running], pids=pids)
     data = {**base, "interrupted": not failed, "stopped": running, "pids": pids}
+    com.session_changed(name)
     if failed:
         data["note"] = "the stop could not be carried out: " + "; ".join(failed)
     return com.envelope_ok(data)

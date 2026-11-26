@@ -801,6 +801,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         mark.last_delivered_uuid = turn.terminal_uuid
         mark.byte_offset = end_offset
         ts.save_watermark(state_dir, mark)
+        com.session_changed(session)
 
 
 async def resend_reply(session: str, conversation_id: str, callback_base: str, *,

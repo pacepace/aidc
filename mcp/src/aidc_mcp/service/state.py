@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -24,6 +25,12 @@ if TYPE_CHECKING:
 # Holds references to background tasks (common.fire) so they aren't GC'd before
 # completion.
 background_tasks: set[asyncio.Task[None]] = set()
+
+
+# Who to tell when what a session's status shows may have changed (MCP-09). The MCP face
+# registers one while it serves, to send its clients `notifications/resources/updated`;
+# the service names the session and knows nothing of who listens.
+session_change_listeners: list[Callable[[str], None]] = []
 
 
 class InFlight(NamedTuple):

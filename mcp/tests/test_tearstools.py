@@ -213,13 +213,19 @@ async def test_a_blocking_service_call_runs_off_the_event_loop(monkeypatch):
 # --- what a tool tells its caller while it runs ---------------------------------------
 
 class _Ctx:
-    """A call context's log channel, recording what the tool sends."""
+    """A real call context whose channels record what the tool sends."""
 
-    def __init__(self):
-        self.logged = []
+    def __init__(self, progress_token="tok"):
+        from threetears.mcp import CallContext
+        self.logged, self.progress = [], []
 
-    async def log(self, level, data, *, logger=None):
-        self.logged.append((level, data))
+        async def log(level, data, logger):
+            self.logged.append((level, data))
+
+        async def progress(value, total, message):
+            self.progress.append((value, message))
+        self.ctx = CallContext(tool_name="t", progress_token=progress_token,
+                               progress_sender=progress, log_sender=log)
 
 
 async def test_create_reports_each_phase_to_the_caller_as_a_log_line(monkeypatch):
@@ -229,9 +235,21 @@ async def test_create_reports_each_phase_to_the_caller_as_a_log_line(monkeypatch
         return com.envelope_ok({"name": kwargs["name"]})
     monkeypatch.setattr(ses, "create", create)
     ctx = _Ctx()
-    result = await _tool("session_create").execute(ctx, name="proj", repo="/r")
+    result = await _tool("session_create").execute(ctx.ctx, name="proj", repo="/r")
     assert result.success is True
     assert ctx.logged == [("info", "building"), ("info", "starting")]
+    # TRS-04: each phase is also a progress notification, counting up
+    assert ctx.progress == [(1, "building"), (2, "starting")]
+
+
+async def test_without_a_progress_token_the_phases_are_still_logged(monkeypatch):
+    async def create(*, progress, **kwargs):
+        await progress("building")
+        return com.envelope_ok({})
+    monkeypatch.setattr(ses, "create", create)
+    ctx = _Ctx(progress_token=None)
+    await _tool("session_create").execute(ctx.ctx, name="proj", repo="/r")
+    assert ctx.logged == [("info", "building")] and ctx.progress == []
 
 
 async def test_without_a_call_context_the_service_gets_no_progress_hook(monkeypatch):

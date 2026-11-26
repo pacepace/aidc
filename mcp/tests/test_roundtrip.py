@@ -883,3 +883,22 @@ async def test_resend_tool_requires_conversation_id(harness):
     res = await h.resend_tool(name="proj")
     assert res["ok"] is False
     assert "conversation_id" in res["error"]
+
+
+async def test_the_paste_and_the_delivered_reply_each_report_the_session_changed(harness,
+                                                                                monkeypatch):
+    """A session's status resource is live (MCP-09): the service reports a change when
+    the prompt goes in and when its reply is delivered, so a subscribed client reads the
+    status again at each."""
+    h = harness
+    seen = []
+    monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+    (h.base / "proj").mkdir(parents=True)
+    await h.send(name="proj", prompt="what does foo() do?", conversation_id="conv-1")
+    assert seen == ["proj"]          # pasted
+    _agent_writes(h.base, "proj", "sid-A", [_user("u1", h.paste_calls[-1]),
+                                            _assistant("a1", "foo() returns the answer.")])
+    await h.drain()
+    assert seen == ["proj", "proj"]  # delivered
+    await h.drain()
+    assert seen == ["proj", "proj"]  # nothing new, nothing reported

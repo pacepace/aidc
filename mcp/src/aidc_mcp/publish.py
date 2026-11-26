@@ -1,4 +1,5 @@
-"""The server's tool list as a file: every tool's name, description and input schema.
+"""The server's tool list as a file: every tool's name on the local MCP face, its name on a
+3tears mesh (`mesh_name`, TRS-15), its description and its input schema.
 
 An orchestrator classifies each tool it binds (what kind of thing it is, whether it can
 be undone), and a tool it has no row for arrives unclassified. So the list is published
@@ -24,9 +25,10 @@ def published_tools() -> list[dict[str, Any]]:
     no session watched)."""
     from aidc_mcp import server
 
-    listed = server.Face(include_create=True).listing()
-    return sorted(({"name": t.name, "description": t.description,
-                    "input_schema": t.input_schema} for t in listed),
+    face = server.Face(include_create=True)
+    mesh = {t.local_name: t.mcp_name() for t in face.tools}
+    return sorted(({"name": t.name, "mesh_name": mesh[t.name], "description": t.description,
+                    "input_schema": t.input_schema} for t in face.listing()),
                   key=lambda t: str(t["name"]))
 
 

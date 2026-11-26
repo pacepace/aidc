@@ -25,6 +25,7 @@ from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import invoke as inv
 from aidc_mcp.service import repos as rps
+from aidc_mcp.service import state as ss
 from tests import toolcall
 from tests.logs import patch_log_event
 
@@ -413,6 +414,21 @@ async def test_interrupting_with_no_headless_run_does_nothing(docker, monkeypatc
     d = (await _tool("session_interrupt")(name="proj", target="headless"))["data"]
     assert d["interrupted"] is False and d["note"] == "no headless run was going"
     assert d["stopped"] == [] and docker["stopped"] == []
+
+
+async def test_stopping_a_headless_run_reports_the_session_changed_and_nothing_does_not(
+        docker, monkeypatch):
+    async def tree(name):
+        return None
+    monkeypatch.setattr(rps, "tree", tree)
+    seen = []
+    monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+    await _tool("session_interrupt")(name="proj", target="headless")
+    assert seen == []                                   # no run was going
+    docker["found"] = [{"pid": 77, "started_at": 1.0, "run_id": "session_invoke-aa",
+                        "prompt": "x"}]
+    await _tool("session_interrupt")(name="proj", target="headless")
+    assert seen == ["proj"]
 
 
 async def test_an_unknown_interrupt_target_is_refused(docker):

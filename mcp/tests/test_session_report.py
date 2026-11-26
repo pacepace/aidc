@@ -201,6 +201,27 @@ async def test_interrupt_with_nothing_running_does_nothing(facts, monkeypatch):
     assert d["note"] == "nothing was running"
 
 
+async def test_only_an_interrupt_that_stopped_a_turn_reports_the_session_changed(facts,
+                                                                                monkeypatch):
+    # the status resource's subscribers hear of a turn stopped (MCP-09), and of nothing else
+    seen = []
+    monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+    rc = {"value": 1}
+
+    async def tmux(container, args):
+        return rc["value"]
+    monkeypatch.setattr(tmx, "tmux_exec", tmux)
+    res = await _tool("session_interrupt")(name="proj")
+    assert res["error_code"] == "command_failed" and seen == []   # the Esc did not go in
+    rc["value"] = 0
+    assert (await _tool("session_interrupt")(name="proj"))["data"]["interrupted"] is True
+    assert seen == ["proj"]
+    facts["working"] = False
+    seen.clear()
+    assert (await _tool("session_interrupt")(name="proj"))["data"]["interrupted"] is False
+    assert seen == []                                            # nothing was running
+
+
 @pytest.fixture
 def queued(facts, monkeypatch):
     async def instance(name):

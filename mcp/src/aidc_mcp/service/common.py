@@ -27,6 +27,18 @@ def fire(coro: Any) -> None:
     task.add_done_callback(ss.background_tasks.discard)
 
 
+def session_changed(name: str) -> None:
+    """Tell the listeners that what session `name`'s status shows may have changed: a
+    prompt went in, a turn was delivered, the session was created or interrupted. A
+    listener that fails is logged; the service's work goes on."""
+    for listener in list(ss.session_change_listeners):
+        try:
+            listener(name)
+        except Exception as exc:  # prawduct:allow prawduct/broad-except -- a notice only
+            audit.log_event("session_change_notify_failed", session=name,
+                            error_type=type(exc).__name__, error=repr(exc))
+
+
 def run_cli(args: list[str], timeout: float = 60.0) -> dict[str, Any]:
     """Run `aidc <args>` synchronously, capture stdout/stderr/exit."""
     cmd = [AIDC, *args]

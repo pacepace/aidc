@@ -459,3 +459,56 @@ def test_the_listed_schema_still_says_integer(client):
         "jsonrpc": "2.0", "id": 50, "method": "tools/list", "params": {}}))
     tool = next(t for t in msg["result"]["tools"] if t["name"] == "session_transcript")
     assert tool["inputSchema"]["properties"]["last_n"]["type"] == "integer"
+
+
+# --- progress and log lines before the result (TRS-04, MCP-07) ------------------------
+
+def _messages(resp):
+    """Every JSON-RPC message in an SSE response, in order."""
+    assert resp.status_code == 200, resp.text
+    return [json.loads(ln[len("data:"):].strip()) for ln in resp.text.splitlines()
+            if ln.startswith("data:") and ln[len("data:"):].strip()]
+
+
+@pytest.mark.parametrize("tool,arguments", [
+    ("session_create", {"name": "proj", "repo": "/r"}),
+    ("session_invoke", {"name": "proj", "prompt": "q"}),
+])
+def test_each_phase_reaches_the_caller_as_progress_and_a_log_line_before_the_result(
+        tmp_path, monkeypatch, tool, arguments):
+    from aidc_mcp import scope
+    from aidc_mcp.service import invoke as inv
+    from aidc_mcp.service import sessions as ses
+    monkeypatch.setenv(scope.ENABLE_CREATE_ENV, "true")
+    token_file = tmp_path / "mcp-token"
+    token_file.write_text(TOKEN + "\n", encoding="utf-8")
+    monkeypatch.setattr(auth, "_TOKEN_PATH", token_file)
+
+    async def no_resume(self):
+        return None
+    monkeypatch.setattr(server.Face, "resume", no_resume)
+
+    async def phases(*, progress, **kwargs):
+        await progress("container: Container aidc-proj-dev Started")
+        await progress("healthy: Healthy")
+        return com.envelope_ok({"done": True})
+    monkeypatch.setattr(ses, "create", phases)
+
+    async def invoke(*, name, prompt, progress):
+        return await phases(progress=progress)
+    monkeypatch.setattr(inv, "invoke", invoke)
+
+    with TestClient(server.build_app(), base_url=f"http://{HOST}") as c:
+        _, sid = _initialize(c)
+        resp = c.post("/mcp", headers=_headers(sid), json={
+            "jsonrpc": "2.0", "id": 60, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments, "_meta": {"progressToken": "p-1"}}})
+    msgs = _messages(resp)
+    kinds = [m.get("method") or ("result" if "result" in m else "other") for m in msgs]
+    assert kinds[-1] == "result", kinds
+    progress = [m["params"] for m in msgs if m.get("method") == "notifications/progress"]
+    logged = [m["params"]["data"] for m in msgs if m.get("method") == "notifications/message"]
+    assert [p["progress"] for p in progress] == [1, 2]
+    assert all(p["progressToken"] == "p-1" for p in progress)
+    assert progress[0]["message"].startswith("container:")
+    assert logged == ["container: Container aidc-proj-dev Started", "healthy: Healthy"]

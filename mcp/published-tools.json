@@ -27,6 +27,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.audit_get",
     "name": "audit_get"
   },
   {
@@ -58,6 +59,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.file_get",
     "name": "file_get"
   },
   {
@@ -89,6 +91,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.file_list",
     "name": "file_list"
   },
   {
@@ -116,6 +119,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.file_put",
     "name": "file_put"
   },
   {
@@ -152,6 +156,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.file_search",
     "name": "file_search"
   },
   {
@@ -168,6 +173,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.repo_branches",
     "name": "repo_branches"
   },
   {
@@ -199,6 +205,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.repo_diff",
     "name": "repo_diff"
   },
   {
@@ -230,6 +237,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.repo_log",
     "name": "repo_log"
   },
   {
@@ -246,6 +254,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.repo_status",
     "name": "repo_status"
   },
   {
@@ -287,6 +296,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_create",
     "name": "session_create"
   },
   {
@@ -310,6 +320,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_exec",
     "name": "session_exec"
   },
   {
@@ -335,6 +346,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_interrupt",
     "name": "session_interrupt"
   },
   {
@@ -356,6 +368,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_invoke",
     "name": "session_invoke"
   },
   {
@@ -382,6 +395,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_invoke_async",
     "name": "session_invoke_async"
   },
   {
@@ -391,6 +405,7 @@
       "required": [],
       "type": "object"
     },
+    "mesh_name": "aidc.session_list",
     "name": "session_list"
   },
   {
@@ -422,6 +437,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_mcp_set",
     "name": "session_mcp_set"
   },
   {
@@ -452,6 +468,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_queue_cancel",
     "name": "session_queue_cancel"
   },
   {
@@ -487,6 +504,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_resend",
     "name": "session_resend"
   },
   {
@@ -538,6 +556,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_send",
     "name": "session_send"
   },
   {
@@ -553,6 +572,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_status",
     "name": "session_status"
   },
   {
@@ -579,6 +599,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_transcript",
     "name": "session_transcript"
   },
   {
@@ -594,6 +615,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_unwatch",
     "name": "session_unwatch"
   },
   {
@@ -617,6 +639,7 @@
       ],
       "type": "object"
     },
+    "mesh_name": "aidc.session_watch",
     "name": "session_watch"
   }
 ]

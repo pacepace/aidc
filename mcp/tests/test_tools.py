@@ -191,6 +191,18 @@ class TestSessionCreate:
         res = await _create_tool(monkeypatch)(name="proj", repo="/r", ctx=None)
         assert res["ok"] is False and res["error"] == "boom"
 
+    async def test_a_created_session_is_reported_changed_and_a_failed_one_is_not(
+            self, monkeypatch):
+        # the session list and its status resource change with a create (MCP-09)
+        seen = []
+        monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
+        _patch_cli(monkeypatch, {"exit": 1, "stdout": "", "stderr": "boom"})
+        await _create_tool(monkeypatch)(name="proj", repo="/r")
+        assert seen == []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "created", "stderr": ""})
+        await _create_tool(monkeypatch)(name="proj", repo="/r")
+        assert seen == ["proj"]
+
 
 def _configure_backend(value):
     """Write the operator's config with a top-level `backend:` line (value None: no line)."""

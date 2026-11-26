@@ -87,6 +87,9 @@ one plan as asked.
 - 03: `disconnect.py` went in 03 rather than 04: with tools.py gone nothing used it, and 3tears' drop cancellation at the pin made its test green. `session_invoke`'s in-flight table is keyed by run id, so interrupting a headless run always finds the host's docker exec.
 - 03 (main, 2026-11-26, from design-13's Contract: an existing orchestrator needs no change beyond the 2.0 notes): null for an optional argument and whole numbers in text stay accepted, through a `[type, "null"]` schema and 3tears' `prepare_arguments` hook, the published schema staying `integer`.
 - 03: `retryable` on a failed call is design-10 D6's Retryable column (`cli_failed`, `invoke_busy`), decided from its Caller column and tested against the table.
+- 04: MCP-09's update notifications were never sent by 1.x; built here, from one service hook (`common.session_changed`) called where a session's status changes (inject on a paste, delivery of a reply, create, interrupt), which the face turns into `resources/updated` for the status and the session list.
+- 04: what "on change" (MCP-09) means for 2.0: a paste, a delivered reply, a create, an interrupt (agent or headless); a scoped server reports only its own sessions. Chunk 24 adds the hook events (a turn starting or ending, a permission prompt, idle), which also cover a person typing into the terminal; a taint, or a kill or stop from the CLI, reach a subscriber on its next read.
+- 04: the orchestrator round trip waits for the owner (asked through main 2026-11-26); everything else in 04 is built and tested.
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with

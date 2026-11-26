@@ -17,3 +17,9 @@ def test_the_published_list_names_every_tool_and_no_withdrawn_one():
             "session_queue_cancel", "repo_status", "repo_diff", "repo_log", "repo_branches",
             "file_get", "file_list", "file_search"} <= names
     assert not names & {"taint_mark", "session_kill", "session_run"}
+
+
+def test_every_tool_names_its_mesh_name_beside_its_local_name():
+    # TRS-15: plain on the MCP face, `aidc.` on the mesh, both in the published list
+    for tool in json.loads(publish.PUBLISHED.read_text(encoding="utf-8")):
+        assert tool["mesh_name"] == f"aidc.{tool['name']}", tool["name"]

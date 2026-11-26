@@ -154,12 +154,18 @@ class SessionAwareTool(AidcTool):
 
 
 def progress_of(ctx: CallContext | None) -> Callable[[str], Awaitable[None]] | None:
-    """The service's progress hook for one call: each phase the service reports goes to the
-    caller as a log line (MCP-07). None without a call context."""
+    """The service's progress hook for one call (MCP-07, TRS-04): each phase the service
+    reports goes to the caller as `notifications/progress` (when it sent a progress token;
+    the count of phases so far, the phase as the message) and as a log line. None without a
+    call context."""
     if ctx is None:
         return None
+    phases = 0
 
     async def progress(message: str) -> None:
+        nonlocal phases
+        phases += 1
+        await ctx.report_progress(phases, None, message)
         await ctx.log("info", message)
     return progress
 

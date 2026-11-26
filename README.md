@@ -1147,14 +1147,16 @@ against 1.x keeps working through every 1.x upgrade.
 
 When `aidc mcp` is running, an external AI orchestrator on your overlay network gets:
 
-**Tools** (function calls): `session_create` (only with `mcp.session_create: true`, see the config above), `session_list`, `session_status`, `session_transcript`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `session_interrupt`, `session_queue_cancel`, `session_mcp_set`, `repo_status`, `repo_diff`, `repo_log`, `repo_branches`, `file_get`, `file_list`, `file_search`, `file_put`, `audit_get`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP; `taint_mark` is gone: the policy sidecar writes the taint flag.) Every tool's name, description and input schema is published in [`mcp/published-tools.json`](mcp/published-tools.json), generated from the code and held to it by a test.
+**Tools** (function calls): `session_create` (only with `mcp.session_create: true`, see the config above), `session_list`, `session_status`, `session_transcript`, `session_exec`, `session_invoke`, `session_invoke_async`, `session_send`, `session_watch`, `session_unwatch`, `session_resend`, `session_interrupt`, `session_queue_cancel`, `session_mcp_set`, `repo_status`, `repo_diff`, `repo_log`, `repo_branches`, `file_get`, `file_list`, `file_search`, `file_put`, `audit_get`. (`session_kill` and `session_run` exist as CLI/wrapper capabilities but are deliberately not exposed over MCP; `taint_mark` is gone: the policy sidecar writes the taint flag.) Every tool's name, its name on a 3tears mesh (`mesh_name`), its description and input schema are published in [`mcp/published-tools.json`](mcp/published-tools.json), generated from the code and held to it by a test. The server is 3tears-mcp's (design 13): every result is the envelope `{ok, data}` / `{ok: false, error, error_code}`, and a failure is also `isError` with its code under `_meta["threetears.mcp/error"]`.
 
 - **What a session is doing.** `session_status` and each `session_list` record say whether the coding agent is `working`, on what (`working_on`), its `repo` and `branch`, when it last replied, where its replies go, and its taint as a typed field (`tainted: {at, trigger, domain}` or null). `session_transcript` returns its completed turns as prompt and reply text only, never tool calls or their results, with known secret shapes redacted and every part capped.
 - **Reading the repository.** `repo_status`, `repo_diff`, `repo_log`, `repo_branches`, `file_list`, `file_search` and `file_get` are read-only and run inside the session's dev container as its user, with fixed argument lists (`--end-of-options` before every ref, the repository's fsmonitor, pager, diff drivers and textconv off), a timeout and a byte cap. Paths stay inside the repository: one outside it, or a symlink pointing out, is refused with `outside_repo`.
 - **A tainted session takes no more work.** `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` refuse it with `error_code: "tainted"`, and a prompt queued before the taint is never pasted (`waiting_reason: session_tainted`).
 - **Stopping work.** `session_interrupt` sends Esc to a session whose agent is working and says what it was doing and the state of the working tree; `session_queue_cancel` takes back sent prompts that have not been pasted: by `prompt_id` (the one `session_send` returned), by `position`, or all of them.
 
-**Resources** (read-only data): `aidc://sessions`, `aidc://sessions/{name}/status`, `aidc://sessions/{name}/audit`, `aidc://sessions/{name}/audit/{filename}`, `aidc://config`.
+**Resources** (read-only data): `aidc://sessions`, `aidc://sessions/{name}/status`, `aidc://sessions/{name}/audit`, `aidc://sessions/{name}/audit/{filename}`, `aidc://config`. A client may subscribe to a session's status or the session list and is told when it changes.
+
+**Progress:** with a `progressToken`, `session_create` and `session_invoke` report each phase as progress and as a log line before the result.
 
 **Lifecycle:**
 
@@ -1162,7 +1164,7 @@ When `aidc mcp` is running, an external AI orchestrator on your overlay network 
 aidc mcp start              # auto-generates a bearer token on first run
 aidc mcp status             # show bind + last access
 aidc mcp logs --follow      # uvicorn output
-aidc mcp token rotate       # new token + restart, prints the new one
+aidc mcp token rotate       # new token + restart, prints the new one (an open session with the old token is refused)
 aidc mcp token show         # print current token (for the client config)
 aidc mcp stop               # tear down
 ```

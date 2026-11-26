@@ -42,6 +42,7 @@ from aidc_mcp.authz import PERMISSION, AidcAuthorizer
 from aidc_mcp.service import common as com
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import startup as sup
+from aidc_mcp.service import state as ss
 from aidc_mcp.tearstools import AidcTool, ToolHooks, build_tools
 
 INSTRUCTIONS = (
@@ -110,6 +111,16 @@ class Face:
             audit.log_event("tool_list_changed_notify_failed",
                             error_type=type(exc).__name__, error=repr(exc))
 
+    def session_changed(self, name: str) -> None:
+        """The service's notice that session `name`'s status may have changed: clients that
+        subscribed to its status resource, or to the session list, are told to read it
+        again (MCP-09). Only the URIs go out; a read is a request of its own. A scoped
+        server says nothing of a session outside its scope, not even that it changed."""
+        if scope.refusal(name) is not None:
+            return
+        com.fire(self.server.notify_resource_updated(f"aidc://sessions/{name}/status"))
+        com.fire(self.server.notify_resource_updated("aidc://sessions"))
+
     async def resume(self) -> None:
         """Startup resume (service/startup.py): saved send queues, then the webhooks. When
         a webhook reopens, the clients hear that the tool list changed."""
@@ -154,11 +165,13 @@ def build_app(face: Face | None = None) -> Any:
         await face.server.start()
         endpoint.transport = face.server.build_http_transport(
             path=MCP_PATH, stateless=False, json_response=False)
+        ss.session_change_listeners.append(face.session_changed)
         try:
             async with endpoint.transport.lifespan():
                 com.fire(face.resume())
                 yield
         finally:
+            ss.session_change_listeners.remove(face.session_changed)
             await face.server.stop()
 
     app = Starlette(routes=[Route(MCP_PATH, endpoint=endpoint)], lifespan=lifespan)

@@ -160,6 +160,7 @@ async def create_session(
         # Claude state from a seed with every mcpServers entry stripped, and the
         # server is written into the installed state.
         created["mcp"] = await hand_session_mcp(name, mcp_server, mcp_path, mcp_bearer)
+    com.session_changed(name)
     return com.envelope_ok(created)
 
 
@@ -357,6 +358,7 @@ async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, A
                                 {"was_running": was, "tree": tree}, code="command_failed")
     audit.log_event("tool_call", tool="session_interrupt", session=name, interrupted=True,
               why=state.why)
+    com.session_changed(name)
     return com.envelope_ok({"session": name, "interrupted": True, "was_running": was,
                          "tree": tree})
 

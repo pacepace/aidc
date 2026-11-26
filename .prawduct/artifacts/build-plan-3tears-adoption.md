@@ -100,6 +100,7 @@ verify-api against the released source.
 | REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 22 (moved from 01 by the 2026-11-26 ruling) |
 | TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) — answered 2026-11-25: no API in 2.0; U10 and chunk 06 dropped, kept addable |
 | Q-K1 | How a user adds a Claude account to the broker. | 17 |
+| Q-G1 | In ask mode, do GitHub issue writes (create, edit, comment, close) wait for approval like pushes, or run at once like reads? | 13 |
 | W-K0-03 / Q-M5 | Does paste+Enter answer AskUserQuestion? If not, the key sequence (§5 decision). | 14 |
 
 ## Upstream work in 3tears (W-T1; built and released in the 3tears repo)
@@ -339,7 +340,10 @@ Order follows design-13 "Upstream work".
   answer performed as gitreq) lands with chunk 14 on Kubernetes and with the chunk 03-04 MCP
   work on Docker.
 - **Depends on:** none in this plan for the container and CLI part (W-K0 done).
-- **Requirements:** K8S-05, K8S-06, K8S-24.
+- **Requirements:** K8S-05, K8S-06, K8S-24, GIT-07.
+- **Also (GIT-07):** gitctl issue verbs (list, view, create, edit, comment, close, reopen) on added
+  repos, through gitreq, and the session `gh issue` stand-in handing them to the git container;
+  the approval policy per Q-G1.
 - **Done when:** a test and a mutation show uid git cannot approve, deny, change a mode, or push,
   PR or merge outside a request (Docker and the Kubernetes pod spec); `aidc git approve` approves;
   rules mode runs a passing request with no question; `/prawduct:critic`; committed.

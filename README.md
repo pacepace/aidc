@@ -919,6 +919,8 @@ kubernetes:
                                  # (default: storage_class); like storage_class, several pods on
                                  # a node must be able to mount one volume (the audit sidecar reads
                                  # the home), and it should delete its volumes when released
+  transcripts_size: 10Gi         # the transcript mirror your MCP server reads (on the session
+                                 # class; each session sees only its own folder of it)
   git_store_size: 10Gi           # the git container's private copies of GitHub repos (on the
                                  # session class: a cache of GitHub)
   git_storage_warn: 1Gi          # `aidc git status` warns when those copies take more

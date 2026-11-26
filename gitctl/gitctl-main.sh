@@ -17,7 +17,7 @@ cd "${HOME:-/home/git}" || exit 1
 mkdir -p "${HOME:-/home/git}/.cache/gitctl"
 LOG="${HOME:-/home/git}/.cache/gitctl/requests.log"
 GR=/opt/aidc/lib/gitctl/git-requests.sh
-# Where the MCP server reads the agent's transcript and hook events (mounted on Docker), and
+# Where the MCP server reads the agent's transcript and hook events (mounted on both backends), and
 # the copy-forward that writes it; set otherwise only by the unit test.
 OUT="${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}"
 MIRROR="${AIDC_MIRROR_LIB:-/opt/aidc/lib/gitctl/transcript-mirror.sh}"
@@ -29,8 +29,9 @@ start_tmux() {
     tmux new-window -d -t main: -n shell -c "${HOME:-/home/git}"
     tmux select-window -t main:claude
 }
-# On Docker the git agent's transcript is copied where aidc's MCP server reads every session's
-# (/var/aidc/transcript-out, mounted by aidc git setup), so an orchestrator sees its questions as
+# The git agent's transcript is copied where aidc's MCP server reads every session's
+# (/var/aidc/transcript-out: on Docker a folder of the MCP's state dir, on Kubernetes the agent's
+# folder of the user's mirror claim, each mounted by aidc git setup), so an orchestrator sees its questions as
 # it sees any session's. The same copy-forward as a session's: the dev image's
 # transcript-mirror.sh, which the image's staged build context carries (aidc_build_context).
 if [ -d "$OUT" ]; then

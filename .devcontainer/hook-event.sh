@@ -5,8 +5,8 @@
 # Claude Code runs this with the hook's input as JSON on stdin. It writes that input, with
 # `event` (the hook's name) and `at` (UTC, milliseconds) added, as one file under the
 # session's MCP-readable state dir, where aidc-mcp reads it (the hook never reaches the MCP
-# itself). That dir is the transcript mirror a Docker session mounts; a Kubernetes pod
-# mounts none yet, so there the writer writes nothing:
+# itself). That dir is the session's own folder of the transcript mirror, which a Docker session
+# mounts from the MCP's state dir and a Kubernetes pod from the user's mirror claim:
 #
 #   /var/aidc/transcript-out/hook-events/<epoch-ns>-<pid>.json
 #

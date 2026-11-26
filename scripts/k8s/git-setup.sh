@@ -34,6 +34,8 @@ if [ -z "$K8S_GIT_REPOS_RV" ]; then
     k8s_git_repos_write "$ns" "" || die "could not make the list of added repos in ${ns}"
 fi
 info "applying ${AIDC_K8S_USER}'s git container in ${ns}"
+# The agent's transcripts and hook events reach the user's MCP server through the mirror claim.
+k8s_ensure_transcripts "$ns" || exit 1
 applied=$(k8s_render_git "$sel" | k8s_kubectl apply -f -) || die "could not apply the git container"
 printf '%s\n' "$applied" >&2
 # The image tag is aidc's version, so `aidc k8s build --force` replaces the image under the same

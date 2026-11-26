@@ -276,6 +276,8 @@ k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/
     --from-file="${seed}/config-snapshot.yaml" --dry-run=client -o yaml \
     | yq '.metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/session": "'"${NAME}"'"}' \
     | k8s_kubectl apply -f - >&2
+# The session's transcripts and hook events reach the user's MCP server through the mirror claim.
+k8s_ensure_transcripts "$ns" || exit 1
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" | k8s_kubectl apply -f - >&2
 # Not there yet is asked again; a read that fails is "the cluster did not answer" (k8s_read).
 proxy_ip=""

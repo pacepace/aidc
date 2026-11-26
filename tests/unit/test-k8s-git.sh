@@ -108,6 +108,7 @@ case "$*" in
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }
         cat >/dev/null 2>&1 || true; echo "ok: $*" | cut -c1-80 ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
+    *"get pvc transcripts"*) [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
     *"get pvc disk"*)
         [ "${K_PVC_WARN:-}" = 1 ] && echo "Warning: client version skew" >&2
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -195,11 +196,17 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
 assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home, the private copies at gitrun's store" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true}]' \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"git"}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
-assert_eq "the volumes are the user's disk claim, the git-home, git-cred and git-run claims, and the two read-only lists" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}},{"name":"settings","configMap":{"name":"git-settings","defaultMode":292}}]' \
+assert_eq "the volumes are the user's disk claim, the git-home, git-cred and git-run claims, the transcript mirror claim, and the two read-only lists" \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"transcripts","persistentVolumeClaim":{"claimName":"transcripts"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}},{"name":"settings","configMap":{"name":"git-settings","defaultMode":292}}]' \
     "$(pod '.volumes')"
+assert_has "the agent's own folder of the transcript mirror is readied by the root step: the git user's, private, its old hook events gone" \
+    'd=/mirror/git && mkdir -p \"$d\" && rm -rf -- \"$d/hook-events\" && chown 2000:2000 \"$d\" && chmod 0700 \"$d\"' \
+    "$(pod '.initContainers[] | select(.name == "seed-home") | .command')"
+assert_eq "only the root step mounts the whole mirror; the agent sees its own folder, the holder none" \
+    '[{"name":"transcripts","mountPath":"/mirror"}] [{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"git"}]' \
+    "$(pod '[.initContainers[] | .volumeMounts[] | select(.name == "transcripts")]') $(pod '[.containers[] | .volumeMounts[] | select(.name == "transcripts")]')"
 # The list of repos the user added is the one thing gitctl takes "added" from: read-only in the
 # pod, a ConfigMap no one in the namespace can write (no container holds an API token), made
 # here when missing and never rewritten by setup.
@@ -294,6 +301,13 @@ assert_not_has "and deletes nothing but its own one-shot folder pod (the home cl
 
 out=$(K_CM_EXISTS=1 run git setup)
 assert_eq "run again with the list there, setup leaves it as it is" "" "$(cat "$K_CMS")$(grep -E 'create -f -|replace -f -' "$K_LOG")"
+echo "=== aidc git setup: the transcript mirror claim made when missing ==="
+out=$(K_NO_TRANSCRIPTS=1 run git setup)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "the user's mirror claim is made first, on the session class, labelled for the user only" \
+    '{"name":"transcripts","labels":{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice"},"class":"scratch"}' \
+    "$(yq -N e 'select(.kind == "PersistentVolumeClaim") | {"name": .metadata.name, "labels": .metadata.labels, "class": .spec.storageClassName}' -o=json -I=0 "$K_APPLIED" | head -1)"
+
 echo "=== aidc git setup: failures ==="
 out=$(K_NO_DISK=1 run git setup)
 assert_has "no disk: says to add the user first" "run \`aidc user add alice\` first" "$out"

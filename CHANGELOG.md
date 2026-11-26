@@ -98,6 +98,13 @@ and the envelope are unchanged; what an MCP caller sees differently:
   host folder (on Kubernetes `pvc:<namespace>/<claim>`), and a file's `path` its place in the
   sidecar (`/var/aidc/audit/<file>`).
 
+### Upgrading: your MCP server in the cluster (aidc 2.0, Kubernetes)
+- **Each session's transcripts and Claude Code hook events reach your MCP server** through a
+  claim of yours, `transcripts`, made by the first `aidc create` or `aidc git setup` that needs
+  it (`kubernetes.transcripts_size`, default 10Gi, on the session class). Each session mounts only
+  its own folder of it, at `/var/aidc/transcript-out` as on Docker. Sessions created before this
+  have no mirror: kill and create them again, and run `aidc git setup` for the git agent.
+
 ### Upgrading
 - **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,
   rename the top-level section holding `callback_url` (and `send_speaker`,

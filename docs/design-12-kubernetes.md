@@ -42,10 +42,24 @@ cluster (the session node)
     ├─ <session>-egress-<host> (Deployment) a TCP relay per --egress-tcp host (NET-15)
     ├─ <session>-dev (Service) + Ingress    a page on the network (--expose, K8S-15)
     ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
+    ├─ transcripts (PVC)                    the transcript mirror the user's MCP reads (MCP-15)
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (not built yet: aidc 2.0)   the user's MCP server (K8S-07)
     └─ syncthing (not built yet: aidc 2.0)  Claude state <-> user's machines (K8S-18)
 ```
+
+The transcript mirror (MCP-15, Q-M3): each session's dev pod copies its Claude transcripts, and
+its Claude Code hooks write their events (MCP-46), into `/var/aidc/transcript-out`, as on Docker;
+there it is the session's own folder (`subPath: <session>`; the git agent's `git`) of one claim
+per user, `transcripts`, which the user's MCP server mounts whole. Not a folder on the user's
+disk, which Q-M3 first named: every session mounts the whole disk, so a mirror there would let a
+session write another's transcripts and events; a pod mounts only its own folder of the claim,
+as a Docker session mounts only its own folder of the MCP's state. A root init step makes the
+folder, gives it to the session user (the git agent's to uid 2000), 0700, and empties its hook
+events on every pod start, so the MCP never reads a Claude's state from the one before. The
+claim is on the session class (a copy of what each home holds), made by the first `aidc create`
+or `aidc git setup` that needs it and never applied over (`kubernetes.transcripts_size`, default
+10Gi); it carries no session label, so `aidc kill` keeps a session's folder, as Docker keeps its.
 
 Sessions live in their user's namespace, named `<session>-*`, not one namespace each: every
 session mounts the user's one disk, and a pod can mount only claims of its own namespace.
@@ -313,8 +327,7 @@ settings add SessionStart, Stop, Notification and UserPromptSubmit, each running
 `/usr/local/bin/aidc-hook-event` (the sessions' writer, copied into the image), which writes the
 event as the agent into `/var/aidc/transcript-out/hook-events`, the mirror aidc's MCP server
 reads for the session `git`. On Docker that is the mounted transcript folder; on Kubernetes the
-git pod has no mirror until the per-user server reads its transcripts (W-M1-02), and the hook
-writes nothing meanwhile.
+agent's folder (`git`) of the user's transcript mirror claim ("Shape", below).
 
 GitHub issues (GIT-07; owner rulings 2026-11-26, Q-G1) go through the git container as an
 issue-scoped API passthrough, not as a general one. `gitctl api <method> <path>` passes a call

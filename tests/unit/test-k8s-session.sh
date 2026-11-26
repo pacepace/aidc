@@ -47,7 +47,7 @@ assert_not_has() {
     esac
 }
 
-# kubectl stub: logs calls; apply appends stdin to $K_APPLIED.
+# kubectl stub: logs calls; apply appends stdin to $K_APPLIED, as a document of its own.
 #   get pvc disk            Bound unless K_NO_DISK=1
 #   get deployment <s>-proxy  exists when K_EXISTS=1
 #   get service ... clusterIP 10.45.9.9
@@ -73,7 +73,8 @@ ARGS="$*"
 case "$*" in
     *"get ingressclass"*) printf '%s' "${K_IC:-traefik.io/ingress-controller}" ;;
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
-    *"apply -f -"*|*"create -f -"*) cat >> "$K_APPLIED" ;;
+    # Each apply its own YAML document, as each is its own request to the API server.
+    *"apply -f -"*|*"create -f -"*) { echo '---'; cat; } >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -n "${K_DISK_PHASE:-}" ] && { printf '%s' "$K_DISK_PHASE"; exit 0; }
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -88,6 +89,8 @@ case "$*" in
         [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
+    *"get pvc transcripts"*) [ "${K_TRANSCRIPTS_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
     *"get pvc demo-home demo-state"*) [ "${K_LEFTOVER:-}" = 1 ] && echo "persistentvolumeclaim/demo-home" ;;
     *"get pvc -l"*"aidc/kept=audit"*) [ "${K_TWO_AUDITS:-}" = 1 ] && echo "persistentvolumeclaim/demo-audit-20261123040000"
         echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
@@ -132,7 +135,7 @@ case "$*" in
         printf '  NAME   READY   STATUS\n  demo-dev-0   true   Running\n' ;;
     *"get networkpolicy -o name"*) [ "${K_STATUS_READS_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
-    *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed}\ndata: {meta.json: "{}"}\n' ;;
+    *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed, namespace: aidc-u-alice}\ndata: {meta.json: "{}"}\n' ;;
 esac
 exit 0
 STUB
@@ -187,9 +190,21 @@ assert_eq "no container in the dev pod is privileged" "[]" \
 assert_eq "session size: 2 CPU / 8Gi guaranteed, the configured ceiling" \
     '{"requests":{"cpu":"2","memory":"8Gi"},"limits":{"cpu":"16","memory":"64Gi"}}' \
     "$(dev '.spec.template.spec.containers[0].resources')"
-assert_eq "the user's disk is mounted at /home/<user>, the home on its own volume" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/vscode"}]' \
+assert_eq "the user's disk is mounted at /home/<user>, the home on its own volume, and only the session's own folder of the transcript mirror" \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/vscode"},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"demo"}]' \
     "$(dev '.spec.template.spec.containers[0].volumeMounts')"
+assert_eq "the transcript mirror is the user's claim, the same one every session mounts" \
+    '{"name":"transcripts","persistentVolumeClaim":{"claimName":"transcripts"}}' \
+    "$(dev '.spec.template.spec.volumes[] | select(.name == "transcripts")')"
+assert_eq "before Claude starts, a root step readies the session's folder: made, the session user's, private, its old hook events gone" \
+    '{"name":"mirror-dir","command":["sh","-c","d=/mirror/demo && mkdir -p \"$d\" && rm -rf -- \"$d/hook-events\" && chown 1000:1000 \"$d\" && chmod 0700 \"$d\""],"volumeMounts":[{"name":"transcripts","mountPath":"/mirror"}]}' \
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "mirror-dir") | {"name": .name, "command": .command, "volumeMounts": .volumeMounts}')"
+assert_eq "no other container of the dev pod mounts the whole mirror" "[]" \
+    "$(dev '[.spec.template.spec.containers[] | .volumeMounts[] | select(.name == "transcripts" and (.subPath // "") != "demo")]')"
+assert_eq "the proxy pod does not mount the mirror" "[]" \
+    "$(q 'select(.kind == "Deployment") | [.spec.template.spec.volumes[] | select(.name == "transcripts")]' | tail -1)"
+assert_eq "a mirror claim that is there is not applied again (a changed size would be refused as a resize)" "" \
+    "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "transcripts") | .metadata.name')"
 pvc() { q "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$1\") | .spec.storageClassName" | tail -1; }
 assert_eq "the home volume is on the session storage class (deleted with the session)" '"scratch"' "$(pvc demo-home)"
 assert_eq "the taint flag's volume outlives the proxy pod, on the session class" '"scratch"' "$(pvc demo-state)"
@@ -323,6 +338,21 @@ assert_not_has "  nor the page offered" "page: https://" "$out"
 assert_has "  and create fails" "exit=1" "$out"
 assert_has "  though the session itself runs" "session demo runs, but WITHOUT its pages" "$out"
 cp "$SCRATCH/config.plain" "$HOME/.config/aidc/config.yaml"
+
+echo "=== the transcript mirror claim, made by the first create that needs it ==="
+out=$(K_NO_TRANSCRIPTS=1 run create demo --backend kubernetes)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "the user's mirror claim is made, on the session class" '"scratch"' "$(pvc transcripts)"
+assert_eq "it is the user's, not the session's: aidc kill, which deletes by the session label, keeps it" \
+    '{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice"}' \
+    "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "transcripts") | .metadata.labels')"
+assert_eq "it is made before the session's pods that mount it" "transcripts" \
+    "$(q 'select(.kind == "PersistentVolumeClaim" or .kind == "StatefulSet" or .kind == "Deployment") | .metadata.name' | head -1 | tr -d '"')"
+out=$(K_NO_TRANSCRIPTS=1 K_TRANSCRIPTS_READ_FAIL=1 run create demo --backend kubernetes)
+assert_has "a cluster that does not say whether the claim is there stops create" \
+    "cannot read the transcript mirror claim in aidc-u-alice: the cluster did not answer" "$out"
+assert_eq "and nothing of the session is made" "" \
+    "$(q 'select(.kind == "StatefulSet" or .kind == "Deployment") | .metadata.name')"
 
 echo "=== create refusals ==="
 out=$(K_NO_DENY=1 run create demo --backend kubernetes)

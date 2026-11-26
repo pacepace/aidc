@@ -59,6 +59,7 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
         printf 'RENDER k8s_render_network %s\n' "$(k8s_render_network s1 shop | kinds)"
         printf 'RENDER k8s_render_expose %s\n' "$(controllers k8s_render_expose s1 'u:$apr1$x' 8080 9090 | kinds)"
         printf 'RENDER k8s_render_expose_login %s\n' "$(controllers k8s_render_expose_login s1 'u:$apr1$x' | kinds)"
+        printf 'RENDER k8s_render_transcripts %s\n' "$(k8s_render_transcripts | kinds)"
     } > "$SCRATCH/facts"
 )
 

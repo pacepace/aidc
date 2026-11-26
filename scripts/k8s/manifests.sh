@@ -250,6 +250,60 @@ spec:
 EOF
 }
 
+# The user's transcript mirror (MCP-15 as amended; plan-aidc-2.0 Q-M3): each session's dev pod,
+# and the git agent's, copies its Claude transcripts and writes its Claude Code hook events
+# (MCP-46) into its own folder here, which the user's MCP server reads. A claim of its own, not
+# a folder on the user's disk: every session mounts the whole disk, so a mirror there would let
+# one session write another's transcripts and events; here each pod mounts only its own folder
+# (subPath <session>, the git agent's `git`), as a Docker session mounts only its own. One claim
+# per user, on the session class (a copy of what each session's home holds), never labelled
+# with a session: aidc kill deletes a session's objects by label, and a session's folder is kept,
+# as on Docker. Made once, when the first session or the git container needs it.
+K8S_TRANSCRIPTS_CLAIM=transcripts
+# Where a pod's own folder of the mirror is mounted (user-main.sh and gitctl-main.sh copy into
+# it; hook-event.sh writes hook-events/ under it), the same path as on Docker.
+K8S_TRANSCRIPT_OUT=/var/aidc/transcript-out
+k8s_render_transcripts() {
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${K8S_TRANSCRIPTS_CLAIM}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}}
+spec:
+  storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_TRANSCRIPTS_SIZE}}}
+EOF
+}
+
+# k8s_ensure_transcripts <namespace>: the transcript mirror claim, made when it is not there yet
+# (never applied over one that is: a changed size would be refused as a resize). Returns 1,
+# saying why on stderr, when the cluster cannot be asked or does not take it.
+k8s_ensure_transcripts() {
+    local have
+    if ! have=$(k8s_get "$1" pvc "$K8S_TRANSCRIPTS_CLAIM" -o name); then
+        printf '[aidc] error: cannot read the transcript mirror claim in %s: the cluster did not answer (%s)\n' "$1" "$have" >&2
+        return 1
+    fi
+    [ -z "$have" ] || return 0
+    if ! k8s_render_transcripts | k8s_kubectl apply -f - >/dev/null; then
+        printf '[aidc] error: could not make the transcript mirror claim in %s\n' "$1" >&2
+        return 1
+    fi
+}
+
+# _k8s_mirror_dir_cmd <folder> <uid>: the root init step that readies a pod's own folder of the
+# mirror: made when missing, given to <uid> (0700: conversations), and its hook events emptied,
+# so the MCP never reads a Claude's state from the last event of the one before it (a restarted
+# or replaced pod; the git agent's start does the same on Docker). Not followed: a symlink a
+# session left as hook-events is removed, not its target; the folder itself is the pod's mount
+# root, which nothing in the pod can replace.
+_k8s_mirror_dir_cmd() {
+    printf '%s' "d=/mirror/${1} && mkdir -p \"\$d\" && rm -rf -- \"\$d/hook-events\" && chown ${2}:${2} \"\$d\" && chmod 0700 \"\$d\""
+}
+
 # --- Users' credentials (docs/design-12-kubernetes.md, "Users and credentials") ---------------
 #
 # What a user's own credentials may do: exactly what aidc's commands do in the user's namespace
@@ -851,6 +905,12 @@ spec:
           imagePullPolicy: Always
           command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/vscode/. /seed/; chown 1000:1000 /seed && chmod 0755 /seed']
           volumeMounts: [{name: home, mountPath: /seed}]
+        # The session's own folder of the transcript mirror (k8s_render_transcripts).
+        - name: mirror-dir
+          image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, '$(_k8s_mirror_dir_cmd "$session" 1000)']
+          volumeMounts: [{name: transcripts, mountPath: /mirror}]
         # The repo folder, made as the session user when it is not on the disk yet, group-writable
         # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
@@ -902,9 +962,13 @@ spec:
           volumeMounts:
             - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
             - {name: home, mountPath: /home/vscode}
+            # Its own folder of the mirror only: the MCP reads its transcripts and hook events
+            # there, and no session sees another's.
+            - {name: transcripts, mountPath: ${K8S_TRANSCRIPT_OUT}, subPath: ${session}}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
+        - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
 EOF
 }
 
@@ -1026,13 +1090,13 @@ spec:
           # The login's home is gitcred's: 0711, so git can read the identity file a login
           # writes there but cannot list it; gh's own files in it are 0600.
           # gitrun's store is gitrun's alone: gitctl refuses one anyone else can enter.
-          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred && chown 2002:2002 /run-store && chmod 0700 /run-store']
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred && chown 2002:2002 /run-store && chmod 0700 /run-store && $(_k8s_mirror_dir_cmd "$K8S_GIT_SESSION" 2000)']
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
-          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}]
+          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}, {name: transcripts, mountPath: /mirror}]
         # Claude Code is copied into the home once, when it is seeded; this brings a home made
         # earlier the image's Claude when that is newer than the one it has. As the git user,
         # not root: the home is the agent's, so nothing it planted there is followed by root.
@@ -1075,6 +1139,9 @@ spec:
             # holds no API token, so nothing in it can add one (gitctl, ADDED_LIST).
             - {name: repos, mountPath: /etc/aidc/git-repos, readOnly: true}
             - {name: settings, mountPath: /etc/aidc/git-settings, readOnly: true}
+            # The agent's own folder of the transcript mirror (gitctl-main.sh copies its
+            # transcripts there, hook-event.sh writes its hook events), read by the MCP.
+            - {name: transcripts, mountPath: ${K8S_TRANSCRIPT_OUT}, subPath: ${K8S_GIT_SESSION}}
         # The request holder (gitreq): takes the sessions' requests, holds them in ask mode,
         # and alone runs the gitctl verbs that change GitHub, out of the agent's reach (owner
         # ruling 2026-11-26). A container of its own: kubectl exec cannot choose a user, so the
@@ -1108,6 +1175,7 @@ spec:
         - {name: home, persistentVolumeClaim: {claimName: git-home}}
         - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
         - {name: run-store, persistentVolumeClaim: {claimName: git-run}}
+        - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
         - {name: repos, configMap: {name: git-repos, defaultMode: 292}}  # 0444
         - {name: settings, configMap: {name: git-settings, defaultMode: 292}}  # 0444
 EOF2

@@ -91,6 +91,12 @@ and the envelope are unchanged; what an MCP caller sees differently:
   token on its next message.
 - **`file_put` overwrites an existing file** (#76: it failed on every overwrite in sessions on
   the current image).
+- **The audit resources work**: `aidc://sessions/<name>/audit` and `.../audit/<file>` read the
+  session's audit trail in its audit sidecar. They looked for an `audit:` line `aidc status`
+  does not print, and for a host folder the `aidc-mcp` container does not mount, so they
+  answered "audit dir not found" for every session. The listing's `audit_dir` is the trail's
+  host folder (on Kubernetes `pvc:<namespace>/<claim>`), and a file's `path` its place in the
+  sidecar (`/var/aidc/audit/<file>`).
 
 ### Upgrading
 - **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,

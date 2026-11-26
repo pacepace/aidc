@@ -1041,8 +1041,25 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
   queries with the readers of their output, the reading of a missing container, and the
   session's instance id. They keep their own
   process handling (sync or async, timeouts, stdin). `mcp/tests/test_backend.py` fails if any
-  other module starts `docker` or spells a container name. The Kubernetes backend answers the
-  same functions with `kubectl` and namespace/pod names.
+  other module starts `docker` or `kubectl`, or spells a container or cluster object name.
+  The Kubernetes backend answers the same functions with `kubectl` and namespace/pod names.
+  One server serves one backend: its environment says which (`AIDC_MCP_BACKEND=docker`, the
+  default, or `kubernetes` with `AIDC_K8S_NAMESPACE`, the user's namespace), and a server
+  whose settings name neither, or no namespace, refuses to start. On Kubernetes:
+  - targets: a session's `dev` role is `pod/<s>-dev-0` container `dev`; `policy` and `audit`
+    are those containers of `deployment/<s>-proxy`; the git agent is `deployment/git`
+    container `git`, and its request holder the same pod's `gitreq` container (kubectl exec
+    cannot choose a user).
+  - the session user is reached with `sudo -E -H -u vscode`, as `aidc attach` does: the pod's
+    environment (its proxy settings) is kept and the dev image's sudo rule gives the
+    session's umask, so what the MCP writes on the shared disk stays group-writable; a
+    workdir and env are part of the command (kubectl exec has neither flag).
+  - a session's instance id is the uid of its state claim (`<s>-state`, the git agent's
+    `git-home`): made by create, deleted by kill, kept by restart and upgrade, as Docker's
+    session network. Only the API server's NotFound for that claim is a gone session.
+  - `audit_get`'s `audit_dir` is `pvc:<namespace>/<claim>`, the audit claim. The audit
+    resources (`aidc://sessions/{name}/audit[/{file}]`) read the trail in the session's
+    audit sidecar on both backends, where it is mounted.
 - **CLI:** the switch point is the dispatcher: `scripts/aidc` runs `scripts/cmd-<verb>.sh` for
   Docker and `scripts/k8s/session-<verb>.sh` for Kubernetes. `--backend docker|kubernetes`
   chooses; without it, `create` takes the config's top-level `backend:`, a verb that names a

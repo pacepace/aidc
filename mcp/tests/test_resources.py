@@ -1,44 +1,17 @@
 """Tests for aidc_mcp.resources.
 
-Covers the shared `aidc status` audit-dir parser (used by both the resources here
-and ses.audit_get) and the path-traversal guard on the audit-file resource — the
-security boundary that stops `{filename}` from escaping the session's audit dir.
+The audit resources read the session's audit dir where it is, in its audit sidecar (on Docker
+a host folder this server does not mount, on Kubernetes a volume claim). These tests run the
+real in-sidecar scripts against a folder here, and hold the path-traversal guard on the
+audit-file resource: the security boundary that stops `{filename}` from escaping the
+session's audit dir.
 """
 import json
-from pathlib import Path
+import subprocess
 
-from aidc_mcp import resources
-from aidc_mcp.resources import parse_audit_dir
+import pytest
 
-# --- parse_audit_dir ---------------------------------------------------------
-
-class TestParseAuditDir:
-    def test_parses_audit_colon_line(self):
-        assert parse_audit_dir("name: proj\naudit: /var/audit/proj\nfoo: bar") == \
-            Path("/var/audit/proj")
-
-    def test_parses_padded_audit_line(self):
-        # `aidc status` prints the value column-padded: `audit:      /path`.
-        assert str(parse_audit_dir("== session ==\naudit:      /var/audit/proj\n")) == \
-            "/var/audit/proj"
-
-    def test_case_insensitive(self):
-        # ses.audit_get used to match case-sensitively; the shared helper is
-        # case-insensitive so a header-case change in the CLI can't break it.
-        assert str(parse_audit_dir("AUDIT: /upper/case")) == "/upper/case"
-        assert str(parse_audit_dir("Audit:  /mixed")) == "/mixed"
-
-    def test_returns_none_when_absent(self):
-        assert parse_audit_dir("health: ok\ntaint: none") is None
-
-    def test_returns_none_on_empty(self):
-        assert parse_audit_dir("") is None
-
-    def test_strips_stray_colon_and_whitespace(self):
-        # `audit:   /p` -> split gives ["audit:", "/p"]; lstrip(':') on the value
-        # is a no-op here, but a value like `: /p` must not keep the leading colon.
-        assert str(parse_audit_dir("audit:  /padded  ")) == "/padded"
-
+from aidc_mcp import backend, resources, session_facts
 
 # --- resource wiring ---------------------------------------------------------
 
@@ -52,11 +25,25 @@ AUDIT_FILE = "aidc://sessions/{name}/audit/{filename}"
 AUDIT_LIST = "aidc://sessions/{name}/audit"
 
 
+def _sidecar(monkeypatch, audit_dir, seen=None):
+    """The audit sidecar, played here: an exec runs its script against `audit_dir` in place
+    of the sidecar's mount; the mount lookup answers with `audit_dir`."""
+    def run(argv):
+        if seen is not None:
+            seen.append(argv)
+        if "sh" in argv:
+            inner = argv[argv.index("sh"):]
+            inner = [str(audit_dir) if a == session_facts.AUDIT_MOUNT else a for a in inner]
+            return subprocess.run(inner, capture_output=True, check=False)
+        return subprocess.CompletedProcess(argv, 0, f"{audit_dir}\n".encode(), b"")
+    monkeypatch.setattr(resources, "_backend_run", run)
+
+
 class TestAuditFileTraversalGuard:
     def _setup(self, tmp_path, monkeypatch):
         audit = tmp_path / "audit"
         audit.mkdir()
-        monkeypatch.setattr(resources, "_run", lambda args: f"audit: {audit}\n")
+        _sidecar(monkeypatch, audit)
         return audit
 
     async def test_reads_file_inside_audit_dir(self, tmp_path, monkeypatch):
@@ -77,6 +64,13 @@ class TestAuditFileTraversalGuard:
         out = json.loads(await _fn(AUDIT_FILE)("proj", "../../../../etc/passwd"))
         assert out["error"] == "path traversal denied"
 
+    async def test_rejects_a_symlink_out_of_the_dir(self, tmp_path, monkeypatch):
+        audit = self._setup(tmp_path, monkeypatch)
+        (tmp_path / "secret").write_text("TOPSECRET", encoding="utf-8")
+        (audit / "link.log").symlink_to(tmp_path / "secret")
+        out = json.loads(await _fn(AUDIT_FILE)("proj", "link.log"))
+        assert out == {"error": "path traversal denied"}
+
     async def test_missing_file_inside_dir(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         out = json.loads(await _fn(AUDIT_FILE)("proj", "nope.log"))
@@ -89,7 +83,7 @@ class TestAuditFileTraversalGuard:
         assert "binary" in out["content"]
 
     async def test_no_audit_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(resources, "_run", lambda args: "health: ok\n")
+        _sidecar(monkeypatch, tmp_path / "not-there")
         out = json.loads(await _fn(AUDIT_FILE)("proj", "events.log"))
         assert out["error"] == "audit dir not found"
 
@@ -99,17 +93,44 @@ class TestAuditListing:
         audit = tmp_path / "audit"
         audit.mkdir()
         (audit / "a.log").write_text("x", encoding="utf-8")
+        (audit / ".hidden").write_text("yy", encoding="utf-8")
         (audit / "sub").mkdir()
-        monkeypatch.setattr(resources, "_run", lambda args: f"audit: {audit}\n")
+        _sidecar(monkeypatch, audit)
         out = json.loads(await _fn(AUDIT_LIST)("proj"))
         names = {f["name"]: f for f in out["files"]}
         assert names["a.log"]["size"] == 1 and names["a.log"]["is_dir"] is False
+        assert names[".hidden"]["size"] == 2
         assert names["sub"]["is_dir"] is True
+        assert out["audit_dir"] == str(audit)
 
     async def test_missing_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(resources, "_run", lambda args: "no audit here")
+        _sidecar(monkeypatch, tmp_path / "not-there")
         out = json.loads(await _fn(AUDIT_LIST)("proj"))
         assert out["error"] == "audit dir not found"
+
+
+@pytest.mark.parametrize("kind", ["docker", "kubernetes"])
+async def test_the_audit_dir_is_read_in_the_sessions_audit_sidecar(kind, tmp_path,
+                                                                    monkeypatch):
+    """On both backends the read is an exec in the session's own audit sidecar, which
+    mounts the audit dir; nothing reads a path on this server's own filesystem."""
+    monkeypatch.setenv(backend.KIND_ENV, kind)
+    monkeypatch.setenv(backend.NAMESPACE_ENV, "aidc-u-alice")
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    (audit / "events.log").write_text("hi", encoding="utf-8")
+    seen = []
+    _sidecar(monkeypatch, audit, seen)
+    out = json.loads(await _fn(AUDIT_FILE)("proj", "events.log"))
+    assert out["content"] == "hi"
+    exec_argv = seen[0]
+    sidecar = backend.target("proj", backend.ROLE_AUDIT)
+    if kind == "docker":
+        assert exec_argv[:3] == ["docker", "exec", sidecar]
+    else:
+        assert exec_argv[:7] == ["kubectl", "-n", "aidc-u-alice", "exec",
+                                 "--pod-running-timeout=10s", "deployment/proj-proxy", "-c"]
+        assert exec_argv[7] == "audit"
 
 
 class TestRunFailsafe:

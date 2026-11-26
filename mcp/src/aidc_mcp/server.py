@@ -39,7 +39,7 @@ from threetears.mcp import (
 )
 from threetears.tool_contract.mcp_face import mcp_tool
 
-from aidc_mcp import __version__, audit, auth, authz, observability, resources, scope
+from aidc_mcp import __version__, audit, auth, authz, backend, observability, resources, scope
 from aidc_mcp import store as state_store
 from aidc_mcp.authz import PERMISSION, AidcAuthorizer
 from aidc_mcp.service import common as com
@@ -212,7 +212,12 @@ def open_state_store() -> bool:
 def main() -> int:
     port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
     observability.configure()
-    audit.log_event("server_start", port=port)
+    try:
+        kind = backend.check_config()
+    except backend.BackendConfigError as exc:
+        audit.log_event("server_start_refused", reason="backend_config", error=str(exc))
+        return 1
+    audit.log_event("server_start", port=port, backend=kind)
     if not open_state_store():
         return 1
     wrapped = build_app()

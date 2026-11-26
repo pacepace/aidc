@@ -1,4 +1,4 @@
-"""Typed facts about one session, read from docker rather than parsed out of CLI text.
+"""Typed facts about one session, read from its containers rather than parsed out of CLI text.
 
 `aidc status` prints text for a person. An orchestrator that parsed it broke the
 moment the wording moved: `audit_get` looked for an `audit:` line the CLI never
@@ -46,7 +46,7 @@ async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerRe
     (exit -1), never a raise."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            backend.BIN, *args,
+            backend.program(), *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -57,7 +57,8 @@ async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerRe
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return DockerResult(-1, b"", f"{backend.BIN} {args[0]} timed out after {timeout}s".encode())
+        said = f"{backend.program()} {args[0]} timed out after {timeout}s"
+        return DockerResult(-1, b"", said.encode())
     return DockerResult(proc.returncode if proc.returncode is not None else -1, out, err)
 
 
@@ -83,7 +84,7 @@ async def read_taint(name: str) -> dict[str, str] | None:
     if res.returncode != 0:
         if _missing_file(res.err):
             return None
-        raise TaintUnknown(res.err.strip() or f"docker exec exited {res.returncode}")
+        raise TaintUnknown(res.err.strip() or f"{backend.program()} exec exited {res.returncode}")
     try:
         data = json.loads(res.stdout.decode("utf-8", errors="replace"))
     except ValueError:
@@ -110,18 +111,19 @@ async def taint_or_none(name: str) -> dict[str, str] | None:
 
 async def audit_dir(name: str) -> str | None:
     """The session's audit dir on the HOST: the source of the audit sidecar's mount."""
-    res = await run_docker(*backend.mount_source_args(
-        backend.target(name, backend.ROLE_AUDIT), AUDIT_MOUNT))
-    return backend.mount_source(res.stdout) if res.returncode == 0 else None
+    tgt = backend.target(name, backend.ROLE_AUDIT)
+    res = await run_docker(*backend.mount_source_args(tgt, AUDIT_MOUNT))
+    return backend.mount_source(res.stdout, tgt, AUDIT_MOUNT) if res.returncode == 0 else None
 
 
 async def repo_path(name: str) -> str | None:
     """The repository the session's dev container works in: AIDC_REPO_PATH, else its
     working dir (compose sets both to the mounted repo)."""
-    res = await run_docker(*backend.env_workdir_args(backend.target(name)))
+    tgt = backend.target(name)
+    res = await run_docker(*backend.env_workdir_args(tgt))
     if res.returncode != 0:
         return None
-    env, workdir = backend.env_and_workdir(res.stdout)
+    env, workdir = backend.env_and_workdir(res.stdout, tgt)
     return env.get("AIDC_REPO_PATH", "").strip() or workdir or None
 
 
@@ -137,7 +139,7 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
     if res.returncode != 0:
         if _missing_file(res.err):
             return []
-        raise TaintUnknown(res.err.strip() or f"docker exec exited {res.returncode}")
+        raise TaintUnknown(res.err.strip() or f"{backend.program()} exec exited {res.returncode}")
     events: list[dict[str, Any]] = []
     for line in res.stdout.decode("utf-8", errors="replace").splitlines():
         try:
@@ -155,20 +157,11 @@ async def dev_containers() -> list[dict[str, str]] | None:
     res = await run_docker(*backend.dev_list_args())
     if res.returncode != 0:
         return None
-    text = res.stdout.decode("utf-8", errors="replace")
-    if not text.strip():
+    rows = backend.dev_rows(res.stdout)
+    if not rows:
         # Sessions made before the labels: their names say what they are.
         res = await run_docker(*backend.dev_list_args(by_name=True))
         if res.returncode != 0:
             return None
-        text = res.stdout.decode("utf-8", errors="replace")
-    rows = []
-    for line in text.splitlines():
-        parts = line.split("\t")
-        session = backend.session_of_dev(parts[0]) if parts else None
-        if not session:
-            continue
-        parts += [""] * (4 - len(parts))
-        rows.append({"name": session, "status": parts[1],
-                     "profile": parts[2] or "?", "started": parts[3]})
+        rows = backend.dev_rows(res.stdout)
     return rows

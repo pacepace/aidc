@@ -36,7 +36,7 @@ from aidc_mcp.service import common as com
 from aidc_mcp.service import turns as tn
 
 #: the request holder, and its home, in the git container (gitctl/Dockerfile)
-HOLDER_USER = "gitreq"
+HOLDER_USER = backend.GIT_HOLDER_USER
 HOLDER_HOME = "/var/lib/gitctl/gitreq"
 #: how long a decision may take: an approval runs the push, pull request or merge
 DECIDE_TIMEOUT_S = 300.0

@@ -173,18 +173,19 @@ async def _docker(*args: str, timeout: float = 20.0) -> bytes:
     """The command's stdout. :raises DockerFailed: on any failure, with its stderr."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            backend.BIN, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            backend.program(), *args, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
-        raise DockerFailed(f"docker could not be started: {exc}") from exc
+        raise DockerFailed(f"{backend.program()} could not be started: {exc}") from exc
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError as exc:
         proc.kill()
         await proc.wait()
-        raise DockerFailed(f"docker did not answer within {timeout:.0f} s") from exc
+        raise DockerFailed(f"{backend.program()} did not answer within {timeout:.0f} s") from exc
     if proc.returncode:
         said = err.decode("utf-8", errors="replace").strip()[:300]
-        raise DockerFailed(f"docker exited {proc.returncode}: {said or 'no message'}")
+        raise DockerFailed(f"{backend.program()} exited {proc.returncode}: {said or 'no message'}")
     return out
 
 

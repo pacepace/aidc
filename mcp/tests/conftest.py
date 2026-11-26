@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 
@@ -60,6 +61,23 @@ def idle_session(monkeypatch):
     async def state(container, name):
         return tn.SessionState(False, None, tn.TURN_IDLE, "claude_not_running")
     monkeypatch.setattr(tn, "session_state", state)
+
+
+@pytest.fixture(autouse=True)
+def _docker_server_and_no_cluster(tmp_path_factory, monkeypatch):
+    """Every test serves the Docker backend unless it says otherwise (the server's own
+    environment must not choose it), and no test can reach a real cluster: a `kubectl`
+    that only fails comes first on PATH, so a Kubernetes path a test forgot to stub fails
+    loudly instead of talking to the developer's cluster."""
+    from aidc_mcp import backend
+    monkeypatch.delenv(backend.KIND_ENV, raising=False)
+    monkeypatch.delenv(backend.NAMESPACE_ENV, raising=False)
+    stub_dir = tmp_path_factory.mktemp("no-cluster")
+    stub = stub_dir / "kubectl"
+    stub.write_text("#!/bin/sh\necho 'kubectl stub: no test reaches a cluster' >&2\nexit 99\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("KUBECONFIG", str(stub_dir / "no-kubeconfig"))
 
 
 @pytest.fixture(autouse=True)

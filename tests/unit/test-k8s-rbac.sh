@@ -196,12 +196,54 @@ other = False
 # page and tunnel lines, and the helpers they call in the libraries.
 MCP_SCRIPTS = {"k8s/session-create.sh", "k8s/session-list.sh", "k8s/session-status.sh",
                "k8s/session-where.sh"}
-MCP_USER_ONLY = ("expose", "login", "tunnel")
-MCP_FUNCS = {"k8s_get", "k8s_git_pod", "k8s_require_session", "k8s_session_lookup",
-             "k8s_session_taint", "k8s_wait_dev_ready", "k8s_node_selector",
-             "k8s_ensure_transcripts", "k8s_names_sync", "k8s_network_refusal",
-             "k8s_network_ungranted", "k8s_relays_describe", "k8s_networks", "k8s_exposed",
-             "aidc_audit_warn_k8s", "_aidc_audit_k8s_total"}
+# The helpers in scope are every function those scripts call, and every function those call
+# in turn: read from the scripts, not listed by hand, so a helper a verb starts calling is held
+# to the MCP's rules too. Left out: the functions that make pages and tunnels (defined in
+# expose.sh and tunnel.sh, which the server never asks for: no --expose, no ports:), but not
+# their readers, which every status runs. The dispatcher's own cluster call for these verbs
+# (the audit size warning) is in scope as well.
+def _functions():
+    bodies, where = {}, {}
+    for root, _, files in os.walk(scripts):
+        for f in files:
+            if not f.endswith(".sh") and f != "aidc": continue
+            rel_ = os.path.relpath(os.path.join(root, f), scripts)
+            name, body = None, []
+            for line in open(os.path.join(root, f)).read().split("\n"):
+                m = re.match(r"^(\w+)\(\)\s*\{", line)
+                if m: name, body = m.group(1), [line[m.end():]]; continue
+                if name is not None:
+                    if line.startswith("}"): bodies[name] = "\n".join(body); where[name] = rel_; name = None
+                    else: body.append(line)
+    return bodies, where
+_bodies, _defined_in = _functions()
+def _called(text):
+    """The functions `text` calls: its words outside comments that name a function."""
+    code = "\n".join("" if l.lstrip().startswith("#") else l.split(" #")[0] for l in text.split("\n"))
+    return {fn for fn in _bodies if re.search(r"(^|[^\w-])" + re.escape(fn) + r"\b", code)}
+MCP_READERS = {"k8s_exposed", "k8s_tunnels", "k8s_expose_host", "k8s_port_ok", "k8s_port_spec"}
+MCP_USER_ONLY_FUNCS = {fn for fn, f in _defined_in.items()
+                       if f in ("k8s/expose.sh", "k8s/tunnel.sh") and fn not in MCP_READERS}
+def _user_only(line):
+    return bool(_called(line) & MCP_USER_ONLY_FUNCS)
+_seed = set(["aidc_audit_warn_k8s"])
+for rel_ in MCP_SCRIPTS:
+    for line in open(os.path.join(scripts, rel_)).read().split("\n"):
+        if not _user_only(line): _seed |= _called(line)
+MCP_FUNCS, _todo = set(), list(_seed - MCP_USER_ONLY_FUNCS)
+while _todo:
+    fn = _todo.pop()
+    if fn in MCP_FUNCS or fn in MCP_USER_ONLY_FUNCS: continue
+    MCP_FUNCS.add(fn)
+    _todo += [g for g in _called("\n".join(l for l in _bodies.get(fn, "").split("\n")
+                                             if not _user_only(l))) - MCP_FUNCS]
+for fn in ("k8s_get", "k8s_session_taint", "k8s_wait_dev_ready", "k8s_ensure_transcripts",
+           "k8s_exposed"):
+    if fn not in MCP_FUNCS:
+        print(f"  FAIL: the MCP scope misses {fn}: the call graph reader is broken"); sys.exit(1)
+for fn in ("k8s_expose_check", "k8s_render_expose_login", "k8s_tunnel_start"):
+    if fn in MCP_FUNCS:
+        print(f"  FAIL: the MCP scope holds {fn}, which the server never runs"); sys.exit(1)
 mcp_needs, mcp_scope = {}, False
 def need(where, r, v):
     (other_needs if other else needs).setdefault((r, v), []).append(where)
@@ -225,8 +267,7 @@ for root, _, files in os.walk(scripts):
             fm = re.match(r"^(\w+)\(\)\s*\{", line)
             if fm: func = fm.group(1)
             elif line.startswith("}"): func = None
-            mcp_scope = ((rel in MCP_SCRIPTS and not any(w in line for w in MCP_USER_ONLY))
-                         or func in MCP_FUNCS)
+            mcp_scope = ((rel in MCP_SCRIPTS and not _user_only(line)) or func in MCP_FUNCS)
             code = line.split(" #")[0] if not line.lstrip().startswith("#") else ""
             direct = re.search(r"(^\s*|\$\(\s*|[|;&]\s*|\b(then|do|else|if|!)\s+)kubectl\s", code)
             if direct and rel != "k8s/lib.sh" and code[:direct.start()].count('"') % 2 == 0:

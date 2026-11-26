@@ -287,6 +287,21 @@ class TestSessionCreateBackend:
         res = await _create_tool(monkeypatch)(name="proj", repo="/home/alice/app", ctx=None)
         assert (res["ok"], res["error_code"]) == (False, "invalid_argument")
 
+    async def test_a_docker_server_creating_on_the_cluster_waits_as_long(self, monkeypatch):
+        """The timeout follows the backend the create runs on, not the server's: a Docker
+        server whose config says backend: kubernetes makes a cluster session, with the
+        cluster's two waits."""
+        _configure_backend("kubernetes")
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "ready", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(name="proj", ctx=None)
+        assert res["ok"] is True and rec[0][0][-2:] == ["--backend", "kubernetes"]
+        assert rec[0][1] == ses.CREATE_TIMEOUT_S[backend.KUBERNETES] >= 900
+        _configure_backend(None)
+        rec.clear()
+        res = await _create_tool(monkeypatch)(name="proj", repo="/host/repo", ctx=None)
+        assert rec[0][1] == 300.0
+
     async def test_a_cluster_creates_steps_are_reported_as_progress(self, monkeypatch, tmp_path):
         """The cluster create's own lines name its phases (TRS-04), each once, in order: the
         CLI's real output, read by the real streaming reader."""

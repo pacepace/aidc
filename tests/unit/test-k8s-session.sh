@@ -701,6 +701,7 @@ printf '#!/bin/sh\nexit 127\n' > "$SCRATCH/nogit/git"; chmod +x "$SCRATCH/nogit/
 out=$(cd "$POD_HOME" && HOME="$POD_HOME" AIDC_MCP_CONFIG_MOUNT="$POD_CFG" PATH="$SCRATCH/nogit:$PATH" \
     "$AIDC_ROOT/scripts/aidc" create demo --profile multi --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
 assert_has "it creates the session" "session demo is ready" "$out"
+assert_has "...and exits 0" "exit=0" "$out"
 assert_has "...starting at /home/<user>, the disk's top, from the pod's home" "repo /home/alice" "$out"
 assert_has "...with no git identity to bridge (said, not failed)" "git identity: NOT bridged" "$out"
 assert_not_has "...and opens no tunnel (a tunnel ends on the machine that runs it)" "port-forward" "$(cat "$K_LOG")"

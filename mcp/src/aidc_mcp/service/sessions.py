@@ -143,6 +143,13 @@ async def session_report(name: str) -> dict[str, Any]:
 CREATE_TIMEOUT_S = {backend.DOCKER: 300.0, backend.KUBERNETES: 960.0}
 
 
+def _create_backend_of(args: list[str]) -> str:
+    """The backend a create's arguments name (session_create always passes --backend): a
+    Docker-hosted server may create on the cluster when the config says so."""
+    named = args[args.index("--backend") + 1] if "--backend" in args[:-1] else ""
+    return backend.KUBERNETES if backend.is_kubernetes(named) else backend.DOCKER
+
+
 async def create_session(
     name: str, args: list[str], progress: Callable[[str], Awaitable[Any]] | None,
     wants_mcp: bool, mcp_server: str,
@@ -165,7 +172,7 @@ async def create_session(
     if progress is not None:
         result = await com.run_cli_streaming(args, progress, phases)
     else:
-        result = com.run_cli(args, timeout=CREATE_TIMEOUT_S[backend.kind()])
+        result = com.run_cli(args, timeout=CREATE_TIMEOUT_S[_create_backend_of(args)])
     if result["exit"] != 0:
         return com.envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
                                 code="cli_failed")

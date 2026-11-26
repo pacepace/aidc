@@ -255,7 +255,7 @@ if [ -n "$AIDC_K8S_GIT_USER_NAME" ] && [ -n "$AIDC_K8S_GIT_USER_EMAIL" ]; then
     info "git identity: ${AIDC_K8S_GIT_USER_NAME} <${AIDC_K8S_GIT_USER_EMAIL}>"
 else
     AIDC_K8S_GIT_USER_NAME="" AIDC_K8S_GIT_USER_EMAIL=""
-    info "git identity: NOT bridged (set this machine's git config --global user.name and user.email)"
+    info "git identity: NOT bridged (set this machine's git config --global user.name and user.email; for a session your MCP server made, set them in the session)"
 fi
 AUDIT_CLAIM="${NAME}-audit-$(date -u +%Y%m%d%H%M%S)"
 info "creating session ${NAME} in ${ns} (repo ${REPO_PATH}, profile ${PROFILE}, audit ${AUDIT_CLAIM})"

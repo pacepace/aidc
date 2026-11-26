@@ -93,7 +93,7 @@ verify-api against the released source.
 | design-13 Q3 | Images: one image with the mesh extra, or a light default plus a mesh variant? | 21 |
 | design-13 Q4 | Durable state: an L1-on-a-file 3tears store (U11, TRS-25 A), or aidc's files (TRS-25 B)? | 07 (and U11) |
 | design-13 Q5 | Answered 2026-11-25: drop SDK 1.x first (U01). | — |
-| REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 01 |
+| REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 22 (moved from 01 by the 2026-11-26 ruling) |
 | TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) — answered 2026-11-25: no API in 2.0; U10 and chunk 06 dropped, kept addable |
 | Q-K1 | How a user adds a Claude account to the broker. | 17 |
 | W-K0-03 / Q-M5 | Does paste+Enter answer AskUserQuestion? If not, the key sequence (§5 decision). | 14 |
@@ -141,12 +141,14 @@ Order follows design-13 "Upstream work".
 
 ## Build Chunks
 
-### Chunk 01: Adopt the 3tears release
+### Chunk 01: Adopt the unreleased 3tears branch
 
-- **Description:** Pin the 3tears family at the minor that carries U01-U09, record the REL-09
-  decision beside the setting, and read the released source of every surface the later chunks use
-  before any code is written against it.
-- **Depends on:** U01-U09 released; gate REL-09.
+- **Description:** Take the 3tears family from the merged, pushed 3tears branch that carries
+  U01-U09: one uv git source per package, pinned to a commit. Per the owner's ruling of
+  2026-11-26, aidc is tested on unreleased 3tears before 3tears is released, and chunk 22 moves
+  to the release. Read the source at that commit for every surface the later chunks use, before
+  any code is written against it.
+- **Depends on:** U01-U09 merged and pushed on the 3tears branch (no release needed).
 - **Requirements:** TRS-02, TRS-17 (local dependencies).
 - **Deliverables:** `mcp/pyproject.toml` and `mcp/uv.lock` on the pinned minor, with the `mesh` extra
   declared empty for now; a unit test for TRS-02 (mcp >= 2, one 3tears minor); verify-api notes
@@ -154,10 +156,11 @@ Order follows design-13 "Upstream work".
   registry, resources, stateful mode, the authorizer call, the bridge, as released).
 - **Foreign API:** 3tears-mcp, 3tears-agent-tools (contract), 3tears-tool-schema, 3tears-observe
 - **Done when:**
-  0. verify-api — read the released 3tears source for each surface above and record it.
+  0. verify-api — read the 3tears source at the pinned commit for each surface above, and record
+     it with that commit.
   1. TRS-02's test passes; the MCP suite is green on the new lock (FastMCP still serves).
   2. `/prawduct:critic` run and blocking findings resolved; committed.
-- **Owner's hands:** the 3tears release; the REL-09 answer.
+- **Owner's hands:** none (the release and REL-09 move to chunk 22).
 
 ### Chunk 02: Tools as TearsTools over the service
 
@@ -384,12 +387,26 @@ Order follows design-13 "Upstream work".
   in mesh mode or both by config; the image(s) per Q3.
 - **Depends on:** 12, 20; gates Q2, Q3.
 - **Requirements:** TRS-17, TRS-19, TRS-23, TRS-24.
-- **Type:** cumulative-final
 - **Done when:** live, on a real mesh: an orchestrator calls `aidc.session_send` and gets the turn;
   the same server still answers its local face; then committed, `/prawduct:critic cumulative` run
   and blocking findings resolved.
 - **Owner's hands:** a running 3tears mesh (NATS with callout auth, registry, hub) to test against;
   the Q2 and Q3 answers; the orchestrator agreeing any payload change.
+
+### Chunk 22: Move to the 3tears release
+
+- **Description:** aidc has passed end to end on the unreleased 3tears branch, including every
+  3tears fix its tests forced, each landed on that branch with the pin moved. The owner then
+  releases 3tears. This chunk replaces each git source with the released version and records the
+  REL-09 decision beside the cooldown setting: wait out the 14 days, or an explicit
+  `exclude-newer-package` exception for the 3tears family.
+- **Depends on:** 21; the 3tears release; gate REL-09.
+- **Requirements:** TRS-02, TRS-17.
+- **Type:** cumulative-final
+- **Done when:** the lock resolves only released 3tears versions, with no git sources left; the
+  MCP suite and TRS-01/TRS-02's tests pass on it; the image builds from it; committed, then
+  `/prawduct:critic cumulative` run and blocking findings resolved.
+- **Owner's hands:** the 3tears release; the REL-09 answer.
 
 ## Early Feedback Milestone
 
@@ -405,4 +422,6 @@ is done and tested end to end (W-R, the one 2.0 PR).
 - After chunk 04: the local face is whole; confirm the TearsTool and bridge shape before the
   cluster and mesh build on it.
 - After chunk 12: the per-user server is live; confirm before approvals and taint build on it.
-- Chunk 21 (cumulative): the whole adoption reviewed before W-R.
+- Chunk 21: the whole adoption tested end to end on the unreleased 3tears branch; then the owner
+  releases 3tears.
+- Chunk 22 (cumulative): moved to the released 3tears, the whole adoption reviewed before W-R.

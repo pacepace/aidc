@@ -256,8 +256,8 @@ W-K7 ops (any time, owner) ; W-R release last
 
 ### W-T1: upstream 3tears-mcp (in the 3tears repo, released there)
 - 01 Call context (progress token, report_progress, log, cancel). 02 progress and logging over Streamable HTTP. 03 richer error model. 04 resources. 05 stateful mode (`list_changed`, subscriptions, cancellation, identity re-checked per message). 06 TearsTool→McpTool bridge. 07 `face_api` without the hub. 08 (if Q4 = yes) L1 on a file. 09 durable/fail-reporting agent-audit sink.
-- Done when: each is released in one pinned 3tears minor.
-- Owner's hands: 3tears releases (PyPI), the decision on dropping SDK 1.x (Q5).
+- Done when: each is merged and pushed on one 3tears branch. aidc builds and is tested against that branch, pinned by commit, before 3tears is released (owner ruling 2026-11-26). After aidc passes end to end, the release ships as one 3tears minor, and adoption chunk 22 moves aidc onto it.
+- Owner's hands: the 3tears release (PyPI), after aidc's end-to-end pass; the decision on dropping SDK 1.x (Q5, answered).
 
 ### W-T2: service split in aidc (can run alongside T1)
 - Status: done (`build-plan-mcp-service-split.md`, `changes/mcp-service-split.md`).

@@ -17,7 +17,7 @@ governed_by:
     dispositions:
       - "Module split (service/ holds the service with no MCP types; tools.py holds only the MCP surface) → amendment proposed: chunk 02 replaces tools.py with one TearsTool per tool and chunk 03 a face module; the line is rewritten then to name them"
       - "State: anything that must survive a restart is a file in the watcher-state dir → ruling needed: design-13 Q4 (TRS-25 option B conforms; option A is an amendment)"
-      - "Contracts: the envelope and callback payload change only by agreement, additively → conforms: the envelope is the TearsTool content unchanged, the payload does not change unless Q2 adds a mesh delivery, agreed with the orchestrator"
+      - "Contracts: the envelope and callback payload change only by agreement, additively → the envelope is the TearsTool content unchanged and the payload does not change unless Q2 adds a mesh delivery; one ruled, non-additive change: a failed call is isError with its code under _meta (TRS-05/TRS-16, rulings 2026-11-24), in design-10 D6 and the 2.0 CHANGELOG"
       - "no private names in the repo → conforms: the owner's mesh, cluster and hosts are named only in the user's config"
       - "ruff, mypy clean; tests are sentences about behaviour; uv run --frozen → conforms"
   - artifact: .claude/rules/learnings/core
@@ -83,6 +83,10 @@ one plan as asked.
 - 01: two findings sent upstream/owner: `McpServer` lacks `version`/`instructions` (aidc 1.x sends both; a 3tears change requested), and the SQLite L3 imports asyncpg and sqlalchemy, which TRS-01/TRS-17 forbid as written (owner question, chunk 07).
 - 02: the TearsTools live in `aidc_mcp/tearstools/` (a package beside tools.py, which chunk 03 removes); the call context's type is imported for type checking only, so no tool imports an MCP type at run time; `ToolResult.error_code` is never set for an aidc refusal (TRS-10), the face carries the aidc code from the metadata.
 - 01→03: pin moved to the head of feat/mcp-face carrying `McpServer(version=, instructions=)` before chunk 03 (main, 2026-11-26).
+- 03: pins moved twice more for 3tears changes aidc's tests needed (Refusal content, cancel on a dropped request; api-notes pin history). The HTTP bearer gate stays in front of the server: identity is resolved by 3tears for tool calls and resources but not for `initialize` or `tools/list`, and MCP-14 logs every request. So a rotated token on an open session is refused with 401 at the gate; the server's resolver refuses it too (tested), so TRS-08's "identity unavailable" holds for any message that reached it. The token file is read on every check (a modification-time cache could miss a rotation within one clock tick).
+- 03: `disconnect.py` went in 03 rather than 04: with tools.py gone nothing used it, and 3tears' drop cancellation at the pin made its test green. `session_invoke`'s in-flight table is keyed by run id, so interrupting a headless run always finds the host's docker exec.
+- 03 (main, 2026-11-26, from design-13's Contract: an existing orchestrator needs no change beyond the 2.0 notes): null for an optional argument and whole numbers in text stay accepted, through a `[type, "null"]` schema and 3tears' `prepare_arguments` hook, the published schema staying `integer`.
+- 03: `retryable` on a failed call is design-10 D6's Retryable column (`cli_failed`, `invoke_busy`), decided from its Caller column and tested against the table.
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with
@@ -188,9 +192,10 @@ Order follows design-13 "Upstream work".
   taint as authorizers; aidc's codes registered as protocol codes.
 - **Depends on:** 02.
 - **Requirements:** TRS-01, TRS-05, TRS-08, TRS-12, MCP-04, MCP-05, MCP-06, MCP-31, MCP-32.
-- **Deliverables:** the face module (replacing `mcp/src/aidc_mcp/server.py` and the guards in
-  `mcp/src/aidc_mcp/tools.py`); wire tests rewritten against it; the fresh-interpreter import test
-  for TRS-01; token-rotation-on-an-open-session test.
+- **Deliverables:** the face module `mcp/src/aidc_mcp/server.py` (rewritten on 3tears-mcp) and
+  the guards as `mcp/src/aidc_mcp/authz.py` (1.x's tools.py removed); wire tests rewritten
+  against it; the fresh-interpreter import test for TRS-01; token-rotation-on-an-open-session
+  test; one run of the built image (handshake, list, call) with the mounted token.
 - **Critic mode:** final
 - **Done when:** the wire suite passes against the new server; `/prawduct:critic` run, findings
   resolved; committed.

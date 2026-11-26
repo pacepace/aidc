@@ -1,7 +1,7 @@
 """Transcript-sourced delivery (design-09, MCP-15..19): the per-session watchers, the
 drain that turns transcript lines into exactly-once callbacks, resend, and resume.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations
@@ -1000,8 +1000,8 @@ async def watch(
     *,
     announce: Callable[[], Awaitable[None]],
 ) -> dict[str, Any]:
-    """The session_watch tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_watch tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     base_url = orc.orchestrator_callback_url()
     if not base_url:
         return com.envelope_err(orc.callback_url_unset(),
@@ -1027,8 +1027,8 @@ async def resend(
     turn_uuid: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """The session_resend tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_resend tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     if not conversation_id:
         return com.envelope_err(
             "conversation_id is required (the orchestrator injects it automatically)",
@@ -1094,8 +1094,8 @@ async def resend(
 
 
 async def unwatch(name: str, *, announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
-    """The session_unwatch tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_unwatch tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     ts.remove_watch(ss.WATCHER_STATE_DIR, name)
     task = ss.session_watchers.pop(name, None)
     if task is not None:

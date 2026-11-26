@@ -11,9 +11,8 @@ import asyncio
 import json
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import tools
+from aidc_mcp import server
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
@@ -22,6 +21,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 
 # The wiring fixture patches asyncio.sleep MODULE-WIDE (asyncio is the real
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
@@ -43,9 +43,7 @@ def _f(text, conversation_id="c1", sent_by=""):
 
 
 def _make_send():
-    app = MCPServer("t")
-    tools.register(app)
-    return app, app._tool_manager._tools["session_send"].fn
+    return None, toolcall.tool("session_send")
 
 
 class _StubTask:
@@ -251,13 +249,9 @@ async def test_auto_starts_watcher_with_conversation_id(wiring, monkeypatch):
     async def fake_watcher(*a, **k):
         await asyncio.Event().wait()  # stay alive until the cleanup fixture cancels
 
-    async def announce(app_, ctx=None):
-        return None
-
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://cb")
     monkeypatch.setattr(dlv, "_baseline_watermark", baseline)
     monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
-    monkeypatch.setattr(tools, "_announce_watchers", announce)
 
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
@@ -612,7 +606,7 @@ async def test_a_failed_first_load_is_retried_not_saved_over(wiring, monkeypatch
         raise OSError("spawn failed")
 
     monkeypatch.setattr(tn, "session_instance", broken)
-    await tools.resume_on_startup(MCPServer("t"))
+    await server.Face().resume()
     assert "proj" not in ss.queue_loaded
     monkeypatch.setattr(tn, "session_instance", working)
 
@@ -671,9 +665,7 @@ async def test_status_line_clears_when_the_wait_changes_to_another_reason(wiring
 
 
 async def test_session_status_lists_waiting_prompts_with_reasons(wiring, monkeypatch):
-    app = MCPServer("t")
-    tools.register(app)
-    status = app._tool_manager._tools["session_status"].fn
+    status = toolcall.tool("session_status")
     monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "ok", "stderr": ""})
     ss.pending_sends["proj"] = [
@@ -983,7 +975,7 @@ async def test_a_send_with_no_headless_run_says_nothing_about_one(wiring):
 # under, so a prompt is in the pasted batch or cancelled, never both.
 
 def _cancel_tool(app):
-    return app._tool_manager._tools["session_queue_cancel"].fn
+    return toolcall.tool("session_queue_cancel")
 
 
 @pytest.fixture
@@ -1288,10 +1280,12 @@ async def test_session_send_pastes_a_command_unframed(wiring):
 
 async def test_session_send_declares_sender_label():
     """The orchestrator passes sender_label only when aidc declares it."""
-    app, _ = _make_send()
-    props = app._tool_manager._tools["session_send"].parameters["properties"]
+    props = toolcall.instance("session_send").mcp_schema().input_schema["properties"]
     assert "sender_label" in props
-    assert props["sender_label"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    # optional: a string, or null for "not given", as 1.x declared it
+    assert props["sender_label"]["type"] == ["string", "null"]
+    assert "sender_label" not in toolcall.instance(
+        "session_send").mcp_schema().input_schema["required"]
 
 
 async def test_a_batch_keeps_each_prompts_own_header(wiring):
@@ -1341,7 +1335,7 @@ async def test_a_queued_prompts_preview_is_the_prompt_not_the_header(wiring, mon
     """The header is ~124 characters with a real conversation id: a preview cut from the
     pasted text would show only it, and every waiting prompt would look the same."""
     app, send = _make_send()
-    status = app._tool_manager._tools["session_status"].fn
+    status = toolcall.tool("session_status")
     monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
         "exit": 0, "stdout": "ok", "stderr": ""})
     ss.session_watchers["proj"] = _StubTask()

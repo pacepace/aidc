@@ -11,9 +11,8 @@ import os
 import time
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import repo, scope, tools
+from aidc_mcp import repo, scope
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
@@ -21,6 +20,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 
 OLD = time.time() - 3600
 
@@ -31,9 +31,7 @@ class _StubTask:
 
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
 
 
 @pytest.fixture

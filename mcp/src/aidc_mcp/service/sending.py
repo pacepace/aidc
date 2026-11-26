@@ -1,7 +1,7 @@
 """Sending prompts (design-10 S3/S4, MCP-28..30): the per-session queue, its drainer, the
 paste, joining a running turn, and the notes a waiting or dropped prompt gets.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations
@@ -769,8 +769,8 @@ async def send(
     *,
     announce: Callable[[], Awaitable[None]],
 ) -> dict[str, Any]:
-    """The session_send tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_send tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     # Who the prompt is for: the reply comes back with prompt_origin "person"
     # and this, so the orchestrator answers it as that person's and not as a
     # report on its own prompt.
@@ -1012,8 +1012,8 @@ async def run_turns(
     conversation_id: str | None = None,
     sender_label: str | None = None,
 ) -> dict[str, Any]:
-    """The session_run tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_run tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     if not turns:
         return com.envelope_err("turns must be a non-empty list of prompt strings",
                                 code="invalid_argument")
@@ -1086,8 +1086,8 @@ async def queue_cancel(
     position: int | None = None,
     prompt_id: str | None = None,
 ) -> dict[str, Any]:
-    """The session_queue_cancel tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_queue_cancel tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     container = backend.target(name)
     prompt_id = (prompt_id or "").strip()
     if prompt_id and position is not None:

@@ -1,14 +1,14 @@
 ---
 artifact: api-notes
 scope: 3tears-adoption
-pinned_commit: 3d5dd9cf91be988dba56c72e39b0600bdabef8f7
+pinned_commit: 1378d2e9a540cdef98b28c93dd03d40402054469
 branch: feat/mcp-face (unreleased, github.com/pacepace/3tears)
 read: 2026-11-26
 ---
 
 # 3tears API notes (verify-api)
 
-Read from the 3tears source **at commit `3d5dd9cf91be988dba56c72e39b0600bdabef8f7`** of the
+Read from the 3tears source **at commit `1378d2e9a540cdef98b28c93dd03d40402054469`** of the
 unreleased branch `feat/mcp-face`, the commit `mcp/pyproject.toml` pins. The branch is still under
 review, so these notes hold for that commit only. When the pin moves, re-read the surfaces below and
 record what changed under "Pin history".
@@ -33,7 +33,7 @@ annotations=None) -> McpTool`
 
 - Refuses a tool whose class does not set `face_mcp = True` (ValueError).
 - `name` overrides the listed name (default `tool.mcp_name()`); aidc passes the 1.x local name
-  (TRS-15).
+  (TRS-15). `prepare_arguments=` is passed to the `McpTool` (below).
 - The listing is `tool.mcp_schema()`: `description`, `input_schema`, `output_schema`.
 - The handler calls `tool.run(**arguments)` (coercion, then `execute`). If `execute` declares a
   parameter annotated `CallContext`, the call's context is passed under that name; otherwise
@@ -41,8 +41,9 @@ annotations=None) -> McpTool`
 - Result mapping (`_call_result`):
   - `success=True`: one text block holding `content`; `structuredContent` only when the tool has an
     output schema and `content` parses as a JSON object.
-  - `success=False`: `tool_error(content or error, code=..., message=error or None)` — `isError`
-    true, the content text unchanged, the code from `ToolResult.error_code` if set, else
+  - `success=False`: `tool_error(...)` — `isError` true, the content text unchanged (and, for a
+    tool with an output schema whose content is a JSON object, that object as
+    `structuredContent`; SDK 2.x clients do not validate structured content on an error result), the code from `ToolResult.error_code` if set, else
     `metadata["error_code"]` if a string, else `TOOL_ERROR`. A code the server never registered
     answers `HANDLER_ERROR` (logged once per code).
 - **Consequence for aidc:** a failed envelope (`ok: false`) becomes `isError: true` on the protocol
@@ -92,7 +93,9 @@ error_codes=None, resources=None, resource_provider=None)`
   security settings, which the SDK treats as protection off (aidc 1.x turned it off explicitly).
 
 Dispatch order (`_dispatch`), each refusal an `isError` result with the code in `_meta`:
-tool lookup (`UNKNOWN_TOOL`; provider failure `TOOLS_UNAVAILABLE`) → jsonschema validation of the
+tool lookup (`UNKNOWN_TOOL`; provider failure `TOOLS_UNAVAILABLE`) → the tool's
+`prepare_arguments`, when set (given a read-only mapping, answers a new dict; raising or
+answering a non-dict is `INVALID_ARGUMENTS`) → jsonschema validation of the
 arguments against `input_schema` (`INVALID_ARGUMENTS`, text `Input validation error: ...`,
 `argument` set) → `identity_provider.identify()` (RuntimeError → `IDENTITY_UNAVAILABLE`) →
 authorizer (`authorize_call` if the authorizer's class defines it, else `allows`; raise →
@@ -115,7 +118,11 @@ progress_sender=None, log_sender=None, cancelled: asyncio.Event | None = None)`
 - `await log(level, data, *, logger=None)`: `notifications/message` on the call's stream, filtered
   by the connection's `logging/setLevel` (handshake-era) or the request's opt-in (2026-07-28).
 - `await wait_cancelled()`: returns only on cancellation (client `notifications/cancelled`, session
-  close, dropped connection → the handler task is cancelled; the event is set in `_dispatch`).
+  close, or the client dropping the HTTP request that carries the call → the handler task is
+  cancelled; the event is set in `_dispatch`). A drop cancels only that call, stateless and
+  stateful, both protocol eras, **except** plain-JSON responses in stateless mode: aidc runs SSE
+  (`json_response=False`). The transport's hook is
+  `threetears.mcp.http_server.on_request_drop(callback) -> stop | None`.
 - A handler asks for it by a parameter annotated `CallContext` (found by signature at `McpTool`
   construction; a name the schema also has is refused). Tests build one directly with recording
   senders.
@@ -226,5 +233,12 @@ parameter a handler takes the call context in, as `McpTool` finds it (the bridge
   aidc); log levels are now kept per SDK connection. No signature aidc already used changed.
 - 2026-11-26: moved to `3d5dd9cf91be988dba56c72e39b0600bdabef8f7`: `Refusal` gained `content`
   (asked for by aidc). Nothing else changed in the packages aidc uses.
-- Open upstream ask (2026-11-26): cancelling a call whose client dropped its connection (TRS-09;
-  measured not cancelled at `bbbf5ead`).
+- 2026-11-26: moved to `281ecb1f7559a02683becd62edd8acd2bb8b8c81`: a call whose client drops its
+  HTTP request is cancelled (asked for by aidc, TRS-09; measured not cancelled at `bbbf5ead`).
+  Nothing else changed in the packages aidc uses.
+- 2026-11-26: moved to `3bc97f872b17edd7ff96948af3aa7833f10971b1`: a structured tool's failure
+  carries its JSON object as `structuredContent` too (asked for by aidc, design-10 D6). Nothing
+  else changed in the packages aidc uses.
+- 2026-11-26: moved to `1378d2e9a540cdef98b28c93dd03d40402054469`: `McpTool` and `mcp_tool(...)`
+  take `prepare_arguments` (a hook over a call's arguments before schema validation; asked for
+  by aidc to keep 1.x's numeric strings working). Nothing else changed in the packages aidc uses.

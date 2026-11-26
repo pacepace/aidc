@@ -13,10 +13,10 @@ import sys
 
 import aidc_mcp.service as service
 
-FORBIDDEN_PACKAGES = {"mcp", "fastmcp"}
-# The MCP face of aidc: the service must not reach back into it.
-ADAPTER_MODULES = {"aidc_mcp.tools", "aidc_mcp.server", "aidc_mcp.resources",
-                   "aidc_mcp.disconnect", "aidc_mcp.publish"}
+FORBIDDEN_PACKAGES = {"mcp", "fastmcp", "threetears"}
+# aidc's tools and faces: the service must not reach back into them (TRS-13).
+ADAPTER_MODULES = {"aidc_mcp.server", "aidc_mcp.resources", "aidc_mcp.publish",
+                   "aidc_mcp.authz", "aidc_mcp.tearstools"}
 
 
 def _service_modules():
@@ -69,14 +69,25 @@ def test_importing_the_whole_service_loads_no_mcp_package():
 
 
 def test_the_import_check_sees_mcp_when_it_is_there():
-    # The fresh-interpreter check above can tell: the tools module does load the SDK.
-    assert "mcp" in _modules_loaded_by_importing(["aidc_mcp.tools"])
+    # The fresh-interpreter check above can tell: the face does load the SDK.
+    assert "mcp" in _modules_loaded_by_importing(["aidc_mcp.server"])
+
+
+def test_the_tools_load_no_mcp_package():
+    """TRS-18: the TearsTools stay free of MCP types, so another face (an HTTP API, the
+    mesh) can serve the same instances without the MCP SDK."""
+    tools = ["aidc_mcp.tearstools", *(f"aidc_mcp.tearstools.{m.name}" for m in
+                                      pkgutil.iter_modules(
+                                          importlib.import_module("aidc_mcp.tearstools").__path__))]
+    assert "mcp" not in _modules_loaded_by_importing(tools)
 
 
 def _package_modules():
     import aidc_mcp
+    import aidc_mcp.tearstools as tearstools
     return ["aidc_mcp", *(f"aidc_mcp.{m.name}" for m in pkgutil.iter_modules(aidc_mcp.__path__)),
-            *_service_modules()]
+            *_service_modules(),
+            *(f"aidc_mcp.tearstools.{m.name}" for m in pkgutil.iter_modules(tearstools.__path__))]
 
 
 def test_no_module_imports_log_event_by_name():

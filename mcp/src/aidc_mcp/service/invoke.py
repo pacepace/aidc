@@ -1,7 +1,7 @@
 """Headless runs (session_invoke, session_invoke_async): one per session, stopped when
 their caller goes away.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations
@@ -71,17 +71,6 @@ def invoke_busy(name: str, tool: str, running: dict[str, Any]) -> dict[str, Any]
         {"running": running}, code="invoke_busy")
 
 
-def stop_invoke_of_gone_client(session_id: str, request_id: str) -> None:
-    """disconnect.StopInvokeOnDisconnect's callback: the client of that call is gone."""
-    entry = ss.invokes_in_flight.pop((session_id, request_id), None)
-    if entry is None:
-        return
-    audit.log_event("session_invoke_client_disconnected", session=entry.run.session,
-              run_id=entry.run.run_id)
-    com.fire(stop_headless(entry.container, entry.run, entry.proc,
-                            "session_invoke_stopped_client_gone"))
-
-
 def _kill_host_exec(proc: Any) -> None:
     if proc is not None and proc.returncode is None:
         try:
@@ -121,8 +110,8 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
         try:
             if mine is not None:
                 pids += await headless.stop(container, mine)
-                _kill_host_exec(next((e.proc for e in ss.invokes_in_flight.values()
-                                      if e.run is mine), None))
+                waiting = ss.invokes_in_flight.get(mine.run_id)
+                _kill_host_exec(waiting.proc if waiting is not None else None)
             elif rec["run_id"]:
                 pids += await headless.stop_tagged(container, rec["run_id"])
             elif rec["pid"] is not None:
@@ -161,11 +150,10 @@ async def invoke(
     name: str,
     prompt: str,
     *,
-    call_key: tuple[str, str] | None = None,
     progress: Callable[[str], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
-    """The session_invoke tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_invoke tool's work (tearstools/talk.py holds the tool). The caller going
+    away cancels this coroutine, which stops the run in the container."""
     audit.log_event("tool_call", tool="session_invoke", session=name, prompt_len=len(prompt))
     container = backend.target(name)
     run, running = await claim_headless(name, "session_invoke", prompt)
@@ -181,9 +169,7 @@ async def invoke(
     except BaseException:
         headless.forget(run)
         raise
-    key = call_key
-    if key is not None:
-        ss.invokes_in_flight[key] = ss.InFlight(container, run, proc)
+    ss.invokes_in_flight[run.run_id] = ss.InFlight(container, run, proc)
     try:
         return await _finish_invoke(container, run, proc, progress)
     except BaseException as exc:
@@ -197,8 +183,7 @@ async def invoke(
                                else "session_invoke_failed_stopped"))
         raise
     finally:
-        if key is not None:
-            ss.invokes_in_flight.pop(key, None)
+        ss.invokes_in_flight.pop(run.run_id, None)
 
 
 async def _finish_invoke(container: str, run: headless.Run, proc: Any,
@@ -252,8 +237,8 @@ async def _finish_invoke(container: str, run: headless.Run, proc: Any,
 
 
 async def invoke_async(name: str, prompt: str, conversation_id: str) -> dict[str, Any]:
-    """The session_invoke_async tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_invoke_async tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     base_url = orc.orchestrator_callback_url()
     if not base_url:
         return com.envelope_err(

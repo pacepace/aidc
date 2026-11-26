@@ -252,8 +252,13 @@ a minute late. If the prompt is pasted later, its reply follows as usual; if the
 ### D6. The tool result envelope
 
 Every MCP tool returns one envelope. An MCP client sees it twice: as a JSON string in
-`content[0].text`, and as an object in `structuredContent`. `isError` stays false. A failure is
-reported inside the envelope, not through the MCP error flag.
+`content[0].text`, and as an object in `structuredContent`. From aidc 2.0 a failure is also
+`isError: true`, with the same code and whether the call can succeed later under
+`_meta["threetears.mcp/error"]` (`{"code", "message", "retryable", "argument"?}`, TRS-05); 1.x
+left `isError` false and reported a failure inside the envelope only. A call the framework
+refuses before any aidc code runs (no such tool, arguments the input schema refuses) has no
+envelope: its text is the framework's (`Input validation error: ...`), and its code
+(`UNKNOWN_TOOL`, `INVALID_ARGUMENTS`) is under `_meta` the same way.
 
 - Success: `{"ok": true, "data": {...}}`.
 - Failure: `{"ok": false, "error": "<a sentence for a model or person to read>", "error_code": "<kind>"}`,
@@ -263,24 +268,30 @@ reported inside the envelope, not through the MCP error flag.
 orchestrator session 2026-09-17). The set is `ERROR_CODES` in `mcp/src/aidc_mcp/service/common.py`, and a test fails if any failure path is
 missing a code or uses one outside the set:
 
-| Code | Meaning | Caller |
-|---|---|---|
-| `no_such_session` | the session does not exist (its network is gone) | tell the person, no retry |
-| `queue_full` | 25 prompts already waiting: the session is wedged | tell the person, no retry |
-| `out_of_scope` | a scoped server refusing another session (MCP-31) | tell the person, no retry |
-| `create_not_allowed` | `session_create` on a scoped server | tell the person, no retry |
-| `invalid_argument` | a required argument is missing or invalid | fix the call |
-| `not_configured` | the aidc config lacks what the call needs (`orchestrator.callback_url`) | tell the person |
-| `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once |
-| `command_failed` | a command inside the session failed | tell the person |
-| `timeout` | a command inside the session ran out of time | tell the person |
-| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste); `session_not_ready` also from `session_mcp_set` on a session whose first start has not finished | tell the person |
-| `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person |
-| `not_found` | a file or directory the call reads is missing | tell the person |
-| `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call |
-| `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry |
-| `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call |
-| `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` |
+| Code | Meaning | Caller | Retryable |
+|---|---|---|---|
+| `no_such_session` | the session does not exist (its network is gone) | tell the person, no retry | no |
+| `queue_full` | 25 prompts already waiting: the session is wedged | tell the person, no retry | no |
+| `out_of_scope` | a scoped server refusing another session (MCP-31) | tell the person, no retry | no |
+| `create_not_allowed` | `session_create` on a scoped server | tell the person, no retry | no |
+| `invalid_argument` | a required argument is missing or invalid | fix the call | no |
+| `not_configured` | the aidc config lacks what the call needs (`orchestrator.callback_url`) | tell the person | no |
+| `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once | yes |
+| `command_failed` | a command inside the session failed | tell the person | no |
+| `timeout` | a command inside the session ran out of time | tell the person | no |
+| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste); `session_not_ready` also from `session_mcp_set` on a session whose first start has not finished | tell the person | no |
+| `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person | no |
+| `not_found` | a file or directory the call reads is missing | tell the person | no |
+| `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call | no |
+| `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry | no |
+| `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call | no |
+| `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` | yes |
+
+**Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
+call, made again unchanged, can succeed later. It follows the Caller column: `cli_failed` is
+transient (retry once), and `invoke_busy` succeeds once the running headless run ends. Every
+other code meets the same refusal until something changes (the person acts, or the call is
+fixed). `RETRYABLE_ERROR_CODES` in `service/common.py` is this column, held to it by a test.
 
 `session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
 The orchestrator side never retries a `session_send`, even after a transport failure (a retry could paste
@@ -702,12 +713,11 @@ invoke at a time per dev container"; long work belongs to `session_send`.
 - **Stopped when nobody waits.** `session_invoke` has no timeout. When its handler is cancelled
   or reading the answer fails, the run is stopped in a task of its own: every process carrying its
   tag gets SIGTERM, then SIGKILL after 3 s (`headless.stop`), then the host's `docker exec` is
-  killed; logged as `session_invoke_cancelled` with the pids. Measured on MCP SDK 2.3 with the
-  2025-11-25 protocol (`tests/test_invoke_cancel_wire.py`, real uvicorn and HTTP client): the SDK
-  cancels the handler on `notifications/cancelled` and on a session `DELETE`, but not when the
-  client drops the connection. `disconnect.StopInvokeOnDisconnect` watches each `session_invoke`
-  call for `http.disconnect` and stops its run (`session_invoke_client_disconnected`,
-  `session_invoke_stopped_client_gone`). A client that abandons a call with none of the three
+  killed; logged as `session_invoke_cancelled` with the pids. From 2.0 the handler is cancelled
+  by 3tears-mcp's call context (TRS-09) on `notifications/cancelled`, on a session `DELETE` and
+  when the client drops the HTTP request carrying the call (the MCP SDK alone does not cancel
+  on the last; 3tears does, on the SSE responses aidc answers with). Tested end to end in
+  `tests/test_invoke_cancel_wire.py` (real uvicorn and HTTP client). A client that abandons a call with none of the three
   cannot be seen (the orchestrator's stop button, on the evidence of 23:04Z); the one-at-a-time rule and
   `headless_runs` are what is left for it, with `session_interrupt(target="headless")`. The
   call a stop ended says it was stopped, not that claude failed; an `invoke_busy` refusal names
@@ -854,10 +864,10 @@ pass it only when the aidc it talks to declares it.
   `_drop_prompts_of_removed_session`, `_notify_prompts`, `resume_send_queues`, `run_turns`);
   `service/turns.py` (`session_state`, `turn_verdict`, `paste_reason`, `wait_for_turn_end`,
   `watch_for_echo`); `service/startup.py` (`resume`); `mcp/src/aidc_mcp/screen.py` (`classify`).
-  `mcp/src/aidc_mcp/tools.py` holds the MCP tools over them.
+  `mcp/src/aidc_mcp/tearstools/` holds the tools over them, served by `server.py`.
 - Turn info and join (S5): `transcript.open_turn`, `turns_view.turn_info`,
   `service/sending.py` (`join_running_turn`, `_join_refusal`).
-- Headless runs (S6): `mcp/src/aidc_mcp/headless.py`, `mcp/src/aidc_mcp/disconnect.py`,
+- Headless runs (S6): `mcp/src/aidc_mcp/headless.py`,
   `service/invoke.py` (`claim_headless`, `stop_headless`, `interrupt_headless`); the wrapper in
   `.devcontainer/Dockerfile` (`aidc-claude`).
 - Transcript mirror: `.devcontainer/transcript-mirror.sh`. tmux session: `.devcontainer/tmux-start.sh`.

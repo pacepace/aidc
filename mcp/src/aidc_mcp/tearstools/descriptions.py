@@ -53,7 +53,3 @@ def watching_suffix() -> str:
         "\n\nNo session is being watched yet. session_send auto-starts a "
         "webhook for the `name` you pass (session_watch starts one explicitly)."
     )
-
-
-#: the tools whose descriptions end with watching_suffix()
-SESSION_AWARE_TOOLS = ("session_send", "session_invoke", "session_invoke_async")

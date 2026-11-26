@@ -26,8 +26,8 @@ from typing import Any
 def off_loop(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a synchronous function so awaiting it runs the body in a thread.
 
-    Keeps the signature and docstring (functools.wraps), which MCPServer reads
-    for the tool's schema and a resource template's parameters."""
+    Keeps the signature and docstring (functools.wraps), which a resource reads
+    for its description and a resource template's reader is called by."""
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         return await asyncio.to_thread(fn, *args, **kwargs)

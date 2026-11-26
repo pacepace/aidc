@@ -1,6 +1,6 @@
 """What aidc-mcp picks up when it starts.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations

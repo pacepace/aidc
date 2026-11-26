@@ -32,8 +32,38 @@ ruling 2026-11-26).
 - #76: `file_put` writes through a temporary file renamed over the target instead of `install -m
   MODE /dev/stdin PATH`, which the session image's uutils coreutils refuse on an existing file.
 
-**Proof:** chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
+- Chunk 03: the local face is 3tears-mcp's `McpServer` (`server.py`), stateful Streamable HTTP on
+  SSE responses, serving the TearsTools through the bridge under their 1.x names, with the
+  server's version and instructions. `tools.py` and `disconnect.py` are gone. Scope and taint are
+  `authz.AidcAuthorizer`, which 3tears asks before a tool runs; a refusal answers aidc's envelope
+  as its content (1.x's text, `data.tainted` included) and is logged as before. aidc's 20 codes
+  are registered as protocol codes, with which are retryable: a failed call is now `isError`,
+  its code under `_meta["threetears.mcp/error"]`. The bearer is checked against the token file
+  as it is now, in the gate (401, logged) and in the server's resolver, so a rotated token
+  refuses an open session's next message. Resources are 3tears resources with the scope in the
+  authorizer: an out-of-scope read is now a JSON-RPC refusal, not a JSON error body, and the
+  global config is left out of a scoped server's listing. A dropped connection cancels a
+  blocking `session_invoke` through 3tears (no watcher of aidc's own). `published-tools.json`
+  is regenerated: the same names and descriptions, self-contained schemas. Every tool declares
+  the envelope as its output schema, so the envelope is sent as `structuredContent` too (design-10
+  D6), failures included. Where 1.x accepted null for an optional argument the schema lists
+  `[type, "null"]` and null reaches the tool as not given; an integer argument sent as a whole
+  number in text ("5") is read as the number before the schema checks it (3tears'
+  `prepare_arguments`), the schema staying `integer`. A failed call's `retryable` is design-10
+  D6's new Retryable column (`cli_failed`, `invoke_busy`), held to it by a test. A token file
+  unreadable for a moment (mid-rotation) answers a logged 401.
+
+**Proof:** chunk 03: the built image (test tag, a test-only container with the token mounted as `aidc mcp start` mounts it) answered 401 without a token, the handshake with aidc's name, version and instructions, the tool list, a call failing with its code on the protocol result and the envelope as structured content, the resource list, and a token rotation refusing the old token at once and serving the new one, each request in the access log. The MCP suite is green, the wire suite against the new server included (cancel, DELETE and dropped connection each stop a blocking invoke; a rotated token refuses an open session; every aidc code rides the protocol result; local mode starts, lists and calls every tool in a fresh interpreter with no NATS, Postgres, LangGraph or 3tears core loaded). Chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
 (`docker build`, test tag) and imports the server with no git left in it.
 
 ## Consumer note
-Chunks 01-02 change nothing a caller sees, except that `file_put` now overwrites an existing file (#76).
+Chunk 03 changes what a caller sees (aidc 2.0, in the CHANGELOG with chunk 04):
+- A failed call (`ok: false`) is now `isError: true`, its code also under
+  `_meta["threetears.mcp/error"]` with `retryable`; the envelope text is unchanged.
+- Input schemas are self-contained: an optional parameter is `type: [type, "null"]` rather
+  than `anyOf [type, null]`, and titles are gone. Null and whole numbers sent as text are still
+  accepted; leaving an optional argument out and sending a real number are the forms to use.
+  Arguments a schema refuses answer `INVALID_ARGUMENTS` before the tool runs.
+- A resource of a session outside a scoped server's scope is refused as a JSON-RPC error, and
+  `aidc://config` is not listed on a scoped server.
+- `file_put` overwrites an existing file (#76).

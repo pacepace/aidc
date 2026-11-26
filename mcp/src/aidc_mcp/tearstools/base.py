@@ -19,7 +19,8 @@ from __future__ import annotations
 import annotationlib
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -37,6 +38,22 @@ if TYPE_CHECKING:
 #: the mesh's namespace for aidc's tools (TRS-15): `aidc.session_send` on the mesh,
 #: `session_send` on the local MCP face
 MESH_PREFIX = "aidc."
+
+#: every tool's result: the service's envelope (design-10 D6). Declared so a client is sent
+#: the envelope as `structuredContent` as well as JSON text, as 1.x sent it
+ENVELOPE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "data": {},
+        "error": {"type": "string"},
+        "error_code": {"type": "string", "enum": sorted(com.ERROR_CODES)},
+    },
+    "required": ["ok"],
+}
+
+#: a whole decimal integer written as text, as 1.x took for an integer argument
+_WHOLE_NUMBER = re.compile(r"[+-]?[0-9]+")
 
 #: call's parameters that are not arguments of the tool
 _NOT_ARGUMENTS = frozenset({"self", "ctx"})
@@ -69,8 +86,9 @@ class AidcTool(TearsTool):
     def __init__(self, hooks: ToolHooks | None = None) -> None:
         self.hooks = hooks if hooks is not None else ToolHooks()
         self._arguments_model = _arguments_model(self.local_name, type(self).call)
-        self._input_schema = self_contained_input_schema(
-            self._arguments_model.model_json_schema(by_alias=True), tool_name=self.local_name)
+        written = self._arguments_model.model_json_schema(by_alias=True)
+        self._input_schema = nullable_kept(
+            written, self_contained_input_schema(written, tool_name=self.local_name))
 
     #: the tool's work, `call(ctx, **arguments)`, returning the service's envelope. Each tool
     #: defines it with its own arguments, which are the tool's schema
@@ -86,12 +104,27 @@ class AidcTool(TearsTool):
     def mcp_version(self) -> str:
         return __version__
 
+    def prepare_arguments(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """A call's arguments as 1.x read them, before the schema checks them: an integer
+        argument sent as a whole number in text ("5") becomes that number. The schema stays
+        `integer`, so a caller is still shown the form to send; anything else is left as it
+        came, for the schema to accept or refuse."""
+        props = self._input_schema.get("properties", {})
+        out = dict(arguments)
+        for name, value in arguments.items():
+            kind = props.get(name, {}).get("type")
+            integer = kind == "integer" or (isinstance(kind, list) and "integer" in kind)
+            if integer and isinstance(value, str) and _WHOLE_NUMBER.fullmatch(value):
+                out[name] = int(value)
+        return out
+
     def mcp_schema(self) -> MCPToolDefinition:
         return MCPToolDefinition(
             name=self.mcp_name(),
             version=self.mcp_version(),
             description=self.description(),
             input_schema=self._input_schema,
+            output_schema=ENVELOPE_SCHEMA,
         )
 
     async def execute(self, ctx: CallContext | None = None, **arguments: Any) -> ToolResult:
@@ -129,6 +162,27 @@ def progress_of(ctx: CallContext | None) -> Callable[[str], Awaitable[None]] | N
     async def progress(message: str) -> None:
         await ctx.log("info", message)
     return progress
+
+
+def nullable_kept(written: dict[str, Any], flat: dict[str, Any]) -> dict[str, Any]:
+    """`flat` with null allowed again where the tool's own schema allowed it.
+
+    tool-schema collapses an optional `anyOf: [X, null]` to `X`, and 3tears-mcp checks every
+    call against the listed schema before the tool runs, so a caller sending such an argument
+    as null would be refused, where 1.x took null as "not given". A prompt refused for a null
+    `sent_by` is a prompt not sent, so each such argument is listed as `type: [X, "null"]`:
+    still self-contained (no `$ref`, no `anyOf`), and null reaches the tool as its default."""
+    out = dict(flat)
+    props = {name: dict(spec) for name, spec in flat.get("properties", {}).items()}
+    for name, spec in written.get("properties", {}).items():
+        branches = spec.get("anyOf") if isinstance(spec, dict) else None
+        if not branches or {"type": "null"} not in branches or name not in props:
+            continue
+        kind = props[name].get("type")
+        if isinstance(kind, str):
+            props[name]["type"] = [kind, "null"]
+    out["properties"] = props
+    return out
 
 
 def envelope_result(envelope: dict[str, Any]) -> ToolResult:

@@ -50,8 +50,11 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
 - **Module split**: `transcript.py` is the pure core (parsing, delivery decisions, persistence
   helpers) with no I/O of its own; `screen.py` and `scope.py` own one concept each; the service
   package `service/` holds the send queue, the watchers, delivery, resume and the session
-  operations, with no MCP types (`test_service_boundary`), its state in `service/state.py`;
-  `tools.py` holds only the MCP surface (schemas, descriptions, guards, the Context) over it.
+  operations, with no MCP or 3tears types (`test_service_boundary`), its state in
+  `service/state.py`; `tearstools/` holds one 3tears `TearsTool` per tool over it (schemas and
+  descriptions, no MCP types); `authz.py` the scope and taint refusals as the framework's
+  authorizer; `server.py` the local MCP face (3tears-mcp's `McpServer` and the error codes);
+  `auth.py` the bearer gate in front of it; `resources.py` the MCP resources.
 - **State**: anything that must survive a restart is a file in the watcher-state dir, written
   temp+rename. In-memory caches are derived, never the source of truth.
 - **Contracts**: the MCP tool envelope and the callback payload are pinned in

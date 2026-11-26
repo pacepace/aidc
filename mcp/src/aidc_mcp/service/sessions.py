@@ -1,7 +1,7 @@
 """Session operations behind the tools: create, MCP hand-over, list, status, exec, files,
 audit, transcript and interrupt.
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations
@@ -174,8 +174,8 @@ async def create(
     *,
     progress: Callable[[str], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
-    """The session_create tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_create tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     wants_mcp = bool(mcp_server or mcp_path or mcp_bearer)
     if wants_mcp:
         # Checked before anything is created: a session made and then refused its
@@ -233,8 +233,8 @@ async def create(
 
 
 async def list_sessions() -> dict[str, Any]:
-    """The session_list tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_list tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     audit.log_event("tool_call", tool="session_list")
     # The CLI runs in a thread; the per-session facts below read state the event
     # loop owns (send queues, watchers), so they are gathered here on the loop.
@@ -258,8 +258,8 @@ async def list_sessions() -> dict[str, Any]:
 
 
 async def status(name: str) -> dict[str, Any]:
-    """The session_status tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_status tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     audit.log_event("tool_call", tool="session_status", session=name)
     # The CLI call runs in a thread; the send queue below is read back here on
     # the event loop, the only thread that changes it.
@@ -281,8 +281,8 @@ async def status(name: str) -> dict[str, Any]:
 
 
 def kill(name: str) -> dict[str, Any]:
-    """The session_kill tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_kill tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     audit.log_event("tool_call", tool="session_kill", session=name)
     result = com.run_cli(["kill", name], timeout=120.0)
     if result["exit"] != 0:
@@ -291,8 +291,8 @@ def kill(name: str) -> dict[str, Any]:
 
 
 def exec_command(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, Any]:
-    """The session_exec tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_exec tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     audit.log_event("tool_call", tool="session_exec", session=name, cmd_redacted=cmd[:50])
     container = backend.target(name)
     argv = backend.exec_argv(container, ["bash", "-lc", cmd], user="vscode")
@@ -306,8 +306,8 @@ def exec_command(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, An
 
 
 async def transcript(name: str, last_n: int = 5, since_uuid: str = "") -> dict[str, Any]:
-    """The session_transcript tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_transcript tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     if not 1 <= last_n <= tv.MAX_TURNS:
         return com.envelope_err(f"last_n must be between 1 and {tv.MAX_TURNS}",
                                 code="invalid_argument")
@@ -330,8 +330,8 @@ async def transcript(name: str, last_n: int = 5, since_uuid: str = "") -> dict[s
 
 
 async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, Any]:
-    """The session_interrupt tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The session_interrupt tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     container = backend.target(name)
     target = (target or inv.INTERRUPT_AGENT).strip()
     if target not in (inv.INTERRUPT_AGENT, inv.INTERRUPT_HEADLESS):
@@ -373,8 +373,8 @@ FILE_PUT_SCRIPT = (
 
 
 def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str, Any]:
-    """The file_put tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The file_put tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     audit.log_event("tool_call", tool="file_put", session=name, path=path,
               bytes=len(content), mode=mode)
     container = backend.target(name)
@@ -390,8 +390,8 @@ def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str
 
 
 async def audit_get(name: str, since: str | None = None, kind: str | None = None) -> dict[str, Any]:
-    """The audit_get tool's work. tools.py holds the tool: its schema and description,
-    and the guards around it."""
+    """The audit_get tool's work. tearstools/ holds the tool (its schema and
+    description), authz.py the guards around it."""
     # NB: log_event's first positional param is itself named `kind`; pass the
     # audit filter as `filter_kind` so it doesn't collide.
     audit.log_event("tool_call", tool="audit_get", session=name, since=since, filter_kind=kind)

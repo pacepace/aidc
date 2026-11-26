@@ -4,7 +4,7 @@ the directories its persisted state lives in.
 One module, so a restart's losses and a test's reset are one list, and every reader
 reads the one binding (`ss.<name>` at call time, never a copied import).
 
-No MCP types here (test_service_boundary): the tools in tools.py adapt it.
+No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ class InFlight(NamedTuple):
     proc: Any
 
 
-# The session_invoke calls in flight, by (MCP session id, JSON-RPC request id), so the
-# transport layer can stop one whose client dropped the connection (disconnect.py).
-invokes_in_flight: dict[tuple[str, str], InFlight] = {}
+# The session_invoke calls in flight, by run id, so session_interrupt(target="headless")
+# can stop the host's docker exec of a run a call still waits on.
+invokes_in_flight: dict[str, InFlight] = {}
 
 # One headless run per session container at a time (owner ruling, 2026-10-22: "only allow one
 # session invoke at a time per dev container"). The lock makes the check and the

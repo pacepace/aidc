@@ -10,13 +10,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import scope, session_mcp, tools
+from aidc_mcp import scope, session_mcp
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import sessions as ses
 from aidc_mcp.service import tmux as tmx
+from tests import toolcall
 
 REPO = Path(__file__).resolve().parents[2]
 TOKEN = "tok-A1b2_C3d4.e5f6~g7h8+i9j0/k1l2=m3n4"
@@ -267,9 +267,7 @@ class TestWhatIsRefused:
 # --- the tool ------------------------------------------------------------------
 
 def _tool(name):
-    app = MCPServer("t")
-    tools.register(app)
-    return app._tool_manager._tools[name].fn
+    return toolcall.tool(name)
 
 
 def _audit_log(tmp_path) -> str:

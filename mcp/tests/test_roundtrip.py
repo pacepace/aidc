@@ -26,9 +26,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from mcp.server.mcpserver import MCPServer
 
-from aidc_mcp import auth, tools
+from aidc_mcp import auth, server
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
@@ -36,6 +35,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import toolcall
 
 # --- transcript fixture builders (a deterministic stand-in for Claude) --------
 
@@ -136,9 +136,6 @@ def harness(tmp_path, monkeypatch):
     async def capture(container, window):
         return ""
 
-    async def announce(app, ctx=None):
-        return None
-
     async def fake_watcher(*a, **k):
         # Stand in for the background poll loop: stay alive (the conftest cancels
         # it) but never actually poll — the test drives the drain explicitly.
@@ -161,7 +158,6 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(tmx, "load_and_paste", load_paste)
     monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
     monkeypatch.setattr(tmx, "capture_screen", capture)
-    monkeypatch.setattr(tools, "_announce_watchers", announce)
     monkeypatch.setattr(dlv, "_run_transcript_watcher", fake_watcher)
     monkeypatch.setattr(dlv, "_baseline_watermark", baseline_tmp)
     monkeypatch.setattr(orc, "orchestrator_callback_url", lambda: "http://orchestrator.local")
@@ -173,10 +169,8 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", orchestrator.client_factory())
     monkeypatch.setattr(asyncio, "sleep", _nosleep)
 
-    app = MCPServer("t")
-    tools.register(app)
-    send = app._tool_manager._tools["session_send"].fn
-    resend_tool = app._tool_manager._tools["session_resend"].fn
+    send = toolcall.tool("session_send")
+    resend_tool = toolcall.tool("session_resend")
 
     async def drain():
         """One REAL delivery pass (what the background watcher would run), pointed
@@ -193,7 +187,7 @@ def harness(tmp_path, monkeypatch):
             transcripts_base=base, state_dir=state, sleep_fn=_nosleep,
         )
 
-    rig.app = app
+    rig.face = server.Face()
     rig.base = base
     rig.state = state
     rig.orchestrator = orchestrator
@@ -412,9 +406,9 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("reply SEVEN")),
                                             _assistant("a1", "SEVEN")])
 
-    await tools.resume_on_startup(h.app)
+    await h.face.resume()
     assert "proj" in ss.session_watchers
-    assert "proj" in h.app._tool_manager._tools["session_send"].description
+    assert "proj" in next(t for t in h.face.listing() if t.name == "session_send").description
     await h.drain()
     await h.drain()
 
@@ -425,10 +419,10 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
 async def test_unwatch_forgets_the_saved_webhook(harness):
     h = harness
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
-    await h.app._tool_manager._tools["session_unwatch"].fn(name="proj")
+    await toolcall.tool("session_unwatch")(name="proj")
     assert not ts.watch_path(h.state, "proj").exists()
     ss.session_watchers.clear()
-    await tools.resume_watchers(h.app)
+    await dlv.resume_watches(lambda: None)
     assert "proj" not in ss.session_watchers
 
 
@@ -439,7 +433,7 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
     monkeypatch.setenv("AIDC_MCP_ALLOWED_SESSIONS", "proj")
     h.session_state = tn.SESSION_GONE
 
-    await tools.resume_watchers(h.app)
+    await dlv.resume_watches(lambda: None)
 
     assert not ss.session_watchers
     assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
@@ -452,7 +446,7 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
     h = harness
     ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = "id-2"
-    await tools.resume_watchers(h.app)
+    await dlv.resume_watches(lambda: None)
     assert "proj" not in ss.session_watchers
     assert not ts.watch_path(h.state, "proj").exists()
 
@@ -461,7 +455,7 @@ async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
     h = harness
     ts.save_watch(h.state, "proj", "conv-1", "http://orchestrator.local", session_instance="id-1")
     h.instance = ""
-    await tools.resume_watchers(h.app)
+    await dlv.resume_watches(lambda: None)
     assert "proj" in ss.session_watchers
 
 

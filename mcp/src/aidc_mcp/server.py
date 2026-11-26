@@ -23,6 +23,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 from threetears.mcp import (
@@ -37,7 +39,7 @@ from threetears.mcp import (
 )
 from threetears.tool_contract.mcp_face import mcp_tool
 
-from aidc_mcp import __version__, audit, auth, authz, resources, scope
+from aidc_mcp import __version__, audit, auth, authz, observability, resources, scope
 from aidc_mcp.authz import PERMISSION, AidcAuthorizer
 from aidc_mcp.service import common as com
 from aidc_mcp.service import delivery as dlv
@@ -55,6 +57,9 @@ INSTRUCTIONS = (
 )
 
 MCP_PATH = "/mcp"
+#: per-tool call counts and durations, when AIDC_MCP_METRICS=true (observability.py); behind
+#: the same bearer as the MCP endpoint
+METRICS_PATH = "/metrics"
 
 
 def error_codes() -> ErrorCodes:
@@ -136,6 +141,14 @@ def _resource_registry() -> ResourceRegistry:
     return registry
 
 
+async def _metrics(request: Request) -> Response:
+    served = observability.metrics_text()
+    if served is None:
+        return PlainTextResponse("metrics are off (AIDC_MCP_METRICS)", status_code=404)
+    body, media_type = served
+    return Response(body, media_type=media_type)
+
+
 class _LazyEndpoint:
     """The MCP endpoint, bound to the transport the lifespan builds.
 
@@ -174,12 +187,14 @@ def build_app(face: Face | None = None) -> Any:
             ss.session_change_listeners.remove(face.session_changed)
             await face.server.stop()
 
-    app = Starlette(routes=[Route(MCP_PATH, endpoint=endpoint)], lifespan=lifespan)
+    app = Starlette(routes=[Route(MCP_PATH, endpoint=endpoint),
+                            Route(METRICS_PATH, endpoint=_metrics)], lifespan=lifespan)
     return auth.BearerAuthMiddleware(app)
 
 
 def main() -> int:
     port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
+    observability.configure()
     audit.log_event("server_start", port=port)
     wrapped = build_app()
 

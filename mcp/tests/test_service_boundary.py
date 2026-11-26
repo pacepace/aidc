@@ -13,7 +13,10 @@ import sys
 
 import aidc_mcp.service as service
 
-FORBIDDEN_PACKAGES = {"mcp", "fastmcp", "threetears"}
+FORBIDDEN_PACKAGES = {"mcp", "fastmcp"}
+# The 3tears face types (TRS-13): the MCP server and the tool contract. 3tears-observe, the
+# logging every module shares, is allowed.
+FORBIDDEN_PREFIXES = ("threetears.mcp", "threetears.tool_contract")
 # aidc's tools and faces: the service must not reach back into them (TRS-13).
 ADAPTER_MODULES = {"aidc_mcp.server", "aidc_mcp.resources", "aidc_mcp.publish",
                    "aidc_mcp.authz", "aidc_mcp.tearstools"}
@@ -46,17 +49,20 @@ def test_no_service_module_imports_mcp_or_the_adapters():
     found = {}
     for name in ["aidc_mcp.service", *_service_modules()]:
         bad = sorted(m for m in _imported(name)
-                     if m.split(".")[0] in FORBIDDEN_PACKAGES or m in ADAPTER_MODULES)
+                     if m.split(".")[0] in FORBIDDEN_PACKAGES or m in ADAPTER_MODULES
+                     or m.startswith(FORBIDDEN_PREFIXES))
         if bad:
             found[name] = bad
     assert found == {}
 
 
 def _modules_loaded_by_importing(names):
-    """The top-level packages a fresh interpreter has loaded after importing `names`."""
+    """The top-level packages, and the 3tears face modules, a fresh interpreter has loaded
+    after importing `names`."""
     code = ("import json, sys\n"
             + "".join(f"import {n}\n" for n in names)
-            + "print(json.dumps(sorted({m.split('.')[0] for m in sys.modules})))")
+            + "print(json.dumps(sorted({m.split('.')[0] for m in sys.modules}"
+            + f" | {{m for m in sys.modules if m.startswith({FORBIDDEN_PREFIXES!r})}})))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          check=True)
     return set(json.loads(out.stdout))
@@ -66,6 +72,7 @@ def test_importing_the_whole_service_loads_no_mcp_package():
     """Transitively too: a core module the service imports must not pull the SDK in."""
     loaded = _modules_loaded_by_importing(_service_modules())
     assert loaded & FORBIDDEN_PACKAGES == set()
+    assert {m for m in loaded if m.startswith(FORBIDDEN_PREFIXES)} == set()
 
 
 def test_the_import_check_sees_mcp_when_it_is_there():

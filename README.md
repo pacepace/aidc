@@ -1169,6 +1169,8 @@ aidc mcp token show         # print current token (for the client config)
 aidc mcp stop               # tear down
 ```
 
+**Logs and telemetry:** the server logs through 3tears-observe to `aidc mcp logs`, each tool call's lines carrying one correlation id (`cid`); the access log (`access.log`) stays the record of every request. Nothing is exported unless asked: `AIDC_MCP_OTEL_ENDPOINT` (an OTLP/HTTP collector's base URL) exports one span per tool call, and `AIDC_MCP_METRICS=true` serves per-tool call counts and durations at `/metrics` behind the bearer; they need the server's `otel` and `prometheus` extras, which the default image leaves out.
+
 **Auth:** single bearer token at `~/.config/aidc/mcp-token`. Whoever has it can do anything. Dev containers cannot reach the MCP server — it's deliberately one-way.
 
 See [`docs/done/design-08-mcp-control.md`](docs/done/design-08-mcp-control.md) for the full design.

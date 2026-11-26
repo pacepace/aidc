@@ -1,14 +1,14 @@
 ---
 artifact: api-notes
 scope: 3tears-adoption
-pinned_commit: b28bbebf4d662e5e6498b35a5c9af20955d108a6
+pinned_commit: bbbf5ead8d8c4838d800f95e488a7fafd8c04d65
 branch: feat/mcp-face (unreleased, github.com/pacepace/3tears)
 read: 2026-11-26
 ---
 
 # 3tears API notes (verify-api)
 
-Read from the 3tears source **at commit `b28bbebf4d662e5e6498b35a5c9af20955d108a6`** of the
+Read from the 3tears source **at commit `bbbf5ead8d8c4838d800f95e488a7fafd8c04d65`** of the
 unreleased branch `feat/mcp-face`, the commit `mcp/pyproject.toml` pins. The branch is still under
 review, so these notes hold for that commit only. When the pin moves, re-read the surfaces below and
 record what changed under "Pin history".
@@ -75,8 +75,9 @@ error_codes=None, resources=None, resource_provider=None)`
 - Exactly one of `registry` (`ToolRegistry`) and `tool_provider` (`Callable[[], Iterable[McpTool]]`,
   read on every `tools/list` and `tools/call`).
 - At most one of `resources` (`ResourceRegistry`) and `resource_provider`.
-- **No `version` or `instructions` parameter** at this commit (requested upstream 2026-11-26; aidc
-  1.x sends both).
+- `version: str = ""` and `instructions: str | None = None` (keywords): `serverInfo.version` and
+  the `initialize` result's `instructions` on handshake-era protocols (the 2026-07-28 equivalents
+  otherwise).
 - `await start()` (calls `authorizer.start()`) before any build/serve; `await stop()`.
 - `build_http_transport(*, path="/mcp", stateless=True, json_response=True) -> McpHttpTransport`
   for embedding: add `transport.routes` (or `.endpoint`) to the host's Starlette app and enter
@@ -148,9 +149,15 @@ a mapping rides as `structuredContent` plus its JSON text; a string is the text 
 - `Refusal(code: ErrorCode | str, message, argument=None)`.
 - `CallAuthorizer` protocol: `Authorizer` plus `async authorize_call(identity, call) -> bool |
   Refusal`. Detected by the authorizer's **class** defining `authorize_call`.
+- `ResourceRequest(uri, variables: Mapping, required_permission, action)` with `action` one of
+  `"list"`, `"read"`, `"subscribe"`, `"listen"`; `ResourceAuthorizer` protocol: `Authorizer` plus
+  `async authorize_resource(identity, request) -> bool | Refusal`, called (when the class defines
+  it) for each fixed resource a listing would show and for every read, subscription and listen
+  naming a resource; a template's listing still asks `allows`. A refusal answers JSON-RPC
+  `RESOURCE_REFUSED` with its own code when registered, else `PERMISSION_DENIED`. aidc's scope
+  filter on resources goes here (the URI's `name` variable).
 - `Authorizer` protocol: `async allows(identity, permission) -> bool`, `async start()`, `async
-  stop()`. Resources use `allows` only (no call arguments) — aidc's scope filter on resources stays
-  in its readers.
+  stop()`.
 - A `Refusal` naming a registered code answers that code with `refusal.message`; an unregistered
   one answers `PERMISSION_DENIED` with `refused: <message>`.
 
@@ -202,6 +209,10 @@ loads `asyncpg` (its refusals raise asyncpg's error types, per the 2026-11-25 ru
 conflicts with TRS-01/TRS-17 as written; raised to the owner 2026-11-26. Read in detail when chunk
 07 starts.
 
+`threetears.mcp.tool.context_parameter_of(tool_name, handler, input_schema) -> str | None`: the
+parameter a handler takes the call context in, as `McpTool` finds it (the bridge uses it for
+`execute`). A PEP 695 alias of `CallContext` is read through.
+
 ## Pin history
 
-- 2026-11-26: first pin, `b28bbebf4d662e5e6498b35a5c9af20955d108a6` (head of `feat/mcp-face`).
+- 2026-11-26: first pin, `bbbf5ead8d8c4838d800f95e488a7fafd8c04d65` (head of `feat/mcp-face`).

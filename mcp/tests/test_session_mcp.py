@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from aidc_mcp import scope, session_mcp
+from aidc_mcp import backend, scope, session_mcp
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import sessions as ses
@@ -205,6 +205,39 @@ class TestTheTokenStaysOutOfSight:
         assert not any(TOKEN in part for part in seen["argv"]), "the token is in the command line"
         assert json.loads(seen["kwargs"]["input"]) == {"server": "project", "url": BASE + PATH,
                                                        "bearer": TOKEN}
+
+    def test_on_a_cluster_server_it_goes_in_by_kubectl_exec_on_stdin(self, monkeypatch):
+        """The same install, in the session's dev pod as its user (kubectl exec cannot choose
+        one: sudo does), the token on standard input, never in the command line."""
+        monkeypatch.setenv(backend.KIND_ENV, "kubernetes")
+        monkeypatch.setenv(backend.NAMESPACE_ENV, "aidc-u-alice")
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"], seen["kwargs"] = argv, kwargs
+            return subprocess.CompletedProcess(argv, 0, stdout="added\n", stderr="")
+
+        monkeypatch.setattr(session_mcp.subprocess, "run", fake_run)
+        session_mcp.hand("sandbox", server="project", path=PATH, bearer=TOKEN, base_url=BASE)
+        assert seen["argv"][:14] == ["kubectl", "-n", "aidc-u-alice", "exec", "-i",
+                                     "--pod-running-timeout=10s", "pod/sandbox-dev-0", "-c", "dev",
+                                     "--", "sudo", "-E", "-H", "-u"]
+        assert seen["argv"][14:17] == ["vscode", "--", "bash"]
+        assert not any(TOKEN in part for part in seen["argv"]), "the token is in the command line"
+        assert json.loads(seen["kwargs"]["input"])["bearer"] == TOKEN
+
+    def test_a_cluster_session_that_is_gone_is_said_so(self, monkeypatch):
+        monkeypatch.setenv(backend.KIND_ENV, "kubernetes")
+        monkeypatch.setenv(backend.NAMESPACE_ENV, "aidc-u-alice")
+
+        def run(container, payload, timeout):
+            return subprocess.CompletedProcess(
+                [], 1, stdout="", stderr='Error from server (NotFound): pods "gone-dev-0" not found')
+
+        with pytest.raises(session_mcp.SessionMcpError) as failed:
+            session_mcp.hand("gone", server="project", path=PATH, bearer=TOKEN, base_url=BASE,
+                             run=run)
+        assert failed.value.code == "no_such_session"
 
     def test_an_error_that_quotes_it_is_given_back_without_it(self):
         def run(container, payload, timeout):

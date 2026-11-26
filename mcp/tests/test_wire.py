@@ -6,11 +6,12 @@ orchestrator does, so an SDK upgrade that changes the handshake, the tool list, 
 auth gate or the Host check fails here rather than in a client.
 """
 import json
+import subprocess
 
 import pytest
 from starlette.testclient import TestClient
 
-from aidc_mcp import auth, publish, resources, server
+from aidc_mcp import auth, publish, resources, server, session_facts
 from aidc_mcp.service import common as com
 from aidc_mcp.tearstools import descriptions
 
@@ -143,8 +144,15 @@ def test_an_audit_file_outside_the_audit_dir_is_never_read(client, monkeypatch, 
     own traversal check runs. Either refusal will do; reading the parent will not."""
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir()
-    monkeypatch.setattr(resources, "parse_audit_dir", lambda out: audit_dir)
-    monkeypatch.setattr(resources, "_run", lambda args: "")
+    (tmp_path / "secret").write_text("TOPSECRET", encoding="utf-8")
+
+    def sidecar(argv):
+        # The audit sidecar, played here: its script runs against audit_dir in place of
+        # its mount (tests/test_resources.py has the same stand-in).
+        inner = argv[argv.index("sh"):] if "sh" in argv else ["true"]
+        inner = [str(audit_dir) if a == session_facts.AUDIT_MOUNT else a for a in inner]
+        return subprocess.run(inner, capture_output=True, check=False)
+    monkeypatch.setattr(resources, "_backend_run", sidecar)
     _, sid = _initialize(client)
     msg = _rpc_result(client.post("/mcp", headers=_headers(sid), json={
         "jsonrpc": "2.0", "id": 6, "method": "resources/read",
@@ -154,6 +162,7 @@ def test_an_audit_file_outside_the_audit_dir_is_never_read(client, monkeypatch, 
     else:
         text = msg["result"]["contents"][0]["text"]
         assert json.loads(text) == {"error": "path traversal denied"}, text
+        assert "TOPSECRET" not in text
 
 
 def test_session_send_offers_deliver_with_queue_as_the_default(client):

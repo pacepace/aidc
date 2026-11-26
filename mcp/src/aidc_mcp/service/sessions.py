@@ -138,23 +138,34 @@ async def session_report(name: str) -> dict[str, Any]:
     }
 
 
+#: How long a create may take with no progress to report: a cluster create waits up to five
+#: minutes for the session's proxy and ten for its dev pod (scripts/k8s/session-create.sh).
+CREATE_TIMEOUT_S = {backend.DOCKER: 300.0, backend.KUBERNETES: 960.0}
+
+
 async def create_session(
     name: str, args: list[str], progress: Callable[[str], Awaitable[Any]] | None,
     wants_mcp: bool, mcp_server: str,
     mcp_path: str, mcp_bearer: str,
 ) -> dict[str, Any]:
     """Run the CLI create session_create built, then hand the session its MCP server."""
+    # The first that a line holds names its phase: Docker's compose lines, then the cluster's
+    # create (scripts/k8s/session-create.sh), whose waits come before the generic one.
     phases = {
-        "Container aidc-": "container",
-        "Waiting":         "waiting",
-        "Healthy":         "healthy",
-        "Started":         "started",
-        "waiting for":     "wait",
+        "Container aidc-":             "container",
+        "Waiting":                     "waiting",
+        "Healthy":                     "healthy",
+        "Started":                     "started",
+        "creating session":            "creating",
+        "waiting for the proxy":       "proxy",
+        "waiting for the dev pod":     "dev pod",
+        "is ready":                    "ready",
+        "waiting for":                 "wait",
     }
     if progress is not None:
         result = await com.run_cli_streaming(args, progress, phases)
     else:
-        result = com.run_cli(args, timeout=300.0)
+        result = com.run_cli(args, timeout=CREATE_TIMEOUT_S[backend.kind()])
     if result["exit"] != 0:
         return com.envelope_err(result["stderr"] or result["stdout"] or "create failed", result,
                                 code="cli_failed")

@@ -118,6 +118,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   Always with the token. It may post only to your `orchestrator.callback_url` host and port
   (`mcp.kubernetes.callback_address` when the cluster reaches it at another address). A session
   may no longer be named `mcp` on Kubernetes.
+- **`session_create` and `session_mcp_set` through your cluster server** (with
+  `mcp.session_create: true`): a session made there needs no repo (it starts at your disk's top,
+  `/home/<user>`), keeps running and answering with your machines off, and reports the cluster
+  create's steps as progress. Its git identity is not bridged from a machine: set it in the
+  session.
 - **A session's hook events are pruned by the session's own hook writer** (the newest 200 are
   kept), no longer by the MCP server, which only reads them; on both backends.
 - **Build the `aidc/mcp` image through aidc** (`aidc rebuild`, `aidc k8s build`): its build

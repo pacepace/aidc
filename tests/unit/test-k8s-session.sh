@@ -688,6 +688,25 @@ out=$(run create demo --backend docker --help)
 assert_has "--backend docker still wins over the config" "aidc create" "$out"
 sed -i '/^backend: /d' "$HOME/.config/aidc/config.yaml"
 
+echo "=== create as the user's MCP server runs it (session_create in the cluster) ==="
+# The server's pod: HOME is an empty /home/<user> and its working dir, the config is the
+# ConfigMap mounted at /aidc-config (here a stand-in, AIDC_MCP_CONFIG_MOUNT), with no ports:,
+# and no git on PATH (the image has none).
+POD_HOME="$SCRATCH/pod-home"; POD_CFG="$SCRATCH/pod-config"
+mkdir -p "$POD_HOME" "$POD_CFG" "$SCRATCH/nogit"
+yq '.backend = "kubernetes" | del(.kubernetes.context) | del(.kubernetes.kubeconfig) | del(.ports)' \
+    "$HOME/.config/aidc/config.yaml" > "$POD_CFG/config.yaml"
+printf '#!/bin/sh\nexit 127\n' > "$SCRATCH/nogit/git"; chmod +x "$SCRATCH/nogit/git"
+: > "$K_APPLIED"; : > "$K_LOG"
+out=$(cd "$POD_HOME" && HOME="$POD_HOME" AIDC_MCP_CONFIG_MOUNT="$POD_CFG" PATH="$SCRATCH/nogit:$PATH" \
+    "$AIDC_ROOT/scripts/aidc" create demo --profile multi --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
+assert_has "it creates the session" "session demo is ready" "$out"
+assert_has "...starting at /home/<user>, the disk's top, from the pod's home" "repo /home/alice" "$out"
+assert_has "...with no git identity to bridge (said, not failed)" "git identity: NOT bridged" "$out"
+assert_not_has "...and opens no tunnel (a tunnel ends on the machine that runs it)" "port-forward" "$(cat "$K_LOG")"
+assert_not_has "...with no kubeconfig or context of a laptop" "--context" "$(cat "$K_LOG")"
+assert_eq "...in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"' | grep . | sort -u)"
+
 echo "=== list, attach, status, logs ==="
 out=$(K_EXISTS=1 run list)
 assert_has "list shows cluster sessions with their backend" "kubernetes" "$out"

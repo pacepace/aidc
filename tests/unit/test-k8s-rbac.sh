@@ -189,8 +189,24 @@ def res_of(word):
 
 needs, other_needs, problems, calls = {}, {}, [], 0
 other = False
+# The user's MCP server runs the CLI under its own ServiceAccount (K8S_MCP_RULES) for
+# session_create, session_list and session_status (and their resources): `aidc create|list|
+# status --backend kubernetes`, with no --port or --expose (its config has no ports:). Every
+# call those reach must be within the MCP's rules: the scripts of those verbs, minus their
+# page and tunnel lines, and the helpers they call in the libraries.
+MCP_SCRIPTS = {"k8s/session-create.sh", "k8s/session-list.sh", "k8s/session-status.sh",
+               "k8s/session-where.sh"}
+MCP_USER_ONLY = ("expose", "login", "tunnel")
+MCP_FUNCS = {"k8s_get", "k8s_git_pod", "k8s_require_session", "k8s_session_lookup",
+             "k8s_session_taint", "k8s_wait_dev_ready", "k8s_node_selector",
+             "k8s_ensure_transcripts", "k8s_names_sync", "k8s_network_refusal",
+             "k8s_network_ungranted", "k8s_relays_describe", "k8s_networks", "k8s_exposed",
+             "aidc_audit_warn_k8s", "_aidc_audit_k8s_total"}
+mcp_needs, mcp_scope = {}, False
 def need(where, r, v):
     (other_needs if other else needs).setdefault((r, v), []).append(where)
+    if mcp_scope and not other:
+        mcp_needs.setdefault((r, v), []).append(where)
 
 def render_of(line):
     """The manifest function piped into this call (whole names: k8s_render_expose is not
@@ -204,7 +220,13 @@ for root, _, files in os.walk(scripts):
         path = os.path.join(root, f); rel = os.path.relpath(path, scripts)
         text = open(path).read()
         joined = re.sub(r"\\\n\s*", " ", text)
+        func = None
         for ln, line in enumerate(joined.split("\n"), 1):
+            fm = re.match(r"^(\w+)\(\)\s*\{", line)
+            if fm: func = fm.group(1)
+            elif line.startswith("}"): func = None
+            mcp_scope = ((rel in MCP_SCRIPTS and not any(w in line for w in MCP_USER_ONLY))
+                         or func in MCP_FUNCS)
             code = line.split(" #")[0] if not line.lstrip().startswith("#") else ""
             direct = re.search(r"(^\s*|\$\(\s*|[|;&]\s*|\b(then|do|else|if|!)\s+)kubectl\s", code)
             if direct and rel != "k8s/lib.sh" and code[:direct.start()].count('"') % 2 == 0:
@@ -347,6 +369,11 @@ if len(problems) == before: print(f"  PASS: {len(groups)} rules each under their
 for (r, v, which), why in sorted(NOT_GRANTED.items()):
     if (r, v) in unnamed[which]: problems.append(f"{v} {r} ({which}) is granted, decided against: {why}")
     else: print(f"  PASS: not granted, {v} {r} ({which}): {why}")
+for (r, v), wh in sorted(mcp_needs.items()):
+    ok = (r, v) in (rules["mcp-cluster"] if r in CLUSTER else rules["mcp"])
+    print(f"  {'PASS' if ok else 'FAIL'}: the MCP server's CLI: {v} {r} granted ({len(wh)} call(s), e.g. {wh[0]})")
+    if not ok: problems.append(f"the MCP server's CLI needs {v} {r}, which K8S_MCP_RULES lacks: {wh[0]}")
+if len(mcp_needs) < 10: problems.append(f"only {len(mcp_needs)} needs read for the MCP server's CLI: the scope is missing calls")
 extra = (rules["mcp"] - granted_ns) | (rules["mcp-cluster"] - granted_cl)
 if extra: problems.append(f"the MCP's rules grant what the user's do not: {sorted(extra)}")
 else: print("  PASS: the MCP's rules are within the user's")

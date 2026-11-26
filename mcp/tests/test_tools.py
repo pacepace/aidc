@@ -20,6 +20,7 @@ from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import sending as snd
+from aidc_mcp.service import sessions as ses
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 from tests import toolcall
@@ -269,6 +270,43 @@ class TestSessionCreateBackend:
             res = await create(name="proj", ctx=None, **kwargs)
             assert (res["ok"], res["error_code"]) == (False, "invalid_argument"), kwargs
             assert "aidc repo add" in res["error"] and "worktree" in res["error"]
+
+    async def test_a_cluster_server_creates_in_its_cluster_with_time_to_wait(self, monkeypatch):
+        """The per-user server in the cluster creates the user's sessions there, whatever a
+        config line says, and gives the create time for the cluster's two waits (the proxy up
+        to five minutes, the dev pod up to ten)."""
+        monkeypatch.setenv(backend.KIND_ENV, "kubernetes")
+        monkeypatch.setenv(backend.NAMESPACE_ENV, "aidc-u-alice")
+        _configure_backend("docker")
+        rec = []
+        _patch_cli(monkeypatch, {"exit": 0, "stdout": "ready", "stderr": ""}, record=rec)
+        res = await _create_tool(monkeypatch)(name="proj", ctx=None)
+        assert res["ok"] is True
+        assert rec[0][0] == ["create", "proj", "--profile", "multi", "--backend", "kubernetes"]
+        assert rec[0][1] >= 900
+        res = await _create_tool(monkeypatch)(name="proj", repo="/home/alice/app", ctx=None)
+        assert (res["ok"], res["error_code"]) == (False, "invalid_argument")
+
+    async def test_a_cluster_creates_steps_are_reported_as_progress(self, monkeypatch, tmp_path):
+        """The cluster create's own lines name its phases (TRS-04), each once, in order: the
+        CLI's real output, read by the real streaming reader."""
+        cli = tmp_path / "aidc"
+        cli.write_text(
+            "#!/bin/sh\n"
+            "echo '[aidc] creating session proj in aidc-u-alice (repo /home/alice)'\n"
+            "echo '[aidc] config: none found (defaults)'\n"
+            "echo '[aidc] waiting for the proxy (squid, blocklist, policy, audit)'\n"
+            "echo '[aidc] waiting for the dev pod to be ready'\n"
+            "echo '[aidc] session proj is ready'\n")
+        cli.chmod(0o755)
+        monkeypatch.setattr(com, "AIDC", str(cli))
+        reported = []
+
+        async def progress(msg):
+            reported.append(msg.split(":")[0])
+        res = await ses.create_session("proj", ["create", "proj"], progress, False, "", "", "")
+        assert res["ok"] is True
+        assert reported == ["creating", "proxy", "dev pod", "ready"]
 
     async def test_only_the_first_top_level_backend_line_counts(self, monkeypatch):
         """The dispatcher takes the first line starting `backend:`; an indented key of

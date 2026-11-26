@@ -1085,7 +1085,9 @@ namespace (TRS-23, MCP-02/03 as amended):
   to a public address, or does not resolve: a session's proxy reaches any public address and
   no private one, so only a VPN/LAN address keeps every session, the user's and other users',
   from reaching the server through its Squid (MCP-12, K8S-13). Residual: the check is made at
-  start; a DNS answer changed to a public address afterwards is not seen until the next start.
+  start, on the first IPv4 answer the user's machine gets; a DNS answer changed to a public
+  address afterwards, a name that also has a public answer elsewhere (split-horizon DNS, several
+  addresses), or a controller that also listens at a public address, is not seen.
   The ingress rule assumes a controller on the pod network; one on the node's network connects
   from node addresses, which the namespace rule does not admit (as for the pages). The NetworkPolicy lets in connections to the server's port from
   every namespace but the user's own (a decision taken while building, main agent 2026-11-26):
@@ -1107,6 +1109,15 @@ namespace (TRS-23, MCP-02/03 as amended):
   on the CNI. Over a running server the in-cluster address is read first and the policy applied
   once, so it is never narrowed under the server (a server that does not answer keeps what
   its policy allows); a new server's is read once it runs and added.
+- **Creating sessions (MCP-38/39, TRS-23):** with `mcp.session_create: true` the server's
+  `session_create` runs `aidc create --backend kubernetes` in its pod, under its ServiceAccount:
+  no repo or workspace (refused), the session starting at `/home/<user>` (the pod's home and
+  working dir), the user's config from the ConfigMap, no tunnel (its config has no `ports:`),
+  no git identity bridged (the image has no git; the session's commits carry the identity set
+  in it). `tests/unit/test-k8s-rbac.sh` holds every cluster call `aidc create|list|status`
+  reach, minus their page and tunnel paths, to the MCP's Role. A cluster create may take up to
+  fifteen minutes (the proxy's and the dev pod's waits), and reports its steps as progress.
+  `session_mcp_set` writes into the session's Claude state by the same exec, as the session user.
 - **Status:** `aidc mcp status` says why a server that is not ready waits (its pod's reason:
   an image not built yet, a crash) and how full its state claim is, warning from 80%: the
   access log grows on the claim the store needs, and a full claim stops replies.

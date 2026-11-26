@@ -55,8 +55,11 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
   descriptions, no MCP types); `authz.py` the scope and taint refusals as the framework's
   authorizer; `server.py` the local MCP face (3tears-mcp's `McpServer` and the error codes);
   `auth.py` the bearer gate in front of it; `resources.py` the MCP resources.
-- **State**: anything that must survive a restart is a file in the watcher-state dir, written
-  temp+rename. In-memory caches are derived, never the source of truth.
+- **State**: anything that must survive a restart is a row of the 3tears state store
+  (`store.py`: one SQLite L3 file, `aidc-state.sqlite`, in the watcher-state dir), written
+  through `transcript.py`'s persistence functions, never a new file beside it (the files there
+  are 1.x's, read in once at upgrade). In-memory caches are derived, never the source of truth.
+  (Amended 2026-11-26 by the 2026-11-25 ruling on design-13 Q4, TRS-25 option A.)
 - **Contracts**: the MCP tool envelope and the callback payload are pinned in
   `docs/design-10-turn-state-and-sending.md` (D5/D6) and change only by agreement with the
   orchestrator, additively.

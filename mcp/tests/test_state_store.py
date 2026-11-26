@@ -14,6 +14,7 @@ import pytest
 
 from aidc_mcp import store
 from aidc_mcp import transcript as ts
+from tests.logs import patch_log_event
 from tests.statefiles import STORE_FILES, dead_letters, stored
 
 CHILD = Path(__file__).with_name("state_writer_child.py")
@@ -140,6 +141,74 @@ def test_a_1x_file_that_1x_would_have_read_as_nothing_is_kept_aside_unstored(tmp
     assert (base / store.MIGRATED_DIR / "proj.watch.json").read_text() == "{not json"
 
 
+def test_a_1x_send_queue_that_cannot_be_read_is_named_in_the_log(tmp_path, monkeypatch):
+    """1.x logged an unreadable queue (its prompts left for a person) at every start; it is
+    read in once now, so the upgrade names it once."""
+    base = tmp_path / "state"
+    base.mkdir()
+    (base / "proj.send-queue.json").write_text("{torn")
+    (base / "proj.watch.json").write_text(json.dumps({"session": "proj"}))
+    logged = []
+    patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
+    ts.load_watches(base)
+    read_in = [f for k, f in logged if k == "state_1x_read_in"]
+    assert len(read_in) == 1 and read_in[0]["files"] == 2
+    assert read_in[0]["unstored"] == ["proj.send-queue.json"]
+    unreadable = [f for k, f in logged if k == "state_1x_file_unreadable"]
+    assert [f["file"] for f in unreadable] == ["proj.send-queue.json"]
+    assert Path(unreadable[0]["kept_in"]).read_text() == "{torn"
+
+
+def test_a_failing_store_raises_one_type_an_oserror(tmp_path, monkeypatch):
+    """Whatever the SQLite L3 raises (a full disk is sqlite3's OperationalError) leaves the
+    store as StoreError, an OSError, so a caller that logs a failed state write and carries
+    on, as 1.x's callers did, still catches it; the backend's error is its cause."""
+    import sqlite3
+
+    async def disk_full(*a, **k):
+        raise sqlite3.OperationalError("database or disk is full")
+    base = tmp_path / "state"
+    ts.save_watch(base, "s", "c", "http://cb")
+    monkeypatch.setattr(store.StateStore, "_put", disk_full)
+    with pytest.raises(store.StoreError) as raised:
+        ts.save_watch(base, "s", "c2", "http://cb")
+    assert isinstance(raised.value, OSError)
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+
+
+def test_a_conversations_ledger_is_read_through_its_index(tmp_path, monkeypatch):
+    """The ledger only grows, across every session; one conversation's is read on every
+    delivery pass, so that read must be the index's (a range of it), never a scan of the
+    whole table."""
+    import sqlite3
+
+    from threetears.core.backends import sqlite_file
+    base = tmp_path / "state"
+    for conv in ("c1", "c2"):
+        for n in range(3):
+            ts.record_delivered(base, "s", conv, f"fp-{conv}-{n}")
+    ts.record_delivered(base, "other", "c1", "fp-x")
+    reads = []
+    real_run = sqlite_file._run
+
+    def traced(conn, query, params):
+        if "deliveries" in query and query.lstrip().upper().startswith("SELECT"):
+            reads.append((sqlite_file._sqlite_statement(query),
+                          [sqlite_file._bound(v) for v in params]))
+        return real_run(conn, query, params)
+    monkeypatch.setattr(sqlite_file, "_run", traced)
+    assert ts.load_delivered(base, "s", "c1") == {"fp-c1-0", "fp-c1-1", "fp-c1-2"}
+    assert reads
+    conn = sqlite3.connect(f"file:{base / store.FILE_NAME}?mode=ro", uri=True)
+    try:
+        for sql, params in reads:
+            plan = " ".join(row[-1] for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+            assert store.LEDGER_INDEX in plan and "SCAN deliveries" not in plan.replace(
+                f"USING INDEX {store.LEDGER_INDEX}", ""), plan
+    finally:
+        conn.close()
+
+
 def test_the_store_can_be_printed_whole_for_a_person(tmp_path):
     base = tmp_path / "state"
     _write_1x_state(base)
@@ -161,3 +230,28 @@ def test_the_store_can_be_printed_while_the_server_holds_it(tmp_path):
                          cwd=MCP_DIR)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout)["watches"]["s"]["callback_base"] == "http://cb"
+
+
+def test_a_server_whose_store_another_process_holds_stops_at_start(tmp_path, monkeypatch):
+    """One process per store: the second server on a state dir says so and does not
+    serve, rather than failing at its first tool call (data-model item 6)."""
+    from aidc_mcp import server
+    from aidc_mcp.service import state as ss
+    base = tmp_path / "state"
+    base.mkdir(parents=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time; from threetears.core.backends import SqliteL3Backend\n"
+         f"b = SqliteL3Backend({str(base / store.FILE_NAME)!r}); b.open(); print('held', flush=True)\n"
+         "time.sleep(60)"],
+        stdout=subprocess.PIPE, text=True, cwd=MCP_DIR)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        monkeypatch.setattr(ss, "WATCHER_STATE_DIR", base)
+        logged = []
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append(kind))
+        assert server.open_state_store() is False
+        assert "state_store_unavailable" in logged
+    finally:
+        holder.kill()
+        holder.wait()

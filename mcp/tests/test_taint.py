@@ -157,3 +157,16 @@ async def test_the_git_agent_has_no_sandbox_to_taint(monkeypatch):
     monkeypatch.setattr(sf, "run_docker", must_not_run)
     assert await sf.read_taint("git") is None
     assert await sf.policy_events("git") == []
+
+
+@pytest.mark.parametrize("tool", sorted(authz.TAINT_GUARDED))
+async def test_the_guards_hold_under_the_mesh_name_too(tool, tainted):
+    """The mesh face names each tool aidc.<tool> (TRS-15); the same authorizer refuses a
+    tainted session there, and the scope holds there, whichever name the call carries."""
+    from types import MappingProxyType
+
+    from threetears.mcp import Refusal, ToolCall
+    decision = await authz.AidcAuthorizer().authorize_call(authz.ADMIN, ToolCall(
+        tool_name=f"aidc.{tool}", arguments=MappingProxyType({"name": "proj", **_args(tool)}),
+        required_permission=authz.PERMISSION))
+    assert isinstance(decision, Refusal) and decision.code == "tainted"

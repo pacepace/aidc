@@ -203,21 +203,58 @@ local `$ref`, collapses `anyOf: [X, null]` to `X`, drops titles and the root des
 field descriptions; always `type: object` with `properties` and `required`.
 `declared_type(prop, schema)`.
 
-## observe (chunk 05)
+## observe (chunk 05, `observability.py`, `audit.py`, `tearstools/base.py`)
 
-`threetears.observe`: `get_logger`, `configure_logging`, `set_context` / `get_context` /
-`clear_context` (correlation fields), `traced`, `set_span_attribute`, `counter` / `gauge` /
-`histogram` / `metered`, `CallMetrics`, `contain`, `spawn_background`, `cancel_and_wait`. Export
-and metrics backends are extras (`otel`, `prometheus`); with neither installed they are no-ops.
-Read in detail when chunk 05 starts (recorded below then).
+What aidc calls, at this commit:
 
-## core: the SQLite L3 (chunk 07)
+- `get_logger(name: str) -> ThreeTearsLogger`; `configure_logging(level="INFO", *, color=None,
+  strip_prefixes=None, quiet_noisy_libraries=True, process_id=False)`.
+- `set_context(**kwargs: str | None)` / `get_context() -> dict[str, str]`: the log context, a
+  ContextVar, so a task asyncio starts copies it (aidc starts background work in a fresh
+  `contextvars.Context`, `observability.background_context`). A `None` value removes a key.
+- `traced(func=None, *, name=None, record_args=False, record_result=False)`;
+  `set_span_attribute(key, value)`. With no OpenTelemetry extra, spans are OpenTelemetry's no-op.
+- `CallMetrics(prefix, *, label="tool", registry=None)`, `.observe(*, name, outcome, seconds)`:
+  needs the `prometheus` extra.
+- `threetears.observe.setup`: `TelemetryConfig(enabled=False, endpoint=..., protocol="grpc" |
+  "http/protobuf", service_name, service_version, ...)` and `init_telemetry(config) -> bool`
+  (False when the export extra is missing). aidc imports these only when an endpoint is set.
 
-Not in aidc's lock yet. `threetears.core.backends.sqlite_file` exists at this commit. Importing it
-loads `asyncpg` (its refusals raise asyncpg's error types, per the 2026-11-25 ruling) and
-`sqlalchemy`; core's base dependencies also install `3tears-nats` (not the nats-py client). This
-conflicts with TRS-01/TRS-17 as written; raised to the owner 2026-11-26. Read in detail when chunk
-07 starts.
+Also exported, not used by aidc: `clear_context`, `counter` / `gauge` / `histogram` / `metered`,
+`contain`, `spawn_background`, `cancel_and_wait`.
+
+## core: the SQLite L3 (chunk 07, `store.py`)
+
+In the lock as `3tears` (core) 0.95, local mode carrying asyncpg and SQLAlchemy (TRS-01 amended,
+owner ruling 2026-11-26). What aidc calls, at this commit:
+
+- `threetears.core.backends.SqliteL3Backend(path: Path)`: `.open()` (takes an exclusive file
+  lock: one process per file, a second raises `SqliteStoreLockedError`, a `RuntimeError`;
+  `SqliteStoreFormatError` for a file it does not know), `.close()`,
+  `.scan(table, filters=None) -> list[dict]` (equality filters, read in keyset pages of the
+  declared index the filters lead, `TableSchema.keyset_order`), `.register_schema(table, schema)`
+  (creates the table and only the *unique* indexes and constraints a schema declares). Refusals
+  raise asyncpg's error types; a failed statement raises sqlite3's. aidc turns every one into its
+  own `store.StoreError` (an `OSError`) at its boundary.
+- `threetears.core.cache.SQLiteBackend(db_name="threetears_cache", *, directory=None,
+  budget=None)`, the in-memory L1, and `.initialize(sa_metadata)`: its tables come from
+  `TableSchema.to_sqlalchemy_table(metadata)`, one per collection, or every L1 read logs that it
+  holds no table.
+- `threetears.core.collections.registry.CollectionRegistry()` and `.configure(l1_backend=None,
+  l2_client=None, l3_pool=None, kv_key_scope=None, l2_create_if_missing=None)`; with
+  `threetears.core.collections.NO_L2`, there is no L2.
+- `threetears.core.collections.schema_backed`: `TableSchema(name, primary_key, columns,
+  cas_column=None, ..., indexes=(), ..., l1_eviction=None, ...)`; `Column(name, column_type,
+  immutable=False, nullable=False, ...)`; the types `STRING_TYPE`, `JSONB_TYPE`, `UUID_TYPE`,
+  `DATETIMETZ_TYPE`; `Index(name, *columns, unique=False, ..., purpose="", plan_test="", ...)`;
+  `collection_for_schema(schema, *, entity_class=None, module=None)`, whose instances take
+  `(registry, config, l2)` and offer `get`, `create`, `save_entity`, `delete`.
+- `threetears.core.config.DefaultCoreConfig()`; `threetears.core.eviction.Declared(policy, why)`
+  with `Policy.EVICTABLE` / `Policy.KEEP` (an L1 table must declare one).
+
+Core's base dependencies also install `3tears-nats` (not the nats-py client) and
+`3tears-interfaces`; importing the SQLite L3 loads `asyncpg` and `sqlalchemy`
+(`mcp/tests/test_wire.py`, TRS-01, checks nothing else loads and no socket opens).
 
 `threetears.mcp.tool.context_parameter_of(tool_name, handler, input_schema) -> str | None`: the
 parameter a handler takes the call context in, as `McpTool` finds it (the bridge uses it for

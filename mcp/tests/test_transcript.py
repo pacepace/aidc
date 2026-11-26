@@ -31,7 +31,7 @@ from aidc_mcp.transcript import (
     objs_after_uuid,
     parse_jsonl,
     prompt_fingerprint,
-    prompt_seen_since,
+    prompt_index_since,
     record_sent_prompt,
     remove_watch,
     render_delivery,
@@ -1321,42 +1321,42 @@ class TestPasteWrapper:
         """A queue-operation carries the wrapper without its leading newlines."""
         content = f'<pasted_content id="9af4">\n{PASTED}\n</pasted_content id="9af4">'
         objs = [_queued(content, "2026-09-17T01:51:42.000Z")]
-        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+        assert (prompt_index_since(objs, PASTED, TestPromptIndexSince.SENT) is not None) is True
 
     def test_a_wrapped_user_line_counts_as_arrived(self):
         objs = [_at(_typed("u1", _wrapped(PASTED)), "2026-09-17T01:51:41.000Z")]
-        assert prompt_seen_since(objs, PASTED, TestPromptSeenSince.SENT) is True
+        assert (prompt_index_since(objs, PASTED, TestPromptIndexSince.SENT) is not None) is True
 
 
-class TestPromptSeenSince:
+# --- slash commands, local commands and bash mode, read the same by every reader --
+
+class TestPromptIndexSince:
     SENT = 1_789_609_900.0   # 2026-09-17T01:51:40Z
 
     def test_user_line_after_the_send(self):
         objs = [_at(_typed("u1", "fix the  test"), "2026-09-17T01:51:41.000Z")]
-        assert prompt_seen_since(objs, "fix the test", self.SENT) is True
+        assert (prompt_index_since(objs, "fix the test", self.SENT) is not None) is True
 
     def test_queued_while_busy_counts(self):
         """Measured: a prompt pasted while Claude works is written only as a
         queue-operation, and answered inside the running turn."""
         objs = [_queued("fix the test", "2026-09-17T01:51:42.000Z")]
-        assert prompt_seen_since(objs, "fix the test", self.SENT) is True
+        assert (prompt_index_since(objs, "fix the test", self.SENT) is not None) is True
 
     def test_an_older_identical_prompt_does_not_count(self):
         objs = [_at(_typed("u1", "next"), "2026-09-17T01:40:00.000Z")]
-        assert prompt_seen_since(objs, "next", self.SENT) is False
+        assert (prompt_index_since(objs, "next", self.SENT) is not None) is False
 
     def test_different_text_does_not_count(self):
         objs = [_at(_typed("u1", "other"), "2026-09-17T01:51:41.000Z")]
-        assert prompt_seen_since(objs, "next", self.SENT) is False
+        assert (prompt_index_since(objs, "next", self.SENT) is not None) is False
 
     def test_line_without_a_readable_timestamp_counts(self):
         """Unorderable lines cannot prove the prompt is older; the log-based busy check
         still applies after this, so accepting it cannot type into a running turn."""
-        assert prompt_seen_since([_typed("u1", "next")], "next", self.SENT) is True
-        assert prompt_seen_since([_at(_typed("u1", "next"), 12)], "next", self.SENT) is True
+        assert (prompt_index_since([_typed("u1", "next")], "next", self.SENT) is not None) is True
+        assert prompt_index_since([_at(_typed("u1", "next"), 12)], "next", self.SENT) is not None
 
-
-# --- slash commands, local commands and bash mode, read the same by every reader --
 
 def _cmd(uuid, name="/login", args=""):
     return {"type": "user", "uuid": uuid, "timestamp": "2026-09-17T01:51:41.000Z",
@@ -1399,7 +1399,7 @@ class TestLocalCommandsAcrossReaders:
 
     def test_a_pasted_slash_command_is_found_by_its_rendered_form(self):
         objs = [*self.DONE, _cmd("c1", "/review", "src")]
-        assert prompt_seen_since(objs, "/review src", TestPromptSeenSince.SENT) is True
+        assert (prompt_index_since(objs, "/review src", TestPromptIndexSince.SENT) is not None) is True
 
 
 # The lines Claude Code 2.1.28x writes for a `/clear` pasted into a session, copied
@@ -1473,8 +1473,8 @@ class TestClearOpensNoTurn:
     def test_a_pasted_clear_counts_as_arrived(self):
         """The send path holds a session busy until its pasted prompt shows in the
         transcript; a /clear must still show, or every send behind it waits 30 s."""
-        assert prompt_seen_since(_cleared_transcript(), "/clear",
-                                 TestPromptSeenSince.SENT) is True
+        assert (prompt_index_since(_cleared_transcript(), "/clear",
+                                 TestPromptIndexSince.SENT) is not None) is True
 
     def test_a_skill_command_is_still_a_request_to_claude(self):
         """A slash command with neither local-command mark is one Claude answers."""

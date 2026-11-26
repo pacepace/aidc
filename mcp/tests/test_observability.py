@@ -64,6 +64,30 @@ async def test_every_log_line_of_one_call_carries_its_correlation_id(lines, monk
     assert "cid" not in get_context()                     # nothing left behind after a call
 
 
+async def test_work_a_call_starts_in_the_background_logs_as_its_own(lines, monkeypatch):
+    """A watcher or drainer a call starts outlives it: it logs with its own session and
+    task, never the call's correlation id or tool, which name a call long over."""
+    import asyncio
+    started = []
+
+    async def watcher():
+        await asyncio.sleep(0)
+        audit.log_event("watcher_tick", session="a")
+
+    async def status(name):
+        started.append(com.background_task(watcher(), session=name, task="transcript_watcher"))
+        audit.log_event("status_read", session=name)
+        return com.envelope_ok({})
+    monkeypatch.setattr(ses, "status", status)
+    await toolcall.call("session_status", name="a")
+    await started[0]
+    by_msg = dict(lines)
+    assert "cid" in by_msg["status_read"]
+    tick = by_msg["watcher_tick"]
+    assert "cid" not in tick and "tool" not in tick
+    assert tick["task"] == "transcript_watcher" and tick["session"] == "a"
+
+
 async def test_each_call_is_one_span_named_for_tool_calls(monkeypatch):
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider

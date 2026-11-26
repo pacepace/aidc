@@ -20,6 +20,14 @@ trap 'rm -rf "$S"' EXIT
 OUT="$S/transcript-out"
 mkdir -p "$OUT"
 export AIDC_HOOK_EVENTS_DIR="$OUT/hook-events"
+# a stand-in tmux: the pane's window is whatever $FAKE_WINDOW says (main:claude by default)
+mkdir -p "$S/bin"
+cat > "$S/bin/tmux" <<'TMUXSTUB'
+#!/usr/bin/env bash
+[ "$1" = display-message ] && printf '%s\n' "${FAKE_WINDOW:-main:claude}"
+TMUXSTUB
+chmod +x "$S/bin/tmux"
+export PATH="$S/bin:$PATH" TMUX_PANE="%0"
 
 run_hook() {   # run_hook <json>: the hook's exit code and what it printed
     local out rc
@@ -71,6 +79,16 @@ check "a JSON value that is not an object writes nothing" \
 r=$(printf '{}' | AIDC_HOOK_EVENTS_DIR="$S/no-mirror/hook-events" bash "$HOOK" 2>&1; echo "|$?")
 check "a session without the mirror dir: exit 0, nothing created" \
     "$([ "$r" = "|0" ] && [ ! -e "$S/no-mirror" ] && echo yes || echo no)"
+before=$(count)
+r=$(printf '{"hook_event_name":"Stop"}' | env -u TMUX_PANE bash "$HOOK" 2>&1; echo "|$?")
+check "a claude outside tmux (a headless --print run by docker exec): exit 0, nothing written" \
+    "$([ "$r" = "|0" ] && [ "$(count)" -eq "$before" ] && echo yes || echo no)"
+r=$(printf '{"hook_event_name":"Stop"}' | FAKE_WINDOW=main:shell bash "$HOOK" 2>&1; echo "|$?")
+check "a claude in another tmux window: exit 0, nothing written" \
+    "$([ "$r" = "|0" ] && [ "$(count)" -eq "$before" ] && echo yes || echo no)"
+r=$(printf '{"hook_event_name":"Stop"}' | FAKE_WINDOW=other:claude bash "$HOOK" 2>&1; echo "|$?")
+check "a claude in a window named claude of another tmux session: nothing written" \
+    "$([ "$r" = "|0" ] && [ "$(count)" -eq "$before" ] && echo yes || echo no)"
 chmod 0500 "$AIDC_HOOK_EVENTS_DIR"
 r=$(printf '{"hook_event_name":"Stop"}' | bash "$HOOK" 2>&1; echo "|$?")
 chmod 0700 "$AIDC_HOOK_EVENTS_DIR"
@@ -116,6 +134,9 @@ check "the settings library is copied" \
 check "the hook is made executable" "$(grep -q '/usr/local/bin/aidc-hook-event \\' "$DF" && echo yes || echo no)"
 check "the entrypoint installs the managed settings" \
     "$(grep -q 'aidc_install_managed_settings / ' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
+check "a failed install says what follows: sends refused as session_outdated, no screen fallback" \
+    "$(grep -q 'refuses prompts to this session (session_outdated)' "$AIDC_ROOT/.devcontainer/entrypoint.sh" \
+        && ! grep -qi 'falls back to reading the screen' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 
 check "aidc create starts the session's hook events empty (a recreated session reads none of the old one's)" \
     "$(grep -q 'rm -rf -- "${MCP_TRANSCRIPTS_WRITE}/hook-events"' "$AIDC_ROOT/scripts/cmd-create.sh" && echo yes || echo no)"

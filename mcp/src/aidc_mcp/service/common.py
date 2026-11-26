@@ -12,17 +12,24 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aidc_mcp import audit
+from aidc_mcp import audit, observability
 from aidc_mcp.service import state as ss
 
 AIDC = os.environ.get("AIDC_CLI", "/aidc/scripts/aidc")
 
 
 
-def fire(coro: Any) -> None:
-    """Run a coroutine in the background, keeping a reference so it is not collected.
-    server.py starts the resume task with it."""
-    task = asyncio.create_task(coro)
+def background_task(coro: Any, **log_context: str) -> asyncio.Task[Any]:
+    """Start a coroutine as a task of its own, in a fresh log context holding only
+    `log_context`, never the context of the tool call that starts it (its correlation id,
+    tool name and span end with the call). Every task the service starts goes through here."""
+    return asyncio.create_task(coro, context=observability.background_context(**log_context))
+
+
+def fire(coro: Any, **log_context: str) -> None:
+    """Run a coroutine in the background (background_task), keeping a reference so it is
+    not collected. server.py starts the resume task with it."""
+    task = background_task(coro, **log_context)
     ss.background_tasks.add(task)
     task.add_done_callback(ss.background_tasks.discard)
 
@@ -122,7 +129,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "tainted": "the session is tainted: nothing more is put into it",
     "outside_repo": "a path that leaves the session's repository",
     "session_outdated": ("the session predates aidc 2.0's hook events; kill it and create "
-                         "it again"),
+                         "it again (the git agent: rebuild its image and set it up again)"),
 }
 ERROR_CODES = frozenset(ERROR_CODE_DESCRIPTIONS)
 

@@ -45,11 +45,14 @@ from threetears.core.collections.schema_backed import (
     STRING_TYPE,
     UUID_TYPE,
     Column,
+    Index,
     TableSchema,
     collection_for_schema,
 )
 from threetears.core.config import DefaultCoreConfig
 from threetears.core.eviction import Declared, Policy
+
+from aidc_mcp import audit
 
 T = TypeVar("T")
 
@@ -60,6 +63,9 @@ MIGRATED_DIR = "migrated-1x"
 
 #: names a 1.x dead-letter file's row, so reading it in twice stores it once
 _DEAD_LETTER_NS = uuid.UUID("6f1d2b0e-4c55-4a8e-9b1d-a1dc0000d1e7")
+
+#: the index one conversation's delivery ledger is read through
+LEDGER_INDEX = "deliveries_by_conversation"
 
 #: separates the parts of a row's key: neither a session name nor a conversation id holds it
 KEY_SEP = "\x1f"
@@ -95,6 +101,14 @@ TABLES: dict[str, TableSchema] = {
         columns=[Column("key", STRING_TYPE), Column("session", STRING_TYPE),
                  Column("conversation_id", STRING_TYPE), Column("fingerprint", STRING_TYPE),
                  *_DATES],
+        # The ledger only grows, across every session and conversation, and one
+        # conversation's is read on every delivery pass: that read is this index's, so it
+        # costs that conversation's rows, not the install's history. Unique (the key ends
+        # it), since the SQLite L3 creates only the unique indexes a schema declares.
+        indexes=(Index(LEDGER_INDEX, "session", "conversation_id", "key", unique=True,
+                       purpose="mcp/src/aidc_mcp/store.py::StateStore.ledger",
+                       plan_test="mcp/tests/test_state_store.py::"
+                                 "test_a_conversations_ledger_is_read_through_its_index"),),
         cas_column="date_updated", l1_eviction=_L1),
     "dead_letters": TableSchema(
         name="dead_letters", primary_key="id",
@@ -137,12 +151,28 @@ def _store_loop() -> asyncio.AbstractEventLoop:
         return _loop
 
 
+class StoreError(OSError):
+    """A state store that could not do what it was asked: its file could not be opened
+    (held by another process, a format it does not know), or a statement failed (a full
+    disk, an I/O error). One type for every such failure, raised here at the store's
+    boundary whatever the backend raised (it is the `__cause__`). An OSError, as 1.x's
+    file writes raised, so every caller that logs a failed state write and carries on
+    still catches it."""
+
+
 def _run[T](make: Callable[[], Awaitable[T]]) -> T:
     """Run a coroutine on the stores' loop and wait for its result. Never called from
-    that loop itself (it would wait on itself)."""
+    that loop itself (it would wait on itself). Any failure is a StoreError."""
     async def call() -> T:
         return await make()
-    return asyncio.run_coroutine_threadsafe(call(), _store_loop()).result()
+    try:
+        return asyncio.run_coroutine_threadsafe(call(), _store_loop()).result()
+    except StoreError:
+        raise
+    # every backend failure leaves the store's one boundary as StoreError: re-raised, never
+    # swallowed
+    except Exception as exc:  # prawduct:allow prawduct/broad-except -- the store's boundary
+        raise StoreError(f"state store: {type(exc).__name__}: {exc}") from exc
 
 
 def _now() -> datetime:
@@ -291,8 +321,17 @@ class StateStore:
         found = _legacy_files(self.base_dir)
         if not found:
             return
-        for path, step in found:
-            await step(self, path)
+        unstored = [str(path.relative_to(self.base_dir)) for path, step in found
+                    if not await step(self, path)]
+        # 1.x logged an unreadable file (a send queue's prompts left for a person) at every
+        # start; it is read in once, so what could not be is said once, here, by name
+        audit.log_event("state_1x_read_in", dir=str(self.base_dir), files=len(found),
+                        unstored=unstored, kept_in=str(self.base_dir / MIGRATED_DIR))
+        for name in unstored:
+            audit.log_event("state_1x_file_unreadable", dir=str(self.base_dir), file=name,
+                            kept_in=str(self.base_dir / MIGRATED_DIR / name),
+                            hint="1.x could not read it either; what it held is left "
+                                 "for a person")
         aside = self.base_dir / MIGRATED_DIR
         aside.mkdir(exist_ok=True)
         for path, _ in found:
@@ -321,29 +360,31 @@ def _session_of(path: Path, suffix: str, document: Any) -> str | None:
     return name or None
 
 
-def _per_session(table: str, suffix: str) -> Callable[[StateStore, Path], Awaitable[None]]:
-    async def step(store: StateStore, path: Path) -> None:
+def _per_session(table: str, suffix: str) -> Callable[[StateStore, Path], Awaitable[bool]]:
+    async def step(store: StateStore, path: Path) -> bool:
         document = _read_json(path)
         session = _session_of(path, suffix, document)
         if document is None or session is None:
-            return   # 1.x would have read it as nothing: moved aside, not stored
+            return False   # 1.x would have read it as nothing: moved aside, not stored
         await store._put(table, session, document, {"session": session})
+        return True
     return step
 
 
-async def _watermark_step(store: StateStore, path: Path) -> None:
+async def _watermark_step(store: StateStore, path: Path) -> bool:
     document = _read_json(path)
     if not isinstance(document, dict):
-        return
+        return False
     session = document.get("session")
     conversation = document.get("conversation_id")
     if not (isinstance(session, str) and isinstance(conversation, str)):
         session, _, conversation = path.name[:-len(".json")].partition("__")
     await store._put("watermarks", key_of(session, conversation), document,
                      {"session": session, "conversation_id": conversation})
+    return True
 
 
-async def _ledger_step(store: StateStore, path: Path) -> None:
+async def _ledger_step(store: StateStore, path: Path) -> bool:
     session, _, conversation = path.name[:-len(".delivered")].partition("__")
     mark = _read_json(store.base_dir / f"{session}__{conversation}.json")
     if isinstance(mark, dict):
@@ -352,7 +393,7 @@ async def _ledger_step(store: StateStore, path: Path) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return
+        return False
     coll = store._collections["deliveries"]
     for fingerprint in {ln.strip() for ln in lines if ln.strip()}:
         key = key_of(session, conversation, fingerprint)
@@ -361,38 +402,41 @@ async def _ledger_step(store: StateStore, path: Path) -> None:
             await coll.save_entity(coll.create({
                 "key": key, "session": session, "conversation_id": conversation,
                 "fingerprint": fingerprint, "date_created": now, "date_updated": now}))
+    return True
 
 
-def _marker_step(kind: str, suffix: str) -> Callable[[StateStore, Path], Awaitable[None]]:
-    async def step(store: StateStore, path: Path) -> None:
+def _marker_step(kind: str, suffix: str) -> Callable[[StateStore, Path], Awaitable[bool]]:
+    async def step(store: StateStore, path: Path) -> bool:
         document = _read_json(path)
         if not isinstance(document, dict):
-            return
+            return False
         session = path.name[: -len(suffix)]
         await store._put("markers", key_of(session, kind), document,
                          {"session": session, "kind": kind})
+        return True
     return step
 
 
-async def _dead_letter_step(store: StateStore, path: Path) -> None:
+async def _dead_letter_step(store: StateStore, path: Path) -> bool:
     document = _read_json(path)
     if not isinstance(document, dict):
-        return
+        return False
     kind = "send" if path.name.startswith("send__") else "reply"
     coll = store._collections["dead_letters"]
     dl_id = uuid.uuid5(_DEAD_LETTER_NS, path.name)
     if await coll.get(dl_id) is not None:
-        return
+        return True   # read in by a start killed half way
     when = datetime.fromtimestamp(path.stat().st_mtime, UTC)
     await coll.save_entity(coll.create({
         "id": dl_id, "kind": kind, "session": str(document.get("session", "")),
         "conversation_id": str(document.get("conversation_id", "")),
         "reason": str(document.get("reason", "")), "document": document,
         "date_created": when, "date_updated": when}))
+    return True
 
 
 #: 1.x's files: what each name ends with, and how it is read in
-_LEGACY: tuple[tuple[str, Callable[[StateStore, Path], Awaitable[None]]], ...] = (
+_LEGACY: tuple[tuple[str, Callable[[StateStore, Path], Awaitable[bool]]], ...] = (
     (".send-queue.json", _per_session("send_queues", ".send-queue.json")),
     (".watch.json", _per_session("watches", ".watch.json")),
     (".sent-prompts.json", _per_session("sent_prompts", ".sent-prompts.json")),
@@ -405,10 +449,10 @@ _LEGACY: tuple[tuple[str, Callable[[StateStore, Path], Awaitable[None]]], ...] =
 )
 
 
-def _legacy_files(base: Path) -> list[tuple[Path, Callable[[StateStore, Path], Awaitable[None]]]]:
+def _legacy_files(base: Path) -> list[tuple[Path, Callable[[StateStore, Path], Awaitable[bool]]]]:
     if not base.is_dir():
         return []
-    found: list[tuple[Path, Callable[[StateStore, Path], Awaitable[None]]]] = []
+    found: list[tuple[Path, Callable[[StateStore, Path], Awaitable[bool]]]] = []
     for path in sorted(base.iterdir()):
         if not path.is_file():
             continue

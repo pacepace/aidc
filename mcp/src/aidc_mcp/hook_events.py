@@ -55,6 +55,12 @@ class HookEvent:
         return value if isinstance(value, str) else ""
 
     @property
+    def source(self) -> str:
+        """A SessionStart's cause: startup, resume, clear, or compact (mid-turn)."""
+        value = self.data.get("source")
+        return value if isinstance(value, str) else ""
+
+    @property
     def last_assistant_message(self) -> str:
         value = self.data.get("last_assistant_message")
         return value if isinstance(value, str) else ""

@@ -4,8 +4,9 @@
 #
 # Claude Code runs this with the hook's input as JSON on stdin. It writes that input, with
 # `event` (the hook's name) and `at` (UTC, milliseconds) added, as one file under the
-# session's MCP-readable state dir, where aidc-mcp reads it (on Docker and on Kubernetes
-# alike; the hook never reaches the MCP itself):
+# session's MCP-readable state dir, where aidc-mcp reads it (the hook never reaches the MCP
+# itself). That dir is the transcript mirror a Docker session mounts; a Kubernetes pod
+# mounts none yet, so there the writer writes nothing:
 #
 #   /var/aidc/transcript-out/hook-events/<epoch-ns>-<pid>.json
 #
@@ -14,10 +15,20 @@
 #
 # It never fails or holds up Claude: every path exits 0 and nothing is printed (a Stop
 # hook's output could be read as a decision to keep the turn going). A missing state dir
-# (a session created without the mirror) or input that is not JSON writes nothing.
+# (a session created without the mirror), a Claude outside window main:claude, or input
+# that is not JSON writes nothing.
 
 set -u
 exec 2>/dev/null   # nothing it does is said to Claude: a failed write is no event, not an error
+
+# The events are the session's Claude's: the one in tmux window main:claude, the window
+# aidc-mcp reads and types into. The managed settings reach every claude in the container,
+# so a headless `claude --print` (session_invoke, run by docker exec, no tmux pane) or a
+# claude someone starts in another window writes nothing; its Stop is not the session's.
+[ -n "${TMUX_PANE:-}" ] || exit 0
+window=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_name}' 2>/dev/null) \
+    || exit 0
+[ "$window" = "main:claude" ] || exit 0
 
 dir="${AIDC_HOOK_EVENTS_DIR:-/var/aidc/transcript-out/hook-events}"
 [ -d "$(dirname -- "$dir")" ] || exit 0

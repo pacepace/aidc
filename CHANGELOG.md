@@ -68,7 +68,17 @@ and the envelope are unchanged; what an MCP caller sees differently:
   state through Claude Code hooks (busy, idle, waiting on a permission prompt); aidc no longer
   reads the screen for it. A session created before 2.0 reports nothing: `session_status` shows
   `turn: "unknown"` (`why: "session_predates_hook_events"`) and `session_send` refuses it with
-  the new error code `session_outdated`.
+  the new error code `session_outdated`. The git agent is not killed and created: rebuild its
+  image and set it up again (`aidc rebuild`, then `aidc git setup`).
+- **Only the session's own Claude reports its state**: the one in tmux window `main:claude`. A
+  headless `session_invoke` run, or a `claude` started in another window of the session, no
+  longer moves its busy and idle state. A session whose Claude runs aidc's hooks but writes no
+  event (its transcript mirror missing or not writable) reports `why: "hook_events_missing"`
+  after two minutes and logs it once.
+- **One process per state dir**: `aidc-mcp`'s state is a SQLite file (`aidc-state.sqlite`) in
+  its state dir, read in from 1.x's files on the first start (they move to `migrated-1x/`; a file
+  that cannot be read is named in the log). A second server on the same dir stops at start
+  with `state_store_unavailable` in its log.
 - **A rotated token** (`aidc mcp token rotate`) refuses an MCP session opened with the old
   token on its next message.
 - **`file_put` overwrites an existing file** (#76: it failed on every overwrite in sessions on
@@ -79,8 +89,8 @@ and the envelope are unchanged; what an MCP caller sees differently:
   rename the top-level section holding `callback_url` (and `send_speaker`,
   `turn_settle_seconds`) to `orchestrator:`, keys unchanged, before restarting `aidc-mcp`, or callbacks stop with an error naming `orchestrator.callback_url`
   and the section still to rename; `aidc mcp start` warns about it too.
-- **Takes effect when `aidc-mcp` is updated and restarted.** Sessions need no kill or create.
-  A prompt queued by the earlier `aidc-mcp` gets its header when the queue is loaded, unless it
+- **The sender header takes effect when `aidc-mcp` is updated and restarted**, with no session
+  kill or create of its own. A prompt queued by the earlier `aidc-mcp` gets its header when the queue is loaded, unless it
   is already in a session's input box.
 
 ### Changed

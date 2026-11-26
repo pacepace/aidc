@@ -65,9 +65,9 @@ session_send_locks: dict[str, asyncio.Lock] = {}
 # so the message simply evaporated.
 #
 # A prompt accepted here is never dropped: it waits with no deadline, is held while
-# Claude is not running, survives an aidc-mcp restart (persisted beside the other
-# watcher state), and leaves only by being pasted or by its session being killed
-# (then it is written to the send dead-letter dir). session_send returns
+# Claude is not running, survives an aidc-mcp restart (a row of the state store), and
+# leaves only by being pasted or by its session being killed (then it is kept as a send
+# dead letter). session_send returns
 # ok=True/"queued", which the orchestrator's busy marker arms on.
 pending_sends: dict[str, list[ts.QueuedPrompt]] = {}
 
@@ -98,6 +98,10 @@ hook_turn_event: dict[str, Any] = {}
 # Whether each session's Claude runs aidc's hooks (read from its managed settings once per
 # session instance); a session whose Claude does not is from before 2.0.
 hooks_installed: dict[str, bool] = {}
+# When this process first found a session whose Claude runs the hooks with no event yet
+# (epoch seconds): past HOOK_EVENTS_DUE_S that is a writer that cannot write, logged once.
+hooks_silent_since: dict[str, float] = {}
+hooks_silence_logged: set[str] = set()
 
 
 # session -> uuid of the latest prompt the watcher reported as interrupted before Claude
@@ -157,6 +161,8 @@ def forget_session_send_state(name: str) -> None:
     hook_events_read.pop(name, None)
     hook_turn_event.pop(name, None)
     hooks_installed.pop(name, None)
+    hooks_silent_since.pop(name, None)
+    hooks_silence_logged.discard(name)
     sent_awaiting_echo.pop(name, None)
     unsubmitted_paste.pop(name, None)
     last_free_verdict.pop(name, None)
@@ -176,7 +182,7 @@ def forget_session_send_state(name: str) -> None:
                       error_type=type(exc).__name__)
 
 
-# Sessions whose persisted queue file has been read into pending_sends by this
+# Sessions whose persisted queue has been read into pending_sends by this
 # process (by startup resume or by the first send to arrive before it).
 queue_loaded: set[str] = set()
 

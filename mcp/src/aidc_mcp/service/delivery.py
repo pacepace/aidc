@@ -942,7 +942,8 @@ def _register_watcher(name: str, conversation_id: str, base_url: str) -> None:
     existing = ss.session_watchers.get(name)
     if existing is not None:
         existing.cancel()
-    task = asyncio.create_task(_run_transcript_watcher(name, conversation_id, base_url))
+    task = com.background_task(_run_transcript_watcher(name, conversation_id, base_url),
+                               session=name, task="transcript_watcher")
     ss.session_watchers[name] = task
     task.add_done_callback(_make_watcher_done_callback(name))
 

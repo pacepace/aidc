@@ -30,6 +30,10 @@ start_tmux() {
 # it sees any session's. The same copy-forward as a session's (transcript-mirror.sh, a copy of
 # the dev image's file, kept identical by its unit test).
 if [ -d /var/aidc/transcript-out ]; then
+    # The agent's Claude Code hook events (MCP-46) start empty with the container, as a
+    # session's do with aidc create: the MCP must not read this Claude's state from the
+    # last event of the one before it (a rebuilt image, a restart).
+    rm -rf -- /var/aidc/transcript-out/hook-events
     . /opt/aidc/lib/gitctl/transcript-mirror.sh
     proj="${HOME:-/home/git}/.claude/projects/$(printf '%s' "${HOME:-/home/git}" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')"
     ( while :; do aidc_mirror_copy_forward_pass "$proj" /var/aidc/transcript-out; sleep 2; done ) &

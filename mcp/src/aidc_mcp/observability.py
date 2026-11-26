@@ -18,6 +18,7 @@ observability stream and its fields do not change.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import time
 import uuid
@@ -86,6 +87,17 @@ def metrics_text() -> tuple[bytes, str] | None:
         return None
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
     return generate_latest(_registry), CONTENT_TYPE_LATEST
+
+
+def background_context(**fields: str) -> contextvars.Context:
+    """A context for work that outlives the call that starts it (a session's transcript
+    watcher, its send-queue drainer): empty, so it carries no tool call's correlation id,
+    tool name or span, with `fields` (the session it works for) in its log context.
+    asyncio copies the starting task's context into a new task otherwise, and a watcher
+    would log for hours as the call that started it."""
+    ctx = contextvars.Context()
+    ctx.run(set_context, **fields)
+    return ctx
 
 
 @contextlib.contextmanager

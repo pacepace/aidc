@@ -135,8 +135,10 @@ RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/
 
 COPY gitctl-main.sh /usr/local/bin/gitctl-main.sh
 # The git agent's Claude Code hooks (MCP-46/47, the managed settings: SessionStart, Stop,
-# Notification, UserPromptSubmit), the sessions' own writer (a copy of the dev image's
-# .devcontainer/hook-event.sh, kept identical by its unit test). Run as the agent, it writes
+# Notification, UserPromptSubmit), the sessions' own writer: the dev image's
+# .devcontainer/hook-event.sh, which aidc_build_context (scripts/lib/common.sh) puts beside this
+# Dockerfile in the staged build context, so there is one writer. Run as the agent (in tmux
+# window main:claude, the window it writes events for), it writes
 # each event into the mirror aidc's MCP server reads for the session git
 # (/var/aidc/transcript-out/hook-events, which aidc git setup mounts on Docker); with no mirror
 # mounted (Kubernetes, until the per-user server reads the git pod's transcripts) it writes

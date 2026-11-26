@@ -250,13 +250,28 @@ EOF
 # aidc_build_context <tag> <context>: the folder to build <tag> from, in AIDC_BUILD_CONTEXT, and
 # a folder for the caller to remove when the build is done, in AIDC_BUILD_STAGE ("" for none).
 # dev-base builds from a copy of its context with testament's newest wheel beside it when the
-# config names testament's repo (lib/testament.sh: optional, never fails a build); every other
-# image from its own context. One rule for every builder: aidc rebuild, ensure_image and
+# config names testament's repo (lib/testament.sh: optional, never fails a build); gitctl from a
+# copy of its context with the sessions' hook writer (.devcontainer/hook-event.sh) beside it, so
+# the git agent runs the one writer every session runs, never a copy of it in the tree; every
+# other image from its own context. One rule for every builder: aidc rebuild, ensure_image and
 # aidc k8s build. Returns 1 only when the copy could not be made.
 aidc_build_context() {
     local lib
     AIDC_BUILD_CONTEXT="$2" AIDC_BUILD_STAGE=""
-    case "$1" in aidc/dev-base:*) ;; *) return 0 ;; esac
+    case "$1" in
+        aidc/dev-base:*) ;;
+        aidc/gitctl:*)
+            AIDC_BUILD_STAGE=$(mktemp -d) || return 1
+            if ! cp -a "$2" "${AIDC_BUILD_STAGE}/context" \
+                    || ! cp "$2/../.devcontainer/hook-event.sh" "${AIDC_BUILD_STAGE}/context/hook-event.sh"; then
+                echo "cannot stage the gitctl build context with the hook writer" >&2
+                rm -rf "$AIDC_BUILD_STAGE"; AIDC_BUILD_STAGE=""
+                return 1
+            fi
+            AIDC_BUILD_CONTEXT="${AIDC_BUILD_STAGE}/context"
+            return 0 ;;
+        *) return 0 ;;
+    esac
     lib="$(dirname "${BASH_SOURCE[0]}")"
     declare -F _aidc_global_config_file >/dev/null || . "${lib}/config.sh"
     declare -F aidc_testament_stage >/dev/null || . "${lib}/testament.sh"

@@ -213,6 +213,12 @@ def _epoch(at: str) -> float:
         return 0.0
 
 
+def _written_after(mtime: float, event: he.HookEvent) -> bool:
+    """Whether the transcript was last written after `event`. Its `at` is cut to the
+    millisecond, so a write within that millisecond is not after it."""
+    return mtime >= _epoch(event.at) + 0.001
+
+
 def turn_from_hooks(name: str, objs: list[dict], mtime: float,
                     now: float | None = None, *,
                     installed: bool | None = False,
@@ -222,48 +228,85 @@ def turn_from_hooks(name: str, objs: list[dict], mtime: float,
 
     The session's latest hook event about the turn decides: a session start, Claude's
     idle notice or a Stop is idle; a prompt submitted or a permission prompt is running.
-    The transcript, the record, adds what the hooks cannot say: a turn it shows still being
-    written (a Stop hook pushed Claude back, or the event is ahead of the copied transcript)
-    is running until it has been quiet for LOG_QUIET_S, and a reply whose Stop hooks have
-    not reported is held for STOP_HOOK_WAIT_S. A turn the transcript shows over (an Esc
-    after Claude had written, which fires no Stop) since the prompt was submitted is idle.
+    The transcript, the record, adds what the hooks cannot say. Claude Code opens or
+    continues a turn with no UserPromptSubmit of its own after each idle event (a blocking
+    Stop hook sends Claude back; an auto-compact fires SessionStart mid-turn; a background
+    task's notice starts a turn after the idle notice): a turn the transcript shows open,
+    written after the idle event, is running however quiet it is. A turn it shows still
+    being written (the event ahead of the copied transcript) is running until it has been
+    quiet for LOG_QUIET_S, and a reply whose Stop hooks have not reported is held for
+    STOP_HOOK_WAIT_S. A turn the transcript shows over (an Esc after Claude had written,
+    which fires no Stop) since the prompt was submitted is idle.
 
     A session with no event yet is from before 2.0 (TURN_UNKNOWN) when `installed` says its
     Claude does not run the hooks; when it does, Claude is starting and has not reported
-    yet; when it could not be read (None), the session waits rather than being refused.
+    yet, until HOOK_EVENTS_DUE_S has passed with none (a writer that cannot write: logged
+    once, `hook_events_missing`); when it could not be read (None), the session waits
+    rather than being refused.
     """
+    now = time.time() if now is None else now
     any_events, event = latest_hook_event(name, mirror_base)
     if not any_events:
         if installed:
-            return TURN_RUNNING, "starting"
+            return TURN_RUNNING, _starting(name, now)
         if installed is None:
             return TURN_RUNNING, "hooks_unread"
         return TURN_UNKNOWN, PREDATES_HOOK_EVENTS
-    now = time.time() if now is None else now
+    ss.hooks_silent_since.pop(name, None)
     quiet = now - mtime if mtime else float("inf")
     in_progress = ts.log_shows_turn_in_progress(objs)
-    if event is None or event.event == he.SESSION_START:
-        return TURN_IDLE, "session_started"
-    if event.event == he.USER_PROMPT_SUBMIT:
+    if event is not None and event.event == he.USER_PROMPT_SUBMIT:
         if (objs and not in_progress and quiet >= LOG_QUIET_S
-                and mtime > _epoch(event.at)):
+                and _written_after(mtime, event)):
             return TURN_IDLE, "log_finished"
         return TURN_RUNNING, "prompt_submitted"
-    if event.notification_type == he.PERMISSION_PROMPT:
+    if event is not None and event.notification_type == he.PERMISSION_PROMPT:
         return TURN_RUNNING, "waiting_on_permission"
-    if event.event == he.STOP and in_progress and mtime > _epoch(event.at):
-        # Claude Code runs every Stop hook at once, and a blocking one sends Claude back
-        # to work with no event of its own until the next Stop: a turn the record shows
-        # open, written after the Stop, is that turn, however quiet it is (a tool call)
-        return TURN_RUNNING, "stop_pushed_back"
+    # Every event left says idle, and after each Claude Code can open or continue a turn
+    # with no event of its own: a turn the record shows open, written after the event, is
+    # that turn, however quiet it is (a tool call). A SessionStart other than a compact's
+    # leaves Claude at its prompt, so a resumed record that ended mid-turn is not a turn
+    after_idle = event is None or event.event != he.SESSION_START \
+        or event.source == SESSION_START_MID_TURN
+    if after_idle and in_progress and (event is None or _written_after(mtime, event)):
+        if event is not None and event.event == he.STOP:
+            return TURN_RUNNING, "stop_pushed_back"
+        return TURN_RUNNING, "turn_open_after_idle"
     if in_progress and quiet < LOG_QUIET_S:
         return TURN_RUNNING, "log_growing"
+    if event is None or event.event == he.SESSION_START:
+        return TURN_IDLE, "session_started"
     if event.event == he.STOP and ts.awaiting_stop_hooks(objs, objs) \
             and quiet < STOP_HOOK_WAIT_S:
         return TURN_RUNNING, "stop_hooks_running"
     if event.event == he.STOP:
         return TURN_IDLE, "turn_stopped"
     return TURN_IDLE, "idle_prompt"
+
+
+#: the SessionStart source Claude Code fires inside a running turn (an auto-compact)
+SESSION_START_MID_TURN = "compact"
+
+
+#: how long a session whose Claude runs aidc's hooks may report no event before that is
+#: called a fault (Claude Code fires SessionStart as it starts, within a few seconds)
+HOOK_EVENTS_DUE_S = 120.0
+
+
+def _starting(name: str, now: float) -> str:
+    """Why a session whose Claude runs the hooks, with no event yet, is not idle: starting,
+    or past HOOK_EVENTS_DUE_S `hook_events_missing` (its writer cannot write; logged once,
+    since the writer itself says nothing to Claude)."""
+    since = ss.hooks_silent_since.setdefault(name, now)
+    if now - since < HOOK_EVENTS_DUE_S:
+        return "starting"
+    if name not in ss.hooks_silence_logged:
+        ss.hooks_silence_logged.add(name)
+        audit.log_event("hook_events_missing", session=name,
+                        silent_s=int(now - since),
+                        hint="the session's Claude runs aidc's hooks but none has written "
+                             "an event: is its transcript mirror dir there and writable?")
+    return "hook_events_missing"
 
 
 async def _hooks_installed(container: str, name: str) -> bool | None:
@@ -274,6 +317,15 @@ async def _hooks_installed(container: str, name: str) -> bool | None:
         if installed is not None:
             ss.hooks_installed[name] = installed
     return installed
+
+
+def outdated_remedy(name: str) -> str:
+    """What makes an outdated session report hook events: a session is created again; the
+    git agent, which `aidc kill` refuses, runs a rebuilt image (its hooks are in it)."""
+    if backend.is_git_session(name):
+        return ("It is the git agent: rebuild its image and set it up again "
+                "(aidc rebuild, then aidc git setup).")
+    return "Kill it and create it again (aidc kill, then aidc create)."
 
 
 async def session_outdated(container: str, name: str) -> bool:
@@ -349,26 +401,6 @@ def paste_reason(state: SessionState) -> str:
     return ""
 
 
-async def wait_for_turn_end(container: str, name: str, timeout: float) -> str:
-    """Poll until Claude's turn is over on two consecutive readings (""), ignoring the
-    input box: a person's unsent text, or a prompt Esc put back there, does not keep a
-    turn running. Returns "claude_not_running" or "claude_busy" when it does not end."""
-    polls = max(2, int(timeout / FREE_POLL_S))
-    streak = 0
-    for i in range(polls):
-        state = await session_state(container, name)
-        if not state.claude_running:
-            return "claude_not_running"
-        if state.turn == TURN_UNKNOWN:
-            return "session_outdated"
-        streak = 0 if state.turn == TURN_RUNNING else streak + 1
-        if streak >= 2:
-            return ""
-        if i < polls - 1:
-            await asyncio.sleep(FREE_POLL_S)
-    return "claude_busy"
-
-
 def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -> bool:
     """Whether the transcript shows a pasted prompt arrived — and, when no turn will
     ever claim it, give its send record back.
@@ -442,20 +474,6 @@ async def watch_for_echo(session: str, text: str, sent_at: float) -> None:
         ss.sent_awaiting_echo.pop(session, None)
         audit.log_event("session_send_not_seen_in_transcript", session=session,
                   prompt_len=len(text), waited_s=_ECHO_WAIT_S)
-
-
-def reply_from_transcript(name: str, prompt: str, sent_at: float) -> str:
-    """The reply text to `prompt`, sent at `sent_at`, from the session's transcript:
-    every completed turn after the prompt's line, interrupted ones with their note.
-    "" when the prompt or its reply is not there (interrupted before Claude wrote
-    anything, or folded into a turn that was already running)."""
-    objs, _, _ = session_transcript(name)
-    start = ts.prompt_index_since(objs, prompt, sent_at)
-    if start is None:
-        return ""
-    turns = ts.extract_completed_turns(objs[start:])
-    return "\n\n".join(ts.render_delivery(t.text, [], interrupted=t.interrupted)
-                       for t in turns if t.text or t.interrupted)
 
 
 SESSION_EXISTS = "exists"

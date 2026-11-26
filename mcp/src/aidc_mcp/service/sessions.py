@@ -116,7 +116,7 @@ async def session_report(name: str) -> dict[str, Any]:
     objs, _, _ = tn.session_transcript(name)
     working = state.claude_running and state.turn == tn.TURN_RUNNING
     outdated = ({"note": "This session predates aidc 2.0's hook events, so whether its "
-                         "agent is working cannot be told. Kill it and create it again."}
+                         f"agent is working cannot be told. {tn.outdated_remedy(name)}"}
                 if state.turn == tn.TURN_UNKNOWN else {})
     return {
         **outdated,
@@ -283,16 +283,6 @@ async def status(name: str) -> dict[str, Any]:
     return com.envelope_ok({**report, "send_queue": queue,
                          "headless_runs": headless.merge(name, found),
                          "raw": result["stdout"]})
-
-
-def kill(name: str) -> dict[str, Any]:
-    """The session_kill tool's work. tearstools/ holds the tool (its schema and
-    description), authz.py the guards around it."""
-    audit.log_event("tool_call", tool="session_kill", session=name)
-    result = com.run_cli(["kill", name], timeout=120.0)
-    if result["exit"] != 0:
-        return com.envelope_err(result["stderr"] or "kill failed", result, code="cli_failed")
-    return com.envelope_ok({"name": name})
 
 
 def exec_command(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, Any]:

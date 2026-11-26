@@ -16,7 +16,7 @@ governed_by:
   - artifact: project-preferences
     dispositions:
       - "Module split (service/ holds the service with no MCP types; tools.py holds only the MCP surface) → amendment proposed: chunk 02 replaces tools.py with one TearsTool per tool and chunk 03 a face module; the line is rewritten then to name them"
-      - "State: anything that must survive a restart is a file in the watcher-state dir → ruling needed: design-13 Q4 (TRS-25 option B conforms; option A is an amendment)"
+      - "State: anything that must survive a restart is a file in the watcher-state dir → amended: the owner ratified TRS-25 option A (owner-rulings 2026-11-25, design-13 Q4); the row now names the 3tears state store (store.py), amended 2026-11-26"
       - "Contracts: the envelope and callback payload change only by agreement, additively → the envelope is the TearsTool content unchanged and the payload does not change unless Q2 adds a mesh delivery; one ruled, non-additive change: a failed call is isError with its code under _meta (TRS-05/TRS-16, rulings 2026-11-24), in design-10 D6 and the 2.0 CHANGELOG"
       - "no private names in the repo → conforms: the owner's mesh, cluster and hosts are named only in the user's config"
       - "ruff, mypy clean; tests are sentences about behaviour; uv run --frozen → conforms"

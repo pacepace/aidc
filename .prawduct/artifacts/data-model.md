@@ -41,14 +41,19 @@ consumers and queries, then design).
 6. **Concurrency and lifetime.** One process per store (the SQLite store's file lock). On
    Docker each MCP has its own state dir (aidc-mcp and aidc-mcp-dev do). On Kubernetes the
    per-user server is one replica and must be replaced, not rolled (`Recreate`; chunk 10). A
-   second process on the same file is refused at start, never two writers.
+   second process on the same file is refused at start, never two writers: the server opens its
+   store before serving and, when another process holds it, logs `state_store_unavailable` and
+   exits. Any store failure reaches aidc's code as one type, `store.StoreError` (an `OSError`, so
+   a caller that logs a failed state write and carries on, as 1.x's did, still catches it).
 7. **Versioning.** The store records its own format (the SQLite file's `user_version`, refused
    when it is another's). A new nullable column or a new table is additive; anything else is a
    migration in aidc's code, tested.
 8. **Upgrade from 1.x.** The first start on a state dir holding 1.x files reads each one into
    the store (idempotently, so a start killed half way finishes on the next), then moves them to `watcher-state/migrated-1x/` (kept,
    not deleted, so a downgrade can move them back). A file 1.x would have read as empty or
-   corrupt is moved without a row, as 1.x would have ignored it. Debug captures
+   corrupt is moved without a row, as 1.x would have ignored it, and named in the log once
+   (`state_1x_file_unreadable`, after one `state_1x_read_in` counting the files), since 1.x
+   logged such a file at every start. Debug captures
    (`watcher-state/screens/`) are not state and stay files.
 
 ## Tables
@@ -58,7 +63,7 @@ All tables carry `date_created` (immutable) and `date_updated` (`datetimetz`).
 | Table | Key | Columns | Document (1.x file it replaces) |
 |---|---|---|---|
 | `watermarks` | session, conversation | `session`, `conversation_id` | the Watermark (`<s>__<c>.json`) |
-| `deliveries` | session, conversation, fingerprint | `session`, `conversation_id`, `fingerprint` | none: the row is the fact (`<s>__<c>.delivered`) |
+| `deliveries` | session, conversation, fingerprint | `session`, `conversation_id`, `fingerprint`; unique index `deliveries_by_conversation` (session, conversation, key), which a conversation's ledger is read through on every delivery pass | none: the row is the fact (`<s>__<c>.delivered`) |
 | `send_queues` | session | `session` | design 10 S4's queue object (`<s>.send-queue.json`) |
 | `watches` | session | `session` | design 10 D7's watch object (`<s>.watch.json`) |
 | `sent_prompts` | session | `session` | the send record list (`<s>.sent-prompts.json`) |

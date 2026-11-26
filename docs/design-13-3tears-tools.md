@@ -78,8 +78,8 @@ is not in the 3tears repo, so what it supports is unknown here.
   (MCP-34) from state files.
 - **Protocol extras:** `ctx.info` messages during `session_create` and `session_invoke` (named
   progress in MCP-07, implemented as logging); tool descriptions that list the watched sessions,
-  announced by `tools/list_changed` (MCP-21); a disconnect watcher that stops a blocking
-  `session_invoke` when its client goes away; server `instructions` steering long work to
+  announced by `tools/list_changed` (MCP-21); a blocking `session_invoke` stopped when its
+  client goes away (1.x's disconnect watcher; in 2.0 the call context's cancel, TRS-09); server `instructions` steering long work to
   `session_send`.
 - **Contract:** every result is the envelope `{ok, data}` / `{ok: false, error, error_code}`
   with a closed set of 20 aidc error codes (design-10 D6, MCP-32); `published-tools.json` is
@@ -96,7 +96,7 @@ is not in the 3tears repo, so what it supports is unknown here.
 | Progress during create and invoke | none | **Open.** Keep `ctx.info` in local mode only; on a mesh, `session_create` returns when the session is ready (as today, without phase messages), and long work goes through `session_send` / `session_invoke_async`. |
 | Resources | none in `3tears-mcp` | **Keep** (owner ruling 2026-11-24): add resource support upstream in `3tears-mcp` (item 4) and serve the same URIs through it (TRS-06). |
 | Dynamic descriptions + `tools/list_changed` (MCP-21) | stateless, not supported | **Keep** (owner ruling 2026-11-24): through upstream stateful mode (item 5) and `McpServer`'s live tool provider (TRS-07). |
-| Blocking `session_invoke` with disconnect cancel | no cancel channel | Keep it in local mode with today's disconnect watcher; on a mesh, offer `session_invoke_async` and `session_interrupt(target="headless")` (blocking calls would sit inside the registry's call deadline). |
+| Blocking `session_invoke` with disconnect cancel | no cancel channel | Keep it in local mode, cancelled through the call context when the client goes away (TRS-09, which retired 1.x's disconnect watcher); on a mesh, offer `session_invoke_async` and `session_interrupt(target="headless")` (blocking calls would sit inside the registry's call deadline). |
 | Webhook delivery to the orchestrator | no push channel in the tool contract | Keep the service's webhook in both modes; **open:** add a NATS-subject delivery for mesh mode, agreed with the orchestrator (design-10 D5's rule for payload changes). |
 | Bearer token, scope env var | local: identity resolver; mesh: hub-signed caller identity and grants | Local: the bearer resolves to one admin identity, scope as today. Mesh: grants per tool decide who may call; `AIDC_MCP_ALLOWED_SESSIONS` stays as a per-install limit; `conversation_id` must be injected by the hub as the orchestrator injects it today. |
 | `audit.log_event` JSON access log | `3tears-observe` | Structured logs and traces through observe; keep a file sink for the access log, since it is aidc's audit record of tool calls. |

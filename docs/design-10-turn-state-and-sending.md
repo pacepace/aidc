@@ -286,7 +286,7 @@ missing a code or uses one outside the set:
 | `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry | no |
 | `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call | no |
 | `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` | yes |
-| `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again | no |
+| `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again (the git agent, which `aidc kill` refuses: `aidc rebuild`, then `aidc git setup`) | no |
 
 **Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
 call, made again unchanged, can succeed later. It follows the Caller column: `cli_failed` is
@@ -368,7 +368,7 @@ Two questions are kept apart, because they have different callers:
 
 - **Is Claude working on a turn?** `_session_state` returns a `SessionState` whose `turn` is
   `running` or `idle`, with `why` naming the evidence. `session_resend`'s "still working"
-  warning and `session_run`'s wait for a turn to end (`_wait_for_turn_end`) read only this.
+  warning reads only this (1.x's `session_run` waited on it too; 2.0 offers no session_run).
   A person's unsent text, or a prompt Esc put back in the box, does not keep a turn running.
 - **May a prompt be pasted now?** `_paste_reason` combines the turn with the screen (S2) and
   returns `""` or a reason (S4's table). `_check_free` is that answer; `session_send` and the
@@ -426,8 +426,7 @@ Two questions are kept apart, because they have different callers:
 **Pasting requires two consecutive free readings**, 2.5 s apart (past the mirror's copy
 interval, so both cannot come from the same stale copy), in `_wait_until_free`. That catches a
 turn starting the moment another ends (a background task's notification). The drainer re-checks
-once more under the send lock right before pasting, and `_wait_for_turn_end` likewise needs two
-idle readings. `session_resend` takes a single reading: it only labels a reply, it does not paste.
+once more under the send lock right before pasting. `session_resend` takes a single reading: it only labels a reply, it does not paste.
 The wait is bounded on the clock as well as in polls: after a reading that was not free, no
 reading starts that could not finish inside the timeout, so slow readings do not stretch the free
 wait in `session_send` (`_SEND_FREE_WAIT_S`). A free reading is always followed by its confirming
@@ -472,16 +471,26 @@ never reported; a slash command with no local-command mark (a skill Claude was a
 Owner ruling 2026-11-26: session state comes from Claude Code's hooks, not the screen. Each
 session's managed settings run `aidc-hook-event` on `SessionStart`, `UserPromptSubmit`,
 `Notification` and `Stop`; it writes the hook's input, with `event` and `at`, as one file in
-`hook-events/` of the session's mirror dir, which aidc-mcp reads (`hook_events.py`).
+`hook-events/` of the session's mirror dir, which aidc-mcp reads (`hook_events.py`). The
+settings reach every `claude` in the container, so the writer writes only for the Claude in
+tmux window `main:claude` (the window aidc-mcp reads and types into, the git agent's too): a
+headless `--print` run (`session_invoke`, by docker exec, no pane) or a claude someone starts
+in another window writes nothing, since its Stop is not the session's.
 
 - **The turn** (`turns.turn_from_hooks`) is the latest event about it: `SessionStart` idle
   (`session_started`), `UserPromptSubmit` running (`prompt_submitted`), `Notification`
   `permission_prompt` running (`waiting_on_permission`), `idle_prompt` idle, `Stop` idle
   (`turn_stopped`). Other notification types change nothing.
-- **The transcript, the record,** adds what the hooks cannot say: a turn it shows open and
-  written after the Stop is one a blocking Stop hook sent Claude back to (Claude Code runs every
-  Stop hook at once, and the pushback fires no event of its own), running however quiet it is
-  until the next Stop (`stop_pushed_back`); a turn still being written when the event is ahead of
+- **The transcript, the record,** adds what the hooks cannot say. After each idle event Claude
+  Code can open or continue a turn with no `UserPromptSubmit`: a blocking Stop hook sends Claude
+  back (Claude Code runs every Stop hook at once, and the pushback fires no event of its own); an
+  auto-compact mid-turn fires `SessionStart` with `source: "compact"` and Claude carries on; a
+  background task's notice opens a turn after the idle notice. So a turn the transcript shows
+  open, written after the latest idle event (to the millisecond its `at` keeps), is running
+  however quiet it is, until the next idle event (`stop_pushed_back` after a Stop,
+  `turn_open_after_idle` otherwise). A `SessionStart` of another source (startup, resume, clear)
+  leaves Claude at its prompt, so a resumed transcript that ended mid-turn is idle. A turn still
+  being written when the event is ahead of
   the copied transcript is running until quiet for `LOG_QUIET_S` (`log_growing`); a reply whose Stop
   hooks have not reported is held for `STOP_HOOK_WAIT_S` (`stop_hooks_running`); and a turn
   it shows over since the prompt was submitted (an Esc after Claude had written, which fires
@@ -492,10 +501,14 @@ session's managed settings run `aidc-hook-event` on `SessionStart`, `UserPromptS
   it no longer reads the screen for it.
 - **A session with no event yet** is starting (`starting`) when its managed settings name the
   hook (read once per instance by a probe that prints grep's own status, so an exec that fails
-  is "could not say", never "not installed"), and from before 2.0 when they do not: `turn: "unknown"`, `why:
+  is "could not say", never "not installed"); past `HOOK_EVENTS_DUE_S` with none it is
+  `hook_events_missing`, logged once (the writer says nothing to Claude, so a mirror dir that is
+  missing or not the session user's would otherwise look like a Claude forever starting). It is
+  from before 2.0 when they do not name the hook: `turn: "unknown"`, `why:
   "session_predates_hook_events"`, `session_send` refused with `session_outdated` (D6). A
   session whose settings cannot be read waits (`hooks_unread`) rather than being refused.
-- **A session created again** starts with no events: `aidc create` empties its `hook-events/`.
+- **A session created again** starts with no events: `aidc create` empties its `hook-events/`,
+  and the git container's main process empties the git agent's as it starts.
 - **Reading** is incremental per session (the newest file read is remembered); after an MCP
   restart every file is read again, and all but the newest `HOOK_EVENTS_KEPT` are removed once
   read.
@@ -910,9 +923,8 @@ pass it only when the aidc it talks to declares it.
   `resume_watches`), `service/callbacks.py` (`post_turn`).
 - Send path: `mcp/src/aidc_mcp/service/sending.py` (`send`, `_drain_pending_sends`,
   `enqueue_send`, `inject`, `_check_free`, `wait_until_free`, `load_persisted_queue`,
-  `_drop_prompts_of_removed_session`, `_notify_prompts`, `resume_send_queues`, `run_turns`);
-  `service/turns.py` (`session_state`, `turn_verdict`, `paste_reason`, `wait_for_turn_end`,
-  `watch_for_echo`); `service/startup.py` (`resume`); `mcp/src/aidc_mcp/screen.py` (`classify`).
+  `_drop_prompts_of_removed_session`, `_notify_prompts`, `resume_send_queues`);
+  `service/turns.py` (`session_state`, `turn_from_hooks`, `paste_reason`, `watch_for_echo`); `service/startup.py` (`resume`); `mcp/src/aidc_mcp/screen.py` (`classify`).
   `mcp/src/aidc_mcp/tearstools/` holds the tools over them, served by `server.py`.
 - Turn info and join (S5): `transcript.open_turn`, `turns_view.turn_info`,
   `service/sending.py` (`join_running_turn`, `_join_refusal`).

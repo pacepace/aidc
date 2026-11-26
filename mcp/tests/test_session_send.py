@@ -8,10 +8,12 @@ container/tmux helper monkeypatched, so the async contract is pinned without a
 real Docker session.
 """
 import asyncio
+import sqlite3
 
 import pytest
 
 from aidc_mcp import server
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
@@ -777,10 +779,10 @@ async def test_record_write_failure_does_not_fail_the_send(wiring, monkeypatch):
     app, send = _make_send()
     ss.session_watchers["proj"] = _StubTask()
 
-    def boom(*a, **k):
-        raise OSError("read-only")
+    async def disk_full(*a, **k):   # what the SQLite L3 raises, not an OSError
+        raise sqlite3.OperationalError("database or disk is full")
 
-    monkeypatch.setattr(ts, "record_sent_prompt", boom)
+    monkeypatch.setattr(state_store.StateStore, "_put", disk_full)
     res = await send(name="proj", prompt="hello", conversation_id="c1")
 
     assert res["ok"] is True

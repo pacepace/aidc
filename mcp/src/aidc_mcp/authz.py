@@ -29,6 +29,7 @@ from threetears.mcp import Identity, Refusal, ResourceRequest, ToolCall
 from aidc_mcp import audit, auth, scope
 from aidc_mcp import session_facts as sf
 from aidc_mcp.service import common as com
+from aidc_mcp.tearstools.base import MESH_PREFIX
 
 #: the permission every aidc tool and resource requires; the one caller holds it
 PERMISSION = "aidc"
@@ -71,9 +72,16 @@ def _taint_refusal(name: str, taint: dict[str, str]) -> dict[str, Any]:
         {"tainted": taint}, code="tainted")
 
 
+def local_name(tool_name: str) -> str:
+    """The tool's local name, whichever face asks: the mesh calls `session_send`
+    `aidc.session_send` (TRS-15), and the guards below are the tool's, not the face's."""
+    return tool_name.removeprefix(MESH_PREFIX)
+
+
 async def refusal_of(tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
     """The envelope refusing this call before the tool runs, or None to let it run.
     Logs a refusal to the access log."""
+    tool_name = local_name(tool_name)
     name = arguments.get("name")
     if tool_name in _NAME_IS_NOT_A_SESSION or not isinstance(name, str):
         return None

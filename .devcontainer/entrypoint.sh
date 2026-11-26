@@ -95,7 +95,7 @@ if aidc_install_managed_settings / "$PLUGIN_REGISTRY" "${AIDC_SHARE_PLUGINS:-fal
     names=$(jq -r '.enabledPlugins // {} | keys | join(", ")' /etc/claude-code/managed-settings.json 2>/dev/null)
     log "claude managed settings: aidc's hooks installed${names:+; plugins enabled: ${names}}"
 else
-    log "WARN: could not write Claude's managed settings; aidc-mcp falls back to reading the screen"
+    log "ERROR: could not write Claude's managed settings, so Claude runs without aidc's hooks: aidc-mcp cannot tell when it is free and refuses prompts to this session (session_outdated). Recreating the session will not help until this write succeeds; see the line above."
 fi
 
 # If the mounted repo declares a Python version (.python-version, the pyenv

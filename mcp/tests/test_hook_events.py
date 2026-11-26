@@ -14,9 +14,16 @@ HOOK = pathlib.Path(__file__).resolve().parents[2] / ".devcontainer" / "hook-eve
 
 
 def _fire(mirror, payload):
-    """The hook as Claude Code runs it in the session: its input on stdin."""
+    """The hook as Claude Code runs it in the session: its input on stdin, from the Claude
+    in tmux window main:claude (a stand-in tmux names the pane's window)."""
+    bin_dir = mirror.parent / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "tmux"
+    stub.write_text("#!/bin/sh\necho main:claude\n")
+    stub.chmod(0o755)
     subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), text=True, check=True,
-                   env={**os.environ, "AIDC_HOOK_EVENTS_DIR": str(he.events_dir(mirror))})
+                   env={**os.environ, "AIDC_HOOK_EVENTS_DIR": str(he.events_dir(mirror)),
+                        "TMUX_PANE": "%0", "PATH": f"{bin_dir}:{os.environ['PATH']}"})
     time.sleep(0.002)   # distinct nanosecond names, as real hooks seconds apart have
 
 

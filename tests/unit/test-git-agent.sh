@@ -81,13 +81,24 @@ assert_eq "SessionStart, Stop, Notification and UserPromptSubmit each run aidc-h
     "$(jq -r '.hooks | to_entries[] | select(.key != "PreToolUse") | "\(.key):\(.value[0].hooks[0].command)"' "$ms" | sort | paste -sd' ' -)"
 assert_has "the image installs the sessions' hook writer there, root's" "COPY hook-event.sh /usr/local/bin/aidc-hook-event" "$df"
 assert_has "..." "chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event" "$df"
-assert_eq "gitctl/hook-event.sh is identical to .devcontainer/hook-event.sh" "" \
-    "$(cmp "$G/hook-event.sh" "$AIDC_ROOT/.devcontainer/hook-event.sh" 2>&1)"
-# Run as the agent, it writes into the mirror the MCP reads for the session git (Docker:
-# /var/aidc/transcript-out; here a scratch stand-in).
-mkdir -p "$S/mirror"
-printf '{"hook_event_name":"SessionStart","session_id":"s"}' | AIDC_HOOK_EVENTS_DIR="$S/mirror/hook-events" bash "$G/hook-event.sh"
+# One writer: the image is built from a staged context holding the sessions' own
+# .devcontainer/hook-event.sh, never a copy kept in gitctl/.
+assert_eq "no second copy of the writer in gitctl/" no "$([ -e "$G/hook-event.sh" ] && echo yes || echo no)"
+staged=$(bash -c '. "$1/scripts/lib/common.sh" && aidc_build_context aidc/gitctl:t "$1/gitctl" && printf "%s|%s" "$AIDC_BUILD_CONTEXT" "$AIDC_BUILD_STAGE"' _ "$AIDC_ROOT")
+ctx=${staged%|*}; stage=${staged#*|}
+assert_eq "the staged gitctl context holds the sessions' writer, byte for byte" "" \
+    "$(cmp "$ctx/hook-event.sh" "$AIDC_ROOT/.devcontainer/hook-event.sh" 2>&1)"
+assert_eq "...and the Dockerfile it builds from" yes "$([ -f "$ctx/Dockerfile" ] && echo yes || echo no)"
+# Run as the agent in its tmux window main:claude (gitctl-main.sh names it so), it writes
+# into the mirror the MCP reads for the session git (Docker: /var/aidc/transcript-out; here a
+# scratch stand-in).
+assert_has "the git agent's Claude runs in tmux window main:claude" "tmux send-keys -t main:claude" "$(cat "$G/gitctl-main.sh")"
+mkdir -p "$S/mirror" "$S/wbin"; printf '#!/bin/sh\necho main:claude\n' > "$S/wbin/tmux"; chmod +x "$S/wbin/tmux"
+printf '{"hook_event_name":"SessionStart","session_id":"s"}' | PATH="$S/wbin:$PATH" TMUX_PANE=%0 AIDC_HOOK_EVENTS_DIR="$S/mirror/hook-events" bash "$ctx/hook-event.sh"
 assert_eq "a SessionStart event lands in the mirror's hook-events" "SessionStart" "$(jq -r .event "$S"/mirror/hook-events/*.json 2>/dev/null)"
+[ -n "$stage" ] && rm -rf "$stage"
+assert_has "the agent's hook events start empty with the container (the last Claude's are not read)" \
+    "rm -rf -- /var/aidc/transcript-out/hook-events" "$(cat "$G/gitctl-main.sh")"
 
 echo "=== git-claude: the git agent's Claude ==="
 H="$S/home"; mkdir -p "$H/.local/bin"

@@ -6,11 +6,13 @@ post function and no-op sleep, against fixture transcript files in tmp dirs.
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import delivery as dlv
@@ -1898,7 +1900,13 @@ class TestTerminalPromptAttribution:
         updated the prompt is treated as the MCP's own (no note)."""
         base, state, rec, seed = await self._seeded(tmp_path)
         _mk_transcript(base, "sess", "sid1", seed + [_typed("u1", "q"), _assistant("a1", "R")])
-        with patch("aidc_mcp.transcript.take_sent_entry", side_effect=OSError("ro")):
+        real_get = state_store.StateStore._get
+
+        async def record_unreadable(self, table, key):   # what the SQLite L3 raises
+            if table == "sent_prompts":
+                raise sqlite3.OperationalError("disk I/O error")
+            return await real_get(self, table, key)
+        with patch.object(state_store.StateStore, "_get", record_unreadable):
             await _drain(base, state, rec)
         assert rec.turns[0].text == "R"
         assert rec.turns[0].prompt_origin == "orchestrator"

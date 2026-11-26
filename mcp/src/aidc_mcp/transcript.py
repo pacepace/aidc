@@ -1203,11 +1203,6 @@ def resume_anchor_on_new_transcript(objs: list[dict], seen: float | None) -> str
 _ECHO_SKEW_S = 5.0
 
 
-def prompt_seen_since(objs: list[dict], text: str, sent_at: float) -> bool:
-    """True when the transcript shows `text` arrived at or after `sent_at` (epoch s)."""
-    return prompt_index_since(objs, text, sent_at) is not None
-
-
 def prompt_index_since(objs: list[dict], text: str, sent_at: float) -> int | None:
     """Index of the latest line showing `text` arrived at or after `sent_at` (epoch s).
 
@@ -1311,18 +1306,14 @@ class Watermark:
 
 
 def now_iso() -> str:
-    """UTC timestamp in the form every aidc state file writes. Public: the service
-    modules (service/sending.py, service/delivery.py) stamp the same files."""
+    """UTC timestamp in the form aidc's stored state documents carry. Public: the service
+    modules (service/sending.py, service/delivery.py) stamp the same documents."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def slug(value: str) -> str:
-    """Filesystem-safe token for a (session|conversation_id) component.
-
-    Public because it is a contract between the modules, not an implementation detail:
-    service/state.py names the marker files for a session's send-path state with it, and those
-    have to land beside the watermark and queue files this module writes.
-    """
+    """Filesystem-safe token for a session name in a file name (the screen captures kept
+    for debugging under watcher-state/screens/; state itself is rows of the store)."""
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
 
 
@@ -1394,11 +1385,11 @@ def save_watermark(base_dir: Path, mark: Watermark) -> None:
 # turn, the ledger drops it before it reaches the orchestrator. The watermark bugs
 # degrade from "double-deliver and poison the agent" to "waste a disk read".
 #
-# Growth: one ~65-byte line per delivered turn, bounded per conversation by its
-# turn count; the file accumulates across conversations exactly like the sibling
-# watermark files (both persist under watcher-state and are not auto-evicted).
-# A future janitor sweep can drop ledgers for conversations no longer watched;
-# there is no compaction here by design (Retrieval > premature optimization).
+# Growth: one row of the store's `deliveries` table per delivered turn, bounded per
+# conversation by its turn count; the table accumulates across conversations like the
+# watermarks (neither is evicted). A conversation's ledger is read through its own index
+# (store.LEDGER_INDEX), so a read costs that conversation's rows, not the table's. A
+# future janitor sweep can drop ledgers for conversations no longer watched.
 
 def content_fingerprint(text: str) -> str:
     """Stable idempotency key for a deliverable turn: sha256 of its exact text.

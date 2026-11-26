@@ -40,6 +40,7 @@ from threetears.mcp import (
 from threetears.tool_contract.mcp_face import mcp_tool
 
 from aidc_mcp import __version__, audit, auth, authz, observability, resources, scope
+from aidc_mcp import store as state_store
 from aidc_mcp.authz import PERMISSION, AidcAuthorizer
 from aidc_mcp.service import common as com
 from aidc_mcp.service import delivery as dlv
@@ -192,10 +193,25 @@ def build_app(face: Face | None = None) -> Any:
     return auth.BearerAuthMiddleware(app)
 
 
+def open_state_store() -> bool:
+    """Open the state store (reading 1.x's files in) before serving: a store another process
+    holds, or one this version cannot read, stops the server at start, logged, rather than
+    failing at the first tool call that needs it (data-model item 6)."""
+    try:
+        state_store.for_dir(ss.WATCHER_STATE_DIR)
+    except state_store.StoreError as exc:
+        audit.log_event("state_store_unavailable", dir=str(ss.WATCHER_STATE_DIR),
+                        error=str(exc)[:300])
+        return False
+    return True
+
+
 def main() -> int:
     port = int(os.environ.get("AIDC_MCP_PORT", "7878"))
     observability.configure()
     audit.log_event("server_start", port=port)
+    if not open_state_store():
+        return 1
     wrapped = build_app()
 
     import uvicorn

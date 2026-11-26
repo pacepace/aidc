@@ -465,7 +465,7 @@ async def _drain_pending_sends(container: str, name: str) -> None:
                 if await sf.taint_or_none(name) is not None:
                     # A prompt accepted before the session was tainted is never pasted
                     # into it: it waits, saying why, until the person kills the session
-                    # (which hands the queue to the dead-letter dir and tells its
+                    # (which keeps the queue as send dead letters and tells its
                     # conversation). Checked here, under the lock, right before the paste.
                     await _set_waiting_reason(container, name, "session_tainted")
                     audit.log_event("session_send_queue_held_tainted", session=name,
@@ -531,7 +531,7 @@ def _spawn_drainer(container: str, name: str, *, delay: float = 0.0) -> None:
             await asyncio.sleep(delay)
         await _drain_pending_sends(container, name)
 
-    task = asyncio.create_task(run())
+    task = com.background_task(run(), session=name, task="send_queue_drainer")
     ss.pending_drainers[name] = task
     ss.background_tasks.add(task)
     task.add_done_callback(ss.background_tasks.discard)
@@ -564,8 +564,8 @@ _DROPPED_NOTE = ("[Not delivered: the session '{session}' was removed before thi
 
 
 def _abandon_queue(name: str, prompts: list[ts.QueuedPrompt]) -> None:
-    """The session these prompts were accepted for is gone. Record each in the send
-    dead-letter dir, tell each prompt's conversation it was not delivered (never
+    """The session these prompts were accepted for is gone. Keep each as a send dead
+    letter, tell each prompt's conversation it was not delivered (never
     silence: the orchestrator was promised it would go in), and forget the session's
     send-path state."""
     for q in prompts:
@@ -718,8 +718,8 @@ async def _load_persisted_queue_once(container: str, name: str) -> None:
 
 
 async def resume_send_queues() -> None:
-    """Pick up every persisted queue in scope after an aidc-mcp start. Unreadable
-    queue files are logged and left for a person."""
+    """Pick up every persisted queue in scope after an aidc-mcp start. A stored queue
+    that cannot be read is logged and left for a person."""
     queues, unreadable = ts.load_send_queues(ss.WATCHER_STATE_DIR)
     for name in unreadable:
         audit.log_event("session_send_queue_unreadable", session=name)
@@ -795,7 +795,7 @@ async def send(
                   prompt_len=len(prompt), reason="session_outdated")
         return com.envelope_err(
             f"Session '{name}' predates aidc 2.0's hook events, so aidc cannot tell when it "
-            "is free. Kill it and create it again (aidc kill, then aidc create).",
+            f"is free. {tn.outdated_remedy(name)}",
             code="session_outdated")
 
     # Auto-register the transcript watcher if one isn't already running.
@@ -1004,81 +1004,6 @@ async def send(
          **({"watched_conversation_id": watched} if watched else {}),
          "window": tmx.SESSION_WINDOW, "delivery": delivery}
     )
-
-
-async def run_turns(
-    name: str,
-    turns: list[str],
-    conversation_id: str | None = None,
-    sender_label: str | None = None,
-) -> dict[str, Any]:
-    """The session_run tool's work. tearstools/ holds the tool (its schema and
-    description), authz.py the guards around it."""
-    if not turns:
-        return com.envelope_err("turns must be a non-empty list of prompt strings",
-                                code="invalid_argument")
-
-    audit.log_event("tool_call", tool="session_run", session=name, num_turns=len(turns))
-    label = ts.clean_sender_label(sender_label)
-
-    # NB: session_run does NOT auto-start a transcript watcher (contrast
-    # session_send). It delivers the transcript inline as its return value; a
-    # watcher would POST each completed turn to the callback too, so the
-    # orchestrator would receive every turn twice. See the docstring.
-
-    _TURN_TIMEOUT_S = 1800
-    _PRE_IDLE_TIMEOUT_S = 30.0
-
-    if name not in ss.session_send_locks:
-        ss.session_send_locks[name] = asyncio.Lock()
-    lock = ss.session_send_locks[name]
-
-    container = backend.target(name)
-    transcript: list[dict[str, Any]] = []
-
-    async with lock:
-        if not await tmx.is_claude_running(container):
-            return com.envelope_err(
-                "Claude is not running in the session. "
-                "The user needs to start it (run 'aidc-claude' in the tmux claude window).",
-                    code="claude_not_running"
-            )
-
-        for i, turn_prompt in enumerate(turns):
-            reason = await wait_until_free(container, name, timeout=_PRE_IDLE_TIMEOUT_S)
-            if reason:
-                err = f"session not ready before turn {i + 1} ({reason})"
-                return com.envelope_err(err, {"completed_turns": transcript},
-                                        code="session_not_ready")
-
-            # Framed like a session_send prompt; the reply is then found by the
-            # framed text, which is what the transcript holds.
-            pasted = ts.frame_prompt(turn_prompt.replace("\n", " ").strip(),
-                                     sender_label=label,
-                                     conversation_id=conversation_id or "")
-            sent_at = time.time()
-            if not await inject(container, pasted, tmx.SESSION_WINDOW, session=name):
-                # Not retried: if the paste shows in the box later, it stays there
-                # as unsent input, held like a person's (see _own_unsent_text).
-                ss.unsubmitted_paste.pop(name, None)
-                err = (f"failed to inject turn {i + 1} (if the text reached the input "
-                       "box it was not submitted and stays there unsent)")
-                return com.envelope_err(err, {"completed_turns": transcript},
-                                        code="paste_failed")
-
-            ended = await tn.wait_for_turn_end(container, name, timeout=_TURN_TIMEOUT_S)
-            if ended:
-                err = f"turn {i + 1} did not finish ({ended})"
-                return com.envelope_err(err, {"completed_turns": transcript},
-                                        code="turn_not_finished")
-
-            response = tn.reply_from_transcript(name, pasted, sent_at)
-
-            transcript.append({"turn": i + 1, "prompt": turn_prompt, "response": response})
-
-    audit.log_event("tool_call", tool="session_run_complete", session=name, turns=len(transcript))
-    return com.envelope_ok({"transcript": transcript, "session": name,
-                            "window": tmx.SESSION_WINDOW})
 
 
 async def queue_cancel(

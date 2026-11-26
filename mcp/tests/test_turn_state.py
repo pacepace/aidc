@@ -233,6 +233,28 @@ class TestCheckFree:
         session.hook(hk.he.SESSION_START, source="startup")
         assert await session.check() == ""
 
+    async def test_hooks_that_never_report_are_named_and_logged_once(
+            self, session, monkeypatch):
+        """A writer that cannot write (the mirror dir missing or not the session user's)
+        says nothing to Claude; past HOOK_EVENTS_DUE_S the session says so, and the log
+        records it once."""
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        logged = []
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append(kind))
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "starting"
+        session.clock += tn.HOOK_EVENTS_DUE_S
+        for _ in range(3):
+            assert await session.check() == "claude_busy"
+            assert ss.last_free_verdict["proj"][1] == "hook_events_missing"
+        assert logged.count("hook_events_missing") == 1
+        session.hook(hk.he.SESSION_START, source="startup")
+        assert await session.check() == ""
+        assert "proj" not in ss.hooks_silent_since
+
     async def test_a_session_from_before_hook_events_is_outdated(self, session, monkeypatch):
         """Its Claude reports nothing and its settings lack aidc's hook: it is not guessed
         at from the screen; it is said to be outdated (MCP-47)."""
@@ -352,6 +374,38 @@ class TestCheckFree:
         assert await session.check() == "claude_busy"
         assert ss.last_free_verdict["proj"][1] == "stop_pushed_back"
 
+    async def test_an_auto_compact_mid_turn_keeps_the_turn_running_through_a_quiet_tool_call(
+            self, session):
+        """Claude Code fires SessionStart (source compact) after an auto-compact in the
+        middle of a turn and carries on with no new prompt: the record, open and written
+        after it, is that turn, however long it has been quiet."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", None, stop="tool_use")],
+                      age=200.0)
+        session.hook(hk.he.SESSION_START, source="compact", age=150.0)
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", None, stop="tool_use"),
+                       _reply("a2", None, stop="tool_use")], age=120.0, hooks=False)
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "turn_open_after_idle"
+
+    async def test_a_resumed_session_whose_record_ended_mid_turn_is_idle(self, session):
+        """Claude restarted (--continue) after it was killed mid-turn: its SessionStart
+        (source resume) leaves it at the prompt, however the record it resumed ends."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", None, stop="tool_use")],
+                      age=100.0, hooks=False)
+        session.hook(hk.he.SESSION_START, source="resume", age=200.0)
+        assert await session.check() == ""
+        assert ss.last_free_verdict["proj"][1] == "session_started"
+
+    async def test_a_turn_a_task_notice_opens_after_the_idle_notice_stays_running(
+            self, session):
+        """A background task's notice opens a turn with no UserPromptSubmit after Claude's
+        idle notice: once it goes quiet in a tool call, it is still running."""
+        session.write(FINISHED, age=400.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt", age=300.0)
+        session.write(NOTIFIED, age=120.0, hooks=False)
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "turn_open_after_idle"
+
     async def test_a_stop_ahead_of_the_copied_transcript_is_busy_while_the_log_grows(
             self, session):
         """The mirror copies the transcript after the hook writes its event: a Stop that
@@ -443,16 +497,6 @@ class TestSessionStateSeparatesTurnFromInputBox:
         session.screen = _screen("typed-unsent")
         state = await tn.session_state("aidc-proj-dev", "proj")
         assert (state.turn, tn.paste_reason(state)) == (tn.TURN_RUNNING, "claude_busy")
-
-    async def test_turn_end_ignores_a_prompt_put_back_in_the_box(self, session, monkeypatch):
-        """Esc before output puts the prompt back in the box. session_run's wait for the
-        turn to end must not sit out its full timeout on that."""
-        async def nosleep(_):
-            return None
-        monkeypatch.setattr(asyncio, "sleep", nosleep)
-        session.write(FINISHED)
-        session.screen = _screen("esc-before-output-prompt-restored")
-        assert await tn.wait_for_turn_end("aidc-proj-dev", "proj", timeout=60) == ""
 
     async def test_send_path_waits_for_the_watcher_to_report_the_interrupt(self, session):
         ss.session_watchers["proj"] = object()
@@ -613,27 +657,6 @@ class TestWaitUntilFree:
         monkeypatch.setattr(snd, "_check_free", check)
         monkeypatch.setattr(asyncio, "sleep", nosleep)
         assert await snd.wait_until_free("c", "proj", timeout=3) == "input_has_text"
-
-
-class TestReplyFromTranscript:
-    def test_reply_after_the_prompt(self, session):
-        session.write([*FINISHED, _typed("u1", "run it"), _reply("a1", "Done."),
-                       SUMMARY, DURATION])
-        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == "Done."
-
-    def test_an_older_identical_prompt_is_not_the_one(self, session):
-        session.write([_typed("u0", "run it", when="2026-09-17T01:00:00.000Z"),
-                       _reply("a0", "OLD"), SUMMARY, DURATION])
-        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == ""
-
-    def test_interrupted_reply_carries_the_note(self, session):
-        interrupt = {"type": "user", "uuid": "i1", "timestamp": ISO_NOW,
-                     "message": {"role": "user", "content": [
-                         {"type": "text", "text": "[Request interrupted by user]"}]}}
-        session.write([_typed("u1", "run it"), _reply("a1", "Starting.", stop="tool_use"),
-                       interrupt])
-        assert tn.reply_from_transcript("proj", "run it", NOW - 1) == ts.render_delivery(
-            "Starting.", [], interrupted=True)
 
 
 class TestInterruptedBeforeOutputDelivery:
@@ -1362,6 +1385,13 @@ class TestSessionsFromBeforeHookEvents:
         assert "proj" not in ss.pending_sends
         assert ("tool_call", {"tool": "session_send_failed", "session": "proj",
                               "prompt_len": 5, "reason": "session_outdated"}) in logged
+
+    def test_the_git_agent_is_told_its_own_remedy(self):
+        """`aidc kill` refuses the git agent, so recreating it is no remedy: its image is
+        rebuilt and set up again."""
+        assert "aidc git setup" in tn.outdated_remedy("git")
+        assert "aidc kill" not in tn.outdated_remedy("git")
+        assert "aidc kill, then aidc create" in tn.outdated_remedy("proj")
 
     async def test_session_status_says_so_and_what_to_do(self, outdated, monkeypatch):
         from aidc_mcp.service import common as com

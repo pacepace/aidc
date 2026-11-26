@@ -350,6 +350,7 @@ HELD_ELSEWHERE = "conversation_held_elsewhere"
 #: the prompt's own hook event, written when it goes through, ends the wait sooner.
 _REFUSAL_WAIT_S = 5.0
 _REFUSAL_POLL_S = 0.2
+_CLOCK_SLACK_S = 5
 
 
 def held_elsewhere(name: str, now: float | None = None) -> dict[str, Any] | None:
@@ -381,7 +382,9 @@ async def _refused_by_lease(session: str, entered: float) -> bool:
     after = f"{int(entered * 1e9):019d}"
     for _ in range(max(1, int(_REFUSAL_WAIT_S / _REFUSAL_POLL_S))):
         held = held_elsewhere(session)
-        if held is not None and held["at_s"] >= int(entered):
+        # The note's time is the session pod's clock, `entered` this server's: a few seconds
+        # of skew between the two must not hide a refusal.
+        if held is not None and held["at_s"] >= int(entered) - _CLOCK_SLACK_S:
             return True
         if any(e.event == he.USER_PROMPT_SUBMIT for e in he.read_events(mirror, after=after)):
             return False

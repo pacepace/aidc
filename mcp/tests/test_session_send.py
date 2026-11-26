@@ -1400,9 +1400,9 @@ async def test_a_prompt_the_lease_refuses_is_not_recorded_and_stays_queued(wirin
 
     from aidc_mcp import backend as be
     monkeypatch.setattr(be, "kind", lambda: be.KUBERNETES)
-    d = _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() + 5)
+    d = _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() - 3)
     ok = await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj")
-    assert ok is False
+    assert ok is False   # a session pod's clock a few seconds behind still counts
     assert "proj" not in ss.sent_awaiting_echo
     # a prompt that went through: its own hook event ends the wait at once, the paste landed
     (d / snd.HELD_ELSEWHERE_FILE).unlink()

@@ -39,12 +39,9 @@ from aidc_mcp.transcript import (
     save_send_queue,
     save_watch,
     save_watermark,
-    send_queue_path,
-    sent_prompts_path,
     unanswered_prompt_turn,
-    watch_path,
-    watermark_path,
 )
+from tests.statefiles import STORE_FILES, put_raw, stored
 
 # --- fixture builders --------------------------------------------------------
 
@@ -536,10 +533,9 @@ class TestWatermark:
         m = load_watermark(tmp_path, "sess", "conv")
         assert m.byte_offset == 0 and m.last_delivered_uuid == "" and m.session_id == ""
 
-    def test_corrupt_file_returns_zero_mark(self, tmp_path):
-        p = watermark_path(tmp_path, "sess", "conv")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{not json", encoding="utf-8")
+    def test_a_malformed_stored_mark_returns_zero_mark(self, tmp_path):
+        put_raw(tmp_path, "watermarks", ["not", "a", "mark"], "sess", "conv",
+                session="sess", conversation_id="conv")
         m = load_watermark(tmp_path, "sess", "conv")
         assert m.byte_offset == 0
 
@@ -553,14 +549,16 @@ class TestWatermark:
         save_watermark(tmp_path, Watermark("s", "c", byte_offset=1))
         assert watermark_exists(tmp_path, "s", "c") is True
 
-    def test_slug_sanitizes_path_separators(self, tmp_path):
-        p = watermark_path(tmp_path, "a/b", "c:d")
-        assert "/" not in p.name and p.name == "a_b__c_d.json"
-
-    def test_path_traversal_in_ids_is_neutralized(self, tmp_path):
-        # ../ in ids must not escape base_dir.
-        p = watermark_path(tmp_path, "..", "../etc")
-        assert p.parent == Path(tmp_path)
+    def test_ids_holding_path_characters_are_data(self, tmp_path):
+        # a session or conversation id is a key in the store, never part of a path: "../"
+        # in one reaches nothing outside the state dir, and each keeps its own mark
+        base = tmp_path / "state"
+        for session, conversation in (("a/b", "c:d"), ("..", "../etc")):
+            save_watermark(base, Watermark(session, conversation, byte_offset=7))
+            assert load_watermark(base, session, conversation).byte_offset == 7
+        assert load_watermark(base, "a_b", "c_d").byte_offset == 0
+        assert {p.name for p in base.iterdir()} <= STORE_FILES
+        assert {p.name for p in tmp_path.iterdir()} == {"state", "operator-home"}
 
 
 # --- delivery ledger (structural exactly-once at the POST boundary) ----------
@@ -591,19 +589,20 @@ class TestDeliveryLedger:
         record_delivered(tmp_path, "sess", "convA", "fp1")
         assert load_delivered(tmp_path, "sess", "convB") == set()
 
-    def test_torn_final_line_is_inert(self, tmp_path):
-        """A crash mid-append can leave a partial last line; it must not corrupt
-        the load or cause a false match — it is just a value no fingerprint equals."""
-        from aidc_mcp.transcript import ledger_path, load_delivered
-        p = ledger_path(tmp_path, "sess", "conv")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("fpcomplete\nfppar", encoding="utf-8")  # no trailing newline
+    def test_a_1x_ledger_with_a_torn_final_line_is_read_in_whole(self, tmp_path):
+        """1.x appended to a file, and a crash mid-append could leave a partial last line.
+        Read in on upgrade, it is a value no fingerprint equals: inert, and every whole
+        line is kept, so nothing already delivered goes out again."""
+        from aidc_mcp.transcript import load_delivered
+        (tmp_path / "sess__conv.delivered").write_text("fpcomplete\nfppar", encoding="utf-8")
         assert load_delivered(tmp_path, "sess", "conv") == {"fpcomplete", "fppar"}
+        assert (tmp_path / "migrated-1x" / "sess__conv.delivered").exists()
 
-    def test_ledger_path_neutralizes_traversal(self, tmp_path):
-        from aidc_mcp.transcript import ledger_path
-        p = ledger_path(tmp_path, "..", "../etc")
-        assert p.parent == Path(tmp_path) and p.name.endswith(".delivered")
+    def test_ledger_ids_holding_path_characters_are_data(self, tmp_path):
+        from aidc_mcp.transcript import load_delivered, record_delivered
+        record_delivered(tmp_path, "..", "../etc", "fp1")
+        assert load_delivered(tmp_path, "..", "../etc") == {"fp1"}
+        assert load_delivered(tmp_path, "_", "_etc") == set()
 
 
 # --- active transcript resolution --------------------------------------------
@@ -823,9 +822,8 @@ class TestSentPromptRecord:
         assert consume_sent_prompt(tmp_path, "s", "p0") is False    # evicted
         assert consume_sent_prompt(tmp_path, "s", "p204") is True   # newest kept
 
-    def test_corrupt_file_is_an_empty_record(self, tmp_path):
-        sent_prompts_path(tmp_path, "s").parent.mkdir(parents=True, exist_ok=True)
-        sent_prompts_path(tmp_path, "s").write_text("{not json")
+    def test_a_malformed_record_is_an_empty_record(self, tmp_path):
+        put_raw(tmp_path, "sent_prompts", {"not": "a list"}, "s", session="s")
         assert consume_sent_prompt(tmp_path, "s", "x") is False
         record_sent_prompt(tmp_path, "s", "x")   # recovers by rewriting
         assert consume_sent_prompt(tmp_path, "s", "x") is True
@@ -839,15 +837,17 @@ class TestSentPromptRecord:
         assert take_sent_prompt(tmp_path, "s", "and push") is None
 
     def test_an_entry_written_before_senders_is_the_callers_own(self, tmp_path):
+        # a 1.x send record, from before `by` existed, read in on upgrade
         from aidc_mcp.transcript import take_sent_prompt
-        sent_prompts_path(tmp_path, "s").parent.mkdir(parents=True, exist_ok=True)
-        sent_prompts_path(tmp_path, "s").write_text(
+        (tmp_path / "s.sent-prompts.json").write_text(
             json.dumps([{"fp": prompt_fingerprint("old"), "at": time.time()}]))
         assert take_sent_prompt(tmp_path, "s", "old") == ""
 
-    def test_path_neutralizes_traversal(self, tmp_path):
-        p = sent_prompts_path(tmp_path, "../../etc/passwd")
-        assert p.parent == Path(tmp_path) and p.name.endswith(".sent-prompts.json")
+    def test_a_session_name_holding_path_characters_is_data(self, tmp_path):
+        base = tmp_path / "state"
+        record_sent_prompt(base, "../../etc/passwd", "x")
+        assert consume_sent_prompt(base, "../../etc/passwd", "x") is True
+        assert {p.name for p in base.iterdir()} <= STORE_FILES
 
     def test_record_is_atomic_no_leftover_temp(self, tmp_path):
         record_sent_prompt(tmp_path, "s", "x")
@@ -1509,9 +1509,9 @@ class TestPersistedSendQueue:
         its own, so it can be cancelled by id."""
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t", prompt_id="p-x")])
         assert [q.prompt_id for q in load_send_queues(tmp_path)[0]["proj"]] == ["p-x"]
-        path = send_queue_path(tmp_path, "proj")
-        path.write_text(json.dumps({"session": "proj", "prompts": [
-            {"text": "a", "enqueued_at": "t"}, {"text": "b", "enqueued_at": "t"}]}))
+        put_raw(tmp_path, "send_queues", {"session": "proj", "prompts": [
+            {"text": "a", "enqueued_at": "t"}, {"text": "b", "enqueued_at": "t"}]},
+            "proj", session="proj")
         ids = [q.prompt_id for q in load_send_queues(tmp_path)[0]["proj"]]
         assert all(i.startswith("p-") for i in ids) and len(set(ids)) == 2
 
@@ -1524,25 +1524,25 @@ class TestPersistedSendQueue:
                               [f"p-{i}" for i in range(tsm._PASTED_IDS_MAX)], "later")
         assert tsm.pasted_at_of(tmp_path, "proj", "p-a") == ""
         assert tsm.pasted_at_of(tmp_path, "proj", "p-0") == "later"
-        tsm.pasted_ids_path(tmp_path, "proj").write_text("{not json")
+        put_raw(tmp_path, "pasted_ids", {"not": "a list"}, "proj", session="proj")
         assert tsm.pasted_at_of(tmp_path, "proj", "p-0") == ""
 
-    def test_empty_queue_removes_the_file(self, tmp_path):
+    def test_empty_queue_removes_the_stored_queue(self, tmp_path):
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])
         save_send_queue(tmp_path, "proj", [])
-        assert not send_queue_path(tmp_path, "proj").exists()
+        assert stored(tmp_path, "send_queues", "proj") is None
         save_send_queue(tmp_path, "never-had-one", [])   # no error
 
     def test_session_name_comes_from_the_file_not_the_slug(self, tmp_path):
         save_send_queue(tmp_path, "a/b", [QueuedPrompt("x", "t")])
         assert list(load_send_queues(tmp_path)[0]) == ["a/b"]
 
-    def test_corrupt_file_is_reported_and_left_alone(self, tmp_path):
-        bad = send_queue_path(tmp_path, "bad")
-        bad.write_text("{not json")
+    def test_a_malformed_stored_queue_is_reported_and_left_alone(self, tmp_path):
+        put_raw(tmp_path, "send_queues", {"prompts": 5}, "bad", session="bad")
         save_send_queue(tmp_path, "good", [QueuedPrompt("x", "t")])
         queues, unreadable = load_send_queues(tmp_path)
-        assert list(queues) == ["good"] and unreadable == [bad] and bad.exists()
+        assert list(queues) == ["good"] and unreadable == ["bad"]
+        assert stored(tmp_path, "send_queues", "bad") == {"prompts": 5}
 
     def test_write_is_atomic_no_leftover_temp(self, tmp_path):
         save_send_queue(tmp_path, "proj", [QueuedPrompt("x", "t")])
@@ -1567,9 +1567,10 @@ class TestPersistedWatch:
         remove_watch(tmp_path, "never-watched")   # no error
         assert [w["session"] for w in load_watches(tmp_path)[0]] == ["proj"]
 
-    def test_a_file_saved_without_a_session_instance_still_loads(self, tmp_path):
-        watch_path(tmp_path, "proj").write_text(
-            '{"session": "proj", "conversation_id": "c1", "callback_base": "http://cb"}')
+    def test_a_watch_saved_without_a_session_instance_still_loads(self, tmp_path):
+        put_raw(tmp_path, "watches",
+                {"session": "proj", "conversation_id": "c1", "callback_base": "http://cb"},
+                "proj", session="proj")
         [w], unreadable = load_watches(tmp_path)
         assert w["session_instance"] == "" and unreadable == []
 
@@ -1578,16 +1579,14 @@ class TestPersistedWatch:
         save_watch(tmp_path, "proj", "c2", "http://cb")
         assert [w["conversation_id"] for w in load_watches(tmp_path)[0]] == ["c2"]
 
-    def test_corrupt_or_incomplete_files_are_reported_and_left_alone(self, tmp_path):
-        bad = watch_path(tmp_path, "bad")
-        bad.write_text("{not json")
-        partial = watch_path(tmp_path, "partial")
-        partial.write_text('{"session": "partial", "conversation_id": ""}')
-        listed = watch_path(tmp_path, "list")
-        listed.write_text("[]")
+    def test_malformed_or_incomplete_watches_are_reported_and_left_alone(self, tmp_path):
+        put_raw(tmp_path, "watches", {"not": "a watch"}, "bad", session="bad")
+        put_raw(tmp_path, "watches", {"session": "partial", "conversation_id": ""},
+                "partial", session="partial")
+        put_raw(tmp_path, "watches", [], "list", session="list")
         watches, unreadable = load_watches(tmp_path)
-        assert watches == [] and sorted(unreadable) == sorted([bad, partial, listed])
-        assert bad.exists() and partial.exists()
+        assert watches == [] and unreadable == ["bad", "list", "partial"]
+        assert stored(tmp_path, "watches", "bad") == {"not": "a watch"}
 
     def test_missing_dir_loads_nothing(self, tmp_path):
         assert load_watches(tmp_path / "absent") == ([], [])

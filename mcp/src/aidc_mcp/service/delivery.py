@@ -135,8 +135,8 @@ async def resume_watches(on_resumed: Callable[[], None]) -> None:
     `on_resumed` runs once when any webhook was re-opened (the MCP adapter refreshes
     the tool descriptions that list them)."""
     watches, unreadable = ts.load_watches(ss.WATCHER_STATE_DIR)
-    for path in unreadable:
-        audit.log_event("session_watch_unreadable", path=str(path))
+    for name in unreadable:
+        audit.log_event("session_watch_unreadable", session=name)
     resumed = False
     for w in watches:
         name = w["session"]

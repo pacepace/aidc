@@ -20,6 +20,13 @@ dependencies = [
     "3tears-tool-contract[mcp]>=0.95,<0.96",
     "3tears-tool-schema>=0.95,<0.96",
     "3tears-observe>=0.95,<0.96",
+    # aidc-mcp's durable state on the 3tears SQLite L3 (TRS-25). 3tears core brings asyncpg
+    # (the store's refusals are asyncpg's error types) and SQLAlchemy; nothing connects to
+    # Postgres, and no NATS client is installed (owner ruling 2026-11-26, TRS-01/TRS-17).
+    "3tears>=0.95,<0.96",
+    # store.py builds the L1's tables from the store's schemas with it (3tears core's own
+    # dependency; named because aidc imports it)
+    "sqlalchemy",
 ]
 
 [project.optional-dependencies]
@@ -92,3 +99,6 @@ constraint-dependencies = [
 3tears-tool-contract = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/tool-contract" }
 3tears-tool-schema = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/tool-schema" }
 3tears-observe = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/observe" }
+3tears = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/core" }
+3tears-interfaces = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/interfaces" }
+3tears-nats = { git = "https://github.com/pacepace/3tears", rev = "1378d2e9a540cdef98b28c93dd03d40402054469", subdirectory = "packages/nats" }

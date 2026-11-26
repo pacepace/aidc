@@ -298,17 +298,24 @@ async def test_the_servers_own_resolver_refuses_a_token_that_is_not_current(tmp_
 # --- local mode needs nothing of the platform (TRS-01) -------------------------------
 
 _FRESH = r"""
-import json, os, sys, pathlib, tempfile
+import json, os, sys, pathlib, socket, tempfile
+# every connection the process opens, from the first import on (the in-process test client
+# opens none)
+connections = []
+_connect = socket.socket.connect
+def _recording_connect(self, address):
+    connections.append(repr(address))
+    return _connect(self, address)
+socket.socket.connect = _recording_connect
 tmp = tempfile.mkdtemp()
 pathlib.Path(tmp, "token").write_text("t\n")
 os.environ["AIDC_MCP_TOKEN_FILE"] = str(pathlib.Path(tmp, "token"))
 os.environ["AIDC_MCP_AUDIT_LOG"] = str(pathlib.Path(tmp, "access.log"))
 os.environ["AIDC_MCP_SESSION_CREATE"] = "true"
+# the state store in a dir of its own; startup resumes from it (empty: nothing to resume)
+os.environ["AIDC_MCP_WATCHER_STATE"] = str(pathlib.Path(tmp, "watcher-state"))
 from starlette.testclient import TestClient
 from aidc_mcp import server
-async def no_resume(self):
-    return None
-server.Face.resume = no_resume
 H = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
      "Authorization": "Bearer t"}
 def rpc(resp):
@@ -330,7 +337,14 @@ with TestClient(server.build_app()) as c:
         out = rpc(c.post("/mcp", headers=h, json={"jsonrpc": "2.0", "id": 10 + i,
                   "method": "tools/call", "params": {"name": t["name"], "arguments": {}}}))
         answered += "result" in out
-print(json.dumps({"tools": len(tools), "answered": answered, "modules": sorted(sys.modules)}))
+import importlib.metadata
+try:
+    importlib.metadata.distribution("nats-py")
+    nats_installed = True
+except importlib.metadata.PackageNotFoundError:
+    nats_installed = False
+print(json.dumps({"tools": len(tools), "answered": answered, "modules": sorted(sys.modules),
+                  "nats_installed": nats_installed, "connections": connections}))
 """
 
 
@@ -343,11 +357,19 @@ def test_local_mode_starts_lists_and_calls_every_tool_with_nothing_of_the_platfo
     report = json.loads(out.stdout.strip().splitlines()[-1])
     assert report["tools"] == len(json.loads(publish.PUBLISHED.read_text(encoding="utf-8")))
     assert report["answered"] == report["tools"]
+    # TRS-01 (amended 2026-11-26): 3tears core's SQLite L3 (aidc's state store) is loaded,
+    # with asyncpg for its error types; no NATS client (`nats`), no Postgres driver besides
+    # it, no LangGraph or LangChain, no 3tears registry. 3tears core imports its own
+    # threetears.nats modules (error types, subject names), which hold no client (TRS-01's
+    # amendment allows them, as long as the client is neither installed nor imported)
     forbidden = [m for m in report["modules"]
-                 if m.split(".")[0] in {"nats", "asyncpg", "psycopg", "psycopg2", "langgraph",
+                 if m.split(".")[0] in {"nats", "psycopg", "psycopg2", "langgraph",
                                         "langchain", "langchain_core", "fastmcp"}
-                 or m.startswith(("threetears.nats", "threetears.registry", "threetears.core"))]
+                 or m.startswith("threetears.registry")]
     assert forbidden == []
+    assert "threetears.core.backends.sqlite_file" in report["modules"]
+    assert report["nats_installed"] is False      # the NATS client is not even installed
+    assert report["connections"] == []            # nothing connects anywhere
 
 
 def test_aidc_uses_neither_fastmcp_nor_the_sdks_high_level_server():

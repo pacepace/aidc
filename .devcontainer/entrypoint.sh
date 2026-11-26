@@ -79,31 +79,23 @@ if [ "${AIDC_BACKEND:-}" = kubernetes ]; then
         || log "WARN: could not set umask 002 for shells and sudo (continuing)"
 fi
 
-# Enable the host's shared plugins inside the container (share_plugins).
+# Claude Code's managed settings: aidc's hooks (MCP-46), and the host's shared plugins
+# enabled when share_plugins is on (managed-settings.sh says why they go here).
 #
-# cmd-create.sh bind-mounts ~/.claude/plugins read-only, which lets Claude
-# Code RESOLVE the plugins — but a resolved plugin still won't LOAD unless it's
-# enabled. Not via ~/.claude/settings.json: that file is the session's copy of the
-# host's, installed on first start, and enablement written there would be lost
-# if the copy were ever re-seeded and would drift from the host's. Instead we write
-# /etc/claude-code/managed-settings.json — a container-local settings scope that
-# merges on top of the bridged user settings and is never mounted from the host.
-#
-# The enable-list is every plugin the operator has installed, read from the
-# mounted registry. share_plugins is opt-in, so enabling what they installed is
-# the expected behavior. Empty/missing registry -> nothing written.
+# cmd-create.sh bind-mounts ~/.claude/plugins read-only, which lets Claude Code RESOLVE the
+# plugins, but a resolved plugin still won't LOAD unless it's enabled. Not via
+# ~/.claude/settings.json: that file is the session's copy of the host's, installed on first
+# start, and enablement written there would be lost if the copy were ever re-seeded and would
+# drift from the host's. The enable-list is every plugin the operator has installed, read from
+# the mounted registry; share_plugins is opt-in, so enabling what they installed is expected.
+# shellcheck source=managed-settings.sh
+. /usr/local/bin/aidc-managed-settings.sh
 PLUGIN_REGISTRY="/home/vscode/.claude/plugins/installed_plugins.json"
-if [ "${AIDC_SHARE_PLUGINS:-false}" = "true" ] && [ -s "$PLUGIN_REGISTRY" ]; then
-    enabled_json=$(jq -c '{enabledPlugins: ((.plugins // {}) | keys | map({(.): true}) | add // {})}' "$PLUGIN_REGISTRY" 2>/dev/null || true)
-    if [ -n "$enabled_json" ] && [ "$enabled_json" != '{"enabledPlugins":{}}' ]; then
-        mkdir -p /etc/claude-code
-        printf '%s\n' "$enabled_json" > /etc/claude-code/managed-settings.json
-        chmod 0644 /etc/claude-code/managed-settings.json
-        names=$(printf '%s' "$enabled_json" | jq -r '.enabledPlugins | keys | join(", ")')
-        log "plugins: enabled in-container via managed-settings.json (${names})"
-    else
-        log "plugins: share_plugins=true but no installed plugins in registry; none enabled"
-    fi
+if aidc_install_managed_settings / "$PLUGIN_REGISTRY" "${AIDC_SHARE_PLUGINS:-false}"; then
+    names=$(jq -r '.enabledPlugins // {} | keys | join(", ")' /etc/claude-code/managed-settings.json 2>/dev/null)
+    log "claude managed settings: aidc's hooks installed${names:+; plugins enabled: ${names}}"
+else
+    log "WARN: could not write Claude's managed settings; aidc-mcp falls back to reading the screen"
 fi
 
 # If the mounted repo declares a Python version (.python-version, the pyenv

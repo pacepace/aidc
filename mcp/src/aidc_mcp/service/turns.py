@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import time
 from pathlib import Path
 from typing import Any
 
 from aidc_mcp import audit, backend
 from aidc_mcp import screen as scr
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
@@ -87,28 +87,28 @@ def _interrupt_reported(name: str, prompt_uuid: str) -> bool:
     return ss.reported_interrupts.get(name) == prompt_uuid
 
 
-def _write_marker(name: str, path: Path, **fields: str) -> None:
+def _write_marker(name: str, kind: str, **fields: str) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"session_instance": ss.session_instances.get(name, ""),
-                                    **fields}), encoding="utf-8")
-    except OSError as exc:
-        audit.log_event("session_marker_persist_failed", session=name, path=str(path),
+        state_store.for_dir(ss.WATCHER_STATE_DIR).put(
+            "markers", state_store.key_of(name, kind),
+            {"session_instance": ss.session_instances.get(name, ""), **fields},
+            session=name, kind=kind)
+    except Exception as exc:  # prawduct:allow prawduct/broad-except -- a marker only
+        audit.log_event("session_marker_persist_failed", session=name, marker=kind,
                   error_type=type(exc).__name__)
 
 
-def _read_marker(path: Path, instance: str) -> dict[str, Any] | None:
+def _read_marker(name: str, kind: str, instance: str) -> dict[str, Any] | None:
     """The marker's fields when it belongs to `instance`; otherwise None, and a marker
     that exists but belongs to another instance (or cannot be read) is removed."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    store = state_store.for_dir(ss.WATCHER_STATE_DIR)
+    key = state_store.key_of(name, kind)
+    data = store.get("markers", key)
+    if data is None:
         return None
-    except (OSError, ValueError):
-        data = None
     if isinstance(data, dict) and data.get("session_instance") == instance:
         return data
-    path.unlink(missing_ok=True)
+    store.delete("markers", key)
     return None
 
 
@@ -116,7 +116,7 @@ def record_reported_interrupt(name: str, prompt_uuid: str) -> None:
     # Only the latest unanswered prompt can be waiting on this report, so one per
     # session is all that is kept.
     ss.reported_interrupts[name] = prompt_uuid
-    _write_marker(name, ss.reported_interrupt_path(name), prompt_uuid=prompt_uuid)
+    _write_marker(name, ss.REPORTED_INTERRUPT_MARKER, prompt_uuid=prompt_uuid)
 
 
 async def _sync_session_markers(name: str) -> None:
@@ -135,10 +135,10 @@ async def _sync_session_markers(name: str) -> None:
     ss.session_instances[name] = current
     if known is None:
         try:
-            if _read_marker(ss.working_seen_path(name), current) is not None:
+            if _read_marker(name, ss.WORKING_SEEN_MARKER, current) is not None:
                 ss.working_indicator_seen.add(name)
-            reported = _read_marker(ss.reported_interrupt_path(name), current)
-        except OSError as exc:
+            reported = _read_marker(name, ss.REPORTED_INTERRUPT_MARKER, current)
+        except Exception as exc:  # prawduct:allow prawduct/broad-except -- markers only
             audit.log_event("session_marker_read_failed", session=name,
                       error_type=type(exc).__name__)
             return
@@ -153,7 +153,7 @@ async def read_screen(container: str, name: str) -> scr.ScreenState:
     state = scr.classify(raw)
     if state.working and not working_indicator_known(name):
         ss.working_indicator_seen.add(name)
-        _write_marker(name, ss.working_seen_path(name))
+        _write_marker(name, ss.WORKING_SEEN_MARKER)
     return state
 
 

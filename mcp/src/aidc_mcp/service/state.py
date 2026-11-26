@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aidc_mcp import audit
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 
 if TYPE_CHECKING:
@@ -130,12 +131,9 @@ unsubmitted_paste: dict[str, tuple[str, tuple[str, ...]]] = {}
 session_instances: dict[str, str] = {}
 
 
-def working_seen_path(name: str) -> Path:
-    return Path(WATCHER_STATE_DIR) / f"{ts.slug(name)}.working-text-seen"
-
-
-def reported_interrupt_path(name: str) -> Path:
-    return Path(WATCHER_STATE_DIR) / f"{ts.slug(name)}.interrupt-reported"
+#: the session markers kept in the state store (store.py's `markers`), by kind
+WORKING_SEEN_MARKER = "working-text-seen"
+REPORTED_INTERRUPT_MARKER = "interrupt-reported"
 
 
 # Consecutive unexpected drainer failures per session, for the restart backoff.
@@ -161,11 +159,12 @@ def forget_session_send_state(name: str) -> None:
     lock = invoke_locks.get(name)
     if lock is not None and not lock.locked():
         del invoke_locks[name]
-    for path in (working_seen_path(name), reported_interrupt_path(name)):
+    for kind in (WORKING_SEEN_MARKER, REPORTED_INTERRUPT_MARKER):
         try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            audit.log_event("session_state_forget_failed", session=name, path=str(path),
+            state_store.for_dir(WATCHER_STATE_DIR).delete("markers",
+                                                          state_store.key_of(name, kind))
+        except Exception as exc:  # prawduct:allow prawduct/broad-except -- a marker only
+            audit.log_event("session_state_forget_failed", session=name, marker=kind,
                       error_type=type(exc).__name__)
 
 

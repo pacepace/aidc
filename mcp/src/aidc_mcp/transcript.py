@@ -46,6 +46,9 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+from aidc_mcp import store as state_store
 
 # Assistant stop_reason values that mark a turn as complete (control returns to user).
 TERMINAL_STOP = frozenset({"end_turn", "stop_sequence"})
@@ -1322,8 +1325,8 @@ def slug(value: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in value)
 
 
-def watermark_path(base_dir: Path, session: str, conversation_id: str) -> Path:
-    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.json"
+def _watermark_key(session: str, conversation_id: str) -> str:
+    return state_store.key_of(session, conversation_id)
 
 
 def watermark_exists(base_dir: Path, session: str, conversation_id: str) -> bool:
@@ -1332,14 +1335,18 @@ def watermark_exists(base_dir: Path, session: str, conversation_id: str) -> bool
     Used to distinguish a first-ever watch (which must baseline forward-only, so
     pre-existing transcript history is not replayed) from a resume (which picks
     up where it left off — survives MCP restart)."""
-    return watermark_path(base_dir, session, conversation_id).exists()
+    return state_store.for_dir(base_dir).get(
+        "watermarks", _watermark_key(session, conversation_id)) is not None
 
 
 def load_watermark(base_dir: Path, session: str, conversation_id: str) -> Watermark:
     """Load the persisted mark, or a fresh zero mark if none/corrupt."""
-    path = watermark_path(base_dir, session, conversation_id)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        stored = state_store.for_dir(base_dir).get(
+            "watermarks", _watermark_key(session, conversation_id))
+        if not isinstance(stored, dict):
+            raise TypeError("no watermark")
+        data: dict[str, Any] = stored
         return Watermark(
             session=session,
             conversation_id=conversation_id,
@@ -1357,19 +1364,16 @@ def load_watermark(base_dir: Path, session: str, conversation_id: str) -> Waterm
             updated_at=str(data.get("updated_at", "")),
             baselined_at=str(data.get("baselined_at", "")),
         )
-    except (OSError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return Watermark(session=session, conversation_id=conversation_id)
 
 
 def save_watermark(base_dir: Path, mark: Watermark) -> None:
-    """Atomically persist the mark (temp + rename), matching the taint-flag pattern."""
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
+    """Persist the mark; returns once it is committed (store.py)."""
     mark.updated_at = now_iso()
-    path = watermark_path(base, mark.session, mark.conversation_id)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(mark.to_json(), encoding="utf-8")
-    os.replace(tmp, path)
+    state_store.for_dir(base_dir).put(
+        "watermarks", _watermark_key(mark.session, mark.conversation_id), asdict(mark),
+        session=mark.session, conversation_id=mark.conversation_id)
 
 
 # --- durable delivery ledger (structural exactly-once at the POST boundary) --
@@ -1422,37 +1426,18 @@ def delivery_fingerprint(turn: Turn) -> str:
     return content_fingerprint(turn.text)
 
 
-def ledger_path(base_dir: Path, session: str, conversation_id: str) -> Path:
-    """Delivery-ledger file, a sibling of the watermark (same state dir/keying)."""
-    return Path(base_dir) / f"{slug(session)}__{slug(conversation_id)}.delivered"
-
-
 def load_delivered(base_dir: Path, session: str, conversation_id: str) -> set[str]:
-    """The set of confirmed-delivered content fingerprints for this conversation.
-
-    Missing file -> empty set (nothing delivered yet). The file is append-only,
-    one hex fingerprint per line; a torn final line from a crash mid-append is a
-    value that can never equal a real sha256, so it is inert on load — it can
-    neither corrupt prior entries nor cause a false dedup."""
-    try:
-        text = ledger_path(base_dir, session, conversation_id).read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    return {line.strip() for line in text.splitlines() if line.strip()}
+    """The set of confirmed-delivered content fingerprints for this conversation
+    (empty when nothing was delivered yet)."""
+    return state_store.for_dir(base_dir).ledger(session, conversation_id)
 
 
 def record_delivered(base_dir: Path, session: str, conversation_id: str,
                      fingerprint: str) -> None:
-    """Append one confirmed-delivered fingerprint to the durable ledger.
-
-    Append-only: a crash mid-write can lose at most the trailing line (worst case
-    one future duplicate — never corruption of prior entries). Called ONLY after
-    a 2xx ack, so a turn that failed delivery or was dead-lettered is never
-    recorded and stays eligible for a later resend."""
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    with ledger_path(base, session, conversation_id).open("a", encoding="utf-8") as fh:
-        fh.write(fingerprint + "\n")
+    """Record one confirmed-delivered fingerprint in the durable ledger; returns once it
+    is committed. Called ONLY after a 2xx ack, so a turn that failed delivery or was
+    dead-lettered is never recorded and stays eligible for a later resend."""
+    state_store.for_dir(base_dir).ledger_add(session, conversation_id, fingerprint)
 
 
 # --- injected-prompt record (terminal-typed prompt attribution) ---------------
@@ -1492,20 +1477,13 @@ def prompt_fingerprint(text: str) -> str:
     return hashlib.sha256(normalize_prompt(text).encode("utf-8")).hexdigest()
 
 
-def sent_prompts_path(base_dir: Path, session: str) -> Path:
-    """Per-session (not per-conversation) record: a session has one tmux pane, and
-    whichever conversation watches it needs the same answer."""
-    return Path(base_dir) / f"{slug(session)}.sent-prompts.json"
-
-
 def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
     """Entries as ``[{"fp": <sha256>, "at": <epoch>, "by": <sent_by>}]``, expired
     ones dropped; "by" is "" for the caller's own prompt and for an entry written
-    before it existed. A missing or corrupt file is an empty record (never raises)."""
-    try:
-        data = json.loads(sent_prompts_path(base_dir, session).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return []
+    before it existed. The record is per session (not per conversation): a session has
+    one tmux pane, and whichever conversation watches it needs the same answer. A
+    missing or malformed record is empty (never raises)."""
+    data = state_store.for_dir(base_dir).get("sent_prompts", session)
     if not isinstance(data, list):
         return []
     out: list[dict] = []
@@ -1550,19 +1528,7 @@ def _valid_batch(raw: object) -> dict | None:
 
 
 def _save_sent_prompts(base_dir: Path, session: str, entries: list[dict]) -> None:
-    """Atomic write (temp + rename), matching save_watermark."""
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    path = sent_prompts_path(base, session)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def prompt_origin_path(base_dir: Path, session: str) -> Path:
-    """Per-session, like the send record: whose prompt the session's last
-    prompted turn answered."""
-    return Path(base_dir) / f"{slug(session)}.prompt-origin.json"
+    state_store.for_dir(base_dir).put("sent_prompts", session, entries, session=session)
 
 
 #: The origins a turn's prompt can have (``Turn.prompt_origin``), "" aside.
@@ -1574,36 +1540,25 @@ def record_prompt_origin(base_dir: Path, session: str, origin: str, *, sent_by: 
     """Remember whose prompt ``session``'s latest prompted turn answered (one of
     PROMPT_ORIGINS, and for "person" who sent it), and the pasted batch it answered
     (see _valid_batch; None when no batch of the MCP's opened it), so a continuation
-    of that turn can say so. Atomic write (temp + rename), matching save_watermark."""
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    path = prompt_origin_path(base, session)
-    tmp = path.with_suffix(path.suffix + ".new")
+    of that turn can say so. Per session, like the send record."""
     record: dict = {"origin": origin, "sent_by": sent_by, "at": now_fn()}
     if batch:
         record["batch"] = batch
-    tmp.write_text(json.dumps(record), encoding="utf-8")
-    os.replace(tmp, path)
+    state_store.for_dir(base_dir).put("prompt_origins", session, record, session=session)
 
 
 def last_prompt_batch(base_dir: Path, session: str) -> dict | None:
     """The pasted batch ``session``'s latest prompted turn answered, or None (none on
-    record, or a missing or corrupt file; never raises)."""
-    try:
-        data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
+    record, or a malformed one; never raises)."""
+    data = state_store.for_dir(base_dir).get("prompt_origins", session)
     return _valid_batch(data.get("batch")) if isinstance(data, dict) else None
 
 
 def last_prompt_origin(base_dir: Path, session: str) -> tuple[str, str]:
     """Whose prompt ``session``'s latest prompted turn answered, and who sent it
-    when that was a person: ("", "") when none is on record. A missing or corrupt
-    file is ("", "") (never raises)."""
-    try:
-        data = json.loads(prompt_origin_path(base_dir, session).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return "", ""
+    when that was a person: ("", "") when none is on record, or a malformed one (never
+    raises)."""
+    data = state_store.for_dir(base_dir).get("prompt_origins", session)
     if not isinstance(data, dict) or data.get("origin") not in PROMPT_ORIGINS:
         return "", ""
     sent_by = data.get("sent_by") if data["origin"] == "person" else ""
@@ -1722,24 +1677,21 @@ def new_prompt_id() -> str:
     return "p-" + os.urandom(8).hex()
 
 
-def send_queue_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{slug(session)}.send-queue.json"
-
-
 def save_send_queue(base_dir: Path, session: str, prompts: Sequence[QueuedPrompt]) -> None:
-    """Atomic write (temp + rename). An empty queue removes the file, so a file on
-    disk always means prompts are waiting."""
-    base = Path(base_dir)
-    path = send_queue_path(base, session)
+    """Persist the session's queue (design 10 S4's object); returns once it is committed.
+    An empty queue removes the row, so a stored queue always means prompts are waiting."""
+    store = state_store.for_dir(base_dir)
     if not prompts:
-        path.unlink(missing_ok=True)
+        store.delete("send_queues", session)
         return
-    base.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps({"session": session, "updated_at": now_iso(),
-                               "prompts": [asdict(q) for q in prompts]}, indent=1),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    store.put("send_queues", session,
+              {"session": session, "updated_at": now_iso(),
+               "prompts": [asdict(q) for q in prompts]}, session=session)
+
+
+def has_send_queue(base_dir: Path, session: str) -> bool:
+    """Whether a queue is stored for `session` (prompts are waiting)."""
+    return state_store.for_dir(base_dir).get("send_queues", session) is not None
 
 
 def _persisted_paste_text(entry: dict) -> str:
@@ -1754,14 +1706,14 @@ def _persisted_paste_text(entry: dict) -> str:
                         conversation_id=str(entry.get("conversation_id", "")))
 
 
-def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], list[Path]]:
-    """Every persisted queue under `base_dir` as {session: prompts}, plus the files
-    that could not be read (left in place, for a person to look at)."""
+def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], list[str]]:
+    """Every persisted queue as {session: prompts}, plus the sessions whose stored queue
+    could not be read (left in place, for a person to look at)."""
     queues: dict[str, list[QueuedPrompt]] = {}
-    unreadable: list[Path] = []
-    for path in sorted(Path(base_dir).glob("*.send-queue.json")):
+    unreadable: list[str] = []
+    for row in state_store.for_dir(base_dir).rows("send_queues"):
+        data = row.document
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
             session = data["session"]
             prompts = [QueuedPrompt(text=str(e["text"]),
                                     enqueued_at=str(e.get("enqueued_at", "")),
@@ -1778,13 +1730,12 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
                        for e in data["prompts"]]
             if not isinstance(session, str) or not session:
                 raise ValueError("no session")
-        except (OSError, ValueError, TypeError, KeyError, RecursionError):
-            unreadable.append(path)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(row.key)
             continue
         if prompts:
             queues[session] = prompts
     return queues, unreadable
-
 
 # --- persisted webhooks (MCP-34) ------------------------------------------------
 #
@@ -1794,43 +1745,40 @@ def load_send_queues(base_dir: Path) -> tuple[dict[str, list[QueuedPrompt]], lis
 # Readers: the MCP on start (which watchers to resume), and a person inspecting
 # watcher-state/. Written when a watcher opens, removed on session_unwatch.
 
-def watch_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{slug(session)}.watch.json"
-
-
 def save_watch(base_dir: Path, session: str, conversation_id: str, callback_base: str, *,
                session_instance: str = "") -> None:
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    path = watch_path(base, session)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps({"session": session, "conversation_id": conversation_id,
-                               "callback_base": callback_base, "session_instance": session_instance,
-                               "updated_at": now_iso()},
-                              indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    state_store.for_dir(base_dir).put(
+        "watches", session,
+        {"session": session, "conversation_id": conversation_id,
+         "callback_base": callback_base, "session_instance": session_instance,
+         "updated_at": now_iso()}, session=session)
+
+
+def has_watch(base_dir: Path, session: str) -> bool:
+    """Whether a webhook is stored for `session`."""
+    return state_store.for_dir(base_dir).get("watches", session) is not None
 
 
 def remove_watch(base_dir: Path, session: str) -> None:
-    watch_path(base_dir, session).unlink(missing_ok=True)
+    state_store.for_dir(base_dir).delete("watches", session)
 
 
-def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[Path]]:
+def load_watches(base_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
     """Every persisted webhook as {session, conversation_id, callback_base,
-    session_instance}, plus the files that could not be read (left in place).
-    `session_instance` is "" when it could not be read when the watch was saved."""
+    session_instance}, plus the sessions whose stored webhook could not be read (left in
+    place). `session_instance` is "" when it could not be read when the watch was saved."""
     watches: list[dict[str, str]] = []
-    unreadable: list[Path] = []
-    for path in sorted(Path(base_dir).glob("*.watch.json")):
+    unreadable: list[str] = []
+    for row in state_store.for_dir(base_dir).rows("watches"):
+        data = row.document
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
             entry = {k: data[k] for k in ("session", "conversation_id", "callback_base")}
             if not all(isinstance(v, str) and v for v in entry.values()):
                 raise ValueError("incomplete watch")
             instance = data.get("session_instance", "")
             entry["session_instance"] = instance if isinstance(instance, str) else ""
-        except (OSError, ValueError, TypeError, KeyError, RecursionError):
-            unreadable.append(path)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            unreadable.append(row.key)
             continue
         watches.append(entry)
     return watches, unreadable
@@ -1894,36 +1842,25 @@ def take_sent_entry(base_dir: Path, session: str, text: str, *,
 # that turn, which opened with prompts of its own. Its batch waits here, per session,
 # until the watcher delivers the next reply, which names it after the turn's own.
 
-def joined_batches_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{slug(session)}.joined-batches.json"
-
-
 def record_joined_batch(base_dir: Path, session: str, batch: dict) -> None:
-    """Remember a joined prompt's batch for the next delivered reply. Atomic write."""
+    """Remember a joined prompt's batch for the next delivered reply."""
     valid = _valid_batch(batch)
     if not valid:
         return
     pending = take_joined_batches(base_dir, session, remove=False)
     pending.append(valid)
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    path = joined_batches_path(base, session)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps(pending[-_SENT_PROMPTS_MAX:]), encoding="utf-8")
-    os.replace(tmp, path)
+    state_store.for_dir(base_dir).put("joined_batches", session,
+                                      pending[-_SENT_PROMPTS_MAX:], session=session)
 
 
 def take_joined_batches(base_dir: Path, session: str, *, remove: bool = True) -> list[dict]:
     """The joined batches waiting for a reply, oldest first, removed unless
-    ``remove`` is False. A missing or corrupt file is none (never raises on read)."""
-    path = joined_batches_path(base_dir, session)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        data = []
+    ``remove`` is False. A missing or malformed record is none (never raises on read)."""
+    store = state_store.for_dir(base_dir)
+    data = store.get("joined_batches", session)
     out = [b for b in (_valid_batch(x) for x in data) if b] if isinstance(data, list) else []
     if remove and out:
-        path.unlink(missing_ok=True)
+        store.delete("joined_batches", session)
     return out
 
 
@@ -1936,15 +1873,8 @@ def take_joined_batches(base_dir: Path, session: str, *, remove: bool = True) ->
 _PASTED_IDS_MAX = 500
 
 
-def pasted_ids_path(base_dir: Path, session: str) -> Path:
-    return Path(base_dir) / f"{slug(session)}.pasted-prompts.json"
-
-
 def _load_pasted_ids(base_dir: Path, session: str) -> list[dict]:
-    try:
-        data = json.loads(pasted_ids_path(base_dir, session).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return []
+    data = state_store.for_dir(base_dir).get("pasted_ids", session)
     if not isinstance(data, list):
         return []
     return [e for e in data if isinstance(e, dict) and isinstance(e.get("id"), str)
@@ -1953,23 +1883,18 @@ def _load_pasted_ids(base_dir: Path, session: str) -> list[dict]:
 
 def record_pasted_ids(base_dir: Path, session: str, prompt_ids: Sequence[str],
                       pasted_at: str) -> None:
-    """Remember that these prompts were pasted at ``pasted_at``. Atomic write."""
+    """Remember that these prompts were pasted at ``pasted_at``."""
     if not prompt_ids:
         return
     entries = _load_pasted_ids(base_dir, session)
     entries.extend({"id": i, "at": pasted_at} for i in prompt_ids)
     del entries[:-_PASTED_IDS_MAX]
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    path = pasted_ids_path(base, session)
-    tmp = path.with_suffix(path.suffix + ".new")
-    tmp.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
-    os.replace(tmp, path)
+    state_store.for_dir(base_dir).put("pasted_ids", session, entries, session=session)
 
 
 def pasted_at_of(base_dir: Path, session: str, prompt_id: str) -> str:
     """When the prompt ``prompt_id`` was pasted into ``session``, or "" when it is
-    not on record. A missing or corrupt file is "" (never raises)."""
+    not on record (never raises)."""
     for e in reversed(_load_pasted_ids(base_dir, session)):
         if e["id"] == prompt_id:
             return e["at"]

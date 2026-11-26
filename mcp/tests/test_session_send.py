@@ -8,7 +8,6 @@ container/tmux helper monkeypatched, so the async contract is pinned without a
 real Docker session.
 """
 import asyncio
-import json
 
 import pytest
 
@@ -22,6 +21,7 @@ from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
 from tests import toolcall
+from tests.statefiles import dead_letters, put_raw, stored
 
 # The wiring fixture patches asyncio.sleep MODULE-WIDE (asyncio is the real
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
@@ -276,7 +276,7 @@ async def test_errors_when_the_session_does_not_exist(wiring):
     assert "proj" not in ss.sent_awaiting_echo   # its send-path state is forgotten
     # Checked before the webhook opens: nothing is started or saved for it.
     assert "proj" not in ss.session_watchers
-    assert not ts.watch_path(ss.WATCHER_STATE_DIR, "proj").exists()
+    assert not ts.has_watch(ss.WATCHER_STATE_DIR, "proj")
 
 
 async def test_claude_not_running_holds_the_prompt_instead_of_refusing(wiring):
@@ -382,7 +382,7 @@ async def test_a_long_busy_turn_never_costs_the_prompt(wiring):
     await send(name="proj", prompt="hello", conversation_id="c1")
     await _let_drainer_run("proj", ticks=500)
     assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
-    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert dead_letters(ss.WATCHER_STATE_DIR, kind="send") == []
 
     wiring.idle_ok = True
     await _let_drainer_run("proj")
@@ -432,10 +432,10 @@ async def test_killing_the_session_dead_letters_every_waiting_prompt(wiring):
     await _let_drainer_run("proj", ticks=200)
 
     assert "proj" not in ss.pending_sends
-    dead = sorted(json.loads(p.read_text())["prompt"] for p in
-                  (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json"))
+    dead = sorted(d["prompt"] for d in
+                  dead_letters(ss.WATCHER_STATE_DIR, kind="send", session="proj"))
     assert dead == ["one", "two"]
-    assert not ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj").exists()
+    assert not ts.has_send_queue(ss.WATCHER_STATE_DIR, "proj")
 
 
 async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
@@ -460,7 +460,7 @@ async def test_failed_pastes_retry_past_three_attempts_then_land(wiring):
     # Backoff between failed pastes: 2, 4, 8 … s, capped.
     retries = [x for x in wiring.sleeps if x not in (0.0, tn.FREE_POLL_S)]
     assert retries == [2.0, 4.0, 8.0, 16.0, 32.0]
-    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert dead_letters(ss.WATCHER_STATE_DIR, kind="send") == []
 
 
 async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
@@ -490,7 +490,7 @@ async def test_queue_is_persisted_and_resumed_after_a_restart(wiring):
     await snd.resume_send_queues()
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [f"{_f('first')} [next message] {_f('second')}"]
-    assert not ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj").exists()
+    assert not ts.has_send_queue(ss.WATCHER_STATE_DIR, "proj")
 
 
 async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
@@ -499,8 +499,8 @@ async def test_resume_dead_letters_queues_of_sessions_that_are_gone(wiring):
     wiring.session_state = tn.SESSION_GONE
     await snd.resume_send_queues()
     assert "gone" not in ss.pending_sends
-    [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__gone__*.json")
-    assert json.loads(dead.read_text())["reason"] == "session_killed"
+    [dead] = dead_letters(ss.WATCHER_STATE_DIR, kind="send", session="gone")
+    assert dead["reason"] == "session_killed"
 
 
 async def test_queued_prompts_record_the_session_they_were_accepted_for(wiring):
@@ -540,8 +540,8 @@ async def test_a_session_recreated_during_the_wait_does_not_get_the_old_prompt(w
 
     assert not wiring.paste_calls
     assert "proj" not in ss.pending_sends
-    [dead] = (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")
-    assert json.loads(dead.read_text())["prompt"] == "for the old session"
+    [dead] = dead_letters(ss.WATCHER_STATE_DIR, kind="send", session="proj")
+    assert dead["prompt"] == "for the old session"
 
 
 async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enqueue(
@@ -561,20 +561,19 @@ async def test_a_prompt_is_not_lost_when_the_queue_list_is_replaced_during_enque
 
 
 async def test_an_unreadable_saved_queue_is_kept_aside_not_overwritten(wiring):
-    path = ts.send_queue_path(ss.WATCHER_STATE_DIR, "proj")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not json")
-    # Startup cannot tell whose it is (the name is inside the file): logged, left alone.
+    put_raw(ss.WATCHER_STATE_DIR, "send_queues", {"prompts": 5}, "proj", session="proj")
+    # Startup cannot read it: logged, left alone.
     await snd.resume_send_queues()
-    assert path.read_text() == "{not json"
+    assert stored(ss.WATCHER_STATE_DIR, "send_queues", "proj") == {"prompts": 5}
 
     app, send = _make_send()
     ss.session_watchers["proj"] = _StubTask()
     wiring.idle_ok = "claude_busy"
     await send(name="proj", prompt="new", conversation_id="c1")
-    [aside] = path.parent.glob(f"{path.name}.unreadable-*")
-    assert aside.read_text() == "{not json"
-    assert [q.text for q in ts.load_send_queues(path.parent)[0]["proj"]] == ["new"]
+    # kept for a person as a dead letter, and the session's queue goes on without it
+    [aside] = dead_letters(ss.WATCHER_STATE_DIR, kind="send", session="proj")
+    assert aside == {"prompts": 5}
+    assert [q.text for q in ts.load_send_queues(ss.WATCHER_STATE_DIR)[0]["proj"]] == ["new"]
 
 
 async def test_the_drainer_reports_a_prompt_that_has_waited_long(wiring, monkeypatch):
@@ -799,7 +798,7 @@ async def test_a_docker_error_is_not_a_killed_session(wiring):
     wiring.session_state = tn.SESSION_UNKNOWN
     await _let_drainer_run("proj", ticks=200)
     assert [q.text for q in ss.pending_sends["proj"]] == ["hello"]
-    assert not list((ss.WATCHER_STATE_DIR / "dead-letter").glob("send__*"))
+    assert dead_letters(ss.WATCHER_STATE_DIR, kind="send") == []
 
     wiring.session_state = tn.SESSION_EXISTS
     wiring.idle_ok = True
@@ -1074,8 +1073,7 @@ async def test_a_prompt_cancelled_before_the_paste_is_left_out_of_the_batch(wiri
     await _let_drainer_run("proj")
     assert [text for _, text, _ in wiring.paste_calls] == [
         f"{_THREE_SENT[0]} [next message] {_THREE_SENT[2]}"]
-    dead = [json.loads(p.read_text()) for p in
-            (ss.WATCHER_STATE_DIR / "dead-letter").glob("send__proj__*.json")]
+    dead = dead_letters(ss.WATCHER_STATE_DIR, kind="send", session="proj")
     assert [(x["prompt_id"], x["reason"]) for x in dead] == [(ids[1], "cancelled")]
 
 

@@ -26,6 +26,7 @@ from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
 from tests import toolcall
 from tests.logs import patch_log_event
+from tests.statefiles import stored
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
 NOW = 1_789_609_900.0   # 2026-09-17T01:51:40Z
@@ -207,7 +208,7 @@ class TestCheckFree:
         session.screen = _screen("idle-empty")
         assert await session.check() == "claude_busy"
         assert ss.last_free_verdict["proj"][1] == "status_row_unproven"
-        assert not ss.working_seen_path("proj").exists()   # the stale marker is gone
+        assert stored(ss.WATCHER_STATE_DIR, "markers", "proj", ss.WORKING_SEEN_MARKER) is None   # the stale marker is gone
 
     async def test_a_session_created_again_while_the_mcp_runs_is_forgotten(self, session):
         session.screen = _screen("busy-tool-empty-box")

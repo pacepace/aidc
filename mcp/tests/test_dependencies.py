@@ -95,11 +95,19 @@ def test_the_mesh_extra_is_declared():
 
 
 def test_local_mode_resolves_none_of_the_platform():
-    # TRS-17: the local server needs no NATS, Postgres driver, LangGraph or LangChain; a 3tears
-    # package that started pulling one in would make every aidc install carry it
+    # TRS-17 (amended 2026-11-26): the local server needs no NATS client, LangGraph or
+    # LangChain, and no Postgres driver but asyncpg, which 3tears core's SQLite L3 raises the
+    # errors of (aidc's state store). A 3tears package that started pulling one in would make
+    # every aidc install carry it.
     names = set(_packages(_lock()))
     heavy = {n for n in names
-             if n in {"nats-py", "asyncpg", "psycopg", "psycopg2", "psycopg-binary", "3tears",
-                      "3tears-nats", "3tears-agent-tools", "3tears-registry"}
+             if n in {"nats-py", "psycopg", "psycopg2", "psycopg-binary",
+                      "3tears-agent-tools", "3tears-registry"}
              or n.startswith(("langgraph", "langchain"))}
     assert not heavy, f"the lock resolves platform packages: {sorted(heavy)}"
+
+
+def test_the_state_store_comes_from_3tears_core_on_the_same_commit():
+    # TRS-25: the SQLite L3 is 3tears core's, pinned like the rest of the family
+    names = set(_packages(_lock()))
+    assert {"3tears", "asyncpg", "sqlalchemy"} <= names

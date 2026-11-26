@@ -303,9 +303,11 @@ Found in the joint test: after a restart the send queue resumed and pasted its p
 answered, and no callback was sent, because webhooks lived only in memory. Now:
 
 - Opening a webhook (`session_watch`, or `session_send` with a `conversation_id`) saves
-  `watcher-state/<session>.watch.json` (`session`, `conversation_id`, `callback_base`,
-  `session_instance`, `updated_at`; atomic write). `session_unwatch` removes it.
-- At startup (`server.ResumeOnStartup`), after the send queues, `resume_watchers` reopens every
+  the session's webhook (`session`, `conversation_id`, `callback_base`, `session_instance`,
+  `updated_at`) in aidc-mcp's state store (from 2.0; 1.x wrote
+  `watcher-state/<session>.watch.json`; see `.prawduct/artifacts/data-model.md`).
+  `session_unwatch` removes it.
+- At startup (the server's lifespan start), after the send queues, `delivery.resume_watches` reopens every
   saved webhook in scope whose session still exists, and removes the file of one whose session
   is gone or is a different instance (killed and created again: the new session was never asked
   to report to that conversation; an upgraded session is the same instance and keeps it). An
@@ -403,7 +405,8 @@ Two questions are kept apart, because they have different callers:
    Claude Code that renames the text costs a slow queue, never a paste into a running turn. The
    send path learns the text on its own screen reads; the watcher reads the screen while a turn
    is in progress until it has seen it once. Having seen it is remembered in
-   `watcher-state/<session>.working-text-seen`, so a restart does not forget it. The marker
+   aidc-mcp's state store (a `working-text-seen` marker; 1.x's
+   `watcher-state/<session>.working-text-seen`), so a restart does not forget it. The marker
    records the session instance it was seen on (S4 item 5), and one from another instance is
    ignored and removed, so a session killed and created again under the same name, perhaps on a
    Claude Code whose working text reads differently, never inherits it; when the instance changes
@@ -452,7 +455,7 @@ sent-record entry. Until it has reported that prompt, the send path holds a sess
 watcher as `interrupt_not_reported_yet`, so the orchestrator hears about the interrupt before its
 next prompt lands. Once reported, that prompt's turn is over (`interrupt_reported`) unless the
 status row shows Claude working, and the report is kept, with its session instance, in
-`watcher-state/<session>.interrupt-reported`: the
+the state store (an `interrupt-reported` marker; 1.x's `watcher-state/<session>.interrupt-reported`): the
 watcher's watermark is past the prompt by then, so after a restart nothing would report it again,
 and a session remembered only in memory read busy for good (found in the joint test, when a
 queued prompt waited behind an interrupt reported before a restart). A tail made of a local command, its output, or a background task's notification is
@@ -545,13 +548,14 @@ ways:
 3. **Paste failures retry** with backoff (2, 4, 8 … s, capped at 60 s) and no attempt limit;
    each is logged and shown as `paste_failing`. A failed paste in `session_send` itself queues
    the prompt the same way.
-4. **Persisted.** The queue is written to the watcher-state dir (atomic temp+rename, like the
-   watermark) on every change; an emptied queue removes its file. When `aidc-mcp` starts
-   (`server.ResumeOnStartup`, on the ASGI lifespan start), `resume_send_queues` gives each
+4. **Persisted.** The queue is written to aidc-mcp's state store (from 2.0; 1.x wrote a file
+   in the watcher-state dir) on every change, committed before the write returns; an emptied
+   queue removes its row. When `aidc-mcp` starts
+   (the server's lifespan start), `resume_send_queues` gives each
    persisted queue a drainer, and dead-letters the queue of a session that is gone. An
-   unreadable queue file is logged and left in place at startup (its session's name is inside
-   it); the first send to that session renames it to `<file>.unreadable-<time>` before saving,
-   so it is kept for a person rather than overwritten. Loading a saved queue happens once per
+   unreadable stored queue is logged and left in place at startup; the first send to that
+   session moves it to a dead letter (`queue_unreadable`) before saving, so it is kept for a
+   person rather than overwritten. Loading a saved queue happens once per
    process, under the session's send lock, from whichever comes first: startup resume or a
    `session_send` to that session. Saved prompts always go ahead of new ones.
 5. **The only exits** are "pasted" and "session gone": the session no longer exists, or a
@@ -592,10 +596,11 @@ accepted one.
 
 **Persisted format.** A persisted queue locks in a schema, so its questions come first. What reads
 it: the MCP on restart (to resume draining), `session_status` (to report), and a person
-inspecting the MCP's `watcher-state/` dir after an incident. The questions it answers: which
+inspecting the MCP's state after an incident (`python -m aidc_mcp.store` in its container
+prints the store; 1.x kept one file per session in `watcher-state/`). The questions it answers: which
 prompts are waiting for which session, in what order, since when, how many paste attempts each
-has had, and the last recorded waiting reason. File:
-`watcher-state/<session>.send-queue.json`, one object per session:
+has had, and the last recorded waiting reason. One document per session (the store's
+`send_queues` row; 1.x's `watcher-state/<session>.send-queue.json`):
 
 ```json
 { "session": "orchestrator",

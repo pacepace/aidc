@@ -6,13 +6,13 @@ No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from pathlib import Path
 
 import httpx
 
 from aidc_mcp import audit, auth
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import config as orc
 
@@ -141,12 +141,8 @@ async def deliver_with_retry(turn: ts.Turn, *, post_fn, sleep_fn=asyncio.sleep,
 
 def write_dead_letter(state_dir: Path, session: str, conversation_id: str, turn: ts.Turn) -> None:
     """Persist an undelivered turn so it is recorded, not silently lost (MCP-18)."""
-    dl = Path(state_dir) / "dead-letter"
-    dl.mkdir(parents=True, exist_ok=True)
-    name = f"{ts.slug(session)}__{ts.slug(conversation_id)}__{ts.slug(turn.terminal_uuid)}.json"
-    (dl / name).write_text(
-        json.dumps({"session": session, "conversation_id": conversation_id,
-                    "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok,
-                    "interrupted": turn.interrupted}),
-        encoding="utf-8",
-    )
+    state_store.for_dir(state_dir).add_dead_letter(
+        "reply", session, conversation_id, "undelivered",
+        {"session": session, "conversation_id": conversation_id,
+         "turn_uuid": turn.terminal_uuid, "content": turn.text, "ok": turn.ok,
+         "interrupted": turn.interrupted})

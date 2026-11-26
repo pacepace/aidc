@@ -91,6 +91,9 @@ one plan as asked.
 - 04: what "on change" (MCP-09) means for 2.0: a paste, a delivered reply, a create, an interrupt (agent or headless); a scoped server reports only its own sessions. Chunk 24 adds the hook events (a turn starting or ending, a permission prompt, idle), which also cover a person typing into the terminal; a taint, or a kill or stop from the CLI, reach a subscriber on its next read.
 - 04: the orchestrator round trip waits for the owner (asked through main 2026-11-26); everything else in 04 is built and tested.
 - 05: the call scope is entered in `AidcTool.execute`, not the MCP face, so the mesh face gets the same correlation and span; access-log events also go out as observe log lines (the file and its fields unchanged); export and metrics are opt-in extras, not in the default image. TRS-13's boundary forbids the 3tears face types (threetears.mcp, threetears.tool_contract) in the service, not observe, which every module logs through.
+- 07: rows keep 1.x's documented JSON documents under their natural keys (data-model.md), so the documented shapes stay the contract and the persistence functions keep their signatures; the store runs on one loop thread of its own behind a synchronous interface, as the 1.x file writes were synchronous. Only the four column types both 3tears stores share are used. Switching the L3 to Postgres by configuration (the store creates no Postgres tables yet) belongs with the mesh face in chunk 21, where the first Postgres deployment is; recorded here so it is not lost.
+- 07: TRS-01 amended in this chunk's commit (main, 2026-11-26): 3tears' own `threetears.nats` modules that core imports are allowed while the NATS client is neither installed nor imported; the import test checks both and that nothing connects.
+- 23: the event format is Claude Code's own hook input plus `event` and `at`, so a field a newer Claude Code adds reaches the MCP without a change here; events go to the mirror dir the MCP already reads (both backends), never to the MCP. The git agent's managed settings are the git wave's files (gitctl/), so its hooks were asked of that wave (main, 2026-11-26). The live check's Claude-fired half needs a logged-in Claude in the scratch session: asked of the owner (main, 2026-11-26).
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with
@@ -454,7 +457,9 @@ Order follows design-13 "Upstream work".
 ### Chunk 21: Mesh delivery, the per-user server on the mesh, images
 
 - **Description:** The mesh delivery channel if Q2 adds it; the per-user cluster server running
-  in mesh mode or both by config; the image(s) per Q3.
+  in mesh mode or both by config; the image(s) per Q3; aidc-mcp's state store on the Postgres L3
+  by configuration (store.py's tables created on Postgres, the same collections; chunk 07 built
+  it on SQLite).
 - **Depends on:** 12, 20; gates Q2, Q3.
 - **Requirements:** TRS-17, TRS-19, TRS-23, TRS-24.
 - **Done when:** live, on a real mesh: an orchestrator calls `aidc.session_send` and gets the turn;

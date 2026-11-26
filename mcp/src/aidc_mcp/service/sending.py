@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -18,6 +17,7 @@ from typing import Any
 from aidc_mcp import audit, backend, headless, scope
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
+from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp import turns_view as tv
 from aidc_mcp.service import callbacks as cbk
@@ -239,20 +239,15 @@ async def wait_until_free(container: str, name: str, timeout: float) -> str:
 def write_send_dead_letter(session: str, queued: ts.QueuedPrompt, reason: str) -> None:
     """Persist a prompt that will never be pasted because its session is gone, so it
     is recorded, not lost. Sibling of cbk.write_dead_letter (an undelivered REPLY)."""
-    dl = Path(ss.WATCHER_STATE_DIR) / "dead-letter"
     try:
-        dl.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(
-            f"{queued.enqueued_at}\n{queued.text}".encode()).hexdigest()[:16]
-        (dl / f"send__{ts.slug(session)}__{digest}.json").write_text(
-            json.dumps({"session": session, "prompt": queued.text, "reason": reason,
-                        "prompt_id": queued.prompt_id,
-                        "enqueued_at": queued.enqueued_at,
-                        "paste_attempts": queued.paste_attempts,
-                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
-            encoding="utf-8",
-        )
-    except OSError as exc:
+        state_store.for_dir(ss.WATCHER_STATE_DIR).add_dead_letter(
+            "send", session, queued.conversation_id, reason,
+            {"session": session, "prompt": queued.text, "reason": reason,
+             "prompt_id": queued.prompt_id,
+             "enqueued_at": queued.enqueued_at,
+             "paste_attempts": queued.paste_attempts,
+             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    except Exception as exc:  # prawduct:allow prawduct/broad-except -- logged, never lost silently
         audit.log_event("session_send_dead_letter_failed", session=session, reason=reason,
                   error_type=type(exc).__name__)
 
@@ -683,22 +678,17 @@ async def load_persisted_queue(container: str, name: str) -> None:
 
 async def _load_persisted_queue_once(container: str, name: str) -> None:
     ss.queue_loaded.add(name)
-    path = ts.send_queue_path(ss.WATCHER_STATE_DIR, name)
-    if not path.exists():
+    if not ts.has_send_queue(ss.WATCHER_STATE_DIR, name):
         return
-    queues, unreadable = ts.load_send_queues(path.parent)
-    if path in unreadable:
-        # Kept for a person under another name, so saving this session's queue from
-        # now on does not overwrite it.
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        aside = path.with_name(f"{path.name}.unreadable-{stamp}")
-        try:
-            path.rename(aside)
-        except OSError as exc:
-            audit.log_event("session_send_queue_unreadable", path=str(path), kept_as="",
-                      error_type=type(exc).__name__)
-        else:
-            audit.log_event("session_send_queue_unreadable", path=str(path), kept_as=str(aside))
+    queues, unreadable = ts.load_send_queues(ss.WATCHER_STATE_DIR)
+    if name in unreadable:
+        # Kept for a person as a dead letter, so saving this session's queue from now on
+        # does not overwrite it.
+        store = state_store.for_dir(ss.WATCHER_STATE_DIR)
+        store.add_dead_letter("send", name, "", "queue_unreadable",
+                              store.get("send_queues", name))
+        store.delete("send_queues", name)
+        audit.log_event("session_send_queue_unreadable", session=name, kept_as="dead_letter")
         return
     saved = queues.get(name, [])
     if not saved:
@@ -731,8 +721,8 @@ async def resume_send_queues() -> None:
     """Pick up every persisted queue in scope after an aidc-mcp start. Unreadable
     queue files are logged and left for a person."""
     queues, unreadable = ts.load_send_queues(ss.WATCHER_STATE_DIR)
-    for path in unreadable:
-        audit.log_event("session_send_queue_unreadable", path=str(path))
+    for name in unreadable:
+        audit.log_event("session_send_queue_unreadable", session=name)
     for name in queues:
         if scope.refusal(name) is not None:
             continue   # another server's session: leave its queue file alone

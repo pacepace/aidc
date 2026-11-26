@@ -36,6 +36,7 @@ from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
 from tests import toolcall
+from tests.statefiles import dead_letters
 
 # --- transcript fixture builders (a deterministic stand-in for Claude) --------
 
@@ -381,9 +382,9 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q")), _assistant("a1", "UNDELIVERABLE")])
     await h.drain()
 
-    dead = list((h.state / "dead-letter").glob("*.json"))
+    dead = dead_letters(h.state)
     assert len(dead) == 1
-    assert json.loads(dead[0].read_text())["content"] == "UNDELIVERABLE"
+    assert dead[0]["content"] == "UNDELIVERABLE"
     assert ts.load_watermark(h.state, "proj", "conv-1").last_delivered_uuid == "a1"
 
 
@@ -420,7 +421,7 @@ async def test_unwatch_forgets_the_saved_webhook(harness):
     h = harness
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     await toolcall.tool("session_unwatch")(name="proj")
-    assert not ts.watch_path(h.state, "proj").exists()
+    assert not ts.has_watch(h.state, "proj")
     ss.session_watchers.clear()
     await dlv.resume_watches(lambda: None)
     assert "proj" not in ss.session_watchers
@@ -436,8 +437,8 @@ async def test_resume_skips_webhooks_of_removed_or_out_of_scope_sessions(harness
     await dlv.resume_watches(lambda: None)
 
     assert not ss.session_watchers
-    assert not ts.watch_path(h.state, "proj").exists()   # its session is gone
-    assert ts.watch_path(h.state, "other").exists()      # another server's to resume
+    assert not ts.has_watch(h.state, "proj")   # its session is gone
+    assert ts.has_watch(h.state, "other")      # another server's to resume
 
 
 async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
@@ -448,7 +449,7 @@ async def test_resume_drops_a_webhook_whose_session_was_recreated(harness):
     h.instance = "id-2"
     await dlv.resume_watches(lambda: None)
     assert "proj" not in ss.session_watchers
-    assert not ts.watch_path(h.state, "proj").exists()
+    assert not ts.has_watch(h.state, "proj")
 
 
 async def test_resume_keeps_a_webhook_when_the_id_cannot_be_read(harness):
@@ -592,7 +593,7 @@ async def test_a_prompt_whose_session_is_removed_is_reported_not_delivered(harne
         "error_code": "prompt_dropped",
         "prompts": [{"prompt_id": "p-eight", "sent_by": "", "conversation_id": "conv-1"}]}]
     assert h.orchestrator.posts[0]["url"].endswith("/callback/conv-1")
-    assert len(list((h.state / "dead-letter").glob("send__proj__*.json"))) == 2
+    assert len(dead_letters(h.state, kind="send", session="proj")) == 2
 
 
 async def test_a_recreated_session_is_not_handed_the_old_sessions_prompts(harness):

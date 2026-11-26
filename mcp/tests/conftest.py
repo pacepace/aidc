@@ -67,6 +67,10 @@ def _isolate_audit_log(tmp_path, monkeypatch):
     # Same for the watcher-state dir, which the send-queue dead-letter writer
     # resolves at call time.
     monkeypatch.setattr(ss, "WATCHER_STATE_DIR", tmp_path / "watcher-state")
+    yield
+    # each test's state stores are its own: closed when it ends, so their file locks go
+    from aidc_mcp import store
+    store.close_all(within=[tmp_path])
 
 
 @pytest.fixture(autouse=True)

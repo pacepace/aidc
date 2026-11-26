@@ -190,7 +190,7 @@ W-K0 ─┬─ W-K1 ─ W-K2 ─ W-K4* ─────────────�
       │                 (W-K4 needs M4 webhook for the k8s freeze trigger)
       ├─ W-K6                             │
       ├─ W-T0 ─ W-T1 (upstream) ──┐       │
-      │         W-T2 (split) ─────┴─ W-T3 ─ W-T4 ─ W-M1 ─ W-M2 ─ W-M3 ─ W-M4 ─ W-T5 (mesh)
+      │         W-T2 (split) ─────┴─ W-T3 ─ W-H ─ W-T4 ─ W-M1 ─ W-M2 ─ W-M3 ─ W-M4 ─ W-T5 (mesh)
       ├─ W-N (rename, early: removes conflicts)       │
       └─ W-K5 (RBAC/kubeconfig) ─────────────────────┘ (M1/M2 need its RBAC model)
 W-K3 (broker) and W-K3b (Syncthing) after M1 (shared Claude-state layout), before W-R
@@ -266,6 +266,12 @@ W-K7 ops (any time, owner) ; W-R release last
 ### W-T3: tools as TearsTools, local face
 - 01 23 tools as TearsTools over the service. Taint gate as an Authorizer. Schemas via tool-schema. 02 local face on 3tears-mcp through the bridge: progress, resources, list_changed, cancel kept; aidc codes as protocol codes. 03 #76 `file_put` overwrite fixed in the rebuilt tool. 04 wire tests rewritten, published-tools regenerated. Done when: an orchestrator round trip (send, watch, callback, cancel) passes against the new server on Docker.
 - Depends: T1 (01-06), T2.
+
+### W-H: session state and replies from Claude Code hooks (owner ruling 2026-11-26)
+- 01 Each session's managed settings install hooks: `Stop` (turn done, with `last_assistant_message`), `Notification` (`permission_prompt`, `idle_prompt`), and `UserPromptSubmit` (what was typed, by whom). The hooks write events where the service reads them on both backends. Writing a file under the session's state dir is the default, because the MCP already reads that dir on Docker and on Kubernetes (W-M1 02). The hook process does not need to reach the MCP.
+- 02 The service takes busy/idle/waiting-on-permission and the reply from hook events instead of screen reads. The transcript stays the record, used for catch-up after an MCP or Claude restart. Screen reads and tmux keys stay only for AskUserQuestion, dialogs and the paste send path. Done when: the delivery and turns suites pass with screen classification removed from the busy/idle and reply paths, a Docker and a k8s session each deliver a reply once across an MCP restart, and a human-typed prompt's reply still reaches the orchestrator.
+- 03 Sending and tool-approval relay through a Claude Code channel. Built when custom channels load without `--dangerously-load-development-channels` (research preview today, with a confirmation dialog at every start), checked again before W-R. Until then, sending stays the tmux paste.
+- Depends: T3 (service layer). Lands before M1 so the k8s backend is built on hook events.
 
 ### W-T4: observability on 3tears-observe
 - 01 Structured logs and traces. The access log stays a file sink (MCP-14). Done when: the access-log tests are unchanged.

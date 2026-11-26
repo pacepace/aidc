@@ -122,7 +122,7 @@ verify-api against the released source.
 | design-13 Q5 | Answered 2026-11-25: drop SDK 1.x first (U01). | — |
 | REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 22 (moved from 01 by the 2026-11-26 ruling) |
 | TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) — answered 2026-11-25: no API in 2.0; U10 and chunk 06 dropped, kept addable |
-| Q-K1 | How a user adds a Claude account to the broker. | 17 |
+| Q-K1 | How a user adds a Claude account to the broker. | 17 — answered 2026-11-26: `aidc claude account add`, login inside the broker pod; one-year token as a stopgap |
 | Q-G1 | In ask mode, do GitHub issue writes (create, edit, comment, close) wait for approval like pushes, or run at once like reads? | 13 — answered 2026-11-26: run at once, checked by gitreq |
 | W-K0-03 / Q-M5 | Does paste+Enter answer AskUserQuestion? If not, the key sequence (§5 decision). | 14 |
 

@@ -491,3 +491,11 @@ The owner's other products and projects are never named in code, tests or docs o
 - 2026-11-26 (local mode may carry asyncpg and SQLAlchemy): yes. aidc's state is on the 3tears SQLite L3, which raises asyncpg's error types (ruling of 2026-11-25), so local mode installs and imports 3tears core with asyncpg and SQLAlchemy. They are used only for those error types and the store's code; nothing connects to Postgres. Local mode still installs and imports no NATS client, LangGraph or LangChain, and starts no network service besides the MCP server. TRS-01 and TRS-17 are amended to match.
 
 - 2026-11-26 (Q-G1, GitHub issue writes): issue writes run at once in every git mode, checked by the request handler (gitreq). They are limited to added repos and the fixed allow-list of issue operations, carry no AI attribution, and cannot delete, transfer or lock an issue. They do not wait for approval in ask mode. Pushes, pull requests and merges still do.
+
+- 2026-11-26 (Q-M3 refined): yes. Cluster transcripts and hook events go to a per-user `transcripts` claim, and each session's pod mounts only its own folder. They do not go to a folder on the user's disk, because every session mounts the whole disk and could forge another session's replies there. The MCP server reads them all.
+
+- 2026-11-26 (D6 codes retired): yes. `claude_not_running`, `paste_failed` and `turn_not_finished` are retired from D6 in 2.0, since nothing can emit them after the old send path's removal. The 2.0 upgrade notes say so.
+
+- 2026-11-26 (cluster live runs): yes. Agents may run the 2.0 live checks in the owner's namespace `aidc-u-pace` with test-named sessions. They may replace the owner's cluster git agent with the branch's version for chunk 13's live run, restoring it afterwards. Steps that need cluster-admin rights are not covered by this, and go to the owner.
+
+- 2026-11-26 (Q-K1, adding a Claude account): agreed. `aidc claude account add` runs Claude's normal login inside the user's broker pod and keeps the long-lived token there, on a claim only the broker mounts. Until the broker exists, a session may use a one-year inference token (`claude setup-token`) as a stopgap.

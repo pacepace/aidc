@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -362,16 +361,25 @@ async def interrupt(name: str, target: str = inv.INTERRUPT_AGENT) -> dict[str, A
                          "tree": tree})
 
 
+# Writes stdin to "$1" with mode "$2": into a temporary file beside it, then renamed over it,
+# so a reader never sees half a file and an existing file is replaced. `install -m MODE
+# /dev/stdin PATH` was used before and fails on an existing file with the uutils coreutils
+# the session image ships ("No such file or directory"). The path and mode are arguments,
+# never spliced into the script.
+FILE_PUT_SCRIPT = (
+    'set -e; tmp=$(mktemp "$(dirname -- "$1")/.aidc-put.XXXXXX"); '
+    'trap \'rm -f -- "$tmp"\' EXIT; cat > "$tmp"; chmod -- "$2" "$tmp"; mv -f -- "$tmp" "$1"'
+)
+
+
 def file_put(name: str, path: str, content: str, mode: str = "0644") -> dict[str, Any]:
     """The file_put tool's work. tools.py holds the tool: its schema and description,
     and the guards around it."""
     audit.log_event("tool_call", tool="file_put", session=name, path=path,
               bytes=len(content), mode=mode)
     container = backend.target(name)
-    # Stream content via stdin to a `tee` inside the container.
     proc = subprocess.run(
-        backend.exec_argv(container, ["bash", "-c",
-                          f"install -m {shlex.quote(mode)} /dev/stdin {shlex.quote(path)}"],
+        backend.exec_argv(container, ["bash", "-c", FILE_PUT_SCRIPT, "file_put", path, mode],
                           user="vscode", stdin=True),
         input=content.encode("utf-8"), capture_output=True, timeout=30,
     )

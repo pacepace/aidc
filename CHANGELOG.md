@@ -40,6 +40,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
 - **Logs go through 3tears-observe**, each tool call's lines carrying a correlation id; the
   access log is unchanged. Tracing export (`AIDC_MCP_OTEL_ENDPOINT`) and metrics
   (`AIDC_MCP_METRICS=true`, at `/metrics`) are off unless configured.
+- **Kill and create every session again after upgrading.** A 2.0 session's Claude reports its
+  state through Claude Code hooks (busy, idle, waiting on a permission prompt); aidc no longer
+  reads the screen for it. A session created before 2.0 reports nothing: `session_status` shows
+  `turn: "unknown"` (`why: "session_predates_hook_events"`) and `session_send` refuses it with
+  the new error code `session_outdated`.
 - **A rotated token** (`aidc mcp token rotate`) refuses an MCP session opened with the old
   token on its next message.
 - **`file_put` overwrites an existing file** (#76: it failed on every overwrite in sessions on

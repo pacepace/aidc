@@ -1,11 +1,12 @@
 """Tests for the send path's free check and the interrupted-before-output report
-(design-10 S1/S2).
+(design-10 S1, S2, S9).
 
-The transcript decides whether Claude is busy; the screen is consulted only for the
-input box, whether Claude is at its prompt, and (when the transcript shows a turn in
-progress that has gone quiet) the status row's working text. The Docker/tmux boundary
-is patched; the transcript is a real file under a temp mirror dir, and the screens
-are real captures from Claude Code 2.1.27x.
+The session's Claude Code hook events decide whether Claude is busy (MCP-47); the
+transcript, the record, adds a turn still being written and a turn it shows over; the
+screen is read only for what a paste needs (the input box, a dialog). The Docker/tmux
+boundary is patched; the transcript is a real file under a temp mirror dir, the hook
+events are files as the session writes them (tests/hooks.py), and the screens are real
+captures from Claude Code 2.1.27x.
 """
 import asyncio
 import json
@@ -18,15 +19,15 @@ import pytest
 from aidc_mcp import audit
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
-from aidc_mcp.screen import EMPTY, ScreenState, classify
+from aidc_mcp.screen import classify
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
+from tests import hooks as hk
 from tests import toolcall
 from tests.logs import patch_log_event
-from tests.statefiles import stored
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
 NOW = 1_789_609_900.0   # 2026-09-17T01:51:40Z
@@ -100,13 +101,25 @@ class Session:
 
         monkeypatch.setattr(tmx, "is_claude_running", is_running)
         monkeypatch.setattr(tmx, "capture_screen", capture)
+        self.hook(hk.he.SESSION_START, source="startup", age=1000.0)   # Claude is up
 
-    def write(self, objs, age=100.0):
+    def hook(self, event, age=0.0, **fields):
+        """The session's Claude reporting `event` (MCP-46), `age` seconds ago."""
+        return hk.fire(self.base, "proj", event, at_epoch=self.clock - age, **fields)
+
+    def write(self, objs, age=100.0, hooks=True):
+        """The transcript as Claude leaves it; with `hooks`, the event Claude reported as it
+        wrote it: a prompt submitted while a turn is open, a Stop once it has finished."""
         d = self.base / "proj"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "sid.jsonl"
         p.write_text("\n".join(json.dumps(o) for o in objs) + "\n")
         os.utime(p, (self.clock - age, self.clock - age))
+        if hooks and objs:
+            if ts.log_shows_turn_in_progress(objs):
+                self.hook(hk.he.USER_PROMPT_SUBMIT, age=age + 1.0)
+            else:
+                self.hook(hk.he.STOP, age=age)
         return p
 
     async def check(self):
@@ -149,144 +162,195 @@ class TestCheckFree:
         session.screen = _screen("busy-tool-empty-box")
         assert await session.check() == "claude_busy"
 
-    async def test_esc_before_output_is_free_once_the_working_text_has_been_seen(self, session):
-        """The prompt has no reply and nothing marks the interrupt; the status row,
-        whose wording this session has shown before, says Claude stopped."""
-        session.screen = _screen("busy-tool-empty-box")
-        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
-        assert await session.check() == "claude_busy"          # seen working
+    async def test_esc_before_output_is_free_once_claude_reports_it_is_idle(self, session):
+        """The prompt has no reply, nothing marks the interrupt in the transcript, and an Esc
+        fires no Stop; Claude's idle notice says it stopped (MCP-47)."""
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-        session.screen = _screen("idle-empty")
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "prompt_submitted"
+        session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
         assert await session.check() == ""
+        assert ss.last_free_verdict["proj"][1] == "idle_prompt"
 
-    async def test_a_prompt_put_back_in_the_box_is_a_stop_without_the_working_text(
+    async def test_a_prompt_put_back_in_the_box_waits_for_the_persons_text_once_idle(
             self, session):
-        """Claude Code returns the prompt to the input box when Esc is pressed before
-        it writes anything. That is proof enough, with no working text ever seen; the
-        session is then held for the person's text in the box, not for a turn."""
+        """Claude Code returns the prompt to the input box when Esc is pressed before it
+        writes anything. Once Claude reports idle, the session is held for the text in the
+        box (a person's to send or clear), not for a turn."""
         session.write([*FINISHED, _typed("u1", RESTORED)], age=10.0)
         session.screen = _screen("esc-before-output-sent-prompt-restored")
+        session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
         assert await session.check() == "input_has_text"
-        assert ss.last_free_verdict["proj"][1] == "prompt_restored"
+        assert ss.last_free_verdict["proj"][1] == "idle_prompt"
 
-    async def test_a_wrapped_prompt_put_back_in_the_box_is_a_stop(self, session):
-        """The box shows what was pasted, never Claude Code's paste wrapper."""
-        wrapped = f'\n\n<pasted_content id="fab9">\n{RESTORED}\n</pasted_content id="fab9">\n'
-        session.write([*FINISHED, _typed("u1", wrapped)], age=10.0)
-        session.screen = _screen("esc-before-output-sent-prompt-restored")
-        assert await session.check() == "input_has_text"
-        assert ss.last_free_verdict["proj"][1] == "prompt_restored"
-
-    async def test_other_text_in_the_box_is_not_proof_of_a_stop(self, session):
-        session.write([*FINISHED, _typed("u1", "a different prompt")], age=10.0)
-        session.screen = _screen("esc-before-output-sent-prompt-restored")
-        assert await session.check() == "claude_busy"
-        assert ss.last_free_verdict["proj"][1] == "status_row_unproven"
-
-    async def test_the_working_text_is_remembered_across_a_restart(self, session):
-        session.screen = _screen("busy-tool-empty-box")
+    async def test_the_screen_does_not_decide_the_turn(self, session):
+        """The status row's working text and a prompt in the box once decided it; now the
+        session's own report does, whatever the screen shows (owner ruling 2026-11-26)."""
         session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
-        assert await session.check() == "claude_busy"          # seen working
-        ss.working_indicator_seen.clear()                  # the MCP restarts
-        ss.session_instances.clear()
-        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-        session.screen = _screen("idle-empty")
+        session.screen = _screen("idle-empty")                 # looks idle on screen
+        assert await session.check() == "claude_busy"          # Claude says it is working
+        session.write(FINISHED, age=120.0)
+        session.screen = _screen("busy-tool-empty-box")        # looks busy on screen
+        assert await session.check() == ""                     # Claude said it stopped
+
+    async def test_a_permission_prompt_is_busy_waiting_on_permission(self, session):
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "waiting_on_permission"
+
+    async def test_a_notification_about_something_else_changes_nothing(self, session):
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="auth_success")
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "prompt_submitted"
+
+    async def test_a_quiet_open_turn_stays_busy_until_claude_says_otherwise(self, session):
+        # no stall window: a long tool call with nothing written is still Claude's turn
+        session.write([_typed("u1", "essay")], age=3600.0)
+        assert await session.check() == "claude_busy"
+
+    async def test_an_esc_after_claude_wrote_frees_the_session_from_the_record(self, session):
+        """Claude Code marks an interrupt it wrote past in the transcript and fires no Stop:
+        the record shows the turn over since the prompt, which is enough."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "partial", stop=None),
+                       {"type": "user", "uuid": "i1", "timestamp": ISO_NOW,
+                        "message": {"role": "user",
+                                    "content": "[Request interrupted by user]"}}],
+                      age=30.0, hooks=False)
+        session.hook(hk.he.USER_PROMPT_SUBMIT, age=40.0)
         assert await session.check() == ""
-        assert ss.last_free_verdict["proj"][1] == "status_row_idle"
+        assert ss.last_free_verdict["proj"][1] == "log_finished"
 
-    async def test_a_session_created_again_does_not_inherit_the_working_text(self, session):
-        """Review rev-20260917T062841Z-0930096f: a marker keyed by name alone vouched
-        for a new session under the same name (say on a newer Claude Code whose working
-        text reads differently), so a quiet running turn could read as stopped."""
-        session.screen = _screen("busy-tool-empty-box")
-        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
-        assert await session.check() == "claude_busy"          # seen working
-        ss.working_indicator_seen.clear()                  # the MCP restarts...
-        ss.session_instances.clear()
-        session.instance = "net-2"                             # ...on a new session
-        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-        session.screen = _screen("idle-empty")
+    async def test_a_session_whose_claude_has_just_started_waits_for_its_first_report(
+            self, session, monkeypatch):
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
         assert await session.check() == "claude_busy"
-        assert ss.last_free_verdict["proj"][1] == "status_row_unproven"
-        assert stored(ss.WATCHER_STATE_DIR, "markers", "proj", ss.WORKING_SEEN_MARKER) is None   # the stale marker is gone
+        assert ss.last_free_verdict["proj"][1] == "starting"
+        session.hook(hk.he.SESSION_START, source="startup")
+        assert await session.check() == ""
 
-    async def test_a_session_created_again_while_the_mcp_runs_is_forgotten(self, session):
-        session.screen = _screen("busy-tool-empty-box")
-        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+    async def test_a_session_from_before_hook_events_is_outdated(self, session, monkeypatch):
+        """Its Claude reports nothing and its settings lack aidc's hook: it is not guessed
+        at from the screen; it is said to be outdated (MCP-47)."""
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+
+        async def not_installed(container):
+            return False
+        monkeypatch.setattr(tmx, "hooks_installed", not_installed)
+        session.write(FINISHED, hooks=False)
+        assert await session.check() == "session_outdated"
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_UNKNOWN, tn.PREDATES_HOOK_EVENTS)
+        assert await tn.session_outdated("aidc-proj-dev", "proj") is True
+
+    async def test_settings_that_cannot_be_read_never_call_a_session_outdated(
+            self, session, monkeypatch):
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        ss.hook_events_read.clear()
+
+        async def unreadable(container):
+            return None
+        monkeypatch.setattr(tmx, "hooks_installed", unreadable)
+        assert await tn.session_outdated("aidc-proj-dev", "proj") is False
+        assert await session.check() == "claude_busy"          # waits, is not refused
+
+    async def test_the_events_are_read_again_after_a_restart(self, session):
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        assert await session.check() == "claude_busy"
+        ss.hook_events_read.clear()                            # the MCP restarts
+        ss.hook_turn_event.clear()
+        assert await session.check() == "claude_busy"
+        session.write(FINISHED, age=20.0)
+        assert await session.check() == ""
+
+    async def test_a_session_created_again_starts_from_its_own_events(self, session):
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
         await session.check()
         ss.sent_awaiting_echo["proj"] = ("old", NOW)
-        session.instance = "net-2"
-        session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-        session.screen = _screen("idle-empty")
-        assert await session.check() == "claude_busy"
-        assert not tn.working_indicator_known("proj")
-        assert "proj" not in ss.sent_awaiting_echo
+        session.instance = "net-2"                             # killed and created again
+        session.write(FINISHED, age=20.0)
+        assert await session.check() == ""
+        assert "proj" not in ss.sent_awaiting_echo             # the old session's state
 
-    async def test_the_working_text_wins_over_an_earlier_interrupt_report(self, session):
-        """A reported prompt's turn is over unless the screen positively shows Claude
-        working (a person resubmitted it, and the transcript has not caught up)."""
+    async def test_a_reported_interrupt_holds_unless_claude_reports_a_new_turn(self, session):
+        """A reported prompt's turn is over, until Claude says it is working again (a
+        person resubmitted it, and the transcript has not caught up)."""
         ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
-            await session.check()
+            session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
             tn.record_reported_interrupt("proj", "u2")
-            session.screen = _screen("busy-tool-empty-box")
+            assert await session.check() == ""
+            assert ss.last_free_verdict["proj"][1] == "interrupt_reported"
+            session.hook(hk.he.USER_PROMPT_SUBMIT)
             assert await session.check() == "claude_busy"
-            assert ss.last_free_verdict["proj"][1] == "status_row_working"
+            assert ss.last_free_verdict["proj"][1] == "prompt_submitted"
         finally:
             ss.session_watchers.pop("proj", None)
 
-    async def test_the_markers_hold_while_docker_cannot_answer(self, session, monkeypatch):
-        session.screen = _screen("busy-tool-empty-box")
-        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
-        await session.check()
-
-        async def unknown(name):
-            return tn.SESSION_UNKNOWN, ""
-
-        monkeypatch.setattr(tn, "session_instance", unknown)
-        await session.check()
-        assert tn.working_indicator_known("proj")
-
-    async def test_a_removed_session_forgets_the_working_text_on_disk(self, session):
-        session.screen = _screen("busy-tool-empty-box")
-        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=120.0)
+    async def test_a_removed_session_forgets_its_events(self, session):
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
         await session.check()
         ss.forget_session_send_state("proj")
-        assert not tn.working_indicator_known("proj")
+        assert "proj" not in ss.hook_events_read and "proj" not in ss.hook_turn_event
 
-    async def test_without_ever_seeing_the_working_text_a_quiet_open_turn_stays_busy(
-            self, session):
-        session.write([_typed("u1", "essay")], age=30.0)
-        assert await session.check() == "claude_busy"
-        session.write([_typed("u1", "essay")], age=tn._LOG_STALL_S)
-        assert await session.check() == ""
+    async def test_read_events_are_pruned_to_the_newest_few(self, session, monkeypatch):
+        monkeypatch.setattr(tn, "HOOK_EVENTS_KEPT", 3)
+        for _ in range(6):
+            session.hook(hk.he.STOP)
+        await session.check()
+        assert len(list((session.base / "proj" / "hook-events").iterdir())) == 3
 
     async def test_reply_whose_stop_hooks_are_still_running_is_busy(self, session):
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=1.0)
         assert await session.check() == "claude_busy"
 
     async def test_stop_hook_hold_is_busy_whatever_the_screen_shows(self, session):
-        ss.working_indicator_seen.add("proj")
-        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=30.0)
+        # Claude reported Stop, but the record shows another Stop hook still to report
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=30.0, hooks=False)
+        session.hook(hk.he.STOP, age=30.0)
         assert await session.check() == "claude_busy"
         assert ss.last_free_verdict["proj"][1] == "stop_hooks_running"
 
-    async def test_past_the_stop_hook_hold_an_idle_status_row_means_free(self, session):
-        ss.working_indicator_seen.add("proj")
+    async def test_past_the_stop_hook_hold_claudes_stop_means_free(self, session):
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
-                      age=tn.STOP_HOOK_WAIT_S)
+                      age=tn.STOP_HOOK_WAIT_S, hooks=False)
+        session.hook(hk.he.STOP, age=tn.STOP_HOOK_WAIT_S)
         assert await session.check() == ""
-        assert ss.last_free_verdict["proj"][1] == "status_row_idle"
+        assert ss.last_free_verdict["proj"][1] == "turn_stopped"
 
-    async def test_past_the_stop_hook_hold_a_working_status_row_still_wins(self, session):
-        """A Stop hook that runs longer than the hold (a long review gate) with the
-        status row still saying Claude is working must not get a prompt pasted in."""
-        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")],
-                      age=tn.STOP_HOOK_WAIT_S + 60)
-        session.screen = _screen("busy-tool-empty-box")
+    async def test_a_turn_pushed_back_by_a_stop_hook_stays_running_through_a_quiet_tool_call(
+            self, session):
+        """Claude Code runs every Stop hook at once; a blocking one sends Claude back to
+        work with no event of its own. Claude then runs a long quiet tool call (a test
+        suite): the record, written after the Stop and showing the turn open, is that turn,
+        however long it has been quiet (1.x caught this from the status row)."""
+        session.hook(hk.he.STOP, age=200.0)
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "done?"),
+                       _reply("a2", None, stop="tool_use")], age=120.0, hooks=False)
         assert await session.check() == "claude_busy"
-        assert ss.last_free_verdict["proj"][1] == "status_row_working"
+        assert ss.last_free_verdict["proj"][1] == "stop_pushed_back"
+        session.hook(hk.he.STOP)                      # the next Stop ends it
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "done?"),
+                       _reply("a2", "Done."), SUMMARY, DURATION], age=10.0, hooks=False)
+        assert await session.check() == ""
+
+    async def test_a_stop_hook_that_pushes_claude_back_keeps_the_turn_running(self, session):
+        """A blocking Stop hook reopens the turn: Claude writes again, and the record
+        growing after the Stop is a turn still running, until it goes quiet."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", None, stop="tool_use")],
+                      age=1.0, hooks=False)
+        session.hook(hk.he.STOP, age=5.0)
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "stop_pushed_back"
 
     async def test_just_pasted_prompt_is_busy_until_the_log_shows_it(self, session):
         session.write(FINISHED)
@@ -304,9 +368,9 @@ class TestCheckFree:
         ss.sent_awaiting_echo["proj"] = (sent, NOW - 3)
         wrapped = f'\n\n<pasted_content id="fab9">\n{sent}\n</pasted_content id="fab9">\n'
         session.write([*FINISHED, _typed("u1", wrapped, when=ISO_NOW)], age=1.0)
-        assert await session.check() == "claude_busy"           # busy by the log
+        assert await session.check() == "claude_busy"           # busy: Claude took it
         assert "proj" not in ss.sent_awaiting_echo
-        assert ss.last_free_verdict["proj"][1] == "log_growing"
+        assert ss.last_free_verdict["proj"][1] == "prompt_submitted"
 
     async def test_prompt_queued_behind_a_running_turn_counts_as_arrived(self, session):
         session.write([*FINISHED, {"type": "queue-operation", "operation": "enqueue",
@@ -315,10 +379,12 @@ class TestCheckFree:
         assert await session.check() == ""
         assert "proj" not in ss.sent_awaiting_echo
 
-    async def test_free_after_a_clear_without_waiting_out_the_stall_window(self, session):
+    async def test_free_after_a_clear(self, session):
         """Live 2026-10-08: a prompt queued behind a pasted /clear waited 14 minutes as
-        claude_busy (status_row_unproven) while Claude sat at an empty input box."""
-        session.write(CLEARED, age=261.0)
+        busy while Claude sat at an empty input box. No turn opens for /clear: the
+        prompt was submitted, and the record shows nothing running since."""
+        session.write(CLEARED, age=261.0, hooks=False)
+        session.hook(hk.he.USER_PROMPT_SUBMIT, age=262.0)
         assert await session.check() == ""
         assert ss.last_free_verdict["proj"][1] == "log_finished"
 
@@ -342,13 +408,14 @@ class TestCheckFree:
         await session.check()
         checks = [f for kind, f in logged if kind == "session_free_check"]
         assert [(c["reason"], c["why"]) for c in checks] == [
-            ("", "log_finished"), ("input_has_text", "log_finished")]
+            ("", "turn_stopped"), ("input_has_text", "turn_stopped")]
 
-    async def test_free_without_a_transcript_says_so(self, session, monkeypatch):
+    async def test_free_without_a_transcript_once_claude_has_started(self, session,
+                                                                      monkeypatch):
         logged = []
         patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
         assert await session.check() == ""
-        assert logged[-1][1]["why"] == "transcript_none"
+        assert logged[-1][1]["why"] == "session_started"
 
     async def test_unrecognized_screen_is_reported_and_saved(self, session):
         session.write(FINISHED)
@@ -377,10 +444,10 @@ class TestSessionStateSeparatesTurnFromInputBox:
         assert await tn.wait_for_turn_end("aidc-proj-dev", "proj", timeout=60) == ""
 
     async def test_send_path_waits_for_the_watcher_to_report_the_interrupt(self, session):
-        ss.working_indicator_seen.add("proj")
         ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+            session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
             state = await tn.session_state("aidc-proj-dev", "proj")
             assert (state.turn, state.why) == (tn.TURN_RUNNING, "interrupt_not_reported_yet")
             tn.record_reported_interrupt("proj", "u2")
@@ -398,6 +465,7 @@ class TestSessionStateSeparatesTurnFromInputBox:
         ss.session_watchers["proj"] = object()
         try:
             session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+            session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
             await session.check()                        # learns the session instance
             tn.record_reported_interrupt("proj", "u2")
             ss.reported_interrupts.clear()          # the MCP restarts
@@ -410,8 +478,8 @@ class TestSessionStateSeparatesTurnFromInputBox:
             ss.session_watchers.pop("proj", None)
 
     async def test_without_a_watcher_there_is_no_report_to_wait_for(self, session):
-        ss.working_indicator_seen.add("proj")
         session.write([*FINISHED, _typed("u2", "essay")], age=30.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="idle_prompt")
         assert await session.check() == ""
 
 
@@ -484,7 +552,7 @@ class TestWatchForEcho:
 
 class TestEviction:
     def _fill(self):
-        ss.working_indicator_seen.add("proj")
+        ss.hook_events_read["proj"] = "1700000000000000000-1.json"
         ss.sent_awaiting_echo["proj"] = ("x", NOW)
         tn.record_reported_interrupt("proj", "u1")
         ss.last_free_verdict["proj"] = ("", "log_finished")
@@ -494,14 +562,14 @@ class TestEviction:
         state belongs to the session, not to its webhook."""
         self._fill()
         ss.evict_session_state("proj")
-        assert "proj" in ss.working_indicator_seen
+        assert "proj" in ss.hook_events_read
         assert ss.sent_awaiting_echo["proj"] == ("x", NOW)
         assert "proj" in ss.last_free_verdict
 
     def test_a_removed_session_forgets_it(self):
         self._fill()
         ss.forget_session_send_state("proj")
-        assert "proj" not in ss.working_indicator_seen
+        assert "proj" not in ss.hook_events_read
         assert "proj" not in ss.sent_awaiting_echo
         assert not tn._interrupt_reported("proj", "u1")
         assert "proj" not in ss.last_free_verdict
@@ -558,9 +626,10 @@ class TestReplyFromTranscript:
 
 
 class TestInterruptedBeforeOutputDelivery:
-    """The watcher's report of an Esc pressed before Claude wrote anything."""
+    """The watcher's report of an Esc pressed before Claude wrote anything: no reply, no
+    marker in the transcript and no Stop; Claude's idle notice says it stopped (MCP-47)."""
 
-    def _setup(self, tmp_path, tail, working=False, seen=True):
+    def _setup(self, tmp_path, tail, idle=True):
         base = tmp_path / "t"; state = tmp_path / "s"
         d = base / "sess"; d.mkdir(parents=True)
         p = d / "sid1.jsonl"
@@ -568,27 +637,29 @@ class TestInterruptedBeforeOutputDelivery:
         self.path = p
         self.base, self.state = base, state
         self.tail = tail
-        self.screen = ScreenState(EMPTY, working=working)
+        self.idle = idle
         self.posted = []
-        if seen:
-            ss.working_indicator_seen.add("sess")
+        hk.started(base, "sess", at_epoch=p.stat().st_mtime - 100)
 
     async def _post(self, turn, attempt):
         self.posted.append(turn)
         return True
 
-    async def _screen_fn(self, session):
-        return self.screen
-
     async def drain(self, quiet=60.0):
         mtime = self.path.stat().st_mtime
         await dlv._drain_transcript_once(
             "sess", "conv", "http://cb", transcripts_base=self.base, state_dir=self.state,
-            post_fn=self._post, screen_fn=self._screen_fn,
+            post_fn=self._post, detect_interrupts=True,
             wall_now_fn=lambda: mtime + quiet)
 
     def append_tail(self):
+        """The prompt goes in (Claude reports it), and, with `idle`, Claude reports it is
+        idle with no reply written."""
         self.path.write_text("\n".join(json.dumps(o) for o in [*FINISHED, *self.tail]) + "\n")
+        mtime = self.path.stat().st_mtime
+        hk.prompted(self.base, "sess", at_epoch=mtime - 1)
+        if self.idle:
+            hk.notified(self.base, "sess", "idle_prompt", at_epoch=mtime)
 
     async def test_reported_once_after_two_quiet_polls(self, tmp_path):
         self._setup(tmp_path, [_typed("u1", "write an essay")])
@@ -603,12 +674,26 @@ class TestInterruptedBeforeOutputDelivery:
         await self.drain()
         assert len(self.posted) == 1
 
-    async def test_not_reported_while_the_status_row_says_working(self, tmp_path):
-        """Claude can think for a long time before writing its first line."""
-        self._setup(tmp_path, [_typed("u1", "hard question")], working=True)
+    async def test_not_reported_until_claude_says_it_is_idle(self, tmp_path):
+        """Claude can think for a long time before writing its first line: without its idle
+        notice the turn is still its."""
+        self._setup(tmp_path, [_typed("u1", "hard question")], idle=False)
         await self.drain()
         self.append_tail()
         for _ in range(4):
+            await self.drain(quiet=3600.0)
+        assert self.posted == []
+        hk.notified(self.base, "sess", "idle_prompt", at_epoch=self.path.stat().st_mtime)
+        await self.drain()
+        await self.drain()
+        assert [t.terminal_uuid for t in self.posted] == ["u1"]
+
+    async def test_a_permission_prompt_is_not_an_interrupt(self, tmp_path):
+        self._setup(tmp_path, [_typed("u1", "q")], idle=False)
+        await self.drain()
+        self.append_tail()
+        hk.notified(self.base, "sess", "permission_prompt", at_epoch=self.path.stat().st_mtime)
+        for _ in range(3):
             await self.drain()
         assert self.posted == []
 
@@ -619,29 +704,6 @@ class TestInterruptedBeforeOutputDelivery:
         for _ in range(3):
             await self.drain(quiet=2.0)
         assert self.posted == []
-
-    async def test_unproven_working_text_waits_for_the_stall_window(self, tmp_path):
-        self._setup(tmp_path, [_typed("u1", "q")], seen=False)
-        await self.drain()
-        self.append_tail()
-        for _ in range(3):
-            await self.drain(quiet=60.0)
-        assert self.posted == []
-        await self.drain(quiet=tn._LOG_STALL_S)
-        await self.drain(quiet=tn._LOG_STALL_S)
-        assert [t.terminal_uuid for t in self.posted] == ["u1"]
-
-    async def test_a_restored_prompt_is_reported_without_waiting_for_the_stall_window(
-            self, tmp_path):
-        """The joint test of 2026-09-17: an MCP restarted a minute earlier had never
-        seen the working text, and reported this Esc only after ten minutes."""
-        self._setup(tmp_path, [_typed("u1", RESTORED)], seen=False)
-        self.screen = classify(_screen("esc-before-output-sent-prompt-restored"))
-        await self.drain()
-        self.append_tail()
-        await self.drain(quiet=10.0)
-        await self.drain(quiet=10.0)
-        assert [(t.terminal_uuid, t.interrupted) for t in self.posted] == [("u1", True)]
 
     async def test_only_the_latest_report_per_session_is_remembered(self, tmp_path):
         self._setup(tmp_path, [_typed("u1", "first")])
@@ -658,19 +720,10 @@ class TestInterruptedBeforeOutputDelivery:
 
     async def test_a_prompt_whose_turn_ended_with_no_reply_is_not_called_interrupted(
             self, tmp_path):
-        """Only an open turn the screen shows stopped is an interrupt. A prompt followed
-        by Claude Code's end-of-turn record and no reply has not been measured; calling
-        it "interrupted at the terminal" would say something nobody saw happen."""
+        """A prompt followed by Claude Code's end-of-turn record and no reply has not been
+        measured; calling it "interrupted at the terminal" would say something nobody
+        saw happen."""
         self._setup(tmp_path, [_typed("u1", "q"), DURATION])
-        await self.drain()
-        self.append_tail()
-        for _ in range(3):
-            await self.drain()
-        assert self.posted == []
-
-    async def test_not_reported_when_claude_is_not_running(self, tmp_path):
-        self._setup(tmp_path, [_typed("u1", "q")])
-        self.screen = None
         await self.drain()
         self.append_tail()
         for _ in range(3):
@@ -690,26 +743,6 @@ class TestInterruptedBeforeOutputDelivery:
         for _ in range(3):
             await self.drain()
         assert self.posted == []
-
-    async def test_working_text_is_learned_while_a_turn_runs(self, tmp_path):
-        """A session only a person types into never goes through the send path's
-        screen reads, so the watcher learns the working text itself."""
-        self._setup(tmp_path, [_typed("u1", "q"), _reply("a1", None, stop="tool_use")],
-                    working=True, seen=False)
-        calls = []
-
-        async def screen_fn(session):
-            calls.append(session)
-            ss.working_indicator_seen.add(session)   # what _read_screen does
-            return self.screen
-
-        self._screen_fn = screen_fn
-        await self.drain()
-        self.append_tail()
-        await self.drain(quiet=1.0)
-        await self.drain(quiet=1.0)
-        assert calls == ["sess"]
-        assert "sess" in ss.working_indicator_seen
 
     async def test_report_consumes_the_send_record_and_names_the_orchestrator(self, tmp_path):
         self._setup(tmp_path, [_typed("u1", "refactor the parser")])
@@ -769,7 +802,7 @@ class TestQueuedPromptOnTheAgentListScreen:
             if "proj" not in ss.pending_sends:
                 break
         assert pasted == [_f("please fix the other bugs")]
-        assert ss.last_free_verdict["proj"] == ("", "log_finished")
+        assert ss.last_free_verdict["proj"] == ("", "turn_stopped")   # Claude reported its Stop
 
 
 POINTED = "claude-2.1.30x-idle-agent-row-pointed.ansi"
@@ -1102,7 +1135,7 @@ class TestSendDeliverJoin:
         assert "final answer" in d["delivery"] and "join_declined" not in d
         assert ss.sent_awaiting_echo["proj"][0] == JOIN_SENT
         assert ("session_send_joined_turn", {"session": "proj", "prompt_len": len(JOIN_SENT),
-                                             "why": "log_growing"}) in self.logged
+                                             "why": "prompt_submitted"}) in self.logged
 
     async def test_a_joined_prompt_arriving_as_a_queued_message_is_matched_once(
             self, session, monkeypatch):
@@ -1260,3 +1293,70 @@ class TestSendDescribesATurnOnlyWhileOneRuns:
         assert d["status"] == "queued" and d["waiting_reason"] == "input_has_text"
         assert (d["working_on"], d["started_by"], d["turn_started_at"], d["last_activity"]) == (
             "", None, None, None)
+
+
+class TestSessionsFromBeforeHookEvents:
+    """A session whose Claude reports no hook events and whose settings lack aidc's hook
+    predates 2.0 (MCP-47): reported, refused, never guessed at from the screen."""
+
+    @pytest.mark.real_hooks_probe
+    @pytest.mark.parametrize("printed,answer", [
+        ("grep:0\n", True), ("grep:1\n", False), ("grep:2\n", False),
+        ("", None),                                 # the exec failed: nothing was asked
+        ("Error: container is not running\n", None),
+    ])
+    async def test_the_probe_reads_greps_own_status_not_the_execs(self, monkeypatch, printed,
+                                                                  answer):
+        """docker or kubectl exec fails with exit 1 too: only grep's printed status says
+        whether the hook is there, so a session that could not be asked is never called
+        outdated (and cached as such for its instance)."""
+        seen = {}
+
+        class Proc:
+            async def communicate(self):
+                return printed.encode(), b""
+
+        async def exec_(*argv, **kw):
+            seen["argv"] = argv
+            return Proc()
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_)
+        assert await tmx.hooks_installed("aidc-proj-dev") is answer
+        assert tmx.MANAGED_SETTINGS in seen["argv"] and tmx.HOOK_COMMAND in seen["argv"]
+
+    @pytest.fixture
+    def outdated(self, session, monkeypatch):
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+
+        async def not_installed(container):
+            return False
+        monkeypatch.setattr(tmx, "hooks_installed", not_installed)
+        session.write(FINISHED, hooks=False)
+        return session
+
+    async def test_session_send_refuses_it_queues_nothing_and_logs_why(self, outdated,
+                                                                      monkeypatch):
+        logged = []
+        patch_log_event(monkeypatch, lambda kind, **f: logged.append((kind, f)))
+
+        async def must_not_paste(*a, **k):
+            raise AssertionError("pasted into an outdated session")
+        monkeypatch.setattr(tmx, "load_and_paste", must_not_paste)
+        res = await toolcall.call("session_send", name="proj", prompt="hello",
+                                  conversation_id="c1")
+        assert res["ok"] is False and res["error_code"] == "session_outdated"
+        assert "Kill it and create it again" in res["error"]
+        assert "proj" not in ss.pending_sends
+        assert ("tool_call", {"tool": "session_send_failed", "session": "proj",
+                              "prompt_len": 5, "reason": "session_outdated"}) in logged
+
+    async def test_session_status_says_so_and_what_to_do(self, outdated, monkeypatch):
+        from aidc_mcp.service import common as com
+        monkeypatch.setattr(com, "run_cli", lambda args, timeout=60.0: {
+            "exit": 0, "stdout": "ok", "stderr": ""})
+        d = (await toolcall.call("session_status", name="proj"))["data"]
+        assert (d["turn"], d["why"], d["working"]) == (
+            tn.TURN_UNKNOWN, tn.PREDATES_HOOK_EVENTS, False)
+        assert "Kill it and create it again" in d["note"]

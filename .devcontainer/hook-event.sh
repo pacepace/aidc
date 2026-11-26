@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# aidc-hook-event: Claude Code's Stop, Notification and UserPromptSubmit hooks (MCP-46).
+# aidc-hook-event: Claude Code's SessionStart, Stop, Notification and UserPromptSubmit hooks
+# (MCP-46).
 #
 # Claude Code runs this with the hook's input as JSON on stdin. It writes that input, with
 # `event` (the hook's name) and `at` (UTC, milliseconds) added, as one file under the

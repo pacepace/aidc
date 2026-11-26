@@ -1,5 +1,7 @@
-"""Turn state (design-10 S1/S2): whether Claude is running, whether it is working on a
-turn, the markers that survive a restart, and whether a pasted prompt arrived.
+"""Turn state (design-10 S1, S9): whether Claude is running, whether it is working on a
+turn (from the session's Claude Code hook events, MCP-47), the marker that survives a
+restart, and whether a pasted prompt arrived. The screen is read only for what the paste
+needs (the input box, a dialog), never to decide whether Claude is working.
 
 No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 """
@@ -9,29 +11,22 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aidc_mcp import audit, backend
+from aidc_mcp import hook_events as he
 from aidc_mcp import screen as scr
 from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 
-# Whether Claude is busy comes from its transcript (design-10 S1), which the dev
-# container mirrors for the MCP about every 2 s. A turn the transcript shows in
-# progress is only checked against the screen once the transcript has been quiet for
-# longer than that copy lag.
+# The transcript is copied to the MCP about every 2 s. A turn it shows still being written
+# (a reply a Stop hook pushed back on, or one a hook event has not caught up with) counts as
+# running until the transcript has been quiet for longer than that copy lag.
 LOG_QUIET_S = 6.0
-
-
-# An Esc pressed before Claude writes anything leaves the transcript showing a turn in
-# progress forever. The screen settles it (design 10 S1 step 4): the prompt put back in
-# the input box, or the status row's `esc to interrupt`, whose absence is trusted once
-# the MCP has seen that text on the session. Until then, a transcript quiet for this
-# long with no working text on screen counts as stopped.
-_LOG_STALL_S = 600.0
 
 
 # After a paste, the session counts as busy until the transcript shows the prompt
@@ -56,18 +51,27 @@ TURN_RUNNING = "running"
 TURN_IDLE = "idle"
 
 
-# The idle verdicts that come from the screen rather than the transcript: a turn the
-# transcript still shows open, judged stopped. The send path and the watcher both
-# treat exactly these as "Claude stopped with that prompt unanswered".
-STOPPED_BY_SCREEN = frozenset({"prompt_restored", "status_row_idle", "log_stalled"})
+# A session with no hook events at all: created before aidc 2.0, so its Claude reports
+# nothing aidc can read. It is not guessed at from the screen (owner ruling 2026-11-26).
+TURN_UNKNOWN = "unknown"
+
+PREDATES_HOOK_EVENTS = "session_predates_hook_events"
+
+
+# The idle verdicts of a turn the transcript may still show open: Claude reported idle, or
+# said its turn was over. The send path and the watcher both treat exactly these, with an
+# unanswered prompt at the transcript's tail, as "Claude stopped with that prompt
+# unanswered" (an Esc before it wrote anything, which Claude Code reports with no Stop).
+STOPPED_BY_HOOKS = frozenset({"idle_prompt", "turn_stopped"})
 
 
 @dataclasses.dataclass(frozen=True)
 class SessionState:
     """What the MCP knows about a session right now (design-10 S1/S2).
 
-    `turn` is Claude's turn state alone (TURN_RUNNING or TURN_IDLE), with `why` naming
-    the evidence. The input box is a separate matter, in `screen`: whether a prompt may
+    `turn` is Claude's turn state alone (TURN_RUNNING, TURN_IDLE, or TURN_UNKNOWN for a
+    session from before hook events), with `why` naming the evidence. The input box is a
+    separate matter, in `screen`: whether a prompt may
     be pasted combines both (paste_reason), while "is Claude still working?" reads
     only `turn`.
     """
@@ -75,12 +79,6 @@ class SessionState:
     screen: scr.ScreenState | None
     turn: str
     why: str
-
-
-def working_indicator_known(name: str) -> bool:
-    """Whether the MCP has seen this session instance's status row say Claude is
-    working, in this process or before a restart (loaded by _sync_session_markers)."""
-    return name in ss.working_indicator_seen
 
 
 def _interrupt_reported(name: str, prompt_uuid: str) -> bool:
@@ -135,8 +133,6 @@ async def _sync_session_markers(name: str) -> None:
     ss.session_instances[name] = current
     if known is None:
         try:
-            if _read_marker(name, ss.WORKING_SEEN_MARKER, current) is not None:
-                ss.working_indicator_seen.add(name)
             reported = _read_marker(name, ss.REPORTED_INTERRUPT_MARKER, current)
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- markers only
             audit.log_event("session_marker_read_failed", session=name,
@@ -150,11 +146,7 @@ async def read_screen(container: str, name: str) -> scr.ScreenState:
     await _sync_session_markers(name)
     raw = await tmx.capture_screen(container, tmx.SESSION_WINDOW)
     ss.last_screen_raw[name] = raw
-    state = scr.classify(raw)
-    if state.working and not working_indicator_known(name):
-        ss.working_indicator_seen.add(name)
-        _write_marker(name, ss.WORKING_SEEN_MARKER)
-    return state
+    return scr.classify(raw)
 
 
 def session_transcript(name: str) -> tuple[list[dict], float, str]:
@@ -172,47 +164,139 @@ def session_transcript(name: str) -> tuple[list[dict], float, str]:
     return objs, mtime, "ok"
 
 
-def turn_verdict(name: str, objs: list[dict], quiet: float,
-                  screen: scr.ScreenState | None) -> tuple[str, str]:
-    """Is Claude working on a turn? (TURN_RUNNING | TURN_IDLE, why). The one rule both
-    the send path and the watcher use.
+def _relevant(event: he.HookEvent) -> bool:
+    """Whether an event says something about the turn: every hook aidc installs does,
+    except a notification of a type that is not about waiting (auth, elicitation, ...)."""
+    if event.event == he.NOTIFICATION:
+        return event.notification_type in (he.PERMISSION_PROMPT, he.IDLE_PROMPT)
+    return event.event in (he.SESSION_START, he.USER_PROMPT_SUBMIT, he.STOP)
 
-    The transcript decides. When it shows a turn in progress that has gone quiet, a
-    reply still waiting on its Stop hooks is held for STOP_HOOK_WAIT_S whatever the
-    screen shows. Past that hold, and for every other quiet open turn, the status row's
-    working text settles it: shown means working; absent means stopped, trusted once
-    the MCP has seen the text on the session, else only after _LOG_STALL_S. An input box
-    holding exactly the prompt the transcript shows unanswered also means stopped: Claude
-    Code puts the prompt back after an Esc pressed before it wrote anything. Design 10
-    S1 step 4 gives the order of these checks.
+
+def latest_hook_event(name: str, mirror_base: Path | None = None
+                      ) -> tuple[bool, he.HookEvent | None]:
+    """Whether session `name` has any hook events, and its latest one about the turn.
+
+    Read on from the last event this process read, so a poll reads only what is new; after
+    an MCP restart every file is read once. Once read, all but the newest
+    HOOK_EVENTS_KEPT files are removed, so the dir stays small."""
+    mirror = Path(ss.TRANSCRIPTS_BASE if mirror_base is None else mirror_base) / name
+    new = he.read_events(mirror, after=ss.hook_events_read.get(name, ""))
+    for event in new:
+        if _relevant(event):
+            ss.hook_turn_event[name] = event
+    if new:
+        ss.hook_events_read[name] = new[-1].name
+        _prune_hook_events(mirror)
+    return name in ss.hook_events_read, ss.hook_turn_event.get(name)
+
+
+#: how many of a session's hook event files are kept once read
+HOOK_EVENTS_KEPT = 200
+
+
+def _prune_hook_events(mirror: Path) -> None:
+    try:
+        names = sorted(p.name for p in he.events_dir(mirror).iterdir()
+                       if p.name.endswith(".json"))
+        for old in names[:-HOOK_EVENTS_KEPT]:
+            (he.events_dir(mirror) / old).unlink(missing_ok=True)
+    except OSError as exc:
+        audit.log_event("hook_events_prune_failed", dir=str(mirror),
+                        error_type=type(exc).__name__)
+
+
+def _epoch(at: str) -> float:
+    """An event's `at` (UTC ISO, milliseconds) as epoch seconds; 0.0 when unreadable."""
+    try:
+        return datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def turn_from_hooks(name: str, objs: list[dict], mtime: float,
+                    now: float | None = None, *,
+                    installed: bool | None = False,
+                    mirror_base: Path | None = None) -> tuple[str, str]:
+    """Is Claude working on a turn? (TURN_RUNNING | TURN_IDLE | TURN_UNKNOWN, why). The one
+    rule the send path and the watcher use (design 10 S9, MCP-47).
+
+    The session's latest hook event about the turn decides: a session start, Claude's
+    idle notice or a Stop is idle; a prompt submitted or a permission prompt is running.
+    The transcript, the record, adds what the hooks cannot say: a turn it shows still being
+    written (a Stop hook pushed Claude back, or the event is ahead of the copied transcript)
+    is running until it has been quiet for LOG_QUIET_S, and a reply whose Stop hooks have
+    not reported is held for STOP_HOOK_WAIT_S. A turn the transcript shows over (an Esc
+    after Claude had written, which fires no Stop) since the prompt was submitted is idle.
+
+    A session with no event yet is from before 2.0 (TURN_UNKNOWN) when `installed` says its
+    Claude does not run the hooks; when it does, Claude is starting and has not reported
+    yet; when it could not be read (None), the session waits rather than being refused.
     """
-    if not ts.log_shows_turn_in_progress(objs):
-        return TURN_IDLE, "log_finished"
-    if quiet < LOG_QUIET_S:
+    any_events, event = latest_hook_event(name, mirror_base)
+    if not any_events:
+        if installed:
+            return TURN_RUNNING, "starting"
+        if installed is None:
+            return TURN_RUNNING, "hooks_unread"
+        return TURN_UNKNOWN, PREDATES_HOOK_EVENTS
+    now = time.time() if now is None else now
+    quiet = now - mtime if mtime else float("inf")
+    in_progress = ts.log_shows_turn_in_progress(objs)
+    if event is None or event.event == he.SESSION_START:
+        return TURN_IDLE, "session_started"
+    if event.event == he.USER_PROMPT_SUBMIT:
+        if (objs and not in_progress and quiet >= LOG_QUIET_S
+                and mtime > _epoch(event.at)):
+            return TURN_IDLE, "log_finished"
+        return TURN_RUNNING, "prompt_submitted"
+    if event.notification_type == he.PERMISSION_PROMPT:
+        return TURN_RUNNING, "waiting_on_permission"
+    if event.event == he.STOP and in_progress and mtime > _epoch(event.at):
+        # Claude Code runs every Stop hook at once, and a blocking one sends Claude back
+        # to work with no event of its own until the next Stop: a turn the record shows
+        # open, written after the Stop, is that turn, however quiet it is (a tool call)
+        return TURN_RUNNING, "stop_pushed_back"
+    if in_progress and quiet < LOG_QUIET_S:
         return TURN_RUNNING, "log_growing"
-    if ts.awaiting_stop_hooks(objs, objs) and quiet < STOP_HOOK_WAIT_S:
+    if event.event == he.STOP and ts.awaiting_stop_hooks(objs, objs) \
+            and quiet < STOP_HOOK_WAIT_S:
         return TURN_RUNNING, "stop_hooks_running"
-    if screen is None:
-        return TURN_RUNNING, "screen_unread"
-    if screen.working:
-        return TURN_RUNNING, "status_row_working"
-    if screen.input_box == scr.HAS_TEXT:
-        unanswered = ts.unanswered_prompt_turn(objs)
-        if unanswered is not None and any(scr.same_text(screen.typed, p)
-                                           for p in unanswered.prompts):
-            return TURN_IDLE, "prompt_restored"
-    if working_indicator_known(name):
-        return TURN_IDLE, "status_row_idle"
-    if quiet >= _LOG_STALL_S:
-        return TURN_IDLE, "log_stalled"
-    return TURN_RUNNING, "status_row_unproven"
+    if event.event == he.STOP:
+        return TURN_IDLE, "turn_stopped"
+    return TURN_IDLE, "idle_prompt"
+
+
+async def _hooks_installed(container: str, name: str) -> bool | None:
+    """Whether the session's Claude runs aidc's hooks, read once per session instance."""
+    installed = ss.hooks_installed.get(name)
+    if installed is None:
+        installed = await tmx.hooks_installed(container)
+        if installed is not None:
+            ss.hooks_installed[name] = installed
+    return installed
+
+
+async def session_outdated(container: str, name: str) -> bool:
+    """Whether the session predates aidc 2.0's hook events: no event from it, and its
+    Claude's managed settings without aidc's hook (MCP-47). A session whose settings could
+    not be read is not called outdated."""
+    await _sync_session_markers(name)
+    any_events, _ = latest_hook_event(name)
+    return not any_events and await _hooks_installed(container, name) is False
 
 
 async def session_state(container: str, name: str) -> SessionState:
     if not await tmx.is_claude_running(container):
         return SessionState(False, None, TURN_IDLE, "claude_not_running")
-    screen = await read_screen(container, name)
+    await _sync_session_markers(name)
     objs, mtime, status = session_transcript(name)
+    installed = await _hooks_installed(container, name)
+    turn, why = turn_from_hooks(name, objs if status == "ok" else [], mtime,
+                                installed=installed)
+    if turn == TURN_UNKNOWN:
+        return SessionState(True, None, turn, why)
+    # the screen, for what a paste needs: the input box, a dialog (S2)
+    screen = await read_screen(container, name)
     awaiting = ss.sent_awaiting_echo.get(name)
     if awaiting is not None:
         if _prompt_arrived(name, awaiting[0], awaiting[1], objs):
@@ -220,16 +304,15 @@ async def session_state(container: str, name: str) -> SessionState:
         else:
             return SessionState(True, screen, TURN_RUNNING, "sent_prompt_not_in_log")
     if status != "ok":
-        return SessionState(True, screen, TURN_IDLE, f"transcript_{status}")
+        return SessionState(True, screen, turn, why)
     cut_off = ts.unanswered_prompt_turn(objs)
-    if (cut_off is not None and not (screen is not None and screen.working)
+    if (cut_off is not None and turn == TURN_IDLE
             and _interrupt_reported(name, cut_off.terminal_uuid)):
         # Already reported to the orchestrator as stopped before Claude wrote anything:
         # that turn is over. Anything Claude does next writes to the transcript, and a
         # new prompt changes the tail, so neither is mistaken for this.
         return SessionState(True, screen, TURN_IDLE, "interrupt_reported")
-    turn, why = turn_verdict(name, objs, time.time() - mtime, screen)
-    if (turn == TURN_IDLE and why in STOPPED_BY_SCREEN and cut_off is not None
+    if (turn == TURN_IDLE and why in STOPPED_BY_HOOKS and cut_off is not None
             and name in ss.session_watchers):
         return SessionState(True, screen, TURN_RUNNING, "interrupt_not_reported_yet")
     return SessionState(True, screen, turn, why)
@@ -238,6 +321,7 @@ async def session_state(container: str, name: str) -> SessionState:
 def paste_reason(state: SessionState) -> str:
     """"" when a prompt may be pasted now, else why not:
 
+      session_outdated      the session predates hook events: recreate it (MCP-47)
       claude_not_running    the claude window is at a shell
       claude_not_at_prompt  a dialog (e.g. folder trust, login) instead of the input box
       screen_unrecognized   neither the input box nor a known dialog: a layout aidc
@@ -248,6 +332,8 @@ def paste_reason(state: SessionState) -> str:
                             in it), where typed keys are list commands
       input_has_text        a person has unsent text in the input box
     """
+    if state.turn == TURN_UNKNOWN:
+        return "session_outdated"
     if not state.claude_running or state.screen is None:
         return "claude_not_running"
     if state.screen.input_box == scr.NOT_AT_PROMPT:
@@ -273,6 +359,8 @@ async def wait_for_turn_end(container: str, name: str, timeout: float) -> str:
         state = await session_state(container, name)
         if not state.claude_running:
             return "claude_not_running"
+        if state.turn == TURN_UNKNOWN:
+            return "session_outdated"
         streak = 0 if state.turn == TURN_RUNNING else streak + 1
         if streak >= 2:
             return ""

@@ -85,7 +85,7 @@ root="$S/root"
 check "the settings install (shared plugins on)" \
     "$(aidc_install_managed_settings "$root" "$reg" true && echo yes || echo no)"
 ms="$root/etc/claude-code/managed-settings.json"
-for e in Stop Notification UserPromptSubmit; do
+for e in SessionStart Stop Notification UserPromptSubmit; do
     check "the $e hook runs aidc-hook-event" \
         "$([ "$(jq -r ".hooks.${e}[0].hooks[0].command" "$ms")" = /usr/local/bin/aidc-hook-event ] && echo yes || echo no)"
 done
@@ -116,6 +116,9 @@ check "the settings library is copied" \
 check "the hook is made executable" "$(grep -q '/usr/local/bin/aidc-hook-event \\' "$DF" && echo yes || echo no)"
 check "the entrypoint installs the managed settings" \
     "$(grep -q 'aidc_install_managed_settings / ' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
+
+check "aidc create starts the session's hook events empty (a recreated session reads none of the old one's)" \
+    "$(grep -q 'rm -rf -- "${MCP_TRANSCRIPTS_WRITE}/hook-events"' "$AIDC_ROOT/scripts/cmd-create.sh" && echo yes || echo no)"
 
 echo
 echo "hook events: ${PASS} passed, ${FAIL} failed"

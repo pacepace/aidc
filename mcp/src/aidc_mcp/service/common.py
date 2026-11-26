@@ -121,6 +121,8 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "path_not_allowed": "session_create: a path outside what the operator exposed",
     "tainted": "the session is tainted: nothing more is put into it",
     "outside_repo": "a path that leaves the session's repository",
+    "session_outdated": ("the session predates aidc 2.0's hook events; kill it and create "
+                         "it again"),
 }
 ERROR_CODES = frozenset(ERROR_CODE_DESCRIPTIONS)
 

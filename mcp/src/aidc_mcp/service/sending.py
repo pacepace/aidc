@@ -788,6 +788,15 @@ async def send(
             f"There is no session named '{name}'. "
             "Check session_list.", code="no_such_session"
         )
+    if await tn.session_outdated(container, name):
+        # Its Claude reports no hook events (it predates aidc 2.0), so whether it is free
+        # cannot be told; refused at the door rather than queued behind a guess (MCP-47).
+        audit.log_event("tool_call", tool="session_send_failed", session=name,
+                  prompt_len=len(prompt), reason="session_outdated")
+        return com.envelope_err(
+            f"Session '{name}' predates aidc 2.0's hook events, so aidc cannot tell when it "
+            "is free. Kill it and create it again (aidc kill, then aidc create).",
+            code="session_outdated")
 
     # Auto-register the transcript watcher if one isn't already running.
     # Capture WHY when we can't: both gates fail silently, and a send with no

@@ -40,6 +40,20 @@ def _no_real_docker_for_headless(monkeypatch):
     ss.invokes_in_flight.clear()
 
 
+@pytest.fixture(autouse=True)
+def _sessions_run_aidcs_hooks(request, monkeypatch):
+    """Every session a test makes is a 2.0 session: its Claude runs aidc's hooks (MCP-46).
+    A test of a session from before them patches tmux.hooks_installed itself; a test of the
+    probe itself is marked `real_hooks_probe`."""
+    from aidc_mcp.service import tmux
+    if request.node.get_closest_marker("real_hooks_probe"):
+        return
+
+    async def installed(container):
+        return True
+    monkeypatch.setattr(tmux, "hooks_installed", installed)
+
+
 @pytest.fixture
 def idle_session(monkeypatch):
     """A session whose coding agent is not running: _session_state without docker."""
@@ -85,7 +99,9 @@ async def clean_session_watchers():
         ss.settle_state.clear()
         ss.session_send_locks.clear()
         ss.sent_awaiting_echo.clear()
-        ss.working_indicator_seen.clear()
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        ss.hooks_installed.clear()
         ss.unanswered_polls.clear()
         ss.reported_interrupts.clear()
         ss.last_free_verdict.clear()

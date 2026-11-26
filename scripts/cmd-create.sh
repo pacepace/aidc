@@ -646,6 +646,9 @@ MCP_TRANSCRIPTS_WRITE="$AIDC_LOCAL_PATH"
 MCP_AUDIT_BASE_WRITE=$(aidc_local_path "$MCP_AUDIT_BASE") || MCP_AUDIT_BASE_WRITE="$MCP_TRANSCRIPTS_WRITE"
 # Keep the whole tree private (transcripts hold conversation content).
 chmod 0700 "$MCP_AUDIT_BASE_WRITE" "$MCP_TRANSCRIPTS_WRITE"
+# The session's Claude Code hook events (MCP-46) start empty: a session killed and created
+# again under this name must not have its state read from the old session's last event.
+rm -rf -- "${MCP_TRANSCRIPTS_WRITE}/hook-events"
 TRANSCRIPT_MIRROR_MOUNT="- ${MCP_TRANSCRIPTS_DIR}:/var/aidc/transcript-out:rw"
 export TRANSCRIPT_MIRROR_MOUNT
 info "transcript mirror: ${MCP_TRANSCRIPTS_DIR} -> dev:/var/aidc/transcript-out"

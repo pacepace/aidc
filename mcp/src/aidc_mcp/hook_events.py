@@ -1,8 +1,8 @@
 """A session's Claude Code hook events, as aidc-mcp reads them (MCP-46).
 
 Inside the session, `aidc-hook-event` (.devcontainer/hook-event.sh) writes one file per
-`Stop`, `Notification` and `UserPromptSubmit` hook into `hook-events/` of the session's
-MCP-readable mirror dir (beside its transcript copies, `<transcripts>/<session>/`), named
+`SessionStart`, `Stop`, `Notification` and `UserPromptSubmit` hook into `hook-events/` of the
+session's MCP-readable mirror dir (beside its transcript copies, `<transcripts>/<session>/`), named
 `<epoch-ns>-<pid>.json` so the names sort in the order the events happened, each written
 whole by rename. A file holds Claude Code's own hook input with two fields added:
 
@@ -27,6 +27,7 @@ from typing import Any
 #: the dir under a session's mirror dir the hook writes into
 EVENTS_DIR = "hook-events"
 
+SESSION_START = "SessionStart"
 STOP = "Stop"
 NOTIFICATION = "Notification"
 USER_PROMPT_SUBMIT = "UserPromptSubmit"

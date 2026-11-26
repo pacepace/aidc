@@ -26,6 +26,37 @@ async def tmux_exec(container: str, args: list[str]) -> int:
     return await proc.wait()
 
 
+#: the file and the command whose presence says a session's Claude runs aidc's hooks (MCP-46)
+MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json"
+HOOK_COMMAND = "aidc-hook-event"
+
+
+async def hooks_installed(container: str) -> bool | None:
+    """Whether the session's Claude Code runs aidc's hooks: its managed settings name the
+    hook command. None when the session could not be asked: the exec itself failing (the
+    container not running, docker or kubectl not answering) exits 1 just as grep's "no
+    match" does, so the command prints grep's own status and no output is "could not say"."""
+    proc = await asyncio.create_subprocess_exec(
+        *backend.exec_argv(container, [
+            "sh", "-c", 'grep -qF "$1" "$2"; echo "grep:$?"', "sh", HOOK_COMMAND,
+            MANAGED_SETTINGS]),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return hooks_answer(out.decode("utf-8", errors="replace"))
+
+
+def hooks_answer(output: str) -> bool | None:
+    """hooks_installed's reading of what the probe printed."""
+    status = output.strip().rpartition("grep:")[2] if "grep:" in output else ""
+    if status == "0":
+        return True
+    if status in ("1", "2"):   # no match, or no settings file at all
+        return False
+    return None
+
+
 async def capture_screen(container: str, window: str) -> str:
     """The visible pane with its escape sequences (-e), wrapped lines joined (-J)."""
     proc = await asyncio.create_subprocess_exec(

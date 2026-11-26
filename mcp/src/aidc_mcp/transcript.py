@@ -951,7 +951,8 @@ def log_shows_turn_in_progress(objs: list[dict]) -> bool:
     output (/clear, /login, `!` bash mode), or nothing at all.
 
     A transcript cannot show an Esc pressed before Claude wrote anything: it still
-    reads as busy. The caller resolves that case from the screen.
+    reads as busy. The caller resolves that case from Claude's idle notice (a hook event,
+    service/turns.py).
     """
     stop_records = None
     after_summary = False

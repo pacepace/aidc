@@ -35,7 +35,7 @@ from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
-from tests import toolcall
+from tests import hooks, toolcall
 from tests.statefiles import dead_letters
 
 # --- transcript fixture builders (a deterministic stand-in for Claude) --------
@@ -67,6 +67,9 @@ def _agent_writes(base, session, sid, objs):
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{sid}.jsonl"
     p.write_text("\n".join(json.dumps(o) for o in objs) + "\n", encoding="utf-8")
+    # what the session's Claude reports as it writes: a finished reply fires Stop
+    if objs and objs[-1].get("type") == "assistant":
+        hooks.stopped(base, session)
     return p
 
 
@@ -190,6 +193,7 @@ def harness(tmp_path, monkeypatch):
 
     rig.face = server.Face()
     rig.base = base
+    hooks.started(base, "proj")              # the session's Claude is up and idle
     rig.state = state
     rig.orchestrator = orchestrator
     rig.paste_calls = paste_calls
@@ -214,7 +218,7 @@ async def test_fresh_session_reply_delivered_exactly_once(harness):
     swallowing it. Regression-locked here end-to-end."""
     h = harness
     # Fresh session: the transcript dir exists but is empty when we connect.
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
 
     res = await h.send(name="proj", prompt="what does foo() do?", conversation_id="conv-1")
     assert res["ok"] is True
@@ -295,7 +299,7 @@ async def test_multi_turn_back_and_forth_each_reply_once(harness):
     """A back-and-forth conversation: each subsequent send's reply is delivered
     exactly once, in order, and no earlier turn is ever re-sent."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
 
     # Turn 1.
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
@@ -321,7 +325,7 @@ async def test_a_batch_reply_names_every_prompt_and_goes_to_the_watching_convers
     A person's prompt in the batch makes it the person's reply. The next reply names
     only its own prompt."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     transcript = [_user("u1", _sent("q1")), _assistant("a1", "A1")]
     _agent_writes(h.base, "proj", "sid-A", transcript)
@@ -376,7 +380,7 @@ async def test_failed_callback_retries_then_dead_letters_never_silent(harness):
     runs instantly to budget exhaustion.)"""
     h = harness
     h.orchestrator.succeed = False                          # the orchestrator returns non-2xx forever
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
 
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q")), _assistant("a1", "UNDELIVERABLE")])
@@ -395,7 +399,7 @@ async def test_webhook_survives_a_restart_and_a_reply_made_while_down_arrives_on
     (Joint test with the orchestrator, 2026-09-17: a queued prompt pasted after a restart was
     answered, and the answer never came back.)"""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="reply SEVEN", conversation_id="conv-1")
     [saved], _ = ts.load_watches(h.state)
     assert saved["session_instance"] == "id-1"
@@ -471,7 +475,7 @@ async def _deliver_turn(h, objs):
 async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
     h = harness
     monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: True)
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="from the orchestrator", conversation_id="conv-1")
     objs = [_user("u1", _sent("from the orchestrator")), _assistant("a1", "ONE")]
     assert (await _deliver_turn(h, objs))["speaker"] == "agent"
@@ -493,7 +497,7 @@ async def test_speaker_says_who_asked_when_enabled(harness, monkeypatch):
 async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
     h = harness
     monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: True)
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="warm up", conversation_id="conv-1")
     objs = [_user("u1", "warm up"), _assistant("a1", "OK")]
     await _deliver_turn(h, objs)
@@ -509,7 +513,7 @@ async def test_speaker_on_an_interrupted_typed_turn(harness, monkeypatch):
 async def test_speaker_is_not_sent_when_disabled(harness, monkeypatch):
     h = harness
     monkeypatch.setattr(orc, "orchestrator_send_speaker", lambda: False)
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q", conversation_id="conv-1")
     await _deliver_turn(h, [_user("u1", "q"), _assistant("a1", "A"),
                             _user("u2", "typed"), _assistant("a2", "B")])
@@ -638,7 +642,7 @@ async def test_resend_of_an_already_delivered_reply_posts_nothing(harness):
     duplicate of the previous answer into the conversation. The content must come
     back to the CALLER instead, with no callback at all."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [
         _user("u1", _sent("q1")), _assistant("a1", "ANSWER ONE"),
@@ -668,7 +672,7 @@ async def test_resend_tool_returns_the_text_inline_instead_of_duplicating(harnes
     """The tool surface of the same rule: the model gets the reply to read, the
     conversation does not get a second copy of it."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "ANSWER")])
     await h.drain()
@@ -689,7 +693,7 @@ async def test_resend_delivers_a_reply_that_never_reached_orchestrator(harness):
     """The legitimate recovery case must still work: a completed turn the watcher
     has NOT delivered is absent from the ledger, so the resend posts it."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     await h.drain()                                  # baseline, nothing delivered
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "THE REPLY")])
@@ -706,7 +710,7 @@ async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness
     the reply in the old one was never delivered. session_resend is the tool for
     fetching exactly that, so it must look past the file the watcher is on."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     await h.drain()                                  # baseline on the first file
     _agent_writes(h.base, "proj", "sid-A", [
@@ -727,7 +731,7 @@ async def test_resend_reaches_a_reply_in_the_transcript_before_a_restart(harness
 
 async def test_resend_of_a_named_turn_reaches_an_earlier_transcript(harness):
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     await h.drain()
     _agent_writes(h.base, "proj", "sid-A", [
@@ -746,7 +750,7 @@ async def test_resend_of_an_interrupt_keeps_its_note_and_flag(harness):
     """An interrupt with nothing written has no reply text; resending it bare would
     post an empty message. It goes out with the interrupt note and the flag."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     await h.drain()
     interrupt = {"type": "user", "uuid": "i1", "interruptedMessageId": "m",
@@ -768,7 +772,7 @@ async def test_resend_of_a_dead_lettered_reply_still_delivers(harness):
     the ledger — precisely so it stays recoverable. Gating on the watermark instead
     of the ledger would strand exactly the replies this tool exists to rescue."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     h.orchestrator.succeed = False                        # every POST fails -> dead-letter
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "LOST REPLY")])
@@ -788,7 +792,7 @@ async def test_resend_then_watcher_does_not_double_deliver(harness):
     drains that same turn it dedups instead of delivering a second copy. The
     exactly-once invariant holds across BOTH paths."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     await h.drain()
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "THE REPLY")])
@@ -805,7 +809,7 @@ async def test_force_reposts_an_already_delivered_reply(harness):
     """The escape hatch for the one case the ledger cannot see: the orchestrator acked the
     callback but lost the message downstream. Explicit, never the default."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", _sent("q1")), _assistant("a1", "ANSWER")])
     await h.drain()
@@ -821,7 +825,7 @@ async def test_resend_targets_a_specific_turn_under_the_same_rule(harness):
     """turn_uuid selects WHICH reply, it does not bypass the duplicate rule — the
     harm of a second copy is identical however the turn was chosen."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [
         _user("u1", "q1"), _assistant("a1", "FIRST REPLY"),
@@ -844,7 +848,7 @@ async def test_resend_nothing_to_send_when_no_reply(harness):
     """Resend on a session with no completed reply reports nothing to send (no crash,
     no spurious POST)."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", None)])
 
@@ -859,7 +863,7 @@ async def test_resend_tool_warns_when_the_session_is_still_working(harness, monk
     answers an EARLIER prompt. Handing that back unlabelled is how a conversation
     ends up responding to the wrong question."""
     h = harness
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="q1", conversation_id="conv-1")
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", "q1"), _assistant("a1", "OLD ANSWER")])
     await h.drain()
@@ -894,7 +898,7 @@ async def test_the_paste_and_the_delivered_reply_each_report_the_session_changed
     h = harness
     seen = []
     monkeypatch.setattr(ss, "session_change_listeners", [seen.append])
-    (h.base / "proj").mkdir(parents=True)
+    (h.base / "proj").mkdir(parents=True, exist_ok=True)
     await h.send(name="proj", prompt="what does foo() do?", conversation_id="conv-1")
     assert seen == ["proj"]          # pasted
     _agent_writes(h.base, "proj", "sid-A", [_user("u1", h.paste_calls[-1]),

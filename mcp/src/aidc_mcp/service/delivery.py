@@ -14,13 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from aidc_mcp import audit, backend, scope
-from aidc_mcp import screen as scr
 from aidc_mcp import transcript as ts
 from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import state as ss
-from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
 
 
@@ -389,37 +387,36 @@ async def _rotate_if_stale_pin(session: str, conversation_id: str,
     return True
 
 
-async def _interrupted_before_output(session: str, conversation_id: str, suffix: list[dict],
-                                     active: Path, screen_fn, wall_now: float) -> ts.Turn | None:
+def _interrupted_before_output(session: str, conversation_id: str, suffix: list[dict],
+                               active: Path, wall_now: float,
+                               transcripts_base: Path | None = None) -> ts.Turn | None:
     """The prompt at the transcript's tail, as an interrupted turn, when Claude was
     stopped before writing anything; otherwise None.
 
-    Claude Code writes no marker for an Esc pressed that early, so the transcript alone
-    shows only a prompt with no reply. It is reported when the shared turn rule
-    (tn.turn_verdict) says Claude is not working on two consecutive polls, with Claude
-    running at its input box. `screen_fn(session)` returns the session's ScreenState,
-    or None when Claude is not running.
+    Claude Code writes no marker for an Esc pressed that early, and fires no Stop, so the
+    transcript alone shows only a prompt with no reply. It is reported when the shared
+    turn rule (tn.turn_from_hooks) says Claude is idle with that prompt unanswered (its
+    idle notice, or a Stop) on two consecutive polls, the transcript quiet by then.
     """
     key = (session, conversation_id)
     turn = ts.unanswered_prompt_turn(suffix)
-    if turn is None:
+    if turn is None or not ts.log_shows_turn_in_progress(suffix):
+        # an Esc before output leaves the turn open; one Claude Code closed with its
+        # end-of-turn record and no reply is not an interrupt anybody saw
         ss.unanswered_polls.pop(key, None)
         return None
     try:
-        quiet = wall_now - active.stat().st_mtime
+        mtime = active.stat().st_mtime
     except OSError:
         return None
+    quiet = wall_now - mtime
     if quiet < tn.LOG_QUIET_S:
         ss.unanswered_polls.pop(key, None)
         return None
-    state = await screen_fn(session)
-    if state is None or state.input_box not in (scr.EMPTY, scr.HAS_TEXT):
+    verdict, why = tn.turn_from_hooks(session, suffix, mtime, now=wall_now,
+                                      mirror_base=transcripts_base)
+    if verdict != tn.TURN_IDLE or why not in tn.STOPPED_BY_HOOKS:
         ss.unanswered_polls.pop(key, None)
-        return None
-    verdict, why = tn.turn_verdict(session, suffix, quiet, state)
-    if verdict != tn.TURN_IDLE or why not in tn.STOPPED_BY_SCREEN:
-        if why != "status_row_unproven":
-            ss.unanswered_polls.pop(key, None)
         return None
     polls = ss.unanswered_polls.get(key, 0) + 1
     if polls < 2:
@@ -433,13 +430,6 @@ async def _interrupted_before_output(session: str, conversation_id: str, suffix:
     return turn
 
 
-async def _screen_for_watcher(session: str) -> scr.ScreenState | None:
-    container = backend.target(session)
-    if not await tmx.is_claude_running(container):
-        return None
-    return await tn.read_screen(container, session)
-
-
 async def _drain_transcript_once(session: str, conversation_id: str, callback_base: str, *,
                                  transcripts_base: Path | None = None,
                                  state_dir: Path | None = None,
@@ -447,7 +437,7 @@ async def _drain_transcript_once(session: str, conversation_id: str, callback_ba
                                  settle_seconds: float = 0.0,
                                  now_fn=time.monotonic,
                                  wall_now_fn=time.time,
-                                 screen_fn=None) -> None:
+                                 detect_interrupts: bool = False) -> None:
     """One delivery pass, serialized per (session, conversation).
 
     The exactly-once guarantee lives in the durable watermark, but advancing it
@@ -462,7 +452,7 @@ async def _drain_transcript_once(session: str, conversation_id: str, callback_ba
             session, conversation_id, callback_base,
             transcripts_base=transcripts_base, state_dir=state_dir,
             post_fn=post_fn, sleep_fn=sleep_fn, settle_seconds=settle_seconds,
-            now_fn=now_fn, wall_now_fn=wall_now_fn, screen_fn=screen_fn,
+            now_fn=now_fn, wall_now_fn=wall_now_fn, detect_interrupts=detect_interrupts,
         )
 
 
@@ -473,7 +463,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                            settle_seconds: float = 0.0,
                            now_fn=time.monotonic,
                            wall_now_fn=time.time,
-                           screen_fn=None) -> None:
+                           detect_interrupts: bool = False) -> None:
     """The delivery-pass body (run under the per-key lock by _drain_transcript_once):
     resolve active transcript, extract new completed turns, deliver each
     exactly-once with retry, advance the durable high-water mark.
@@ -635,15 +625,9 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
 
     dropped: list[str] = []
     new = ts.extract_completed_turns(suffix, dropped)
-    if screen_fn is not None:
-        if not tn.working_indicator_known(session) and ts.log_shows_turn_in_progress(suffix):
-            # Learn this session's working text while a turn is running, so an Esc
-            # before Claude writes anything can be recognized without waiting out
-            # _LOG_STALL_S. Stops once seen; a person-only session never touches
-            # the send path's own screen reads.
-            await screen_fn(session)
-        cut_off = await _interrupted_before_output(session, conversation_id, suffix, active,
-                                                   screen_fn, wall_now_fn())
+    if detect_interrupts:
+        cut_off = _interrupted_before_output(session, conversation_id, suffix, active,
+                                             wall_now_fn(), transcripts_base)
         if cut_off is not None:
             new = [*new, cut_off]
     for uid in dropped:
@@ -930,7 +914,7 @@ async def _run_transcript_watcher(session: str, conversation_id: str, callback_b
         try:
             await _drain_transcript_once(session, conversation_id, callback_base,
                                          settle_seconds=settle_seconds,
-                                         screen_fn=_screen_for_watcher)
+                                         detect_interrupts=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- watcher must survive

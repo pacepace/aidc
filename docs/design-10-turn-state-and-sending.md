@@ -286,6 +286,7 @@ missing a code or uses one outside the set:
 | `tainted` | the session is tainted: `session_send`, `session_resend`, `session_invoke`, `session_invoke_async`, `session_exec` and `file_put` put nothing into it; `data.tainted` says when and why | tell the person, no retry | no |
 | `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call | no |
 | `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` | yes |
+| `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again | no |
 
 **Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
 call, made again unchanged, can succeed later. It follows the Caller column: `cli_failed` is
@@ -293,7 +294,7 @@ transient (retry once), and `invoke_busy` succeeds once the running headless run
 other code meets the same refusal until something changes (the person acts, or the call is
 fixed). `RETRYABLE_ERROR_CODES` in `service/common.py` is this column, held to it by a test.
 
-`session_send` itself only fails with `no_such_session`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
+`session_send` itself only fails with `no_such_session`, `session_outdated`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
 The orchestrator side never retries a `session_send`, even after a transport failure (a retry could paste
 the prompt twice), and retries a read once on a transport failure or `cli_failed`.
 
@@ -356,7 +357,12 @@ the orchestrator and labels it as stopped at the terminal.
 
 ## Sending
 
-### S1. The transcript decides whether Claude is busy (MCP-28)
+### S1. Whether Claude is busy (MCP-28; from 2.0, S9 and MCP-47)
+
+From aidc 2.0 the session's Claude Code hook events decide it (S9). What follows about the
+screen's working text, the prompt put back in the box and the stall window describes 1.x and
+is kept for the record; the two questions below are unchanged.
+
 
 Two questions are kept apart, because they have different callers:
 
@@ -461,9 +467,47 @@ and a session remembered only in memory read busy for good (found in the joint t
 queued prompt waited behind an interrupt reported before a restart). A tail made of a local command, its output, or a background task's notification is
 never reported; a slash command with no local-command mark (a skill Claude was about to run) is.
 
+### S9. Busy, idle and waiting from Claude Code hook events (MCP-46, MCP-47; aidc 2.0)
+
+Owner ruling 2026-11-26: session state comes from Claude Code's hooks, not the screen. Each
+session's managed settings run `aidc-hook-event` on `SessionStart`, `UserPromptSubmit`,
+`Notification` and `Stop`; it writes the hook's input, with `event` and `at`, as one file in
+`hook-events/` of the session's mirror dir, which aidc-mcp reads (`hook_events.py`).
+
+- **The turn** (`turns.turn_from_hooks`) is the latest event about it: `SessionStart` idle
+  (`session_started`), `UserPromptSubmit` running (`prompt_submitted`), `Notification`
+  `permission_prompt` running (`waiting_on_permission`), `idle_prompt` idle, `Stop` idle
+  (`turn_stopped`). Other notification types change nothing.
+- **The transcript, the record,** adds what the hooks cannot say: a turn it shows open and
+  written after the Stop is one a blocking Stop hook sent Claude back to (Claude Code runs every
+  Stop hook at once, and the pushback fires no event of its own), running however quiet it is
+  until the next Stop (`stop_pushed_back`); a turn still being written when the event is ahead of
+  the copied transcript is running until quiet for `LOG_QUIET_S` (`log_growing`); a reply whose Stop
+  hooks have not reported is held for `STOP_HOOK_WAIT_S` (`stop_hooks_running`); and a turn
+  it shows over since the prompt was submitted (an Esc after Claude had written, which fires
+  no Stop) is idle (`log_finished`). The paste hold (`sent_prompt_not_in_log`) is unchanged.
+- **An Esc before output** fires no Stop and writes nothing: the prompt stays submitted until
+  Claude's idle notice, about a minute later. Then, with the transcript quiet and the turn
+  still open there, the watcher reports it as interrupted on two consecutive polls, as before;
+  it no longer reads the screen for it.
+- **A session with no event yet** is starting (`starting`) when its managed settings name the
+  hook (read once per instance by a probe that prints grep's own status, so an exec that fails
+  is "could not say", never "not installed"), and from before 2.0 when they do not: `turn: "unknown"`, `why:
+  "session_predates_hook_events"`, `session_send` refused with `session_outdated` (D6). A
+  session whose settings cannot be read waits (`hooks_unread`) rather than being refused.
+- **A session created again** starts with no events: `aidc create` empties its `hook-events/`.
+- **Reading** is incremental per session (the newest file read is remembered); after an MCP
+  restart every file is read again, and all but the newest `HOOK_EVENTS_KEPT` are removed once
+  read.
+- **The screen** is read only for what a paste needs: the input box, a dialog (S2), the agent
+  list, and AskUserQuestion. The reply's content is still the transcript's, and exactly-once
+  delivery (the watermark and ledger) is unchanged.
+
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 
-Only three things, each invisible to the transcript:
+From 2.0 (S9) the screen no longer decides whether Claude is working: of the list below, only
+what a paste needs (the input box, a dialog) is still read, and the working-text item describes
+1.x. Only three things, each invisible to the transcript:
 
 1. **Unsent text in Claude's input box.** The transcript records a prompt only after it is sent.
 2. **Whether Claude is at its input prompt at all.** After a start or restart, Claude can be on a

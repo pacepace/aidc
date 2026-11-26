@@ -90,10 +90,14 @@ session_watchers: dict[str, asyncio.Task[None]] = {}
 sent_awaiting_echo: dict[str, tuple[str, float]] = {}
 
 
-# Sessions whose status row the MCP has seen show `esc to interrupt`, so its absence
-# can be trusted (see _LOG_STALL_S). Mirrored by a marker file per session in the
-# watcher-state dir; read it through working_indicator_known.
-working_indicator_seen: set[str] = set()
+# Each session's Claude Code hook events (MCP-47), as this process has read them: the name
+# of the newest event file read (a session absent here has had none read yet), and its
+# latest event about the turn. In memory: after a restart the files are read again.
+hook_events_read: dict[str, str] = {}
+hook_turn_event: dict[str, Any] = {}
+# Whether each session's Claude runs aidc's hooks (read from its managed settings once per
+# session instance); a session whose Claude does not is from before 2.0.
+hooks_installed: dict[str, bool] = {}
 
 
 # session -> uuid of the latest prompt the watcher reported as interrupted before Claude
@@ -131,9 +135,11 @@ unsubmitted_paste: dict[str, tuple[str, tuple[str, ...]]] = {}
 session_instances: dict[str, str] = {}
 
 
-#: the session markers kept in the state store (store.py's `markers`), by kind
-WORKING_SEEN_MARKER = "working-text-seen"
+#: the session marker kept in the state store (store.py's `markers`), by kind
 REPORTED_INTERRUPT_MARKER = "interrupt-reported"
+#: a 1.x marker no longer written (the screen no longer decides the turn); removed with a
+#: session's state
+WORKING_SEEN_MARKER = "working-text-seen"
 
 
 # Consecutive unexpected drainer failures per session, for the restart backoff.
@@ -148,7 +154,9 @@ def forget_session_send_state(name: str) -> None:
     """Send-path state lives as long as the session, not as long as a watcher: a
     session_unwatch must not drop a paste's busy hold. It is cleared here, when the
     session is gone."""
-    working_indicator_seen.discard(name)
+    hook_events_read.pop(name, None)
+    hook_turn_event.pop(name, None)
+    hooks_installed.pop(name, None)
     sent_awaiting_echo.pop(name, None)
     unsubmitted_paste.pop(name, None)
     last_free_verdict.pop(name, None)

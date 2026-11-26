@@ -94,6 +94,8 @@ one plan as asked.
 - 07: rows keep 1.x's documented JSON documents under their natural keys (data-model.md), so the documented shapes stay the contract and the persistence functions keep their signatures; the store runs on one loop thread of its own behind a synchronous interface, as the 1.x file writes were synchronous. Only the four column types both 3tears stores share are used. Switching the L3 to Postgres by configuration (the store creates no Postgres tables yet) belongs with the mesh face in chunk 21, where the first Postgres deployment is; recorded here so it is not lost.
 - 07: TRS-01 amended in this chunk's commit (main, 2026-11-26): 3tears' own `threetears.nats` modules that core imports are allowed while the NATS client is neither installed nor imported; the import test checks both and that nothing connects.
 - 23: the event format is Claude Code's own hook input plus `event` and `at`, so a field a newer Claude Code adds reaches the MCP without a change here; events go to the mirror dir the MCP already reads (both backends), never to the MCP. The git agent's managed settings are the git wave's files (gitctl/), so its hooks were asked of that wave (main, 2026-11-26). The live check's Claude-fired half needs a logged-in Claude in the scratch session: asked of the owner (main, 2026-11-26).
+- 24 (main, 2026-11-26): no screen fallback. A session with no hook event whose managed settings lack aidc's hook predates 2.0: `turn: "unknown"`, `session_send` refused with the new code `session_outdated` (D6, not retryable), recreate it (in the 2.0 upgrade notes). `SessionStart` joined the hooks, since a new 2.0 session has no other event before its first prompt; whether the hooks are installed is read from the session's managed settings once per instance (a file read, not the screen), and a session whose settings cannot be read waits rather than being refused. An Esc before output is reported after Claude's idle notice (about a minute) instead of from the screen.
+- 24: the live checks (a reply delivered once across an MCP restart on Docker; a human-typed prompt's reply reaching the orchestrator) wait on a logged-in Claude in the scratch session and on the owner's orchestrator (asked through main, 2026-11-26).
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with
@@ -301,7 +303,8 @@ Order follows design-13 "Upstream work".
 - **Depends on:** 07, 08.
 - **Requirements:** MCP-15, MCP-17, MCP-34, MCP-35, K8S-02.
 - **Done when:** a cluster session's turn is delivered exactly once across a server restart (live);
-  `/prawduct:critic`; committed.
+  a cluster session's Claude Code hook events (MCP-46) reach the server, so its busy and idle come
+  from them (the Kubernetes half of plan-aidc-2.0 W-H-02); `/prawduct:critic`; committed.
 - **Owner's hands:** the cluster.
 
 ### Chunk 10: The per-user server in the cluster (W-M2-01)

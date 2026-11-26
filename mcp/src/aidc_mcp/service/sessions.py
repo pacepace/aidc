@@ -115,7 +115,11 @@ async def session_report(name: str) -> dict[str, Any]:
                                             repo.head(name, repo_dir))
     objs, _, _ = tn.session_transcript(name)
     working = state.claude_running and state.turn == tn.TURN_RUNNING
+    outdated = ({"note": "This session predates aidc 2.0's hook events, so whether its "
+                         "agent is working cannot be told. Kill it and create it again."}
+                if state.turn == tn.TURN_UNKNOWN else {})
     return {
+        **outdated,
         "tainted": taint,
         "audit_dir": audit,
         "repo": repo_dir,

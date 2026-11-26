@@ -90,6 +90,7 @@ one plan as asked.
 - 04: MCP-09's update notifications were never sent by 1.x; built here, from one service hook (`common.session_changed`) called where a session's status changes (inject on a paste, delivery of a reply, create, interrupt), which the face turns into `resources/updated` for the status and the session list.
 - 04: what "on change" (MCP-09) means for 2.0: a paste, a delivered reply, a create, an interrupt (agent or headless); a scoped server reports only its own sessions. Chunk 24 adds the hook events (a turn starting or ending, a permission prompt, idle), which also cover a person typing into the terminal; a taint, or a kill or stop from the CLI, reach a subscriber on its next read.
 - 04: the orchestrator round trip waits for the owner (asked through main 2026-11-26); everything else in 04 is built and tested.
+- 05: the call scope is entered in `AidcTool.execute`, not the MCP face, so the mesh face gets the same correlation and span; access-log events also go out as observe log lines (the file and its fields unchanged); export and metrics are opt-in extras, not in the default image. TRS-13's boundary forbids the 3tears face types (threetears.mcp, threetears.tool_contract) in the service, not observe, which every module logs through.
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with
@@ -107,7 +108,7 @@ verify-api against the released source.
 | REL-09 | Does the 3tears family wait out the 14-day cooldown, or is it an explicit exception (the owner's own package)? | 22 (moved from 01 by the 2026-11-26 ruling) |
 | TRS-18 | Must local mode serve the HTTP API too, or is the hub's API face on the mesh enough? | 06 (and U10) — answered 2026-11-25: no API in 2.0; U10 and chunk 06 dropped, kept addable |
 | Q-K1 | How a user adds a Claude account to the broker. | 17 |
-| Q-G1 | In ask mode, do GitHub issue writes (create, edit, comment, close) wait for approval like pushes, or run at once like reads? | 13 |
+| Q-G1 | In ask mode, do GitHub issue writes (create, edit, comment, close) wait for approval like pushes, or run at once like reads? | 13 — answered 2026-11-26: run at once, checked by gitreq |
 | W-K0-03 / Q-M5 | Does paste+Enter answer AskUserQuestion? If not, the key sequence (§5 decision). | 14 |
 
 ## Upstream work in 3tears (W-T1; built and released in the 3tears repo)

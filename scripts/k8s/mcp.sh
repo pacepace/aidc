@@ -19,6 +19,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/manifests.sh"
 # shellcheck source=tunnel.sh
 . "$AIDC_SCRIPTS/k8s/tunnel.sh"
+# shellcheck source=expose.sh
+. "$AIDC_SCRIPTS/k8s/expose.sh"
 # shellcheck source=../lib/egress.sh
 . "$AIDC_SCRIPTS/lib/egress.sh"
 
@@ -42,6 +44,10 @@ Verbs:
 
 The token is a Secret in your namespace; start and rotate also write it to
 ~/.config/aidc/mcp-token (mode 0600), where an orchestrator's config reads it.
+
+It is reached in the cluster at http://aidc-mcp.<your namespace>.svc:7878/mcp, and on your
+network at https://mcp-<user>.<your pages' domain>/mcp when mcp.kubernetes.expose is ingress;
+always with the token. It may post replies to orchestrator.callback_url only.
 USAGE
 }
 
@@ -105,6 +111,107 @@ mcp_api_endpoints() {
     printf '%s:%s\n' "$ip" "$port"
 }
 
+# mcp_callback: K8S_MCP_CALLBACK_IP, _PORT and _HOST, where the server posts finished turns
+# (orchestrator.callback_url), for its one egress rule and hosts entry. The name is resolved on
+# this machine, as relays' are (NET-15), unless mcp.kubernetes.callback_address gives the
+# address the cluster reaches it at. No callback_url: no callback egress, said once. Returns 1,
+# saying why, for a URL or address the server could not use.
+mcp_callback() {
+    local url rest hostport host port ip over
+    K8S_MCP_CALLBACK_IP="" K8S_MCP_CALLBACK_PORT="" K8S_MCP_CALLBACK_HOST=""
+    url=$(_k8s_cfg '.orchestrator.callback_url')
+    if [ -z "$url" ]; then
+        info "no orchestrator.callback_url: the server delivers no replies until one is set (then aidc mcp start again)"
+        return 0
+    fi
+    case "$url" in
+        http://*) port=80 ;;
+        https://*) port=443 ;;
+        *) err "orchestrator.callback_url ${url} is not an http(s) URL"; return 1 ;;
+    esac
+    rest="${url#*://}"; hostport="${rest%%/*}"; hostport="${hostport##*@}"
+    case "$hostport" in
+        \[*) err "orchestrator.callback_url names an IPv6 address: set mcp.kubernetes.callback_address to its IPv4 address"; return 1 ;;
+        *:*) host="${hostport%:*}" port="${hostport##*:}" ;;
+        *) host="$hostport" ;;
+    esac
+    if ! printf '%s' "$host" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || ! k8s_port_ok "$port"; then
+        err "orchestrator.callback_url ${url}: cannot read its host and port"; return 1
+    fi
+    over=$(_k8s_cfg '.mcp.kubernetes.callback_address')
+    if [ -n "$over" ]; then
+        aidc_egress_is_ipv4 "$over" || { err "mcp.kubernetes.callback_address ${over} is not an IPv4 address"; return 1; }
+        ip="$over"
+    elif ! ip=$(aidc_egress_resolve_explained "$host"); then
+        err "set mcp.kubernetes.callback_address to the orchestrator's IPv4 address as the cluster reaches it"
+        return 1
+    fi
+    case "$ip" in
+        127.*) err "the callback host ${host} is ${ip} here, which the server's pod cannot reach: set mcp.kubernetes.callback_address"; return 1 ;;
+    esac
+    K8S_MCP_CALLBACK_IP="$ip" K8S_MCP_CALLBACK_PORT="$port"
+    aidc_egress_is_ipv4 "$host" || K8S_MCP_CALLBACK_HOST="$host"
+    export K8S_MCP_CALLBACK_IP K8S_MCP_CALLBACK_PORT K8S_MCP_CALLBACK_HOST
+}
+
+# mcp_expose_mode: "none" or "ingress" (mcp.kubernetes.expose); returns 1, saying why, otherwise.
+mcp_expose_mode() {
+    local m
+    m=$(_k8s_cfg '.mcp.kubernetes.expose')
+    case "$m" in
+        ""|none|false) printf 'none' ;;
+        ingress) printf 'ingress' ;;
+        *) err "mcp.kubernetes.expose ${m}: expected ingress, or none (in the cluster only)"; return 1 ;;
+    esac
+}
+
+# mcp_expose_check: whether the cluster can serve the server at k8s_mcp_host (MCP-11: an
+# exposure the config asks for that cannot be served is refused, not skipped). Returns 1, saying
+# why.
+mcp_expose_check() {
+    local host taken
+    [ -n "$AIDC_K8S_INGRESS_DOMAIN" ] || { err "mcp.kubernetes.expose ingress needs kubernetes.ingress.domain: the domain your pages live under"; return 1; }
+    k8s_valid_domain "$AIDC_K8S_INGRESS_DOMAIN" || { err "kubernetes.ingress.domain ${AIDC_K8S_INGRESS_DOMAIN} is not a domain name"; return 1; }
+    [ -n "$AIDC_K8S_INGRESS_CLASS" ] || { err "mcp.kubernetes.expose ingress needs kubernetes.ingress.class"; return 1; }
+    # The IngressClass must be there (an exposure the cluster cannot serve is refused).
+    k8s_ingress_controller_settle || return 1
+    host=$(k8s_mcp_host)
+    if [ "${#host}" -gt 253 ] || [ "$(printf '%s' "${host%%.*}" | wc -c)" -gt 63 ]; then
+        err "the server's name ${host} is too long for DNS"; return 1
+    fi
+    if taken=$(k8s_expose_taken "$ns" "$host") && [ "$taken" != "${ns}/${K8S_MCP_NAME}" ]; then
+        err "${host} is already served by ingress ${taken}"; return 1
+    fi
+    # On the VPN/LAN only: a session's proxy may reach any public address (and no private one),
+    # so a name that leads to a public address would let every session reach the server through
+    # its Squid (MCP-12, K8S-13). Checked where this machine resolves it.
+    local ip rc=0
+    ip=$(aidc_egress_resolve "$host") || rc=$?
+    if [ "$rc" != 0 ]; then
+        err "cannot resolve ${host} here, so cannot tell it is on your network only: the server is exposed only at a private address, which aidc checks (does your network's DNS answer for the pages' domain?)"
+        return 1
+    fi
+    if ! mcp_private_ipv4 "$ip"; then
+        err "${host} resolves to ${ip}, a public address: every session could reach your MCP server through its proxy there; expose it only where the name resolves to your VPN/LAN (mcp.kubernetes.expose: none keeps it in the cluster)"
+        return 1
+    fi
+}
+
+# mcp_private_ipv4 <ipv4>: 0 when the address is one a session's proxy refuses (private, shared
+# CGNAT, loopback, link-local), as squid's aidc_not_public and the proxy's NetworkPolicy do.
+mcp_private_ipv4() {
+    local a b
+    IFS=. read -r a b _ <<<"$1"
+    case "$a" in
+        10|127) return 0 ;;
+        172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] ;;
+        192) [ "$b" = 168 ] ;;
+        169) [ "$b" = 254 ] ;;
+        100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # mcp_state: RUNNING, STARTING or NOT RUNNING, from the Deployment; returns 2 when the cluster
 # did not answer.
 mcp_state() {
@@ -128,7 +235,8 @@ mcp_incluster_api() {
     printf '%s:%s\n' "$host" "$port"
 }
 
-# mcp_policy_endpoints: the API server addresses the server's NetworkPolicy allows now,
+# mcp_policy_endpoints: the API server addresses the server's NetworkPolicy allows now (the
+# aidc-mcp policy's egress, which holds nothing else: the callback has a policy of its own),
 # "<ipv4>:<port>" a line ("" when there is none); returns 1 when it cannot be read.
 mcp_policy_endpoints() {
     local doc
@@ -148,12 +256,15 @@ mcp_add_endpoints() {
 }
 
 mcp_start() {
-    local sel tok rc=0 eps state incluster="" known have
+    local sel tok rc=0 eps state incluster="" known have expose
     # A token first: the pod mounts it, and a cluster that does not say whether there is one
     # must not get a second.
     tok=$(mcp_token_read) || rc=$?
     [ "$rc" = 0 ] || die "cannot read your MCP token in ${ns}: the cluster did not answer"
     eps=$(mcp_api_endpoints) || exit 1
+    mcp_callback || exit 1
+    expose=$(mcp_expose_mode) || exit 1
+    [ "$expose" != ingress ] || mcp_expose_check || exit 1
     # The API server's in-cluster address too, as the pod sees it: a network policy may judge a
     # connection before or after the Service's address is translated, so both are allowed. A
     # server that runs already says it, so its policy is applied once, never narrowed for a
@@ -204,6 +315,20 @@ mcp_start() {
                 || die "could not let the MCP server reach the API server at ${incluster}"
         fi
     fi
+    # A callback no longer configured keeps no way out.
+    if [ -z "${K8S_MCP_CALLBACK_IP:-}" ]; then
+        k8s_kubectl -n "$ns" delete networkpolicy "${K8S_MCP_NAME}-callback" --ignore-not-found >/dev/null \
+            || err "could not remove the server's old callback egress: the cluster did not answer"
+    fi
+    # On the user's network when the config asks (an Ingress on the pages' class and
+    # certificate); its removal when it no longer does.
+    if [ "$expose" = ingress ]; then
+        k8s_render_mcp_expose | k8s_kubectl apply -f - >/dev/null \
+            || die "the cluster did not take the server's Ingress at $(k8s_mcp_host)"
+    else
+        k8s_kubectl -n "$ns" delete ingress "$K8S_MCP_NAME" --ignore-not-found >/dev/null \
+            || err "could not remove the server's Ingress (mcp.kubernetes.expose is off): the cluster did not answer"
+    fi
     mcp_token_write_local "$tok" || die "could not write ${TOKEN_FILE}"
     info "token: ${TOKEN_FILE} (mode 0600)"
     mcp_status
@@ -218,17 +343,23 @@ mcp_stop() {
         return 0
     fi
     info "stopping your MCP server in ${ns} (its state, token and transcripts are kept)"
-    k8s_kubectl -n "$ns" delete deployment,networkpolicy -l "app=${K8S_MCP_NAME}" --wait=true >&2 \
+    k8s_kubectl -n "$ns" delete deployment,networkpolicy,service,ingress -l "app=${K8S_MCP_NAME}" --wait=true >&2 \
         || die "could not stop the MCP server"
 }
 
 mcp_status() {
-    local state rc=0 last why used
+    local state rc=0 last why used host
     state=$(mcp_state) || rc=$?
     printf 'aidc-mcp (kubernetes, %s): %s\n' "$ns" "$state"
     [ "$rc" = 0 ] || return 0
     printf '  token file:  %s (from Secret %s)\n' "$TOKEN_FILE" "$K8S_MCP_TOKEN_SECRET"
     printf '  state:       claim %s\n' "$K8S_MCP_STATE_CLAIM"
+    [ "$state" = "NOT RUNNING" ] && return 0
+    printf '  in cluster:  http://%s.%s.svc:%s/mcp (from any namespace but %s)\n' \
+        "$K8S_MCP_NAME" "$ns" "$K8S_MCP_PORT" "$ns"
+    if host=$(k8s_get "$ns" ingress "$K8S_MCP_NAME" -o 'jsonpath={.spec.rules[0].host}'); then
+        [ -z "$host" ] || printf '  network:     https://%s/mcp\n' "$(printf '%s' "$host" | aidc_printable)"
+    fi
     if [ "$state" = STARTING ]; then
         # Not ready: a pod still starting, or one that cannot (an image not built yet, a crash).
         why=$(k8s_get "$ns" pod -l "app=${K8S_MCP_NAME}" \

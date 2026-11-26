@@ -64,6 +64,7 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
         printf 'RENDER k8s_render_mcp_state %s\n' "$(k8s_render_mcp_state | kinds)"
         printf 'RENDER k8s_render_mcp_token %s\n' "$(k8s_render_mcp_token t | kinds)"
         printf 'RENDER k8s_render_mcp_config %s\n' "$(k8s_render_mcp_config | kinds)"
+        printf 'RENDER k8s_render_mcp_expose %s\n' "$(AIDC_K8S_INGRESS_DOMAIN=pages.example.org k8s_render_mcp_expose | kinds)"
     } > "$SCRATCH/facts"
 )
 

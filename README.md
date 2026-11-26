@@ -1129,6 +1129,11 @@ mcp:
   session_create: false               # offer the session_create tool. Creating a session means reading a repo and
                                       # writing Claude's per-project memory on the HOST, so turning this on mounts
                                       # your home dir into the aidc-mcp container. Off, the tool is not offered at all.
+  kubernetes:                         # your MCP server in the cluster (backend: kubernetes)
+    expose: none                      # ingress: also at https://mcp-<user>.<kubernetes.ingress.domain>/mcp on your
+                                      # network, on the pages' class and certificate (none: in the cluster only)
+    callback_address: ""              # the orchestrator's IPv4 as the cluster reaches it, when its callback_url
+                                      # names a host this machine cannot resolve (default: resolved here)
 
 # Only relevant if an orchestrator drives sessions over MCP:
 orchestrator:
@@ -1194,11 +1199,18 @@ kubeconfig names it, and its in-cluster address. When your kubeconfig names it b
 the cluster does not see (a load balancer, 127.0.0.1 on the node), set
 `kubernetes.api_endpoints: ["<ipv4>:<port>", ...]`. `stop` keeps its state and token;
 `token rotate` restarts it; `token show` reads the Secret. A user added before 2.0 needs
-`aidc user add <name>` run again by an admin, which lets them read that one Secret. Nothing
-can connect to it until its in-cluster Service and VPN exposure land (the next 2.0 step);
-until then reach it from your machine with
-`kubectl -n aidc-u-<user> port-forward deployment/aidc-mcp 7878` and
-`http://127.0.0.1:7878/mcp`.
+`aidc user add <name>` run again by an admin, which lets them read that one Secret.
+
+It is reached, always with its token, in the cluster at
+`http://aidc-mcp.aidc-u-<user>.svc:7878/mcp` (from any namespace but yours, so none of your
+sessions can), and on your network when `mcp.kubernetes.expose: ingress` at
+`https://mcp-<user>.<kubernetes.ingress.domain>/mcp`, an Ingress on the same class and wildcard
+certificate as your pages (the session name `mcp` is reserved for it). `aidc mcp start` refuses
+an exposure the cluster cannot serve (no pages domain, an IngressClass it lacks, the name
+taken), and one whose name resolves to a public address or not at all: only a VPN/LAN address
+keeps sessions, whose proxies reach public addresses, from reaching it. It may post replies to your `orchestrator.callback_url` host and port only, resolved on
+your machine (or `mcp.kubernetes.callback_address`) and put in the pod's hosts file, since it has
+no DNS.
 
 **Logs and telemetry:** the server logs through 3tears-observe to `aidc mcp logs`, each tool call's lines carrying one correlation id (`cid`); the access log (`access.log`) stays the record of every request. Nothing is exported unless asked: `AIDC_MCP_OTEL_ENDPOINT` (an OTLP/HTTP collector's base URL) exports one span per tool call, and `AIDC_MCP_METRICS=true` serves per-tool call counts and durations at `/metrics` behind the bearer; they need the server's `otel` and `prometheus` extras, which the default image leaves out.
 

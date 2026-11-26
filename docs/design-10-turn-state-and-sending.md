@@ -511,11 +511,12 @@ in another window writes nothing, since its Stop is not the session's.
   from before 2.0 when they do not name the hook: `turn: "unknown"`, `why:
   "session_predates_hook_events"`, `session_send` refused with `session_outdated` (D6). A
   session whose settings cannot be read waits (`hooks_unread`) rather than being refused.
-- **A session created again** starts with no events: `aidc create` empties its `hook-events/`,
-  and the git container's main process empties the git agent's as it starts.
+- **A session created again** starts with no events: `aidc create` empties its `hook-events/`
+  (on Kubernetes the dev pod's mirror step, at every pod start), and the git container's main
+  process empties the git agent's as it starts.
 - **Reading** is incremental per session (the newest file read is remembered); after an MCP
-  restart every file is read again, and all but the newest `HOOK_EVENTS_KEPT` are removed once
-  read.
+  restart every file is read again. The MCP removes none: the session's hook writer keeps the
+  newest 200 (MCP-46), and in the cluster the MCP's mount of the mirror is read-only.
 - **The screen** is read only for what a paste needs: the input box, a dialog (S2), the agent
   list, and AskUserQuestion. The reply's content is still the transcript's, and exactly-once
   delivery (the watermark and ledger) is unchanged.

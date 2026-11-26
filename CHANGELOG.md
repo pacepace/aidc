@@ -110,9 +110,14 @@ and the envelope are unchanged; what an MCP caller sees differently:
   read your MCP token's Secret, by name), and `aidc k8s build` builds the `aidc/mcp` image, which
   now carries the aidc CLI, kubectl and yq. Your token is kept in that Secret and copied to
   `~/.config/aidc/mcp-token`. New settings: `kubernetes.mcp_state_size` and
-  `kubernetes.api_endpoints` (README, Kubernetes backend). Nothing connects to it yet but
-  `kubectl port-forward deployment/aidc-mcp 7878` in your namespace; its Service and VPN
-  exposure follow.
+  `kubernetes.api_endpoints` (README, Kubernetes backend).
+- **Reaching it:** in the cluster at `http://aidc-mcp.aidc-u-<user>.svc:7878/mcp`, from any
+  namespace but yours; on your network with `mcp.kubernetes.expose: ingress` at
+  `https://mcp-<user>.<kubernetes.ingress.domain>/mcp`, on your pages' class and certificate,
+  only where that name resolves to a private (VPN/LAN) address.
+  Always with the token. It may post only to your `orchestrator.callback_url` host and port
+  (`mcp.kubernetes.callback_address` when the cluster reaches it at another address). A session
+  may no longer be named `mcp` on Kubernetes.
 - **A session's hook events are pruned by the session's own hook writer** (the newest 200 are
   kept), no longer by the MCP server, which only reads them; on both backends.
 - **Build the `aidc/mcp` image through aidc** (`aidc rebuild`, `aidc k8s build`): its build

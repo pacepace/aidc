@@ -106,6 +106,9 @@ while [ $# -gt 0 ]; do
 done
 validate_session_name "$NAME"
 ! k8s_is_git_session "$NAME" || die "'git' is reserved for your git agent (aidc git setup); pick another session name"
+# The user's MCP server is served at mcp-<user>.<domain> (scripts/k8s/mcp.sh), a page name a
+# session named mcp would take.
+[ "$NAME" != mcp ] || die "'mcp' is reserved on the kubernetes backend: your MCP server's network name is mcp-${AIDC_K8S_USER:-<user>}.<domain>; pick another session name"
 # Stricter than Docker's names: a Kubernetes Service name must start with a letter, and a label
 # value must end with a letter or digit. Checked before anything is created, so a refused name
 # leaves nothing behind.

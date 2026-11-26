@@ -82,14 +82,27 @@ case "$*" in
         [ "${K_POLICY_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -z "${K_POLICY:-}" ] || printf '%s' "$K_POLICY" ;;
     *"get pod -l app=aidc-mcp"*) printf '%s' "${K_WAITING:-}" ;;
+    *"get ingressclass"*) [ "${K_NO_IC:-}" = 1 ] && { echo 'Error from server (NotFound): ingressclasses.networking.k8s.io "web" not found' >&2; exit 1; }
+        printf 'traefik.io/ingress-controller' ;;
+    *"get ingress aidc-mcp"*) printf '%s' "${K_EXPOSED:-}" ;;
+    *"get ingress -o json"*) printf '%s' "${K_INGRESSES:-{\"items\":[]\}}" ;;
     *"delete secret"*) [ "${K_DELETE_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; } ;;
     *" logs "*) echo "the server's log" ;;
 esac
 exit 0
 STUB_K8S_MCP_x41
 printf '#!/bin/sh\nprintf "docker %%s\\n" "$*" >> "$K_LOG"\nexit 1\n' > "$SCRATCH/bin/docker"
-# getent: api.cluster.test is 192.0.2.20; every other name has no address.
-printf '#!/bin/sh\n[ "$2" = api.cluster.test ] && echo "192.0.2.20      STREAM api.cluster.test"\n' > "$SCRATCH/bin/getent"
+# getent: api.cluster.test is 192.0.2.20, orchestrator.example.org 198.51.100.40, local.test
+# 127.0.0.1; every other name has no address.
+cat > "$SCRATCH/bin/getent" <<'GETENT_K8S_MCP_x41'
+#!/bin/sh
+case "$2" in
+    api.cluster.test) echo "192.0.2.20      STREAM api.cluster.test" ;;
+    orchestrator.example.org) echo "198.51.100.40   STREAM orchestrator.example.org" ;;
+    local.test) echo "127.0.0.1       STREAM local.test" ;;
+    mcp-alice.pages.example.org) [ "${K_MCP_IP:-192.168.1.50}" = none ] || echo "${K_MCP_IP:-192.168.1.50}   STREAM mcp-alice.pages.example.org" ;;
+esac
+GETENT_K8S_MCP_x41
 chmod +x "$SCRATCH/bin/kubectl" "$SCRATCH/bin/docker" "$SCRATCH/bin/getent"
 
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
@@ -117,7 +130,9 @@ run() { : > "$K_APPLIED"; : > "$K_LOG"; ("$AIDC_ROOT/scripts/aidc" mcp "$@" 2>&1
 q() { yq -N e "$1" -o=json -I=0 "$K_APPLIED"; }
 dep() { q "select(.kind == \"Deployment\") | $1" | tail -1; }
 # pols: each NetworkPolicy applied, its egress addresses, one line per apply.
-pols() { q 'select(.kind == "NetworkPolicy") | [.spec.egress[].to[0].ipBlock.cidr]' | grep -vx '\[\]'; }
+pols() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp") | [.spec.egress[].to[0].ipBlock.cidr]' | grep -vx '\[\]'; }
+# cpol: the callback's own policy's egress, as <cidr>:<port>.
+cpol() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp-callback") | [.spec.egress[] | .to[0].ipBlock.cidr + ":" + (.ports[0].port | tostring)]' | grep -vx '\[\]' | tail -1; }
 pod() { dep ".spec.template.spec | $1"; }
 
 echo "=== aidc mcp start: a first start ==="
@@ -182,8 +197,8 @@ assert_eq "no container is privileged" "[]" "$(pod '[.containers[] | select(.sec
 
 echo "=== the server's network: nothing in, the API server only out ==="
 pol() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp") | .spec' | tail -1; }
-assert_eq "it selects the server's pods, and nothing may connect to them yet" \
-    '[{"app":"aidc-mcp"},["Ingress","Egress"],[]]' "$(pol | jq -c '[.podSelector.matchLabels, .policyTypes, .ingress]')"
+assert_eq "it selects the server's pods, both ways" \
+    '[{"app":"aidc-mcp"},["Ingress","Egress"]]' "$(pol | jq -c '[.podSelector.matchLabels, .policyTypes]')"
 assert_eq "it may reach the API server where the kubeconfig names it, and at its in-cluster address, on their ports only" \
     '[{"to":[{"ipBlock":{"cidr":"192.0.2.10/32"}}],"ports":[{"protocol":"TCP","port":6443}]},{"to":[{"ipBlock":{"cidr":"10.43.0.1/32"}}],"ports":[{"protocol":"TCP","port":443}]}]' \
     "$(pol | jq -c '.egress')"
@@ -191,7 +206,96 @@ assert_eq "the first policy, before the in-cluster address is read, allows the k
     '[{"to":[{"ipBlock":{"cidr":"192.0.2.10/32"}}],"ports":[{"protocol":"TCP","port":6443}]}]' \
     "$(q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp") | .spec.egress' | head -1)"
 
+echo "=== reaching the server: its Service, in the cluster ==="
+assert_eq "a ClusterIP Service on the server's port (no node port, no external address)" \
+    '{"type":null,"selector":{"app":"aidc-mcp"},"ports":[{"name":"mcp","port":7878,"targetPort":7878,"protocol":"TCP"}]}' \
+    "$(q 'select(.kind == "Service") | .spec | {"type": .type, "selector": .selector, "ports": .ports}' | tail -1)"
+assert_eq "every namespace but the user's own may connect, to that port only (no session of the user reaches it)" \
+    '[{"from":[{"namespaceSelector":{"matchExpressions":[{"key":"kubernetes.io/metadata.name","operator":"NotIn","values":["aidc-u-alice"]}]}}],"ports":[{"protocol":"TCP","port":7878}]}]' \
+    "$(pol | jq -c '.ingress')"
+assert_eq "the readiness probe connects from inside the pod (the policy lets nothing in from the node)" \
+    '["python","-c","import socket; socket.create_connection(('"'"'127.0.0.1'"'"', 7878), 2)"]' \
+    "$(pod '.containers[0].readinessProbe.exec.command')"
+
+echo "=== the callback: one host and port out, by name in the pod's hosts file ==="
+assert_eq "the orchestrator's callback address and port are allowed, in a policy of their own" \
+    '["198.51.100.40/32:8443"]' "$(cpol)"
+assert_eq "...which selects the server's pods, for egress only" '[{"app":"aidc-mcp"},["Egress"]]' \
+    "$(q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp-callback") | [.spec.podSelector.matchLabels, .spec.policyTypes]' | grep -vx '\[\]' | tail -1)"
+assert_eq "the pod resolves the callback's name from its hosts file (it has no DNS)" \
+    '[{"ip":"198.51.100.40","hostnames":["orchestrator.example.org"]}]' "$(pod '.hostAliases')"
+yq -i '.mcp.kubernetes.callback_address = "10.20.30.40" | .orchestrator.callback_url = "http://orch.internal/cb"' "$CFG"
+out=$(run start)
+assert_eq "mcp.kubernetes.callback_address overrides the lookup; http is port 80" \
+    '["10.20.30.40/32:80"] [{"ip":"10.20.30.40","hostnames":["orch.internal"]}]' "$(cpol) $(pod '.hostAliases')"
+yq -i 'del(.mcp) | .orchestrator.callback_url = "https://192.0.2.99:9000/hook"' "$CFG"
+out=$(run start)
+assert_eq "a callback URL with an address needs no hosts entry" '[]' "$(pod '.hostAliases')"
+yq -i '.orchestrator.callback_url = "https://nowhere.test/hook"' "$CFG"
+out=$(run start)
+assert_has "a callback host with no address is refused, saying what to set" "set mcp.kubernetes.callback_address" "$out"
+assert_eq "...before anything is applied" "" "$(q 'select(.kind == "Deployment") | .metadata.name')"
+yq -i '.orchestrator.callback_url = "https://local.test/hook"' "$CFG"
+out=$(run start)
+assert_has "a callback host that is loopback here is refused (the pod cannot reach it)" "which the server's pod cannot reach" "$out"
+yq -i 'del(.orchestrator)' "$CFG"
+out=$(run start)
+assert_has "no callback_url: started, saying no replies are delivered until one is set" "no orchestrator.callback_url" "$out"
+assert_eq "...and no callback egress: no callback policy applied" "" "$(cpol)"
+assert_has "...and an old one removed" "delete networkpolicy aidc-mcp-callback --ignore-not-found" "$(cat "$K_LOG")"
+write_config
+
+echo "=== on the user's network: mcp.kubernetes.expose ingress ==="
+assert_has "with expose off, any Ingress of the server is removed" "delete ingress aidc-mcp --ignore-not-found" "$(cat "$K_LOG")"
+write_config "$(printf 'mcp:\n  kubernetes:\n    expose: ingress\n')"
+yq -i '.kubernetes.ingress = {"domain": "pages.example.org", "class": "web", "tls_secret": "wildcard"}' "$CFG"
+out=$(run start)
+assert_has "exit 0" "exit=0" "$out"
+ing() { q 'select(.kind == "Ingress")' | tail -1; }
+assert_eq "an Ingress at mcp-<user>.<the pages' domain>, every path to the server's Service" \
+    '{"host":"mcp-alice.pages.example.org","paths":[{"path":"/","pathType":"Prefix","backend":{"service":{"name":"aidc-mcp","port":{"number":7878}}}}]}' \
+    "$(ing | jq -c '.spec.rules[0] | {"host": .host, "paths": .http.paths}')"
+assert_eq "on the pages' class and wildcard certificate" \
+    '["web",[{"hosts":["mcp-alice.pages.example.org"],"secretName":"wildcard"}]]' "$(ing | jq -c '[.spec.ingressClassName, .spec.tls]')"
+assert_eq "labelled as the server's (stop removes it), in the user's namespace" \
+    '["aidc-u-alice","aidc-mcp"]' "$(ing | jq -c '[.metadata.namespace, .metadata.labels.app]')"
+assert_eq "a name the user's admission policy lets them serve (<x>-<user>.<domain>)" yes \
+    "$(printf '%s' "$(ing | jq -r '.spec.rules[0].host')" | grep -Eq '^[a-z0-9-]+-alice[.]pages[.]example[.]org$' && echo yes || echo no)"
+yq -i '.kubernetes.ingress = {"domain": "pages.example.org", "class": "web", "cluster_issuer": "letsencrypt"}' "$CFG"
+out=$(run start)
+assert_eq "with a cert-manager issuer instead: its annotation and a certificate of its own" \
+    '[{"cert-manager.io/cluster-issuer":"letsencrypt"},[{"hosts":["mcp-alice.pages.example.org"],"secretName":"aidc-mcp-tls"}]]' \
+    "$(ing | jq -c '[.metadata.annotations, .spec.tls]')"
+out=$(K_NO_IC=1 run start)
+assert_has "an ingress class the cluster does not have is refused (MCP-11), not skipped" "cannot read IngressClass web" "$out"
+assert_eq "...before anything is applied" "" "$(q 'select(.kind == "Deployment") | .metadata.name')"
+out=$(K_INGRESSES='{"items":[{"metadata":{"namespace":"aidc-u-alice","name":"other"},"spec":{"rules":[{"host":"mcp-alice.pages.example.org"}]}}]}' run start)
+assert_has "a name another Ingress serves is refused" "mcp-alice.pages.example.org is already served by ingress aidc-u-alice/other" "$out"
+out=$(K_INGRESSES='{"items":[{"metadata":{"namespace":"aidc-u-alice","name":"aidc-mcp"},"spec":{"rules":[{"host":"mcp-alice.pages.example.org"}]}}]}' run start)
+assert_has "...but the server's own Ingress is not another" "exit=0" "$out"
+out=$(K_MCP_IP=203.0.113.80 run start)
+assert_has "a name that resolves to a public address is refused (every session's proxy could reach it there)" \
+    "mcp-alice.pages.example.org resolves to 203.0.113.80, a public address" "$out"
+assert_eq "...before anything is applied" "" "$(q 'select(.kind == "Deployment") | .metadata.name')"
+out=$(K_MCP_IP=none run start)
+assert_has "a name that does not resolve here is refused (aidc cannot tell it is private)" "cannot resolve mcp-alice.pages.example.org here" "$out"
+for ip in 10.1.2.3 172.20.0.9 100.100.1.2; do
+    out=$(K_MCP_IP=$ip run start)
+    assert_has "a name on the VPN/LAN (${ip}) is served" "exit=0" "$out"
+done
+yq -i 'del(.kubernetes.ingress)' "$CFG"
+out=$(run start)
+assert_has "expose ingress with no pages domain is refused" "needs kubernetes.ingress.domain" "$out"
+yq -i '.mcp.kubernetes.expose = "nodeport"' "$CFG"
+out=$(run start)
+assert_has "an exposure aidc does not make is refused" "expected ingress, or none" "$out"
+write_config
+out=$(K_RUNNING=1 K_EXPOSED=mcp-alice.pages.example.org run status)
+assert_has "status gives the in-cluster address" "in cluster:  http://aidc-mcp.aidc-u-alice.svc:7878/mcp (from any namespace but aidc-u-alice)" "$out"
+assert_has "...and the network one when exposed" "network:     https://mcp-alice.pages.example.org/mcp" "$out"
+
 echo "=== the server's config, rendered in manifests.sh ==="
+out=$(run start)
 cm=$(q 'select(.kind == "ConfigMap" and .metadata.name == "aidc-mcp-config") | .metadata' | tail -1)
 assert_eq "its ConfigMap carries the server's labels and namespace" \
     '{"name":"aidc-mcp-config","namespace":"aidc-u-alice","labels":{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice","app":"aidc-mcp"}}' "$cm"
@@ -230,6 +334,15 @@ assert_has "a new server whose in-cluster address cannot be read is said to be c
     "its in-cluster API address could not be read, so it may not reach the API server: run aidc mcp start again" "$out"
 out=$(K_SVC_HOST=192.0.2.10 K_SVC_PORT=6443 run start)
 assert_eq "an in-cluster address already allowed is not added twice (one apply)" '["192.0.2.10/32"]' "$(pols)"
+
+yq -i '.mcp.kubernetes.callback_address = "203.0.113.5"' "$CFG"
+out=$(K_RUNNING=1 K_TOKEN=kept-token K_PRINTENV_FAIL=1 \
+    K_POLICY='{"spec":{"egress":[{"to":[{"ipBlock":{"cidr":"192.0.2.10/32"}}],"ports":[{"port":6443}]},{"to":[{"ipBlock":{"cidr":"10.43.0.9/32"}}],"ports":[{"port":443}]}]}}' run start)
+assert_eq "a changed callback over a server that does not answer: the API policy keeps exactly its API addresses" \
+    '[{"to":[{"ipBlock":{"cidr":"192.0.2.10/32"}}],"ports":[{"protocol":"TCP","port":6443}]},{"to":[{"ipBlock":{"cidr":"10.43.0.9/32"}}],"ports":[{"protocol":"TCP","port":443}]}]' \
+    "$(pol | jq -c '.egress')"
+assert_eq "...and the callback policy holds the new callback only (the old one is gone)" '["203.0.113.5/32:8443"]' "$(cpol)"
+write_config
 
 echo "=== where the API server is: the kubeconfig's forms ==="
 out=$(K_SERVER=https://api.cluster.test run start)
@@ -277,7 +390,7 @@ write_config
 
 echo "=== aidc mcp stop, status, logs ==="
 out=$(K_RUNNING=1 run stop)
-assert_has "stop removes the server and its policy" "delete deployment,networkpolicy -l app=aidc-mcp" "$(cat "$K_LOG")"
+assert_has "stop removes the server, its policies, Service and Ingress" "delete deployment,networkpolicy,service,ingress -l app=aidc-mcp" "$(cat "$K_LOG")"
 assert_not_has "...and keeps its state, token and the transcripts" "delete pvc" "$(cat "$K_LOG")"
 assert_not_has "..." "delete secret" "$(cat "$K_LOG")"
 out=$(run stop)

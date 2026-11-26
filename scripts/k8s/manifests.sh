@@ -1315,9 +1315,15 @@ EOF
 #   projected volume at /aidc-config, where the server reads its token on every request and
 #   the orchestrator settings (a rotated Secret reaches the file; `token rotate` also restarts).
 # - Config: a ConfigMap of the user's config as this server's CLI needs it (k8s_mcp_config).
-# - Network: nothing reaches it and it reaches only the API server (aidc-mcp NetworkPolicy, on
-#   top of the namespace's default-deny); the in-cluster Service, exposure and the callback
-#   egress are added with them.
+# - Network (aidc-mcp NetworkPolicy, on top of the namespace's default-deny; MCP-10/11/12 as
+#   amended, owner ruling Q-M1): it is always reachable in the cluster by its Service,
+#   aidc-mcp.<namespace>.svc:7878, from every namespace but the user's own, so no session of the
+#   user reaches it (another user's sessions reach no pod address: their egress is their own
+#   proxy, which goes to public addresses only); on the VPN/LAN through an Ingress at
+#   mcp-<user>.<domain> when mcp.kubernetes.expose is `ingress` (k8s_render_mcp_expose; aidc mcp
+#   start refuses a name that resolves to a public address, which sessions' proxies reach); every
+#   path behind its bearer token. It reaches the API server and the orchestrator's callback
+#   host and port, and nothing else.
 K8S_MCP_NAME=aidc-mcp
 K8S_MCP_TOKEN_SECRET=aidc-mcp-token
 K8S_MCP_CONFIG=aidc-mcp-config
@@ -1390,8 +1396,9 @@ spec:
 EOF
 }
 
-# k8s_render_mcp <node-selector-json> [<ip>:<port> ...]: the server's NetworkPolicy (egress to
-# the API server at those addresses only) and its Deployment.
+# k8s_render_mcp <node-selector-json> [<ip>:<port> ...]: the server's Service, its NetworkPolicy
+# (who may connect; egress to the API server at those addresses only), the callback's policy
+# when there is a callback, and its Deployment.
 k8s_render_mcp() {
     local sel="$1" ns ep egress="" session_create="false"
     shift
@@ -1403,18 +1410,50 @@ k8s_render_mcp() {
     done
     [ -n "$egress" ] || egress="    []
 "
+    # The orchestrator's callback (K8S_MCP_CALLBACK_IP/_PORT, resolved on the user's machine by
+    # aidc mcp start; _HOST when the URL names it): its one address and port, in a policy of its
+    # own (aidc-mcp-callback), so the API server's addresses are the aidc-mcp policy's alone; and
+    # the name in the pod's hosts file, since the pod has no DNS.
+    local aliases="[]" callback=""
+    if [ -n "${K8S_MCP_CALLBACK_IP:-}" ]; then
+        [ -z "${K8S_MCP_CALLBACK_HOST:-}" ] \
+            || aliases="[{ip: \"${K8S_MCP_CALLBACK_IP}\", hostnames: [\"${K8S_MCP_CALLBACK_HOST}\"]}]"
+        callback="---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${K8S_MCP_NAME}-callback, namespace: ${ns}, labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}}}
+spec:
+  podSelector: {matchLabels: {app: ${K8S_MCP_NAME}}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ipBlock: {cidr: ${K8S_MCP_CALLBACK_IP}/32}}]
+      ports: [{protocol: TCP, port: ${K8S_MCP_CALLBACK_PORT:?}}]
+"
+    fi
+    [ -n "$egress" ] || egress="    []
+"
     [ "${AIDC_MCP_SESSION_CREATE:-}" = true ] && session_create=true
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}"
     cat <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  selector: {app: ${K8S_MCP_NAME}}
+  ports: [{name: mcp, port: ${K8S_MCP_PORT}, targetPort: ${K8S_MCP_PORT}, protocol: TCP}]
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
 spec:
   podSelector: {matchLabels: {app: ${K8S_MCP_NAME}}}
   policyTypes: [Ingress, Egress]
-  ingress: []
+  ingress:
+    # Every namespace but the user's own: an orchestrator in the cluster, the ingress controller.
+    - from: [{namespaceSelector: {matchExpressions: [{key: kubernetes.io/metadata.name, operator: NotIn, values: [${ns}]}]}}]
+      ports: [{protocol: TCP, port: ${K8S_MCP_PORT}}]
   egress:
-${egress}---
+${egress}${callback}---
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
@@ -1432,6 +1471,7 @@ spec:
       nodeSelector: ${sel}
       tolerations: ${AIDC_K8S_TOLERATIONS}
       securityContext: {seccompProfile: {type: RuntimeDefault}}
+      hostAliases: ${aliases}
       containers:
         - name: mcp
           image: ${AIDC_K8S_REGISTRY_PULL}/aidc/mcp:${AIDC_VERSION_TAG}
@@ -1449,7 +1489,11 @@ spec:
             - {name: AIDC_MCP_TRANSCRIPTS, value: ${K8S_MCP_STATE_DIR}/transcripts}
             - {name: AIDC_MCP_SESSION_CREATE, value: "${session_create}"}
           ports: [{name: mcp, containerPort: ${K8S_MCP_PORT}, protocol: TCP}]
-          readinessProbe: {tcpSocket: {port: ${K8S_MCP_PORT}}, periodSeconds: 10}
+          # From inside the pod: the policy lets in no connection from the node, which a
+          # tcpSocket probe would be on some network plugins.
+          readinessProbe:
+            exec: {command: [python, -c, "import socket; socket.create_connection(('127.0.0.1', ${K8S_MCP_PORT}), 2)"]}
+            periodSeconds: 10
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -1473,5 +1517,43 @@ spec:
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
         - {name: home, emptyDir: {}}
         - {name: tmp, emptyDir: {}}
+EOF
+}
+
+# k8s_mcp_host: the server's name on the user's network (mcp-<user>.<domain>): one of the user's
+# page names, which the admission policy lets them serve, on the pages' wildcard certificate; the
+# session name `mcp` is reserved on Kubernetes so no page takes it.
+k8s_mcp_host() { printf 'mcp-%s.%s' "$AIDC_K8S_USER" "$AIDC_K8S_INGRESS_DOMAIN"; }
+
+# k8s_render_mcp_expose: the Ingress that serves the server on the user's network (VPN/LAN) at
+# k8s_mcp_host, over TLS, on the pages' class and certificate (kubernetes.ingress); every path
+# goes to the server, which asks for its bearer token on each.
+k8s_render_mcp_expose() {
+    local host tls ann=""
+    host=$(k8s_mcp_host)
+    if [ -n "$AIDC_K8S_INGRESS_TLS_SECRET" ]; then
+        tls="[{hosts: [${host}], secretName: ${AIDC_K8S_INGRESS_TLS_SECRET}}]"
+    elif [ -n "$AIDC_K8S_INGRESS_CLUSTER_ISSUER" ]; then
+        tls="[{hosts: [${host}], secretName: ${K8S_MCP_NAME}-tls}]"
+        ann="cert-manager.io/cluster-issuer: ${AIDC_K8S_INGRESS_CLUSTER_ISSUER}"
+    else
+        tls="[{hosts: [${host}]}]"
+    fi
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${K8S_MCP_NAME}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}}
+  annotations: {${ann}}
+spec:
+  ingressClassName: ${AIDC_K8S_INGRESS_CLASS}
+  tls: ${tls}
+  rules:
+    - host: ${host}
+      http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: ${K8S_MCP_NAME}, port: {number: ${K8S_MCP_PORT}}}}}
 EOF
 }

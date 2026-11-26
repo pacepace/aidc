@@ -1073,8 +1073,34 @@ namespace (TRS-23, MCP-02/03 as amended):
 - **Config:** a ConfigMap of the user's config for the cluster: `backend: kubernetes`,
   `kubernetes.user` set, the kubeconfig and context left out (kubectl uses the ServiceAccount),
   `ports:` left out (a tunnel ends on the machine that runs it).
-- **Network:** a NetworkPolicy on top of the namespace's default-deny: no ingress yet, egress
-  to the API server only, at the address the user's kubeconfig names (resolved on their
+- **Reach (MCP-10/11, owner ruling Q-M1):** always in the cluster by its Service,
+  `aidc-mcp.<namespace>.svc:7878`, and on the VPN/LAN when `mcp.kubernetes.expose: ingress`
+  through an Ingress at `mcp-<user>.<kubernetes.ingress.domain>`, on the pages' class and
+  wildcard certificate; every path behind the bearer (the server's middleware covers all).
+  Chosen over a LAN address because a user's Services are held to ClusterIP by the admission
+  policy and the pages' DNS and certificate already exist; the name is one of the user's page
+  names, so the session name `mcp` is reserved on Kubernetes. `aidc mcp start` refuses an
+  exposure the cluster cannot serve: no pages domain or class, an IngressClass it lacks, or the
+  name another Ingress serves. It also refuses one whose name resolves (on the user's machine)
+  to a public address, or does not resolve: a session's proxy reaches any public address and
+  no private one, so only a VPN/LAN address keeps every session, the user's and other users',
+  from reaching the server through its Squid (MCP-12, K8S-13). Residual: the check is made at
+  start; a DNS answer changed to a public address afterwards is not seen until the next start.
+  The ingress rule assumes a controller on the pod network; one on the node's network connects
+  from node addresses, which the namespace rule does not admit (as for the pages). The NetworkPolicy lets in connections to the server's port from
+  every namespace but the user's own (a decision taken while building, main agent 2026-11-26):
+  an orchestrator in the cluster and the ingress controller reach it, and no session of the
+  user does; another user's sessions reach no pod address at all (their egress is their own
+  proxy, public addresses only). The readiness probe is an exec from inside the pod, since some
+  network plugins would judge a node's tcpSocket probe by the same policy.
+- **Callback egress:** the one host and port of `orchestrator.callback_url`, resolved on the
+  user's machine as relays are (or `mcp.kubernetes.callback_address`), refused when loopback or
+  unresolvable, in a NetworkPolicy of its own (`aidc-mcp-callback`, replaced on every start, so a
+  changed callback leaves no old way out, and kept apart from the API server's addresses, which
+  start reads back from the `aidc-mcp` policy); the name goes in the pod's hosts file, since the
+  pod has no DNS. No callback URL: no callback egress (its policy removed), and start says so.
+- **Network:** a NetworkPolicy on top of the namespace's default-deny: ingress as above, egress
+  to the callback and to the API server only, at the address the user's kubeconfig names (resolved on their
   machine, refused when it is loopback; `kubernetes.api_endpoints` overrides) and at its
   in-cluster Service address, as the server's own pod reports it. Both, because a network
   policy may see a connection before or after the Service's address is translated, depending

@@ -595,6 +595,9 @@ echo "=== the git agent: a session under a reserved name ==="
 out=$(run create git --backend kubernetes)
 assert_has "no session may be named git (the git agent's name; its claims would collide)" "'git' is reserved for your git agent" "$out"
 assert_eq "and nothing is applied" "" "$(cat "$K_APPLIED")"
+out=$(run create mcp --backend kubernetes)
+assert_has "no session may be named mcp (its page name is the user's MCP server's, mcp-<user>.<domain>)" "'mcp' is reserved on the kubernetes backend" "$out"
+assert_eq "and nothing is applied" "" "$(cat "$K_APPLIED")"
 out=$(run create demo --backend kubernetes)
 tok=$(yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "AIDC_GIT_TOKEN") | .value' "$K_APPLIED" | sort -u)
 assert_eq "each session gets one token of its own (64 hex), the same in both renders" yes \

@@ -352,6 +352,17 @@ class TestCheckFree:
         assert await session.check() == "claude_busy"
         assert ss.last_free_verdict["proj"][1] == "stop_pushed_back"
 
+    async def test_a_stop_ahead_of_the_copied_transcript_is_busy_while_the_log_grows(
+            self, session):
+        """The mirror copies the transcript after the hook writes its event: a Stop that
+        arrives while the copy still shows the turn open, last written before the Stop, is
+        the turn ending, held as running until the copy has been quiet for LOG_QUIET_S."""
+        session.write([*FINISHED, _typed("u1", "q"), _reply("a1", None, stop="tool_use")],
+                      age=3.0, hooks=False)
+        session.hook(hk.he.STOP, age=1.0)
+        assert await session.check() == "claude_busy"
+        assert ss.last_free_verdict["proj"][1] == "log_growing"
+
     async def test_just_pasted_prompt_is_busy_until_the_log_shows_it(self, session):
         session.write(FINISHED)
         ss.sent_awaiting_echo["proj"] = ("next task", NOW - 3)

@@ -52,6 +52,16 @@ sleep 0.01
 run_hook '{"hook_event_name":"Notification","session_id":"sid-1","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}' >/dev/null
 sleep 0.01
 run_hook '{"hook_event_name":"UserPromptSubmit","session_id":"sid-1","prompt":"run the tests"}' >/dev/null
+echo "=== the hook writer names this Claude's own transcripts (a shared history folder) ==="
+OWN_OUT="$S/own-out"; mkdir -p "$OWN_OUT"
+(
+    export AIDC_HOOK_EVENTS_DIR="$OWN_OUT/hook-events"
+    run_hook '{"hook_event_name":"SessionStart","session_id":"sid-9","transcript_path":"/home/vscode/.claude/projects/-home-a-r/sid-9.jsonl"}' >/dev/null
+    run_hook '{"hook_event_name":"Stop","session_id":"sid-9","transcript_path":"/home/vscode/.claude/projects/-home-a-r/sid-9.jsonl"}' >/dev/null
+    run_hook '{"hook_event_name":"Stop","session_id":"x","transcript_path":"/tmp/../etc/pass wd.jsonl"}' >/dev/null
+)
+check "own-transcripts names its transcript once, by file name; an odd name is not taken" \
+    "$([ "$(cat "$OWN_OUT/own-transcripts" 2>/dev/null)" = sid-9.jsonl ] && echo yes || echo no)"
 order=$(for f in "$AIDC_HOOK_EVENTS_DIR"/*.json; do jq -r .event "$f"; done | paste -sd' ' -)
 check "names sort in the order the events happened (got: $order)" \
     "$([ "$order" = "Stop Notification UserPromptSubmit" ] && echo yes || echo no)"
@@ -135,6 +145,18 @@ check "share_plugins off: the hooks alone, no plugins enabled" \
 aidc_install_managed_settings "$root" "$S/absent.json" true
 check "share_plugins on with no registry: the hooks alone" \
     "$([ "$(jq -c 'keys' "$ms")" = '["hooks"]' ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false cluster
+check "in a cluster session: a StopFailure hook for rate limits only, run by aidc-claude-usage" \
+    "$([ "$(jq -c '.hooks.StopFailure' "$ms")" = '[{"matcher":"rate_limit","hooks":[{"type":"command","command":"/usr/local/bin/aidc-claude-usage rate-limited"}]}]' ] && echo yes || echo no)"
+check "...and the status line through aidc-claude-usage (the weekly usage the account broker reads)" \
+    "$([ "$(jq -c '.statusLine' "$ms")" = '{"type":"command","command":"/usr/local/bin/aidc-claude-usage statusline"}' ] && echo yes || echo no)"
+check "...with aidc's four hooks still there" \
+    "$([ "$(jq -c '.hooks | keys' "$ms")" = '["Notification","SessionStart","Stop","StopFailure","UserPromptSubmit"]' ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false
+check "on Docker neither (the host's status line is the session's own)" \
+    "$([ "$(jq -c '[has("statusLine"), (.hooks | has("StopFailure"))]' "$ms")" = '[false,false]' ] && echo yes || echo no)"
+check "the entrypoint asks for the cluster form on Kubernetes only" \
+    "$(grep -q '\[ "${AIDC_BACKEND:-}" = kubernetes \] && _managed_cluster=cluster' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 mkdir -p "$S/ro/etc"; chmod 0500 "$S/ro/etc"
 err=$(aidc_install_managed_settings "$S/ro" "$reg" true 2>&1; echo "|$?")
 chmod 0700 "$S/ro/etc"
@@ -148,6 +170,8 @@ check "the hook is copied to /usr/local/bin/aidc-hook-event" \
 check "the settings library is copied" \
     "$(grep -qE '^COPY managed-settings\.sh +/usr/local/bin/aidc-managed-settings\.sh$' "$DF" && echo yes || echo no)"
 check "the hook is made executable" "$(grep -q '/usr/local/bin/aidc-hook-event \\' "$DF" && echo yes || echo no)"
+check "aidc-claude-usage is copied and made executable" \
+    "$(grep -qE '^COPY claude-usage\.sh +/usr/local/bin/aidc-claude-usage$' "$DF" && grep -q '/usr/local/bin/aidc-claude-usage \\' "$DF" && echo yes || echo no)"
 check "the entrypoint installs the managed settings" \
     "$(grep -q 'aidc_install_managed_settings / ' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 check "a failed install says what follows: sends refused as session_outdated, no screen fallback" \

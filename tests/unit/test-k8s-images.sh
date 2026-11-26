@@ -139,11 +139,15 @@ log=$(cat "$K_LOG")
 b() { yq -N ea "select(.kind == \"Pod\") | $1" -o=json -I=0 "$K_APPLIED"; }
 assert_eq "a full build exits 0" "0" "$rc"
 assert_has "images already in the registry for this version are skipped" "present: aidc/squid:${VERSION_TAG}" "$out"
-assert_has "the rest are built, the git container's image among them" "built 6, already present 2" "$out"
+assert_has "the rest are built, the git container's and the account broker's images among them" "built 7, already present 2" "$out"
 assert_has "the git container's image is pushed with the others" \
     "docker push -q registry.aidc-system.svc.cluster.local:5050/aidc/gitctl:${VERSION_TAG}" "$log"
 assert_has "gitctl refreshes Claude Code too (its Claude runs the git rules)" \
     "--build-arg CLAUDE_CODE_REFRESH=" "$(grep 'docker build' "$K_LOG" | grep 'aidc/gitctl')"
+assert_has "the account broker's image is pushed" \
+    "docker push -q registry.aidc-system.svc.cluster.local:5050/aidc/broker:${VERSION_TAG}" "$log"
+assert_has "the broker refreshes Claude Code too (its logins and renewals are Claude Code's)" \
+    "--build-arg CLAUDE_CODE_REFRESH=" "$(grep 'docker build' "$K_LOG" | grep 'aidc/broker')"
 assert_has "each image is pushed to the configured registry under this version" \
     "docker push -q registry.aidc-system.svc.cluster.local:5050/aidc/dev-base:${VERSION_TAG}" "$log"
 assert_not_has "a skipped image is not built" "aidc/squid:${VERSION_TAG} -f" "$log"

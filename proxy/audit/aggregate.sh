@@ -37,7 +37,8 @@ AIDC_LOG_DIR="${AIDC_AUDIT_LOG_DIR:-/var/log/aidc}"
 DEV_HOME="${AIDC_AUDIT_HOME_DIR:-/var/aidc/dev-home}"
 # Claude Code keeps its transcripts under the session user's config dir
 # (CLAUDE_CONFIG_DIR=/home/vscode/.claude), which is in the dev home this sidecar reads.
-CLAUDE_TRANSCRIPT="${DEV_HOME}/.claude/projects"
+# On Kubernetes the history is the user's disk's (shared by their sessions), mounted on its own.
+CLAUDE_TRANSCRIPT="${AIDC_AUDIT_CLAUDE_PROJECTS:-${DEV_HOME}/.claude/projects}"
 # The policy sidecar's state volume, mounted at /var/state on both backends.
 STATE_DIR="${AIDC_AUDIT_STATE_DIR:-/var/state}"
 

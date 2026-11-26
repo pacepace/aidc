@@ -146,7 +146,10 @@ COPY gitctl-main.sh /usr/local/bin/gitctl-main.sh
 # mounted (Kubernetes, until the per-user server reads the git pod's transcripts) it writes
 # nothing and never holds Claude up.
 COPY hook-event.sh /usr/local/bin/aidc-hook-event
-RUN chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event
+# The sessions' own rate-limit reporter (.devcontainer/claude-usage.sh, staged the same way): in
+# a cluster the agent's StopFailure rate_limit hook tells the user's Claude account broker.
+COPY claude-usage.sh /usr/local/bin/aidc-claude-usage
+RUN chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event /usr/local/bin/aidc-claude-usage
 
 # Claude Code, installed as the dev image installs it: Anthropic's native installer, as the
 # user, so it lands under ~/.local and can update itself. The home is a volume in the cluster

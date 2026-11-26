@@ -168,3 +168,22 @@ aidc_has_resumable_conversation() {
     compgen -G "${dir}/*.jsonl" >/dev/null || return 1
     grep -qsE '"type":"(user|assistant)"' "${dir}"/*.jsonl
 }
+
+# aidc_own_resumable_conversation <project-dir> <own-list>
+# The session id of the newest conversation in <project-dir> that this session's own Claude
+# wrote (its file named in <own-list>, which hook-event.sh keeps) and that holds a message; ""
+# when there is none. Where the history folder is shared with other sessions (a cluster
+# session's, the user's disk's), the aidc-claude wrapper resumes this one by id rather than
+# --continue, which would take the newest conversation there, another session's, and append to
+# its file (two writers; each session's mirror then naming the same transcript).
+aidc_own_resumable_conversation() {
+    local dir="$1" own="$2" f
+    [ -s "$own" ] || return 0
+    # shellcheck disable=SC2012  # transcript names are Claude's session ids (no newlines)
+    ls -t -- "$dir"/*.jsonl 2>/dev/null | while IFS= read -r f; do
+        grep -qxF -- "$(basename -- "$f")" "$own" 2>/dev/null || continue
+        grep -qsE '"type":"(user|assistant)"' "$f" || continue
+        basename -- "$f" .jsonl
+        break
+    done
+}

@@ -91,7 +91,9 @@ fi
 # shellcheck source=managed-settings.sh
 . /usr/local/bin/aidc-managed-settings.sh
 PLUGIN_REGISTRY="/home/vscode/.claude/plugins/installed_plugins.json"
-if aidc_install_managed_settings / "$PLUGIN_REGISTRY" "${AIDC_SHARE_PLUGINS:-false}"; then
+_managed_cluster=""
+[ "${AIDC_BACKEND:-}" = kubernetes ] && _managed_cluster=cluster
+if aidc_install_managed_settings / "$PLUGIN_REGISTRY" "${AIDC_SHARE_PLUGINS:-false}" "$_managed_cluster"; then
     names=$(jq -r '.enabledPlugins // {} | keys | join(", ")' /etc/claude-code/managed-settings.json 2>/dev/null)
     log "claude managed settings: aidc's hooks installed${names:+; plugins enabled: ${names}}"
 else

@@ -44,6 +44,8 @@ cluster (the session node)
     ├─ <session>-dev (Service) + Ingress    a page on the network (--expose, K8S-15)
     ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
     ├─ transcripts (PVC)                    the transcript mirror the user's MCP reads (MCP-15)
+    ├─ claude-config (PVC)                  every session's Claude config dir, a folder each (K8S-16)
+    ├─ claude-broker (Deployment) + claude-accounts (PVC)  the user's Claude accounts ("Claude")
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (Deployment) + aidc-mcp-state (PVC)  the user's MCP server (K8S-07; "Control plane")
     └─ syncthing (not built yet: aidc 2.0)  Claude state <-> user's machines (K8S-18)
@@ -991,6 +993,45 @@ Fallback if sharing breaks: each session logs in on its own. Users bring their o
 (their GitHub login, `aidc git login`, and Claude accounts); the admin who runs `aidc user add <name>` never handles
 them (K8S-20).
 
+As built (Q-K1, owner ruling 2026-11-26): `aidc claude account add <name>` starts the user's
+broker (`claude-broker`, image `aidc/broker`) when it is not running and runs Claude's own login
+in it (`claude auth login --claudeai`, the account's own config dir as `CLAUDE_CONFIG_DIR`, on
+this terminal through `kubectl exec -it`): the user opens the link, signs in, pastes the code.
+The login, refresh token included, stays on `claude-accounts`, a claim only the broker's pod
+mounts (the user's retained class). `account list | use | remove` reach the broker the same way.
+
+Where a session's Claude config dir lives: its own folder of one claim per user,
+`claude-config` (`subPath: <session>`, mounted at `/home/vscode/.claude`, the path
+`CLAUDE_CONFIG_DIR` always named), which the broker mounts whole. A folder of the home claim
+would not do: the broker would have to mount every session's home, and a `.credentials.json`
+symlinked to a broker-written file is refused (Claude Code 2.1.332 reads it as
+"refused-symlink"). The proxy pod's first step makes the folder (root: owner 1000, 0700), before
+any pod mounts it; the dev pod's `claude-seed` step fills a new one once, as the session user,
+from the Claude config the home already had, else the image's. The git agent's is the folder
+`git` (owner 2000, group 1000, 0770: the broker writes its credentials as group 1000, of which
+the git user is a member), filled from its home's Claude config with its own history.
+`aidc kill` removes a session's folder (the broker's `forget`, or a one-shot pod when no broker
+runs).
+
+`projects/` (conversations, memory) is the user's disk's `.claude/projects`, mounted over the
+folder's (Q-K2), so two sessions in one repo share its history folder. What reads a session's
+conversations still reads only its own, and a session writes only its own: its aidc-claude
+resumes the newest conversation its own Claude wrote, by id (`--resume`), never `--continue`,
+which would take the newest there, another session's, and append to it; a new session starts
+a new one. Likewise: the hook writer keeps `own-transcripts` (the file names
+of the transcripts its Claude's hook events name) in the session's mirror folder, the mirror
+copies only those on Kubernetes, and the audit sidecar takes its Claude transcripts from that
+mirror folder (read-only) rather than the shared folder. The MCP, which reads the mirror, never
+follows another session's conversation.
+
+Until an account is added (the ruling's stopgap): a session logs in itself, or, when the user
+stored a one-year inference token with `aidc claude-token setup` (`claude setup-token`), a
+session created with no broker running gets it as `CLAUDE_CODE_OAUTH_TOKEN` from a Secret of its
+own (`<session>-claude-token`, made from stdin, removed by kill; the user's credentials cannot
+read Secrets back). With a broker running no token is handed on: the variable would override the
+broker's credentials. The user's MCP server never hands one on (the token is a file on the
+user's machine).
+
 ### Switching accounts mid-work
 
 Accounts run out of usage quota during work, so a running session must switch account without
@@ -1019,8 +1060,41 @@ next message uses the new account with no restart; sessions never refresh, so th
 each other over a rotating refresh token. The broker renews each account's access token before
 it expires and rewrites the sessions' files.
 
+As built (`broker/claude-broker.sh`, a pass a minute): every token handling is Claude Code's own
+(main, 2026-11-26: aidc never presents itself as Claude Code to Anthropic's OAuth endpoint).
+An account whose access token is within an hour of expiring is renewed by running Claude Code in
+its folder with the cheapest call that refreshes: `claude auth status` only reads the stored
+login (read from Claude Code 2.1.332), so a one-word prompt to the smallest model, with no
+tools, MCP servers or slash commands, no session kept. Claude writes the renewed login back
+there; the broker copies it, without the refresh token, into every session's folder whose copy
+differs, with the account's name (`.aidc-account`) and any notice for the status line
+(`.aidc-notice`). A failed renewal is recorded with Claude's own words, shown by `aidc claude
+account list` (RENEWAL FAILING) and in the sessions' status line, and tried again next pass. A
+session's own login (a `.credentials.json` the broker did not write) is replaced only while the
+broker has an active account; with none, it is left as it is.
+
+Switching, as built (K8S-17): the order is `claude_accounts` (accounts not listed come after, by
+name), each with `switch_at` (default 90); `claude_account_switch: auto|wait` (default auto).
+In a cluster session the managed settings run the status line through `aidc-claude-usage`, which
+leaves `rate_limits.seven_day` (used percentage, reset time) in the Claude config dir
+(`.aidc-usage.json`) and then prints the user's own status line (their `settings.json`
+statusLine, its `~/.claude/` or `/Users/<name>/.claude/` path made the session's) and the
+broker's notice; a `StopFailure` hook with matcher `rate_limit` leaves `.aidc-limit.json`. Each
+pass, a fresh report (half an hour) counts for the account the broker gave that session; the
+active account is spent when its usage is at its threshold and its week has not reset, or a
+session hit its rate limit in the last hour. Then the next account of the cycle that is not
+spent becomes active, at once (auto) or waiting for `aidc claude account use <next>` (wait;
+the list shows `> waiting`, the status line the command). An account whose access token
+expired while its renewal keeps failing is spent too (its login ended), and the switch from it
+never waits (main, 2026-11-26). With every account spent it stays, and every session's status
+line says so: that every account's login ended (`aidc claude account add <name>` again for
+each) or that every one is at a limit. `aidc claude account list` gives each spent account's
+reason; the broker's log (`aidc claude broker logs`) says each account's change of state once.
+The git agent's Claude reports its rate limits the same way (its managed settings' StopFailure
+hook).
+
 The broker writes into the session's Claude config **directory**, which the session pod mounts as
-a whole directory (on the user's volume). Never a single-file mount, a `subPath`, or a Secret
+a whole directory (on the user's volume). Never a single-file mount (a `subPath` naming a file included), or a Secret
 volume: Claude replaces `.credentials.json` by rename, so a single-file mount goes stale on one
 side and cannot be renamed over on the other. That is what made in-container logins expire and
 account switches not stick in aidc's Docker backend before 1.5 (CTR-13, anthropics/claude-code#18443).
@@ -1036,7 +1110,8 @@ Measured 2026-11-24 (Claude Code 2.1.331, two Max accounts, one running interact
 | same, `expiresAt` set in the past | A; Claude used the access token as is |
 
 Not yet seen: what a session does when the access token really expires and the file has no
-refresh token. The broker must replace it first; it is the broker's main job.
+refresh token. The broker must replace it first; it is the broker's main job. It renews an hour
+before expiry; the live test (hours) is the plan's chunk 18.
 
 Fallback if the broker breaks: one config directory per account, and switching restarts Claude
 with `--resume <session>` (seconds of downtime, cold prompt cache).

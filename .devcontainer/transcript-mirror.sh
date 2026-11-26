@@ -22,12 +22,19 @@
 # defense in depth -- this function removes the torn read at the source.)
 
 # One pass over every *.jsonl in $1, copy-forwarding changed files into $2.
-# Args: src_dir dest_dir
+# With $3, only the files that list names (one file name a line): the session's own
+# conversations, where its Claude history folder is shared with other sessions (a cluster
+# session's is the user's disk's: AIDC_TRANSCRIPT_OWN_LIST, which hook-event.sh keeps). A
+# list that does not exist yet names nothing.
+# Args: src_dir dest_dir [own-list]
 aidc_mirror_copy_forward_pass() {
-    local _src="$1" _dest_dir="$2" f _base _dest _tmp
+    local _src="$1" _dest_dir="$2" _own="${3:-}" f _base _dest _tmp
     for f in "${_src}"/*.jsonl; do
         { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
         _base=$(basename "$f")
+        if [ -n "$_own" ]; then
+            grep -qxF -- "$_base" "$_own" 2>/dev/null || continue
+        fi
         _dest="${_dest_dir}/${_base}"
         # cp -u equivalent: skip the copy (and the mtime churn a reader could
         # race) when the destination is already current.

@@ -351,7 +351,14 @@ if [ "$resume" = "true" ]; then
     # A transcript holding a message, not just a transcript: see
     # aidc_has_resumable_conversation.
     . /usr/local/bin/aidc-claude-state-install.sh
-    if aidc_has_resumable_conversation "${HOME}/.claude/projects/$(aidc_claude_project_name "$(pwd)")"; then
+    proj="${HOME}/.claude/projects/$(aidc_claude_project_name "$(pwd)")"
+    if [ "${AIDC_BACKEND:-}" = kubernetes ]; then
+        # The history folder is the user's disk's, shared by their sessions: only this
+        # session's own newest conversation is resumed, by id (see
+        # aidc_own_resumable_conversation); a new session starts a new one.
+        own=$(aidc_own_resumable_conversation "$proj" "${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}/own-transcripts")
+        [ -z "$own" ] || args+=(--resume "$own")
+    elif aidc_has_resumable_conversation "$proj"; then
         args+=(--continue)
     fi
 fi
@@ -463,6 +470,7 @@ COPY user-main.sh          /usr/local/bin/aidc-user-main.sh
 COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
 COPY hook-event.sh        /usr/local/bin/aidc-hook-event
 COPY managed-settings.sh  /usr/local/bin/aidc-managed-settings.sh
+COPY claude-usage.sh      /usr/local/bin/aidc-claude-usage
 COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
 COPY gh-standin.sh         /usr/local/bin/gh
@@ -480,6 +488,7 @@ RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/git-remote-aidc /usr/local/bin/a
                 /usr/local/bin/aidc-claude-state-install.sh \
                 /usr/local/bin/aidc-hook-event \
                 /usr/local/bin/aidc-managed-settings.sh \
+                /usr/local/bin/aidc-claude-usage \
                 /usr/local/bin/aidc-dockerd-start.sh
 
 # testament (K8S-25), when the user's config names its repo: aidc builds its newest release

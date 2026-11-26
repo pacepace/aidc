@@ -58,6 +58,9 @@ _k8s_cfg_json() {
 #                           user's retained class; default 5Gi)
 #   AIDC_K8S_TRANSCRIPTS_SIZE  the transcript mirror claim the MCP reads (manifests.sh,
 #                           k8s_render_transcripts; on the session class; default 10Gi)
+#   AIDC_K8S_CLAUDE_CONFIG_SIZE  the claim holding every session's Claude config dir, which the
+#                           user's Claude account broker writes credentials into (manifests.sh,
+#                           k8s_render_claude_config; on the session class; default 20Gi)
 #   AIDC_K8S_GIT_STORE_SIZE the git container's private copies of GitHub repos (git-run claim,
 #                           on the session class; default 10Gi)
 #   AIDC_K8S_GIT_STORAGE_WARN  `aidc git status` warns when those copies and its bundles take
@@ -116,6 +119,7 @@ k8s_load_settings() {
     AIDC_K8S_HOME_SIZE=$(_k8s_cfg '.kubernetes.home_size'); AIDC_K8S_HOME_SIZE="${AIDC_K8S_HOME_SIZE:-50Gi}"
     AIDC_K8S_MCP_STATE_SIZE=$(_k8s_cfg '.kubernetes.mcp_state_size'); AIDC_K8S_MCP_STATE_SIZE="${AIDC_K8S_MCP_STATE_SIZE:-5Gi}"
     AIDC_K8S_TRANSCRIPTS_SIZE=$(_k8s_cfg '.kubernetes.transcripts_size'); AIDC_K8S_TRANSCRIPTS_SIZE="${AIDC_K8S_TRANSCRIPTS_SIZE:-10Gi}"
+    AIDC_K8S_CLAUDE_CONFIG_SIZE=$(_k8s_cfg '.kubernetes.claude_config_size'); AIDC_K8S_CLAUDE_CONFIG_SIZE="${AIDC_K8S_CLAUDE_CONFIG_SIZE:-20Gi}"
     AIDC_K8S_GIT_STORE_SIZE=$(_k8s_cfg '.kubernetes.git_store_size'); AIDC_K8S_GIT_STORE_SIZE="${AIDC_K8S_GIT_STORE_SIZE:-10Gi}"
     AIDC_K8S_GIT_STORAGE_WARN=$(_k8s_cfg '.kubernetes.git_storage_warn'); AIDC_K8S_GIT_STORAGE_WARN="${AIDC_K8S_GIT_STORAGE_WARN:-1Gi}"
     AIDC_K8S_GIT_MODE=$(_k8s_cfg '.kubernetes.git_mode'); AIDC_K8S_GIT_MODE="${AIDC_K8S_GIT_MODE:-ask}"
@@ -141,7 +145,7 @@ k8s_load_settings() {
         AIDC_K8S_RUNTIME_CLASS AIDC_K8S_STORAGE_CLASS AIDC_K8S_NODE_SELECTOR AIDC_K8S_TOLERATIONS \
         AIDC_K8S_REGISTRY_PORT AIDC_K8S_REGISTRY_PUSH AIDC_K8S_REGISTRY_PULL \
         AIDC_K8S_REGISTRY_STORAGE_CLASS AIDC_K8S_REGISTRY_SIZE AIDC_K8S_USER_DISK_SIZE \
-        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_MCP_STATE_SIZE AIDC_K8S_TRANSCRIPTS_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN AIDC_K8S_GIT_MODE AIDC_K8S_USER_TOKEN_TTL \
+        AIDC_K8S_SESSION_STORAGE_CLASS AIDC_K8S_HOME_SIZE AIDC_K8S_MCP_STATE_SIZE AIDC_K8S_TRANSCRIPTS_SIZE AIDC_K8S_CLAUDE_CONFIG_SIZE AIDC_K8S_GIT_STORE_SIZE AIDC_K8S_GIT_STORAGE_WARN AIDC_K8S_GIT_MODE AIDC_K8S_USER_TOKEN_TTL \
         AIDC_K8S_CPU_REQUEST AIDC_K8S_MEMORY_REQUEST \
         AIDC_K8S_CPU_LIMIT AIDC_K8S_MEMORY_LIMIT \
         AIDC_K8S_INGRESS_DOMAIN AIDC_K8S_INGRESS_CLASS AIDC_K8S_INGRESS_TLS_SECRET \

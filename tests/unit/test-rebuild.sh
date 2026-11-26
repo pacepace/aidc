@@ -63,7 +63,8 @@ echo "-- aidc rebuild over the full inventory --"
 HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out.log" 2>&1
 eq "rebuild exits 0 with the stub docker" "0" "$?"
 
-eq "one docker build per inventory image" "7" "$(wc -l < "$TMP/builds.log" | tr -d ' ')"
+eq "one docker build per inventory image Docker runs (not gitctl with no git container set up, never the cluster's account broker)" "7" "$(wc -l < "$TMP/builds.log" | tr -d ' ')"
+eq "the account broker is not built (it runs only in a cluster)" "0" "$(grep -c -- '-t aidc/broker:' "$TMP/builds.log")"
 
 echo
 echo "-- CLAUDE_CODE_REFRESH goes to dev-base and only dev-base --"

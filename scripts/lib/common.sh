@@ -223,7 +223,8 @@ require_cmd() {
 #   <image-tag>|<build-context-dir>|<dockerfile-path>
 #
 # Order matters: small images first (fail-fast on the cheap ones), dev-base
-# the slowest. gitctl (the git container) is built by `aidc k8s build` for a
+# the slowest. broker (a cluster user's Claude account broker) is built by `aidc k8s build`
+# only; it runs nowhere on Docker. gitctl (the git container) is built by `aidc k8s build` for a
 # cluster, and on Docker by `aidc git setup` when missing; `aidc rebuild` builds it
 # only where a Docker git container is set up. Used by:
 #   - cmd-rebuild.sh (iterates every Docker row; force rebuild of each)
@@ -244,6 +245,7 @@ aidc/forwarder:${AIDC_VERSION_TAG}|${AIDC_ROOT}/proxy/forwarder|${AIDC_ROOT}/pro
 aidc/mcp:${AIDC_VERSION_TAG}|${AIDC_ROOT}/mcp|${AIDC_ROOT}/mcp/Dockerfile
 aidc/dev-base:${AIDC_VERSION_TAG}|${AIDC_ROOT}/.devcontainer|${AIDC_ROOT}/.devcontainer/Dockerfile
 aidc/gitctl:${AIDC_VERSION_TAG}|${AIDC_ROOT}/gitctl|${AIDC_ROOT}/gitctl/Dockerfile
+aidc/broker:${AIDC_VERSION_TAG}|${AIDC_ROOT}/broker|${AIDC_ROOT}/broker/Dockerfile
 EOF
 }
 
@@ -259,7 +261,7 @@ EOF
 # The scripts the git image takes from .devcontainer/, the sessions' own (gitctl/Dockerfile
 # copies each from its staged context): the Claude Code hook writer, the gh stand-in that
 # writes requests, and the transcript copy-forward.
-AIDC_GITCTL_SHARED="hook-event.sh gh-standin.sh transcript-mirror.sh"
+AIDC_GITCTL_SHARED="hook-event.sh gh-standin.sh transcript-mirror.sh claude-usage.sh"
 aidc_build_context() {
     local lib
     AIDC_BUILD_CONTEXT="$2" AIDC_BUILD_STAGE=""
@@ -315,7 +317,7 @@ aidc_build_context() {
 
 # Ensure the aidc/<role> image exists locally, building it from the canonical
 # inventory when the tag is absent. Idempotent: a present image short-circuits.
-#   ensure_image <role>   role in: squid|refresher|policy|audit|forwarder|mcp|dev-base|gitctl
+#   ensure_image <role>   role in: squid|refresher|policy|audit|forwarder|mcp|dev-base|gitctl|broker
 #
 # Single home for the "build if missing" pattern: cmd-create (proxy stack +
 # dev-base, eagerly), cmd-mcp (mcp, lazy), cmd-proxy (forwarder, lazy).
@@ -324,7 +326,7 @@ ensure_image() {
     local role="$1"
     local row tag context dockerfile
     row=$(aidc_image_inventory | grep -E "^aidc/${role}:" || true)
-    [ -n "$row" ] || die "ensure_image: unknown role '${role}' (expected: squid, refresher, policy, audit, forwarder, mcp, dev-base, gitctl)"
+    [ -n "$row" ] || die "ensure_image: unknown role '${role}' (expected: squid, refresher, policy, audit, forwarder, mcp, dev-base, gitctl, broker)"
     IFS='|' read -r tag context dockerfile <<EOF
 $row
 EOF

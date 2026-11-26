@@ -26,6 +26,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/tunnel.sh"
 # shellcheck source=expose.sh
 . "$AIDC_SCRIPTS/k8s/expose.sh"
+# shellcheck source=broker.sh
+. "$AIDC_SCRIPTS/k8s/broker.sh"
 
 usage() {
     cat <<'USAGE'
@@ -281,6 +283,9 @@ k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/
     | k8s_kubectl apply -f - >&2
 # The session's transcripts and hook events reach the user's MCP server through the mirror claim.
 k8s_ensure_transcripts "$ns" || exit 1
+# Its Claude config dir is its folder of the user's claude-config claim (the proxy pod's first
+# step makes it; the account broker writes its credentials there).
+k8s_ensure_claude_config "$ns" || exit 1
 # Its policy sidecar pokes the user's MCP server when it is tainted (W-M4): at the server's
 # Service address, made now when missing so it is stable whether or not the server runs yet.
 AIDC_K8S_TAINT_WEBHOOK_IP=$(k8s_mcp_service_ip "$ns") || exit 1
@@ -314,6 +319,15 @@ for _n in $NETWORKS; do
 done
 if [ -n "$EGRESS_LINES" ] || [ -n "$NETWORKS" ]; then
     k8s_names_sync "$ns" "$NAME" || die "the session's names could not be written; aidc kill ${NAME} and create it again"
+fi
+# The active account's credentials before the session's Claude starts, so it starts logged in;
+# with no broker, the long-lived token when this machine has one (the stopgap until a broker).
+# The token is a file on the user's own machine: the user's MCP server never hands one on.
+K8S_CLAUDE_QUIET_NONE=1
+{ [ -f "${HOME}/.config/aidc/claude-oauth-token" ] && [ -z "${AIDC_MCP_BACKEND:-}" ]; } || K8S_CLAUDE_QUIET_NONE=0
+k8s_claude_session_ready "$ns" "$NAME" || exit 1
+if [ "$K8S_CLAUDE_VIA" = none ] && [ "$K8S_CLAUDE_QUIET_NONE" = 1 ]; then
+    k8s_claude_token_secret "$ns" "$NAME" || exit 1
 fi
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" "$proxy_ip" | k8s_kubectl apply -f - >&2
 info "waiting for the dev pod to be ready"

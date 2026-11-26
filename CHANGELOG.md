@@ -141,6 +141,31 @@ and the envelope are unchanged; what an MCP caller sees differently:
   kept), no longer by the MCP server, which only reads them; on both backends.
 - **Build the `aidc/mcp` image through aidc** (`aidc rebuild`, `aidc k8s build`): its build
   context now stages the CLI beside it, so a bare `docker build mcp/` fails.
+- **Your Claude accounts, set up once for every cluster session.** `aidc claude account add
+  <name>` starts your Claude account broker (`claude-broker`, in your namespace) and runs
+  Claude's own login in it; every session created after that starts logged in, with the active
+  account. `aidc claude account list|use|remove` and `aidc claude broker
+  start|stop|status|logs`. With several accounts the broker moves on to the next one as each
+  reaches its weekly threshold, or a session hits its rate limit (`claude_accounts`,
+  `claude_account_switch: auto|wait`), and a session keeps its conversation. Build its image
+  first: `aidc k8s build` (it builds `aidc/broker`). No admin step is needed.
+- **A cluster session's Claude config dir moved** to its own folder of a new claim of yours,
+  `claude-config` (`kubernetes.claude_config_size`, default 20Gi, on the session class), which
+  the broker writes credentials into; a session's conversations and memory are now your disk's
+  `.claude/projects`, shared by all your sessions (one history per repo); each session's
+  transcript mirror (what your MCP server delivers from) and audit trail still hold only its own
+  conversations, the ones its Claude's hooks named. A new cluster session starts a new
+  conversation; a restarted or upgraded one resumes its own newest (by id), never another
+  session's in the same repo. Create sessions again
+  to move them: a new session's Claude config is filled once from the old home's (login and
+  settings kept); conversations stay in the old home claim until the session is killed. `aidc
+  git setup` moves the git agent's Claude config, its own history included. Kill also removes a
+  session's Claude config dir.
+- **Until you add an account**, a cluster session logs in itself (`aidc attach`, `/login`), or
+  gets the one-year inference token `aidc claude-token setup` stores (from `claude setup-token`)
+  as `CLAUDE_CODE_OAUTH_TOKEN`, from a Secret of its own, when no broker runs.
+- **A cluster session's status line** runs through aidc (it reports the weekly usage to the
+  broker), and still shows your own (`settings.json` statusLine) with the account's name.
 
 ### Upgrading
 - **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,

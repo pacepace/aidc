@@ -47,6 +47,15 @@ if printf '%s\n' "$event" > "$tmp" 2>/dev/null; then
     mv -f -- "$tmp" "${dir}/${name}.json" 2>/dev/null
 fi
 rm -f -- "$tmp" 2>/dev/null
+# The transcripts this Claude writes, by file name, a line each (own-transcripts beside the
+# events): where a session's Claude history folder is shared with other sessions (a cluster
+# session's, the user's disk's), the mirror copies only these, so the MCP and the audit trail
+# see only this session's conversations.
+own="$(dirname -- "$dir")/own-transcripts"
+tname=$(printf '%s' "$event" | jq -r '.transcript_path // "" | split("/") | last' 2>/dev/null) || tname=""
+if printf '%s' "$tname" | grep -Eqx '[A-Za-z0-9-]{1,100}\.jsonl' && ! grep -qxF -- "$tname" "$own" 2>/dev/null; then
+    printf '%s\n' "$tname" >> "$own" 2>/dev/null
+fi
 
 # The dir stays small: only the newest AIDC_HOOK_EVENTS_KEPT (200) events are kept. The writer
 # is the dir's one owner on both backends; the MCP only reads it (in the cluster its mount of

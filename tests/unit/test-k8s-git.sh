@@ -110,6 +110,9 @@ case "$*" in
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
     *"get pvc transcripts"*) [ "${K_TRANSCRIPTS_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
+    *"get pvc claude-config"*) [ "${K_NO_CLAUDE_CONFIG:-}" = 1 ] || echo "persistentvolumeclaim/claude-config" ;;
+    *"get deployment claude-broker"*) [ "${K_BROKER:-}" = 1 ] && printf 'claude-broker|1' ;;
+    *"exec deployment/claude-broker"*) : ;;
     *"get pvc disk"*)
         [ "${K_PVC_WARN:-}" = 1 ] && echo "Warning: client version skew" >&2
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -197,10 +200,18 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
 assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home, the private copies at gitrun's store" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"git"}]' \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"git"},{"name":"claude-config","mountPath":"/home/git/.claude","subPath":"git"}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
-assert_eq "the volumes are the user's disk claim, the git-home, git-cred and git-run claims, the transcript mirror claim, and the two read-only lists" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"transcripts","persistentVolumeClaim":{"claimName":"transcripts"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}},{"name":"settings","configMap":{"name":"git-settings","defaultMode":292}}]' \
+assert_eq "...its Claude config dir its own folder of claude-config (the account broker writes there); the holder has none" "[]" \
+    "$(pod '[.containers[] | select(.name != "git") | .volumeMounts[] | select(.name == "claude-config")]')"
+assert_has "the root step gives that folder to the git user, with group 1000 (the broker's) able to write its credentials" \
+    'd=/claude-config/git && mkdir -p \"$d\" && chown 2000:1000 \"$d\" && chmod 0770 \"$d\"' \
+    "$(pod '.initContainers[] | select(.name == "seed-home") | .command[2]')"
+assert_eq "it is filled once, as the git user, from the agent's own Claude config, its history included" \
+    '[{"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"git"}],false]' \
+    "$(pod '.initContainers[] | select(.name == "claude-seed") | [.securityContext, .volumeMounts, (.command[2] | test("exclude"))]')"
+assert_eq "the volumes are the user's disk claim, the git-home, git-cred and git-run claims, the transcript mirror and claude-config claims, and the two read-only lists" \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"transcripts","persistentVolumeClaim":{"claimName":"transcripts"}},{"name":"claude-config","persistentVolumeClaim":{"claimName":"claude-config"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}},{"name":"settings","configMap":{"name":"git-settings","defaultMode":292}}]' \
     "$(pod '.volumes')"
 assert_has "the agent's own folder of the transcript mirror is readied by the root step: the git user's, private, its old hook events gone" \
     'd=/mirror/git && mkdir -p \"$d\" && rm -rf -- \"$d/hook-events\" && chown 2000:2000 \"$d\" && chmod 0700 \"$d\"' \
@@ -284,8 +295,8 @@ assert_eq "its settings name the request folder, the disk and the user's mode" \
 assert_not_has "the agent's container no longer runs or notifies a watcher of its own" "AIDC_GIT_NOTIFY" "$genv"
 assert_not_has "..." "AIDC_GIT_WATCH_HERE" "$genv"
 assert_has "it knows its session name" '{"name":"AIDC_SESSION","value":"git"}' "$genv"
-assert_eq "an existing home gets the image's Claude: refresh-claude runs after the seed, as the git user, with nothing" \
-    '["seed-home","refresh-claude"] {"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}' \
+assert_eq "an existing home gets the image's Claude: refresh-claude runs after the seed, as the git user, with nothing; then its Claude config is filled" \
+    '["seed-home","refresh-claude","claude-seed"] {"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}' \
     "$(pod '[.initContainers[].name]') $(pod '.initContainers[] | select(.name == "refresh-claude") | .securityContext')"
 assert_eq "it reads the image's own home and writes the home claim only" \
     '["/opt/aidc/lib/gitctl/claude-refresh.sh","/home/git","/seed"] [{"name":"home","mountPath":"/seed"}]' \

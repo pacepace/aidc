@@ -644,13 +644,14 @@ assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
 assert_eq "  every tunnel file of the session deleted, a leftover log too; demo-x's kept" "demo-x-18080.log" \
     "$(names_in "$TD" demo-)"
 rm -f "$TD/demo-x-18080.log"
-assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one" \
+assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one, then its Claude token Secret (if any)" \
 "-n aidc-u-alice delete ingress -l aidc/session=demo,app=expose --ignore-not-found
 -n aidc-u-alice delete middlewares.traefik.io demo-login --ignore-not-found --wait=false
 -n aidc-u-alice delete secret demo-login --ignore-not-found --wait=false
 -n aidc-u-alice delete secret demo-expose-8080-tls --ignore-not-found --wait=false
 -n aidc-u-alice delete statefulset,deployment,service,networkpolicy,configmap -l aidc/session=demo --wait=true
--n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --wait=false" \
+-n aidc-u-alice delete pvc -l aidc/session=demo,aidc/kept!=audit --wait=false
+-n aidc-u-alice delete secret demo-claude-token --ignore-not-found" \
     "$(grep ' delete ' "$K_LOG")"
 
 echo "=== removing pages when the cluster does not answer: no certificate left unsaid ==="

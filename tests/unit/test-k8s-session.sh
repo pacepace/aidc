@@ -100,6 +100,9 @@ case "$*" in
     *"logs "*"-c dev"*) echo '[aidc-user-main] ready (tmux running, sleeping forever)' ;;
     *"get pvc transcripts"*) [ "${K_TRANSCRIPTS_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
+    *"get pvc claude-config"*) [ "${K_NO_CLAUDE_CONFIG:-}" = 1 ] || echo "persistentvolumeclaim/claude-config" ;;
+    *"get deployment claude-broker"*) [ "${K_BROKER:-}" = 1 ] && printf 'claude-broker|1' ;;
+    *"exec deployment/claude-broker -c broker -- claude-broker"*) [ "${K_BROKER_EXEC_FAIL:-}" = 1 ] && exit 1 ;;
     *"get pvc demo-home demo-state"*) [ "${K_LEFTOVER:-}" = 1 ] && echo "persistentvolumeclaim/demo-home" ;;
     *"get pvc -l"*"aidc/kept=audit"*) [ "${K_TWO_AUDITS:-}" = 1 ] && echo "persistentvolumeclaim/demo-audit-20261123040000"
         echo "persistentvolumeclaim/demo-audit-20261124050000" ;;
@@ -186,6 +189,8 @@ assert_eq "everything goes in the user's namespace" "aidc-u-alice" \
     "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_eq "every object carries the session label" "demo" \
     "$(q '.metadata.labels["aidc/session"]' | sort -u | tr -d '"')"
+assert_eq "...and no claim of the user's (transcripts, claude-config) is applied over" "" \
+    "$(q 'select(.kind == "PersistentVolumeClaim" and (.metadata.name == "transcripts" or .metadata.name == "claude-config")) | .metadata.name')"
 
 dev() { q "select(.kind == \"StatefulSet\") | $1" | tail -1; }
 assert_eq "the dev pod runs under the runtime class, in a user namespace, with no API token" \
@@ -204,9 +209,30 @@ assert_eq "no container in the dev pod is privileged" "[]" \
 assert_eq "session size: 2 CPU / 8Gi guaranteed, the configured ceiling" \
     '{"requests":{"cpu":"2","memory":"8Gi"},"limits":{"cpu":"16","memory":"64Gi"}}' \
     "$(dev '.spec.template.spec.containers[0].resources')"
-assert_eq "the user's disk is mounted at /home/<user>, the home on its own volume, and only the session's own folder of the transcript mirror" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/vscode"},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"demo"}]' \
+assert_eq "the user's disk is mounted at /home/<user>, the home on its own volume, only the session's own folders of the transcript mirror and of claude-config (its Claude config dir), and the user's one Claude history over its projects/" \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/vscode"},{"name":"transcripts","mountPath":"/var/aidc/transcript-out","subPath":"demo"},{"name":"claude-config","mountPath":"/home/vscode/.claude","subPath":"demo"},{"name":"disk","mountPath":"/home/vscode/.claude/projects","subPath":".claude/projects"}]' \
     "$(dev '.spec.template.spec.containers[0].volumeMounts')"
+assert_eq "claude-config is the user's claim" \
+    '{"name":"claude-config","persistentVolumeClaim":{"claimName":"claude-config"}}' \
+    "$(dev '.spec.template.spec.volumes[] | select(.name == "claude-config")')"
+assert_eq "no container or step of the dev pod mounts another session's Claude config dir, or the whole claim" "[]" \
+    "$(dev '[(.spec.template.spec.containers[], .spec.template.spec.initContainers[]) | .volumeMounts[] | select(.name == "claude-config" and (.subPath // "") != "demo")]')"
+assert_eq "the Claude config dir is filled once, as the session user, from its home's (read-only) or the image's" \
+    '[{"runAsUser":1000,"runAsGroup":1000},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"demo"}]]' \
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | [.securityContext, .volumeMounts]')"
+assert_has "...its projects/ left out (the disk's is mounted over it)" "--exclude=./projects" \
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+proxyq() { yq -N ea "[select(.kind == \"Deployment\" and .metadata.name == \"demo-proxy\")] | .[-1] | $1" -o=json -I=0 "$K_APPLIED"; }
+assert_eq "the proxy pod's first steps make the session's Claude config dir (root: the session user's, private) and the disk's history folder (as the session user), before any pod mounts a part of them" \
+    '[["claude-dirs","d=/claude-config/demo && mkdir -p \"$d\" && chown 1000:1000 \"$d\" && chmod 0700 \"$d\"","root"],["claude-projects","umask 002 && mkdir -p \"/disk/.claude/projects\"",{"runAsUser":1000,"runAsGroup":1000}]]' \
+    "$(proxyq '[.spec.template.spec.initContainers[] | select(.name == "claude-dirs" or .name == "claude-projects") | [.name, .command[2], (.securityContext // "root")]]')"
+assert_eq "...ahead of the rest" '["claude-dirs","claude-projects"]' "$(proxyq '[.spec.template.spec.initContainers[0:2][].name]')"
+assert_has "the audit sidecar takes the session's own conversations from its mirror folder (the shared history holds other sessions')" \
+    '{"name":"AIDC_AUDIT_CLAUDE_PROJECTS","value":"/var/aidc/session-transcripts"}' \
+    "$(proxyq '.spec.template.spec.containers[] | select(.name == "audit") | .env')"
+assert_eq "no running container of the proxy pod mounts the user's disk" "[]" \
+    "$(proxyq '[.spec.template.spec.containers[] | .volumeMounts[] | select(.name == "disk")]')"
+assert_has "no account broker: create says the session logs in itself" "so demo logs in itself (aidc attach demo, then /login)" "$out"
 assert_eq "the transcript mirror is the user's claim, the same one every session mounts" \
     '{"name":"transcripts","persistentVolumeClaim":{"claimName":"transcripts"}}' \
     "$(dev '.spec.template.spec.volumes[] | select(.name == "transcripts")')"
@@ -215,8 +241,9 @@ assert_eq "before Claude starts, a root step readies the session's folder: made,
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "mirror-dir") | {"name": .name, "command": .command, "volumeMounts": .volumeMounts}')"
 assert_eq "no other container of the dev pod mounts the whole mirror" "[]" \
     "$(dev '[.spec.template.spec.containers[] | .volumeMounts[] | select(.name == "transcripts" and (.subPath // "") != "demo")]')"
-assert_eq "the proxy pod does not mount the mirror" "[]" \
-    "$(q 'select(.kind == "Deployment") | [.spec.template.spec.volumes[] | select(.name == "transcripts")]' | tail -1)"
+assert_eq "the proxy pod mounts the mirror only in its audit sidecar: the session's own folder, read-only (its own conversations, for the audit trail)" \
+    '[{"name":"transcripts","mountPath":"/var/aidc/session-transcripts","subPath":"demo","readOnly":true}]' \
+    "$(proxyq '[(.spec.template.spec.containers[], .spec.template.spec.initContainers[]) | .volumeMounts[] | select(.name == "transcripts")]')"
 assert_eq "a mirror claim that is there is not applied again (a changed size would be refused as a resize)" "" \
     "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "transcripts") | .metadata.name')"
 pvc() { q "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$1\") | .spec.storageClassName" | tail -1; }
@@ -399,6 +426,51 @@ assert_has "a mirror claim the cluster does not take stops create" \
 assert_eq "...before anything of the session is made" "" \
     "$(q 'select(.kind == "StatefulSet" or .kind == "Deployment") | .metadata.name')"
 
+echo "=== Claude: the user's claude-config claim, and the account broker at create ==="
+out=$(K_NO_CLAUDE_CONFIG=1 run create demo --backend kubernetes)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "the user's claude-config claim is made when missing, on the session class" '"scratch"' "$(pvc claude-config)"
+assert_eq "it is the user's, not the session's (kill's label delete keeps it)" \
+    '{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice"}' \
+    "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "claude-config") | .metadata.labels' | head -1)"
+out=$(K_BROKER=1 run create demo --backend kubernetes)
+log=$(cat "$K_LOG")
+assert_has "with a broker running, create has it write the session's credentials" \
+    "exec deployment/claude-broker -c broker -- claude-broker session demo" "$log"
+ready_line=$(grep -n 'claude-broker session demo' "$K_LOG" | head -n1 | cut -d: -f1)
+sts_line=$(grep -n 'apply -f -' "$K_LOG" | tail -n1 | cut -d: -f1)
+assert_eq "...before the dev pod (its Claude starts logged in)" "yes" "$([ "${ready_line:-99}" -lt "${sts_line:-0}" ] && echo yes)"
+assert_has "...and says so" "demo uses your account broker's active account" "$out"
+out=$(K_BROKER=1 K_BROKER_EXEC_FAIL=1 run create demo --backend kubernetes)
+assert_has "a broker that does not answer does not stop create" "session demo is ready" "$out"
+assert_has "...it is said" "did not answer for demo" "$out"
+
+echo "=== the long-lived token, the stopgap with no broker (aidc claude-token) ==="
+printf 'sk-ant-oat01-testtoken\n' > "$HOME/.config/aidc/claude-oauth-token"
+out=$(run create demo --backend kubernetes)
+assert_has "with no broker, the token this machine holds is the session's" "demo uses your long-lived token" "$out"
+assert_eq "it is the session's own Secret, made from stdin (never on a command line)" \
+    '["demo-claude-token","demo","sk-ant-oat01-testtoken"]' \
+    "$(q 'select(.kind == "Secret") | [.metadata.name, .metadata.labels["aidc/session"], .stringData.token]')"
+assert_not_has "...the token is on no command line" "sk-ant-oat01" "$(cat "$K_LOG")"
+assert_has "the dev container takes it as CLAUDE_CODE_OAUTH_TOKEN from that Secret" \
+    '{"name":"CLAUDE_CODE_OAUTH_TOKEN","valueFrom":{"secretKeyRef":{"name":"demo-claude-token","key":"token"}}}' \
+    "$(dev '.spec.template.spec.containers[0].env')"
+out=$(K_BROKER=1 run create demo --backend kubernetes)
+assert_eq "with a broker running, no token is handed on (it would override the broker's credentials)" "" \
+    "$(q 'select(.kind == "Secret") | .metadata.name')"
+assert_not_has "...nor in the dev pod" "CLAUDE_CODE_OAUTH_TOKEN" "$(dev '.spec.template.spec.containers[0].env')"
+out=$(AIDC_MCP_BACKEND=kubernetes run create demo --backend kubernetes)
+assert_eq "the user's MCP server's create never hands one on" "" "$(q 'select(.kind == "Secret") | .metadata.name')"
+printf 'not-a-token\n' > "$HOME/.config/aidc/claude-oauth-token"
+out=$(run create demo --backend kubernetes)
+assert_has "a file that holds no token is said, and the session logs in itself" "does not hold a token" "$out"
+rm -f "$HOME/.config/aidc/claude-oauth-token"
+out=$(run create demo --backend kubernetes)
+assert_not_has "with no token, no Secret" "Secret" "$(cat "$K_APPLIED")"
+out=$(K_EXISTS=1 run kill demo --backend kubernetes)
+assert_has "kill removes the session's token Secret by name" "delete secret demo-claude-token --ignore-not-found" "$(cat "$K_LOG")"
+
 echo "=== create refusals ==="
 out=$(K_NO_DENY=1 run create demo --backend kubernetes)
 assert_has "a namespace without its default-deny is refused, with the fix" "run \`aidc user add alice\` again" "$out"
@@ -474,6 +546,16 @@ assert_not_has "  and leaves the older claim's record alone" "annotate persisten
 out=$(K_EXISTS=1 K_TWO_AUDITS=1 run kill demo --backend kubernetes)
 assert_has "with no StatefulSet to name it, the newest claim is the session's" \
     "annotate persistentvolumeclaim/demo-audit-20261124050000" "$(cat "$K_LOG")"
+out=$(K_EXISTS=1 run kill demo --backend kubernetes)
+assert_has "with no broker, kill removes the session's Claude config dir with a one-shot pod" \
+    'rm -rf -- \"/claude-config/$1\" sh demo' "$(q 'select(.kind == "Pod" and .metadata.name == "demo-claude-forget") | .spec.containers[0].command | join(" ")')"
+assert_eq "...which mounts only claude-config" '[{"name":"claude-config","persistentVolumeClaim":{"claimName":"claude-config"}}]' \
+    "$(q 'select(.kind == "Pod" and .metadata.name == "demo-claude-forget") | .spec.volumes')"
+assert_eq "...and carries no session label (it is not the session)" "null" \
+    "$(q 'select(.kind == "Pod" and .metadata.name == "demo-claude-forget") | .metadata.labels["aidc/session"]')"
+out=$(K_EXISTS=1 K_BROKER=1 run kill demo --backend kubernetes)
+assert_has "with a broker running, the broker forgets it" "claude-broker forget demo" "$(cat "$K_LOG")"
+assert_eq "...and no pod is needed" "" "$(q 'select(.kind == "Pod") | .metadata.name')"
 out=$(run kill demo --backend kubernetes)
 assert_has "killing a session that does not exist says so" "no session 'demo'" "$out"
 

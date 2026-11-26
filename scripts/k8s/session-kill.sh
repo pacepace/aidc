@@ -4,7 +4,8 @@
 # The audit sidecar finishes first, as on Docker: one last sweep, and killed_at stamped into
 # meta.json. Then everything the session made goes (labelled aidc/session=<name>): its dev
 # StatefulSet, proxy, Service, NetworkPolicies, home, state and audit seed, its TCP egress relays,
-# its pages (Ingresses, login) and this machine's tunnels to it. Its audit claim
+# its pages (Ingresses, login) and this machine's tunnels to it; and its Claude config dir (its
+# folder of claude-config, which carries no session label: broker.sh, k8s_claude_session_forget). Its audit claim
 # (labelled aidc/kept=audit, named for its creation time) stays, with its size, kill time and
 # taint recorded on it as annotations (scripts/k8s/audit.sh), and so does the user's disk.
 # `aidc audit trim` removes kept claims.
@@ -20,6 +21,10 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/tunnel.sh"
 # shellcheck source=expose.sh
 . "$AIDC_SCRIPTS/k8s/expose.sh"
+# shellcheck source=manifests.sh
+. "$AIDC_SCRIPTS/k8s/manifests.sh"
+# shellcheck source=broker.sh
+. "$AIDC_SCRIPTS/k8s/broker.sh"
 
 case "${1:-}" in
     -h|--help) printf 'aidc kill <name>\n\nRemoves the session from the cluster; its audit claim and your disk stay.\n'; exit 0 ;;
@@ -77,6 +82,9 @@ stopped=$(k8s_tunnels_stop_all "$ns" "$NAME")
 k8s_expose_remove "$ns" "$NAME" || info "WARNING: the session's pages could not be removed; see kubectl -n ${ns} get ingress -l ${sel}"
 k8s_kubectl -n "$ns" delete statefulset,deployment,service,networkpolicy,configmap -l "$sel" --wait=true >&2
 k8s_kubectl -n "$ns" delete pvc -l "${sel},aidc/kept!=audit" --wait=false >&2
+k8s_claude_session_forget "$ns" "$NAME"
+k8s_kubectl -n "$ns" delete secret "$(k8s_claude_token_name "$NAME")" --ignore-not-found >/dev/null 2>&1 \
+    || info "WARNING: ${NAME}'s Claude token Secret could not be removed: kubectl -n ${ns} delete secret $(k8s_claude_token_name "$NAME")"
 # The git container forgets the session (its token and any git mode of its own), so a mode never
 # outlives the session it was given to. Best effort: aidc git setup prunes what is left.
 if gpod=$(k8s_git_pod "$ns" 2>/dev/null); then

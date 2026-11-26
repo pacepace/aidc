@@ -47,6 +47,8 @@ while IFS='|' read -r tag context dockerfile; do
     # exists; aidc git setup then runs the new image): building it for every Docker user would
     # cost minutes for an image nothing runs. A cluster's is built by aidc k8s build.
     case "$tag" in aidc/gitctl:*) docker volume inspect aidc-git-home >/dev/null 2>&1 || continue ;; esac
+    # The Claude account broker runs only in a cluster (aidc k8s build).
+    case "$tag" in aidc/broker:*) continue ;; esac
     info "==> building ${tag}"
     # dev-base bakes Claude Code from Anthropic's installer; bust that one
     # layer so every rebuild fetches the current release (see Dockerfile).

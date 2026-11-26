@@ -219,6 +219,25 @@ copies. Its network reaches public addresses only. What remains, by design or no
 - **Branch protection is GitHub's backstop.** `aidc git protect` offers a ruleset; a fine-grained
   token without admin scope limits what a mistake can reach.
 
+### Claude logins in a cluster: the account broker (K8S-16, K8S-17)
+
+A cluster user's Claude accounts are held by their account broker, one pod in their namespace
+(docs/design-12-kubernetes.md, "Claude: logins, account switching, history"). What holds:
+
+- The long-lived part of each login (the refresh token) is on a claim only the broker's pod
+  mounts. A session receives the active account's access token only, which it could use until
+  it expires (hours) anyway; a session that copies it gains nothing it did not have.
+- A session mounts only its own folder of `claude-config` (its Claude config dir); it cannot
+  read or write another session's credentials, and what it writes there (its usage report, a
+  rate limit) can only move the user's own accounts along their own cycle.
+- The broker reaches no cluster API (no token) and nothing inside the cluster; it may reach
+  public addresses on 443 and Quad9, where Claude's login and renewal go. Nothing may connect to
+  it. Every login and renewal is Claude Code's own, run in it.
+
+What it does not: the broker mounts every session's Claude config dir, so whoever controls the
+broker's pod (a compromised Claude Code release, say) can read every session's Claude state and
+every account's login. That is the same trust a laptop gives the Claude Code it runs.
+
 ### Host network position attacks
 
 If the host is on a network where attackers can reach Docker's exposed ports, aidc itself doesn't harden the host. **Mitigation:** out of scope. aidc assumes the host's perimeter is secured by other means.

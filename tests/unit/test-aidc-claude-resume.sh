@@ -72,5 +72,25 @@ run env AIDC_CLAUDE_RESUME=true
 assert "not even with AIDC_CLAUDE_RESUME=true" "! grep -qx -- --continue '$SEEN'"
 echo
 
+echo "[3/3] a cluster session resumes only its own conversation (the history folder is shared)"
+OUT="$SCRATCH/transcript-out"; mkdir -p "$OUT"
+printf '{"type":"user","message":{"role":"user","content":"theirs"}}\n' > "$CONV/other.jsonl"
+touch -d '2 minutes ago' "$CONV/s1.jsonl"
+ARGS=()
+run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
+assert "a new session (nothing of its own yet) starts a new conversation: no --continue, no --resume" \
+    "! grep -qx -- --continue '$SEEN' && ! grep -qx -- --resume '$SEEN'"
+echo s1.jsonl > "$OUT/own-transcripts"
+run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
+assert "its own newest conversation is resumed by id, though another session's is newer" \
+    "grep -qx -- --resume '$SEEN' && grep -qx s1 '$SEEN' && ! grep -qx -- --continue '$SEEN'"
+printf '{"cost":1}\n' > "$CONV/s2.jsonl"; echo s2.jsonl >> "$OUT/own-transcripts"
+run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
+assert "a newer one of its own with no message is skipped" "grep -qx s1 '$SEEN'"
+ARGS=(--print x)
+run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
+assert "a headless run still resumes nothing" "! grep -qx -- --resume '$SEEN'"
+echo
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

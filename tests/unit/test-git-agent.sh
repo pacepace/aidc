@@ -78,7 +78,12 @@ assert_eq "the hook and managed-hooks-only stay" "true /opt/aidc/lib/gitctl/clau
 # (MCP-46/47): SessionStart says its Claude is up with hooks installed.
 assert_eq "SessionStart, Stop, Notification and UserPromptSubmit each run aidc-hook-event" \
     "Notification:/usr/local/bin/aidc-hook-event SessionStart:/usr/local/bin/aidc-hook-event Stop:/usr/local/bin/aidc-hook-event UserPromptSubmit:/usr/local/bin/aidc-hook-event" \
-    "$(jq -r '.hooks | to_entries[] | select(.key != "PreToolUse") | "\(.key):\(.value[0].hooks[0].command)"' "$ms" | sort | paste -sd' ' -)"
+    "$(jq -r '.hooks | to_entries[] | select(.key != "PreToolUse" and .key != "StopFailure") | "\(.key):\(.value[0].hooks[0].command)"' "$ms" | sort | paste -sd' ' -)"
+# The user's Claude account broker (K8S-17) hears of the agent's rate limits, as of a session's.
+assert_eq "a StopFailure hook for rate limits only runs the sessions' aidc-claude-usage" \
+    '[{"matcher":"rate_limit","hooks":[{"type":"command","command":"/usr/local/bin/aidc-claude-usage rate-limited"}]}]' \
+    "$(jq -c '.hooks.StopFailure' "$ms")"
+assert_has "the image installs it from the staged sessions' copy" "COPY claude-usage.sh /usr/local/bin/aidc-claude-usage" "$df"
 assert_has "the image installs the sessions' hook writer there, root's" "COPY hook-event.sh /usr/local/bin/aidc-hook-event" "$df"
 assert_has "..." "chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event" "$df"
 # One writer: the image is built from a staged context holding the sessions' own

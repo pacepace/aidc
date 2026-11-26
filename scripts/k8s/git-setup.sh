@@ -10,6 +10,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/lib.sh"
 # shellcheck source=manifests.sh
 . "$AIDC_SCRIPTS/k8s/manifests.sh"
+# shellcheck source=broker.sh
+. "$AIDC_SCRIPTS/k8s/broker.sh"
 
 case "${1:-}" in
     -h|--help) exec bash "$AIDC_SCRIPTS/cmd-git.sh" --help ;;
@@ -36,6 +38,9 @@ fi
 info "applying ${AIDC_K8S_USER}'s git container in ${ns}"
 # The agent's transcripts and hook events reach the user's MCP server through the mirror claim.
 k8s_ensure_transcripts "$ns" || exit 1
+# Its Claude config dir is its folder of claude-config, where the account broker writes its
+# credentials (made now when a broker runs, so the agent's Claude starts logged in).
+k8s_claude_session_ready "$ns" "$K8S_GIT_SESSION" || exit 1
 applied=$(k8s_render_git "$sel" | k8s_kubectl apply -f -) || die "could not apply the git container"
 printf '%s\n' "$applied" >&2
 # The image tag is aidc's version, so `aidc k8s build --force` replaces the image under the same

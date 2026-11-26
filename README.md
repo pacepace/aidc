@@ -893,6 +893,25 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   left behind (a create or kill that stopped half way), keeping its audit claim.
 - A tainted session is frozen by your MCP server in the cluster (its way out cut, see "Taint"
   below), or reported as pending while the server is not running.
+- **Claude logins, once for every session.** `aidc claude account add <name>` starts your Claude
+  account broker in your namespace (first time) and runs Claude's own login inside it: open the
+  link it prints, sign in, paste the code back. The broker keeps each account's login (its
+  refresh token included) on a claim only its pod mounts, renews each access token by running
+  Claude Code there when it nears expiry, and writes the active account's credentials, without
+  the refresh token, into every session's Claude config dir; a new session starts logged in,
+  with no `/login`. `aidc claude account list` shows each account's state (a failing renewal
+  included), `account use <name>` switches every session at once, `account remove <name>`
+  logs one out. Add more accounts and they are used in turn as each one's weekly usage reaches
+  its threshold (`claude_accounts` and `claude_account_switch`, under Config); a session keeps
+  its conversation across a switch. Each session's Claude config dir is its own folder of your
+  `claude-config` claim, and its conversations and memory (`projects/`) are your disk's
+  `.claude/projects`, shared by all your sessions, so a repo has one history.
+  **Until you add an account** there are two ways, as on Docker: log in inside the session
+  (`aidc attach <name>`, then `/login`), or store a one-year inference token once with `aidc
+  claude-token setup` (it runs `claude setup-token` on this machine); every session created
+  after that, with no broker running, gets it as `CLAUDE_CODE_OAUTH_TOKEN` from a Secret of its
+  own (inference only: no Remote Control). Once a broker runs, new sessions use the broker
+  instead.
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
 the pod: the dev pod reaches only its own Squid (plus the relays and namespaces you gave it) and
@@ -925,6 +944,9 @@ kubernetes:
                                  # (default: your kubeconfig's server, resolved here)
   transcripts_size: 10Gi         # the transcript mirror your MCP server reads (on the session
                                  # class; each session sees only its own folder of it)
+  claude_config_size: 20Gi       # every session's Claude config dir (on the session class; each
+                                 # session sees only its own folder; your account broker writes
+                                 # their credentials there)
   git_store_size: 10Gi           # the git container's private copies of GitHub repos (on the
                                  # session class: a cache of GitHub)
   git_storage_warn: 1Gi          # `aidc git status` warns when those copies take more
@@ -1135,6 +1157,13 @@ mcp:
                                       # network, on the pages' class and certificate (none: in the cluster only)
     callback_address: ""              # the orchestrator's IPv4 as the cluster reaches it, when its callback_url
                                       # names a host this machine cannot resolve (default: resolved here)
+
+# Only relevant for sessions in a cluster with your Claude account broker (aidc claude account add):
+claude_accounts:                      # the order accounts are used in; after the last comes the first
+  - {name: work, switch_at: 90}       # switch_at: the weekly usage (%) at which aidc moves away from it
+  - {name: personal, switch_at: 70}   #   (default 90); accounts not listed come after, by name
+claude_account_switch: auto           # auto: switch at once; wait: the switch waits for
+                                      #   `aidc claude account use <name>` (account list and the status line say so)
 
 # Only relevant if an orchestrator drives sessions over MCP:
 orchestrator:

@@ -217,15 +217,17 @@ sg_part_github sg_make_gh_wc
 sg_part_claude
 
 echo "[4c/7] restart, upgrade and refresh; the conversation resumes"
-# A conversation in the session home, where Claude keeps the repo's (one message is enough for
-# the aidc-claude wrapper to pass --continue), and a fact about the pods before.
+# A conversation of the session's own (one message, its file named in the session's
+# own-transcripts, is enough for the aidc-claude wrapper to resume it by id), and a fact about the
+# pods before. The history folder is the user's disk's, shared: the file is removed at the end.
 DISK_DIR="/home/${AIDC_K8S_USER}${REPO#"$HOME"}"
 PROJ=$(printf '%s' "$DISK_DIR" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')
-in_dev "mkdir -p /home/vscode/.claude/projects/${PROJ} && printf '%s\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"aidc smoke\"}}' > /home/vscode/.claude/projects/${PROJ}/aidc-smoke.jsonl" >/dev/null 2>&1 || true
+in_dev "mkdir -p /home/vscode/.claude/projects/${PROJ} && printf '%s\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"aidc smoke\"}}' > /home/vscode/.claude/projects/${PROJ}/aidc-smoke.jsonl && echo aidc-smoke.jsonl >> /var/aidc/transcript-out/own-transcripts" >/dev/null 2>&1 || true
 PROXY_BEFORE=$(proxy_pod)
 UID_BEFORE=$(k8s_kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-# resumed: Claude runs in the new pod with --continue (it is started a moment after "ready").
-resumed() { for _ in $(seq 20); do in_dev "ps -eo args | grep -q -- '[c]laude.*--continue'" && return 0; sleep 3; done; return 1; }
+# resumed: Claude runs in the new pod resuming the session's own conversation (it is started a
+# moment after "ready").
+resumed() { for _ in $(seq 20); do in_dev "ps -eo args | grep -q -- '[c]laude.*--resume aidc-smoke'" && return 0; sleep 3; done; return 1; }
 assert "aidc restart gives the session a new dev pod" \
     "'$AIDC' restart '$SESSION' </dev/null && [ \"\$(k8s_kubectl -n '$NS' get pod '$POD' -o jsonpath='{.metadata.uid}')\" != '$UID_BEFORE' ]"
 assert "its home is kept (a file written before is there)" "in_dev 'test -f /home/vscode/.aidc-smoke-write'"
@@ -298,9 +300,11 @@ echo "[7/7] kill"
 REL="${REPO#"$HOME"}"
 DISK_REPO="/home/${AIDC_K8S_USER}${REL}"
 in_dev "echo kept > '${DISK_REPO}/marker'" >/dev/null 2>&1 || true
-# A shell-history line and a transcript file in the session home, where Claude Code keeps them,
-# for the audit sidecar's final sweep to collect (SEC-07).
-in_dev "echo aidc-smoke-history >> /home/vscode/.bash_history; mkdir -p /home/vscode/.claude/projects/aidc-smoke && echo '{\"smoke\":true}' > /home/vscode/.claude/projects/aidc-smoke/t.jsonl" >/dev/null 2>&1 || true
+# A shell-history line in the session home, and a transcript of the session's own in its mirror
+# folder (its own conversations, which is what the audit sidecar collects from: the history
+# folder is shared with the user's other sessions), for the final sweep (SEC-07). The smoke's
+# conversation in the shared history goes now.
+in_dev "echo aidc-smoke-history >> /home/vscode/.bash_history; echo '{\"smoke\":true}' > /var/aidc/transcript-out/aidc-smoke-t.jsonl; rm -f /home/vscode/.claude/projects/${PROJ:-none}/aidc-smoke.jsonl" >/dev/null 2>&1 || true
 AUDIT=$(k8s_kubectl -n "$NS" get statefulset "${SESSION}-dev" -o jsonpath='{.metadata.annotations.aidc/audit}' 2>/dev/null)
 assert "aidc kill removes the session" "'$AIDC' kill '$SESSION' </dev/null"
 assert "and stops this machine's tunnel to it" "! curl -s -m 3 -o /dev/null 'http://127.0.0.1:${TPORT}/'"
@@ -339,7 +343,7 @@ assert "meta.json names the session and its backend" "meta_names_it"
 assert "the audit trail has the config snapshot" "rd 'test -s /audit/config-snapshot.yaml'"
 assert "meta.json records when the session was tainted" "rd 'jq -e .tainted_at /audit/meta.json'"
 assert "the audit trail has the session's shell history" "rd 'grep -q aidc-smoke-history /audit/dev-bash-history'"
-assert "the audit trail has the session's Claude transcripts" "rd 'test -s /audit/claude-transcript/aidc-smoke/t.jsonl'"
+assert "the audit trail has the session's Claude transcripts" "rd 'test -s /audit/claude-transcript/aidc-smoke-t.jsonl'"
 assert "the audit trail has squid's access log" "rd 'test -s /audit/squid-access.log'"
 assert "the user's disk outlives the session (a file written in it is still there)" \
     "rd 'grep -q kept /disk${REL}/marker'"

@@ -24,11 +24,11 @@ while [ $# -gt 0 ]; do
             cat <<'EOF'
 aidc k8s build [--force] [--only ROLE]
 
-Builds aidc's images (squid, refresher, policy, audit, forwarder, mcp, dev-base, and the
-git container's gitctl) in the cluster of the `kubernetes:` config and pushes them to the
+Builds aidc's images (squid, refresher, policy, audit, forwarder, mcp, dev-base, the git
+container's gitctl and the Claude account broker's broker) in the cluster of the `kubernetes:` config and pushes them to the
 registry `aidc k8s setup` made. Images already there for this aidc version are skipped;
---force builds them again (and fetches the current Claude Code release into dev-base and
-gitctl, as `aidc rebuild` does for dev-base, and testament's newest release into dev-base
+--force builds them again (and fetches the current Claude Code release into dev-base,
+gitctl and broker, as `aidc rebuild` does for dev-base, and testament's newest release into dev-base
 when the config names its repo). --only builds one role.
 EOF
             exit 0 ;;
@@ -63,7 +63,7 @@ bexec_in() { k8s_kubectl -n "$ns" exec -i "$BUILDER" -c docker -- "$@"; }
 rows=$(aidc_image_inventory)
 if [ -n "$ONLY" ]; then
     rows=$(printf '%s\n' "$rows" | grep -E "^aidc/${ONLY}:" || true)
-    [ -n "$rows" ] || die "unknown role '${ONLY}' (one of: squid, refresher, policy, audit, forwarder, mcp, dev-base, gitctl)"
+    [ -n "$rows" ] || die "unknown role '${ONLY}' (one of: squid, refresher, policy, audit, forwarder, mcp, dev-base, gitctl, broker)"
 fi
 
 info "starting builder pod ${BUILDER} in ${ns}"
@@ -102,7 +102,7 @@ while IFS='|' read -r tag context dockerfile; do
     [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
     build_args=()
     case "$tag" in
-        aidc/dev-base:*|aidc/gitctl:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
+        aidc/dev-base:*|aidc/gitctl:*|aidc/broker:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
     esac
     bexec docker build ${build_args[@]+"${build_args[@]}"} -t "$ref" \
         -f "${dir}/${dockerfile#"$context"/}" "$dir" >&2 \

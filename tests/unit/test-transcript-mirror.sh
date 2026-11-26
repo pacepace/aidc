@@ -150,6 +150,24 @@ assert "final destination matches final source" \
     "diff -q '$SRC/sess.jsonl' '$DEST/sess.jsonl'"
 echo
 
+# --- a Claude history folder shared by two sessions (a cluster user's disk) ----------
+echo "=== two sessions on one repo: each mirror holds only its own conversations ==="
+SH="$SCRATCH/shared"; A="$SCRATCH/mirror-a"; B="$SCRATCH/mirror-b"
+mkdir -p "$SH" "$A" "$B"
+echo '{"uuid":"a"}' > "$SH/aaaa.jsonl"; echo '{"uuid":"b"}' > "$SH/bbbb.jsonl"
+echo 'aaaa.jsonl' > "$A/own-transcripts"; echo 'bbbb.jsonl' > "$B/own-transcripts"
+aidc_mirror_copy_forward_pass "$SH" "$A" "$A/own-transcripts"
+aidc_mirror_copy_forward_pass "$SH" "$B" "$B/own-transcripts"
+assert "session A's mirror holds A's conversation only" "test -f '$A/aaaa.jsonl' && ! test -e '$A/bbbb.jsonl'"
+assert "session B's mirror holds B's conversation only" "test -f '$B/bbbb.jsonl' && ! test -e '$B/aaaa.jsonl'"
+C="$SCRATCH/mirror-c"; mkdir -p "$C"
+aidc_mirror_copy_forward_pass "$SH" "$C" "$C/own-transcripts"
+assert "a session whose Claude has named nothing yet mirrors nothing" "[ -z \"\$(ls -A '$C')\" ]"
+assert "the session's start mirrors with its own list on Kubernetes only" \
+    "grep -q '\[ \"\${AIDC_BACKEND:-}\" = kubernetes \] && _own=\"\${TRANSCRIPT_OUT}/own-transcripts\"' '$AIDC_ROOT/.devcontainer/user-main.sh' \
+        && grep -q 'aidc_mirror_copy_forward_pass \"\$_src\" \"\$TRANSCRIPT_OUT\" \"\$_own\"' '$AIDC_ROOT/.devcontainer/user-main.sh'"
+echo
+
 # --- the git container's copy ---------------------------------------------
 # The git agent's transcript is mirrored by the same function (gitctl/gitctl-main.sh): its image
 # is built from a staged context holding this file (aidc_build_context), never a copy in gitctl/.

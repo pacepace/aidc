@@ -29,6 +29,7 @@
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-hook-event" }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-hook-event" }] }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-hook-event" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-hook-event" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-hook-event" }] }],
+    "StopFailure": [{ "matcher": "rate_limit", "hooks": [{ "type": "command", "command": "/usr/local/bin/aidc-claude-usage rate-limited" }] }]
   }
 }

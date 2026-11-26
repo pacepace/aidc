@@ -7,33 +7,42 @@
 # settings (its copy of the host's) and is never mounted from the host. They hold:
 #   - aidc's hooks (MCP-46), always: SessionStart, Stop, Notification and UserPromptSubmit
 #     each run aidc-hook-event, which writes the event where aidc-mcp reads it;
-#   - the host's installed plugins, enabled, when share_plugins is on.
+#   - the host's installed plugins, enabled, when share_plugins is on;
+#   - in a cluster session, what its Claude tells the user's Claude account broker (K8S-17):
+#     the status line through aidc-claude-usage (the weekly usage; the user's own status line
+#     is still shown), and a StopFailure rate_limit hook.
 
 AIDC_HOOK_EVENT_COMMAND="${AIDC_HOOK_EVENT_COMMAND:-/usr/local/bin/aidc-hook-event}"
+AIDC_CLAUDE_USAGE_COMMAND="${AIDC_CLAUDE_USAGE_COMMAND:-/usr/local/bin/aidc-claude-usage}"
 
-# aidc_managed_settings <plugin-registry> <share-plugins true|false>
+# aidc_managed_settings <plugin-registry> <share-plugins true|false> [cluster]
 # Prints the managed settings JSON. The registry is Claude Code's installed_plugins.json;
-# a missing or empty one enables nothing. Returns non-zero, saying why on stderr, when the
-# JSON cannot be built (jq missing or failing).
+# a missing or empty one enables nothing. With `cluster` (a Kubernetes session), the status
+# line and the rate-limit hook the account broker reads. Returns non-zero, saying why on
+# stderr, when the JSON cannot be built (jq missing or failing).
 aidc_managed_settings() {
-    local registry="$1" share="$2" plugins='{}'
+    local registry="$1" share="$2" cluster="${3:-}" plugins='{}'
     if [ "$share" = "true" ] && [ -s "$registry" ]; then
         plugins=$(jq -c '(.plugins // {}) | keys | map({(.): true}) | add // {}' "$registry" 2>/dev/null) \
             || plugins='{}'
     fi
-    jq -n -c --arg cmd "$AIDC_HOOK_EVENT_COMMAND" --argjson plugins "$plugins" '
-        {hooks: (["SessionStart", "Stop", "Notification", "UserPromptSubmit"]
-                 | map({(.): [{hooks: [{type: "command", command: $cmd}]}]}) | add)}
+    jq -n -c --arg cmd "$AIDC_HOOK_EVENT_COMMAND" --arg usage "$AIDC_CLAUDE_USAGE_COMMAND" \
+        --argjson plugins "$plugins" --argjson cluster "$([ "$cluster" = cluster ] && echo true || echo false)" '
+        {hooks: ((["SessionStart", "Stop", "Notification", "UserPromptSubmit"]
+                  | map({(.): [{hooks: [{type: "command", command: $cmd}]}]}) | add)
+                 + (if $cluster then {StopFailure: [{matcher: "rate_limit",
+                        hooks: [{type: "command", command: ($usage + " rate-limited")}]}]} else {} end))}
+        + (if $cluster then {statusLine: {type: "command", command: ($usage + " statusline")}} else {} end)
         + (if ($plugins | length) > 0 then {enabledPlugins: $plugins} else {} end)' \
         || { echo "aidc_managed_settings: jq could not build the managed settings" >&2; return 1; }
 }
 
-# aidc_install_managed_settings <root> <plugin-registry> <share-plugins>
+# aidc_install_managed_settings <root> <plugin-registry> <share-plugins> [cluster]
 # Writes <root>/etc/claude-code/managed-settings.json (mode 0644) by temp then rename.
 # Returns non-zero, saying why on stderr, when it cannot.
 aidc_install_managed_settings() {
     local root="$1" registry="$2" share="$3" json dir tmp
-    json=$(aidc_managed_settings "$registry" "$share") || return 1
+    json=$(aidc_managed_settings "$registry" "$share" "${4:-}") || return 1
     dir="${root}/etc/claude-code"
     mkdir -p "$dir" || { echo "aidc_install_managed_settings: cannot create $dir" >&2; return 1; }
     tmp="${dir}/.managed-settings.json.$$"

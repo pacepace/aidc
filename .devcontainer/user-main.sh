@@ -51,10 +51,15 @@ log "starting tmux session 'main'"
 TRANSCRIPT_OUT=/var/aidc/transcript-out
 if [ -d "$TRANSCRIPT_OUT" ]; then
     _src="$_proj_dir"
-    log "transcript mirror: ${_src}/*.jsonl -> ${TRANSCRIPT_OUT}"
+    # A cluster session's Claude history is the user's disk's, shared by every session there:
+    # only this session's own conversations are mirrored (the ones its Claude's hooks named),
+    # so the MCP never follows, nor delivers, another session's.
+    _own=""
+    [ "${AIDC_BACKEND:-}" = kubernetes ] && _own="${TRANSCRIPT_OUT}/own-transcripts"
+    log "transcript mirror: ${_src}/*.jsonl -> ${TRANSCRIPT_OUT}${_own:+ (own conversations only)}"
     (
         while true; do
-            aidc_mirror_copy_forward_pass "$_src" "$TRANSCRIPT_OUT"
+            aidc_mirror_copy_forward_pass "$_src" "$TRANSCRIPT_OUT" "$_own"
             sleep 2
         done
     ) &

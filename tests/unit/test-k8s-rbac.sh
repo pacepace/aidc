@@ -66,6 +66,12 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
         printf 'RENDER k8s_render_mcp_config %s\n' "$(k8s_render_mcp_config | kinds)"
         printf 'RENDER k8s_render_mcp_expose %s\n' "$(AIDC_K8S_INGRESS_DOMAIN=pages.example.org k8s_render_mcp_expose | kinds)"
         printf 'RENDER k8s_render_mcp_service %s\n' "$(k8s_render_mcp_service | kinds)"
+        printf 'RENDER k8s_render_claude_config %s\n' "$(k8s_render_claude_config | kinds)"
+        printf 'RENDER k8s_render_claude_accounts %s\n' "$(k8s_render_claude_accounts | kinds)"
+        printf 'RENDER k8s_render_broker_config %s\n' "$(k8s_render_broker_config | kinds)"
+        printf 'RENDER k8s_render_broker %s\n' "$(k8s_render_broker '{}' | kinds)"
+        printf 'RENDER k8s_render_claude_forget %s\n' "$(k8s_render_claude_forget s1 '{}' | kinds)"
+        printf 'RENDER k8s_render_claude_token %s\n' "$(k8s_render_claude_token s1 t | kinds)"
     } > "$SCRATCH/facts"
 )
 
@@ -225,6 +231,9 @@ def _called(text):
 MCP_READERS = {"k8s_exposed", "k8s_tunnels", "k8s_expose_host", "k8s_port_ok", "k8s_port_spec"}
 MCP_USER_ONLY_FUNCS = {fn for fn, f in _defined_in.items()
                        if f in ("k8s/expose.sh", "k8s/tunnel.sh") and fn not in MCP_READERS}
+# The long-lived Claude token is a file on the user's own machine (aidc claude-token); the
+# server's CLI never hands one on: session-create.sh skips it under the server (AIDC_MCP_BACKEND).
+MCP_USER_ONLY_FUNCS |= {"k8s_claude_token_secret"}
 def _user_only(line):
     return bool(_called(line) & MCP_USER_ONLY_FUNCS)
 _seed = set(["aidc_audit_warn_k8s"])

@@ -304,6 +304,261 @@ _k8s_mirror_dir_cmd() {
     printf '%s' "d=/mirror/${1} && mkdir -p \"\$d\" && rm -rf -- \"\$d/hook-events\" && chown ${2}:${2} \"\$d\" && chmod 0700 \"\$d\""
 }
 
+# --- Claude: one login per user, and its broker (K8S-16, K8S-17, K8S-18) ---------------------
+#
+# Every session's Claude config dir (/home/vscode/.claude, CLAUDE_CONFIG_DIR) is its own folder
+# of one claim per user, claude-config (subPath <session>; the git agent's `git`), so the user's
+# Claude account broker, which mounts the claim whole, can replace each session's
+# .credentials.json by rename (Claude Code re-reads it; it refuses one that is a symlink). A
+# session mounts only its own folder. On the session class, never labelled with a session, made
+# once when the first session, the git container or the broker needs it; aidc kill removes the
+# session's folder (the broker's `forget`, or a one-shot pod when no broker runs).
+#
+# Claude's projects/ (conversations and memory) is not in that folder: it is the user's disk's
+# .claude/projects, mounted over it, so every session of a repo shares one history (Q-K2), which
+# Syncthing carries to the user's machines (K8S-18). The git agent keeps its own.
+#
+# The broker (claude-broker, broker/claude-broker.sh) holds the accounts' logins, refresh tokens
+# included, on claude-accounts, a claim only its pod mounts, on the user's retained class (a lost
+# claim is lost logins).
+K8S_CLAUDE_CONFIG_CLAIM=claude-config
+K8S_CLAUDE_ACCOUNTS_CLAIM=claude-accounts
+K8S_BROKER_NAME=claude-broker
+K8S_BROKER_CONFIG=claude-broker-config
+# Where the broker mounts the two claims (broker/claude-broker.sh: BROKER_ACCESS, BROKER_HOME).
+K8S_BROKER_ACCESS=/var/aidc/claude-config
+K8S_BROKER_HOME=/var/lib/claude-broker
+# The user's disk's Claude history folder (relative to the disk).
+K8S_DISK_PROJECTS=.claude/projects
+
+k8s_render_claude_config() {
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${K8S_CLAUDE_CONFIG_CLAIM}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}}
+spec:
+  storageClassName: ${AIDC_K8S_SESSION_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_CLAUDE_CONFIG_SIZE}}}
+EOF
+}
+
+k8s_render_claude_accounts() {
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${K8S_CLAUDE_ACCOUNTS_CLAIM}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_BROKER_NAME}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+EOF
+}
+
+# _k8s_claim_missing <namespace> <claim> <what>: 0 when the claim is not there yet, 1 when it
+# is; 2, saying why on stderr, when the cluster cannot be asked. A claim is made once and never
+# applied over (a changed size would be refused as a resize).
+_k8s_claim_missing() {
+    local have
+    if ! have=$(k8s_get "$1" pvc "$2" -o name); then
+        printf '[aidc] error: cannot read the %s claim in %s: the cluster did not answer (%s)\n' "$3" "$1" "$have" >&2
+        return 2
+    fi
+    [ -z "$have" ]
+}
+
+# k8s_ensure_claude_config <namespace> / k8s_ensure_claude_accounts <namespace>: the claim, made
+# when missing. Return 1, saying why on stderr, when the cluster cannot be asked or does not
+# take it.
+k8s_ensure_claude_config() {
+    local rc=0
+    _k8s_claim_missing "$1" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" || rc=$?
+    case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
+    k8s_render_claude_config | k8s_kubectl apply -f - >/dev/null && return 0
+    printf '[aidc] error: could not make the Claude config claim in %s\n' "$1" >&2
+    return 1
+}
+
+k8s_ensure_claude_accounts() {
+    local rc=0
+    _k8s_claim_missing "$1" "$K8S_CLAUDE_ACCOUNTS_CLAIM" "Claude accounts" || rc=$?
+    case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
+    k8s_render_claude_accounts | k8s_kubectl apply -f - >/dev/null && return 0
+    printf '[aidc] error: could not make the Claude accounts claim in %s\n' "$1" >&2
+    return 1
+}
+
+# _k8s_claude_dir_cmd <folder> <uid> <gid> <mode>: the root init step that readies a pod's own
+# folder of claude-config (made when missing, given to its Claude's user). The folder is the
+# pod's mount root, which nothing in the pod can replace.
+_k8s_claude_dir_cmd() {
+    printf '%s' "d=/claude-config/${1} && mkdir -p \"\$d\" && chown ${2}:${3} \"\$d\" && chmod ${4} \"\$d\""
+}
+
+# _k8s_claude_seed_cmd <image-claude-dir> [own-projects]: the Claude user's init step that fills
+# a new folder of claude-config once (.aidc-seeded marks it): from the Claude config the pod's
+# home already had (a session or git agent made before its config moved here keeps its login,
+# settings and history), else the image's. A session's projects/ is left out (the user's disk's
+# is mounted over it); with own-projects (the git agent) it comes along.
+_k8s_claude_seed_cmd() {
+    local exclude="--exclude=./projects "
+    [ "${2:-}" = own-projects ] && exclude=""
+    printf '%s' "d=/claude-config-own && if [ ! -e \"\$d/.aidc-seeded\" ]; then src=${1}; if [ -d /seed/.claude ] && [ -n \"\$(ls -A /seed/.claude 2>/dev/null)\" ]; then src=/seed/.claude; fi; (cd \"\$src\" && tar ${exclude}-cf - .) | tar -C \"\$d\" -xf - && mkdir -p \"\$d/projects\" && : > \"\$d/.aidc-seeded\"; fi"
+}
+
+# k8s_render_broker_config: the broker's settings from the user's config (claude_accounts: the
+# order and each account's switch_at; claude_account_switch: auto or wait) as config.json.
+k8s_render_broker_config() {
+    local cfg json
+    cfg=$(_aidc_global_config_file)
+    json='{}'
+    if [ -n "$cfg" ]; then
+        json=$(aidc_yq '{"accounts": ((.claude_accounts // []) | map({"name": .name, "switch_at": (.switch_at // 90)})), "switch": (.claude_account_switch // "auto")}' -o=json -I=0 "$cfg" 2>/dev/null) || json='{}'
+    fi
+    AIDC_BROKER_CFG="$json" yq -n '
+        .apiVersion = "v1" | .kind = "ConfigMap"
+        | .metadata.name = "'"${K8S_BROKER_CONFIG}"'"
+        | .metadata.namespace = "'"$(k8s_user_ns "$AIDC_K8S_USER")"'"
+        | .metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/user": "'"${AIDC_K8S_USER}"'", "app": "'"${K8S_BROKER_NAME}"'"}
+        | .data."config.json" = strenv(AIDC_BROKER_CFG)'
+}
+
+# k8s_render_broker <node-selector-json>: the broker's NetworkPolicy (no way in; out to Quad9 for
+# DNS and to public addresses on 443 only, where Claude's login and renewal go) and its
+# Deployment. No ServiceAccount token: it needs no cluster API.
+k8s_render_broker() {
+    local sel="$1" ns
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_BROKER_NAME}"
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${K8S_BROKER_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {app: ${K8S_BROKER_NAME}}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to: [{ipBlock: {cidr: 9.9.9.9/32}}, {ipBlock: {cidr: 149.112.112.112/32}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ${K8S_BROKER_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  replicas: 1
+  # One writer of the accounts' logins: never two brokers at once.
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: ${K8S_BROKER_NAME}}}
+  template:
+    metadata: {labels: {${labels}}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      dnsPolicy: None
+      dnsConfig: {nameservers: [9.9.9.9, 149.112.112.112]}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        # The accounts' claim is the broker's alone (0700); a new claim is empty and root-owned.
+        - name: accounts-dir
+          image: ${K8S_INIT_IMAGE}
+          command: [sh, -c, 'chown 1000:1000 /accounts && chmod 0700 /accounts']
+          volumeMounts: [{name: accounts, mountPath: /accounts}]
+      containers:
+        - name: broker
+          image: ${AIDC_K8S_REGISTRY_PULL}/aidc/broker:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          env:
+            - {name: BROKER_HOME, value: ${K8S_BROKER_HOME}}
+            - {name: BROKER_ACCESS, value: ${K8S_BROKER_ACCESS}}
+            - {name: BROKER_CONFIG, value: /etc/claude-broker/config.json}
+            # Claude Code updates come with the image (aidc k8s build), never into an account's folder.
+            - {name: DISABLE_AUTOUPDATER, value: "1"}
+            - {name: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, value: "1"}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 128Mi}}
+          volumeMounts:
+            - {name: accounts, mountPath: ${K8S_BROKER_HOME}}
+            - {name: claude-config, mountPath: ${K8S_BROKER_ACCESS}}
+            - {name: config, mountPath: /etc/claude-broker, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: accounts, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_ACCOUNTS_CLAIM}}}
+        - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
+        - {name: config, configMap: {name: ${K8S_BROKER_CONFIG}}}
+        - {name: tmp, emptyDir: {}}
+EOF
+}
+
+# k8s_claude_token_name <session> / k8s_render_claude_token <session> <token>: the session's own
+# Secret holding the long-lived Claude token (the stopgap with no broker: broker.sh,
+# k8s_claude_token_secret). Made with `kubectl create -f -` (the token never on a command line),
+# removed by name at kill; the user's credentials cannot read it back.
+k8s_claude_token_name() { printf '%s-claude-token' "$1"; }
+k8s_render_claude_token() {
+    cat <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $(k8s_claude_token_name "$1")
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, aidc/session: ${1}}
+type: Opaque
+stringData: {token: "${2}"}
+EOF
+}
+
+# _k8s_claude_token_env <session>: the dev container's CLAUDE_CODE_OAUTH_TOKEN from the session's
+# token Secret, when create made one (AIDC_K8S_CLAUDE_TOKEN_SECRET=1); nothing otherwise.
+_k8s_claude_token_env() {
+    [ "${AIDC_K8S_CLAUDE_TOKEN_SECRET:-0}" = 1 ] || return 0
+    printf '            - {name: CLAUDE_CODE_OAUTH_TOKEN, valueFrom: {secretKeyRef: {name: %s, key: token}}}\n' "$(k8s_claude_token_name "$1")"
+}
+
+# k8s_render_claude_forget <session> <node-selector-json>: a one-shot pod removing a killed
+# session's folder of claude-config when no broker runs to do it.
+k8s_render_claude_forget() {
+    local session="$1" sel="$2"
+    cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${session}-claude-forget
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: claude-forget}
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  nodeSelector: ${sel}
+  tolerations: ${AIDC_K8S_TOLERATIONS}
+  containers:
+    - name: forget
+      image: ${K8S_INIT_IMAGE}
+      command: [sh, -c, 'rm -rf -- "/claude-config/\$1"', sh, "${session}"]
+      volumeMounts: [{name: claude-config, mountPath: /claude-config}]
+  volumes:
+    - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
+EOF
+}
+
 # --- Users' credentials (docs/design-12-kubernetes.md, "Users and credentials") ---------------
 #
 # What a user's own credentials may do: exactly what aidc's commands do in the user's namespace
@@ -793,6 +1048,21 @@ spec:
       dnsPolicy: None
       dnsConfig: {nameservers: ${proxy_dns}}
       initContainers:
+        # The session's folder of claude-config and the user's disk's Claude history folder, made
+        # here, before any pod mounts a part of them (a subPath that is missing is made root-owned,
+        # which the session could not write): the folder by root, given to the session user; the
+        # history folder as the session user, on the disk sessions write.
+        - name: claude-dirs
+          image: ${img}/audit:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, '$(_k8s_claude_dir_cmd "$session" 1000 1000 0700)']
+          volumeMounts: [{name: claude-config, mountPath: /claude-config}]
+        - name: claude-projects
+          image: ${img}/audit:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}"']
+          securityContext: {runAsUser: 1000, runAsGroup: 1000}
+          volumeMounts: [{name: disk, mountPath: /disk}]
         # The audit record's first files, as aidc create writes them on Docker: meta.json (the
         # audit sidecar stamps tainted_at and killed_at into it) and the config snapshot. Only
         # when absent: a restarted proxy pod must not reset them.
@@ -866,11 +1136,15 @@ spec:
           env:
             - {name: AIDC_SESSION, value: "${session}"}
             - {name: AIDC_PROFILE, value: "${profile}"}
+            # The session's Claude history folder is the user's disk's, shared by the user's
+            # sessions: its own conversations are the ones its mirror folder holds.
+            - {name: AIDC_AUDIT_CLAUDE_PROJECTS, value: /var/aidc/session-transcripts}
           volumeMounts:
             - {name: squid-log, mountPath: /var/log/squid, readOnly: true}
             - {name: aidc-log, mountPath: /var/log/aidc, readOnly: true}
             - {name: state, mountPath: /var/state, readOnly: true}
             - {name: home, mountPath: /var/aidc/dev-home, readOnly: true}
+            - {name: transcripts, mountPath: /var/aidc/session-transcripts, subPath: ${session}, readOnly: true}
             - {name: audit, mountPath: /var/aidc/audit}
       volumes:
         - {name: blocklist, emptyDir: {}}
@@ -880,6 +1154,9 @@ spec:
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
         - {name: audit, persistentVolumeClaim: {claimName: ${audit}}}
         - {name: audit-seed, configMap: {name: ${session}-audit-seed}}
+        - {name: disk, persistentVolumeClaim: {claimName: disk}}
+        - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
+        - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
 EOF
     [ -n "$proxy_ip" ] || return 0
     cat <<EOF
@@ -927,6 +1204,16 @@ spec:
           imagePullPolicy: Always
           command: [sh, -c, '$(_k8s_mirror_dir_cmd "$session" 1000)']
           volumeMounts: [{name: transcripts, mountPath: /mirror}]
+        # The session's Claude config dir, filled once (k8s_render_claude_config; its folder is
+        # made by the proxy pod's claude-dirs step).
+        - name: claude-seed
+          image: ${img}/dev-base:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          command: [sh, -c, '$(_k8s_claude_seed_cmd /home/vscode/.claude)']
+          securityContext: {runAsUser: 1000, runAsGroup: 1000}
+          volumeMounts:
+            - {name: home, mountPath: /seed, readOnly: true}
+            - {name: claude-config, mountPath: /claude-config-own, subPath: ${session}}
         # The repo folder, made as the session user when it is not on the disk yet, group-writable
         # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
@@ -959,7 +1246,7 @@ spec:
             - {name: AIDC_CLAUDE_MODE, value: "${AIDC_CLAUDE_MODE:-yolo}"}
             - {name: AIDC_CLAUDE_RESUME, value: "${AIDC_CLAUDE_RESUME:-true}"}
             - {name: CLAUDE_CONFIG_DIR, value: /home/vscode/.claude}
-            # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
+$(_k8s_claude_token_env "$session")            # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
             - {name: AIDC_DOCKER_STORAGE_DRIVER, value: overlay2}
             # The session's gh stand-in hands pull requests to the git container through this
             # folder; on this backend new files are group-writable (umask 002) so the git
@@ -981,10 +1268,15 @@ spec:
             # Its own folder of the mirror only: the MCP reads its transcripts and hook events
             # there, and no session sees another's.
             - {name: transcripts, mountPath: ${K8S_TRANSCRIPT_OUT}, subPath: ${session}}
+            # Its Claude config dir, its own folder of claude-config (the broker writes its
+            # credentials there), with the user's one Claude history over its projects/.
+            - {name: claude-config, mountPath: /home/vscode/.claude, subPath: ${session}}
+            - {name: disk, mountPath: /home/vscode/.claude/projects, subPath: ${K8S_DISK_PROJECTS}}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
+        - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
 EOF
 }
 
@@ -1106,13 +1398,13 @@ spec:
           # The login's home is gitcred's: 0711, so git can read the identity file a login
           # writes there but cannot list it; gh's own files in it are 0600.
           # gitrun's store is gitrun's alone: gitctl refuses one anyone else can enter.
-          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred && chown 2002:2002 /run-store && chmod 0700 /run-store && $(_k8s_mirror_dir_cmd "$K8S_GIT_SESSION" 2000)']
+          command: [sh, -c, '[ -e /seed/.profile ] || cp -a /home/git/. /seed/; chown 2000:2000 /seed && chmod 0700 /seed && chown 2001:2001 /cred && chmod 0711 /cred && chown 2002:2002 /run-store && chmod 0700 /run-store && $(_k8s_mirror_dir_cmd "$K8S_GIT_SESSION" 2000) && $(_k8s_claude_dir_cmd "$K8S_GIT_SESSION" 2000 1000 0770)']
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
-          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}, {name: transcripts, mountPath: /mirror}]
+          volumeMounts: [{name: home, mountPath: /seed}, {name: cred, mountPath: /cred}, {name: run-store, mountPath: /run-store}, {name: transcripts, mountPath: /mirror}, {name: claude-config, mountPath: /claude-config}]
         # Claude Code is copied into the home once, when it is seeded; this brings a home made
         # earlier the image's Claude when that is newer than the one it has. As the git user,
         # not root: the home is the agent's, so nothing it planted there is followed by root.
@@ -1127,6 +1419,22 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
           volumeMounts: [{name: home, mountPath: /seed}]
+        # The agent's Claude config dir, its folder of claude-config (group 1000, of which the
+        # git user is a member: the broker writes its credentials there), filled once from the
+        # one its home had, its own history included.
+        - name: claude-seed
+          image: ${img}
+          imagePullPolicy: Always
+          command: [sh, -c, '$(_k8s_claude_seed_cmd /home/git/.claude own-projects)']
+          securityContext:
+            runAsUser: 2000
+            runAsGroup: 2000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: home, mountPath: /seed, readOnly: true}
+            - {name: claude-config, mountPath: /claude-config-own, subPath: ${K8S_GIT_SESSION}}
       containers:
         - name: git
           image: ${img}
@@ -1158,6 +1466,8 @@ spec:
             # The agent's own folder of the transcript mirror (gitctl-main.sh copies its
             # transcripts there, hook-event.sh writes its hook events), read by the MCP.
             - {name: transcripts, mountPath: ${K8S_TRANSCRIPT_OUT}, subPath: ${K8S_GIT_SESSION}}
+            # Its Claude config dir (the account broker writes its credentials there).
+            - {name: claude-config, mountPath: /home/git/.claude, subPath: ${K8S_GIT_SESSION}}
         # The request holder (gitreq): takes the sessions' requests, holds them in ask mode,
         # and alone runs the gitctl verbs that change GitHub, out of the agent's reach (owner
         # ruling 2026-11-26). A container of its own: kubectl exec cannot choose a user, so the
@@ -1192,6 +1502,7 @@ spec:
         - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
         - {name: run-store, persistentVolumeClaim: {claimName: git-run}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
+        - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
         - {name: repos, configMap: {name: git-repos, defaultMode: 292}}  # 0444
         - {name: settings, configMap: {name: git-settings, defaultMode: 292}}  # 0444
 EOF2

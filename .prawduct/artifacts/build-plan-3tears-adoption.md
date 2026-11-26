@@ -327,14 +327,22 @@ Order follows design-13 "Upstream work".
   `/prawduct:critic`; committed.
 - **Owner's hands:** the orchestrator; turning the laptop off.
 
-### Chunk 13: Approvals bound to the answer (W-M3-00, Q-K8)
+### Chunk 13: Approvals out of the agent's reach (W-M3-00, Q-K8 as refined 2026-11-26)
 
-- **Description:** The git agent's question carries a one-time code only the user's or the
-  orchestrator's answer returns; `git-requests approve` refuses without it (both backends).
-- **Depends on:** none in this plan (W-K0 done).
+- **Description:** A separate user in the git container, `gitreq`, holds and decides requests;
+  uid git (the agent) cannot act as it. In ask mode, approval comes only from outside: `aidc git
+  approve|deny <id>` and the request list on the user's machine (exec as gitreq), or the MCP server
+  carrying out the orchestrator's answer as gitreq, matched to the request id in the question.
+  Every push, PR and merge, including terminal-requested ones, is a request. rules mode runs
+  passing requests at once, with the check done by gitreq. Only the user changes a mode. Docker
+  in full; on Kubernetes, the gitreq container and the CLI path. The MCP side (the orchestrator's
+  answer performed as gitreq) lands with chunk 14 on Kubernetes and with the chunk 03-04 MCP
+  work on Docker.
+- **Depends on:** none in this plan for the container and CLI part (W-K0 done).
 - **Requirements:** K8S-05, K8S-06, K8S-24.
-- **Done when:** a unit test and a mutation show the agent cannot approve its own request, and an
-  answer carrying the code approves; `/prawduct:critic`; committed.
+- **Done when:** a test and a mutation show uid git cannot approve, deny, change a mode, or push,
+  PR or merge outside a request (Docker and the Kubernetes pod spec); `aidc git approve` approves;
+  rules mode runs a passing request with no question; `/prawduct:critic`; committed.
 - **Owner's hands:** none.
 
 ### Chunk 14: Git approvals through the orchestrator on Kubernetes (W-M3-01..03)

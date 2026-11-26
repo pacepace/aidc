@@ -17,10 +17,51 @@ constraints = [
 ]
 
 [[package]]
+name = "3tears-mcp"
+version = "0.95.0"
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6#b28bbebf4d662e5e6498b35a5c9af20955d108a6" }
+dependencies = [
+    { name = "3tears-observe" },
+    { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "mcp" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[[package]]
+name = "3tears-observe"
+version = "0.95.0"
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6#b28bbebf4d662e5e6498b35a5c9af20955d108a6" }
+
+[[package]]
+name = "3tears-tool-contract"
+version = "0.95.0"
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6#b28bbebf4d662e5e6498b35a5c9af20955d108a6" }
+dependencies = [
+    { name = "3tears-observe" },
+    { name = "3tears-tool-schema" },
+]
+
+[package.optional-dependencies]
+mcp = [
+    { name = "3tears-mcp" },
+]
+
+[[package]]
+name = "3tears-tool-schema"
+version = "0.95.0"
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6#b28bbebf4d662e5e6498b35a5c9af20955d108a6" }
+
+[[package]]
 name = "aidc-mcp"
 version = "1.9.10"
 source = { editable = "." }
 dependencies = [
+    { name = "3tears-mcp" },
+    { name = "3tears-observe" },
+    { name = "3tears-tool-contract", extra = ["mcp"] },
+    { name = "3tears-tool-schema" },
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "pydantic" },
@@ -38,6 +79,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "3tears-mcp", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6" },
+    { name = "3tears-observe", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6" },
+    { name = "3tears-tool-contract", extras = ["mcp"], git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6" },
+    { name = "3tears-tool-schema", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=b28bbebf4d662e5e6498b35a5c9af20955d108a6" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
@@ -48,7 +93,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=0.37" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["mesh", "dev"]
 
 [[package]]
 name = "annotated-doc"

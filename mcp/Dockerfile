@@ -38,10 +38,17 @@ WORKDIR /opt/aidc-mcp
 # and uv.lock have drifted. --no-dev skips the test/lint tooling. The runtime does
 # NOT bake the aidc CLI in; it's mounted at /aidc/ so host CLI updates take effect
 # on the next mcp-server restart without rebuilding.
+#
+# The 3tears packages are git sources pinned to one commit (mcp/pyproject.toml), and uv
+# fetches a git source with the git CLI over https. git is installed for the sync only and
+# removed in the same layer, so the running server has no git.
 COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev --python python3.14 \
-    && python -c "import mcp; print('mcp SDK version:', getattr(mcp, '__version__', 'unknown'))"
+RUN apk add --no-cache --virtual .uv-git-sources git \
+    && uv sync --frozen --no-dev --python python3.14 \
+    && apk del .uv-git-sources \
+    && python -c "import mcp; print('mcp SDK version:', getattr(mcp, '__version__', 'unknown'))" \
+    && python -c "import threetears.mcp, threetears.tool_contract.mcp_face; print('3tears-mcp', threetears.mcp.__version__)"
 
 # Default expectations (overridable via env at runtime):
 #   AIDC_CLI            -> /aidc/scripts/aidc

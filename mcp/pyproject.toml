@@ -11,9 +11,19 @@ dependencies = [
     "starlette>=0.37",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.5",
+    # The 3tears family (TRS-02, TRS-17): local mode is the MCP server, the tool schemas,
+    # observability and the TearsTool contract with its MCP face, and nothing of the platform
+    # (no NATS, Postgres driver, LangGraph or LangChain). Every 3tears package is one minor.
+    "3tears-mcp>=0.95,<0.96",
+    "3tears-tool-contract[mcp]>=0.95,<0.96",
+    "3tears-tool-schema>=0.95,<0.96",
+    "3tears-observe>=0.95,<0.96",
 ]
 
 [project.optional-dependencies]
+# Mesh mode's dependencies (TRS-17): the 3tears ToolServer, registry and audit. Empty until
+# the mesh face is built.
+mesh = []
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -62,3 +72,14 @@ constraint-dependencies = [
     "pyjwt>=2.15.0",
     "certifi>=2026.10.19",
 ]
+
+# The 3tears family comes from one pushed commit of its unreleased branch, so the lock, the
+# image build and every machine get the same code: aidc is tested on unreleased 3tears before
+# 3tears is released (owner ruling 2026-11-26). Every 3tears package, the transitive ones
+# included, names the same rev; tests/test_dependencies.py fails when they differ. These move
+# to released versions before aidc 2.0 ships.
+[tool.uv.sources]
+3tears-mcp = { git = "https://github.com/pacepace/3tears", rev = "b28bbebf4d662e5e6498b35a5c9af20955d108a6", subdirectory = "packages/mcp" }
+3tears-tool-contract = { git = "https://github.com/pacepace/3tears", rev = "b28bbebf4d662e5e6498b35a5c9af20955d108a6", subdirectory = "packages/tool-contract" }
+3tears-tool-schema = { git = "https://github.com/pacepace/3tears", rev = "b28bbebf4d662e5e6498b35a5c9af20955d108a6", subdirectory = "packages/tool-schema" }
+3tears-observe = { git = "https://github.com/pacepace/3tears", rev = "b28bbebf4d662e5e6498b35a5c9af20955d108a6", subdirectory = "packages/observe" }

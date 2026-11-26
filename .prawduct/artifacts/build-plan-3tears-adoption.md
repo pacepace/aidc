@@ -79,6 +79,8 @@ own branch off this one, so a blocking finding in one wave does not stall the ot
 one plan as asked.
 
 **Decisions made mid-build:** *(appended while building; one line each, naming what settled it)*
+- 01: pinned 3tears `feat/mcp-face` at `b28bbebf4d66`; the REL-09 cooldown does not hold git sources back (no upload date), so no `exclude-newer-package` entry was needed (tested by re-locking); the image installs git for `uv sync` only and removes it in the same layer.
+- 01: two findings sent upstream/owner: `McpServer` lacks `version`/`instructions` (aidc 1.x sends both; a 3tears change requested), and the SQLite L3 imports asyncpg and sqlalchemy, which TRS-01/TRS-17 forbid as written (owner question, chunk 07).
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
 (below); the upstream surface does not exist yet, so every 3tears-facing chunk starts with

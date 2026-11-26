@@ -92,7 +92,7 @@ is not in the 3tears repo, so what it supports is unknown here.
 | aidc today | On 3tears | Recommendation |
 |---|---|---|
 | 23 tools | 23 `TearsTool`s over the core and service | Clean. Canonical names are namespaced (`aidc.session_send`) and used on the mesh; the local MCP face keeps the 1.x names, since LLM APIs reject a dot in a tool name (TRS-15, see "Contract"). |
-| Envelope with 20 error codes | `ToolResult` with 5 platform codes | Keep the envelope as the tool's content (JSON), unchanged for callers; `success` mirrors `ok`; the aidc code also in `metadata`. Use the 5 platform codes only for their own meaning (bad arguments, permission). |
+| Envelope with its closed set of error codes (design-10 D6) | `ToolResult` with 5 platform codes | Keep the envelope as the tool's content (JSON), unchanged for callers; `success` mirrors `ok`; the aidc code also in `metadata`. Use the 5 platform codes only for their own meaning (bad arguments, permission). |
 | Progress during create and invoke | none | **Open.** Keep `ctx.info` in local mode only; on a mesh, `session_create` returns when the session is ready (as today, without phase messages), and long work goes through `session_send` / `session_invoke_async`. |
 | Resources | none in `3tears-mcp` | **Keep** (owner ruling 2026-11-24): add resource support upstream in `3tears-mcp` (item 4) and serve the same URIs through it (TRS-06). |
 | Dynamic descriptions + `tools/list_changed` (MCP-21) | stateless, not supported | **Keep** (owner ruling 2026-11-24): through upstream stateful mode (item 5) and `McpServer`'s live tool provider (TRS-07). |
@@ -143,7 +143,7 @@ then picked up by pinning the family's new minor.
    the content), and an argument-validation failure carries no code at all. Add a
    closed, documented code set with retryable and field metadata, an exception-to-code
    registry, and room for a server's own codes, aligned with agent-tools' `ToolResult`
-   vocabulary. aidc's 20 codes then become real protocol codes, not only envelope text.
+   vocabulary. aidc's codes (D6) then become real protocol codes, not only envelope text.
 4. **`3tears-mcp`: resources** (`McpResource`, `ResourceProvider`, list, read, templates, a
    permission per resource), mirroring tools. Straightforward in both SDK majors.
 5. **`3tears-mcp`: an optional stateful mode** for `tools/list_changed`, resource subscriptions

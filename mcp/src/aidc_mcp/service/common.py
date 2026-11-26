@@ -117,11 +117,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "cli_failed": "an aidc CLI call exited non-zero",
     "command_failed": "a command inside the session failed (file_get, claude, ...)",
     "timeout": "a command inside the session ran out of time",
-    "claude_not_running": "a synchronous path that needs Claude running",
-    "session_not_ready": ("session_run: the session did not become free in time; "
-                          "session_mcp_set: its first start has not finished"),
-    "paste_failed": "a paste into the session did not land",
-    "turn_not_finished": "session_run: a turn did not finish in time",
+    "session_not_ready": "session_mcp_set: the session's first start has not finished",
     "no_reply": "session_resend: nothing completed to resend",
     "callback_failed": "session_resend: the POST to the orchestrator failed",
     "not_found": "a file or directory the call reads is missing",

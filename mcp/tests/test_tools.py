@@ -944,6 +944,13 @@ def test_every_error_code_is_in_the_documented_table():
     assert not missing, f"error codes missing from design 10 D6: {missing}"
 
 
+def test_the_codes_only_session_run_returned_are_retired():
+    """2.0 offers no synchronous session_run, so nothing can return the codes only it
+    returned; a client reading the set (TRS-05 registers each code) must not be told
+    they can still come (owner ruling 2026-11-26)."""
+    assert not com.ERROR_CODES & {"claude_not_running", "paste_failed", "turn_not_finished"}
+
+
 def test_the_retryable_codes_are_d6s_retryable_column():
     """A failed call carries `retryable` (TRS-05), and a client may act on it, so the set
     is the documented one: design 10 D6's Retryable column, read from the table itself."""

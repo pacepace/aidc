@@ -279,7 +279,7 @@ missing a code or uses one outside the set:
 | `cli_failed` | an `aidc` CLI call exited non-zero | transient: retry once | yes |
 | `command_failed` | a command inside the session failed | tell the person | no |
 | `timeout` | a command inside the session ran out of time | tell the person | no |
-| `claude_not_running` / `session_not_ready` / `turn_not_finished` / `paste_failed` | synchronous `session_run` only (`session_send` queues a failed paste); `session_not_ready` also from `session_mcp_set` on a session whose first start has not finished | tell the person | no |
+| `session_not_ready` | `session_mcp_set` on a session whose first start has not finished | tell the person | no |
 | `no_reply` / `callback_failed` | `session_resend` found nothing, or its POST failed | tell the person | no |
 | `not_found` | a file or directory the call reads is missing | tell the person | no |
 | `path_not_allowed` | `session_create`: a `repo` or `workspace` outside the directory the operator exposed to this server (MCP-38) | fix the call | no |
@@ -297,6 +297,10 @@ transient (retry once), `invoke_busy` succeeds once the running headless run end
 `git_requests_unreadable` once the git container answers. Every
 other code meets the same refusal until something changes (the person acts, or the call is
 fixed). `RETRYABLE_ERROR_CODES` in `service/common.py` is this column, held to it by a test.
+
+Retired in 2.0: `claude_not_running`, `paste_failed` and `turn_not_finished`. Only the
+synchronous `session_run` returned them, and 2.0 offers no `session_run` (`session_send` queues
+a prompt Claude cannot take yet, a failed paste included, and says why in `waiting_reason`).
 
 `session_send` itself only fails with `no_such_session`, `session_outdated`, `queue_full`, `out_of_scope`, `tainted`, or `invalid_argument` for a `deliver` other than `"queue"` or `"join"`. Every other condition, a failed paste and a declined join included, queues the prompt. The
 The orchestrator side never retries a `session_send`, even after a transport failure (a retry could paste

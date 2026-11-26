@@ -80,6 +80,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   `turn: "unknown"` (`why: "session_predates_hook_events"`) and `session_send` refuses it with
   the new error code `session_outdated`. The git agent is not killed and created: rebuild its
   image and set it up again (`aidc rebuild`, then `aidc git setup`).
+- **Three error codes are retired**: `claude_not_running`, `paste_failed` and
+  `turn_not_finished`. Only the synchronous `session_run` returned them, and it is no longer
+  offered; `session_send` queues a prompt Claude cannot take yet and says why in
+  `waiting_reason` (where `claude_not_running` stays a reason). A caller that branches on them
+  can drop those branches; nothing sends them.
 - **Only the session's own Claude reports its state**: the one in tmux window `main:claude`. A
   headless `session_invoke` run, or a `claude` started in another window of the session, no
   longer moves its busy and idle state. A session whose Claude runs aidc's hooks but writes no

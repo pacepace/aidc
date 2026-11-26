@@ -104,6 +104,19 @@ and the envelope are unchanged; what an MCP caller sees differently:
   it (`kubernetes.transcripts_size`, default 10Gi, on the session class). Each session mounts only
   its own folder of it, at `/var/aidc/transcript-out` as on Docker. Sessions created before this
   have no mirror: kill and create them again, and run `aidc git setup` for the git agent.
+- **`aidc mcp` runs your own server in the cluster** when your config's backend is kubernetes
+  (or with `--backend kubernetes`): start, stop, status, logs, token rotate and token show, as
+  on Docker. Before the first start: an admin runs `aidc user add <you>` again (your Role may now
+  read your MCP token's Secret, by name), and `aidc k8s build` builds the `aidc/mcp` image, which
+  now carries the aidc CLI, kubectl and yq. Your token is kept in that Secret and copied to
+  `~/.config/aidc/mcp-token`. New settings: `kubernetes.mcp_state_size` and
+  `kubernetes.api_endpoints` (README, Kubernetes backend). Nothing connects to it yet but
+  `kubectl port-forward deployment/aidc-mcp 7878` in your namespace; its Service and VPN
+  exposure follow.
+- **A session's hook events are pruned by the session's own hook writer** (the newest 200 are
+  kept), no longer by the MCP server, which only reads them; on both backends.
+- **Build the `aidc/mcp` image through aidc** (`aidc rebuild`, `aidc k8s build`): its build
+  context now stages the CLI beside it, so a bare `docker build mcp/` fails.
 
 ### Upgrading
 - **The orchestrator's config section is now `orchestrator:`.** In `~/.config/aidc/config.yaml`,

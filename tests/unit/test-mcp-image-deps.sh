@@ -52,6 +52,35 @@ for cmd in $required; do
         *) echo "  FAIL: ${cmd} (apk ${pkg}) is NOT installed in mcp/Dockerfile"; FAIL=$((FAIL + 1)) ;;
     esac
 done
+# The per-user server in the cluster runs the Kubernetes backend's CLI (MCP-13 as amended):
+# kubectl, and yq, which k8s_require insists on.
+for pkg in kubectl yq-go; do
+    case "$apk_list" in
+        *"$pkg"*) echo "  PASS: ${pkg} is installed (the cluster server's CLI)"; PASS=$((PASS + 1)) ;;
+        *) echo "  FAIL: ${pkg} is NOT installed in mcp/Dockerfile"; FAIL=$((FAIL + 1)) ;;
+    esac
+done
+# The CLI is baked in (nothing mounts it in the cluster), from a context staged with it.
+if grep -qx 'COPY aidc/ /aidc/' "$AIDC_ROOT/mcp/Dockerfile"; then
+    echo "  PASS: the image bakes the CLI in at /aidc"; PASS=$((PASS + 1))
+else
+    echo "  FAIL: mcp/Dockerfile does not COPY aidc/ /aidc/"; FAIL=$((FAIL + 1))
+fi
+staged=$(AIDC_ROOT="$AIDC_ROOT" bash -c '. "$1/scripts/lib/common.sh" && aidc_build_context aidc/mcp:t "$1/mcp" && printf "%s|%s" "$AIDC_BUILD_CONTEXT" "$AIDC_BUILD_STAGE"' _ "$AIDC_ROOT")
+ctx=${staged%|*}; stage=${staged#*|}
+check_staged() {
+    if [ -n "$stage" ] && eval "$2"; then
+        echo "  PASS: $1"; PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $1"; FAIL=$((FAIL + 1))
+    fi
+}
+check_staged "the staged context holds the dispatcher and the k8s scripts, byte for byte" \
+    'cmp -s "$ctx/aidc/scripts/aidc" "$AIDC_ROOT/scripts/aidc" && diff -rq "$ctx/aidc/scripts/k8s" "$AIDC_ROOT/scripts/k8s" >/dev/null'
+check_staged "...the VERSION the dispatcher reads" 'cmp -s "$ctx/aidc/VERSION" "$AIDC_ROOT/VERSION"'
+check_staged "...and every file mcp/Dockerfile copies, but no local virtualenv" \
+    '[ -z "$(sed -n "s/^COPY \([^-][^ ]*\) .*/\1/p" "$AIDC_ROOT/mcp/Dockerfile" | while read -r f; do [ -e "$ctx/$f" ] || printf "%s " "$f"; done)" ] && [ ! -e "$ctx/.venv" ]'
+[ -z "$stage" ] || rm -rf "$stage"
 if [ "$PASS" -eq 0 ]; then
     echo "  FAIL: found no require_cmd lines to check — has the CLI changed shape?"
     FAIL=$((FAIL + 1))

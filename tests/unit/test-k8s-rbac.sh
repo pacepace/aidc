@@ -60,6 +60,10 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
         printf 'RENDER k8s_render_expose %s\n' "$(controllers k8s_render_expose s1 'u:$apr1$x' 8080 9090 | kinds)"
         printf 'RENDER k8s_render_expose_login %s\n' "$(controllers k8s_render_expose_login s1 'u:$apr1$x' | kinds)"
         printf 'RENDER k8s_render_transcripts %s\n' "$(k8s_render_transcripts | kinds)"
+        printf 'RENDER k8s_render_mcp %s\n' "$(k8s_render_mcp '{}' 10.0.0.1:6443 | kinds)"
+        printf 'RENDER k8s_render_mcp_state %s\n' "$(k8s_render_mcp_state | kinds)"
+        printf 'RENDER k8s_render_mcp_token %s\n' "$(k8s_render_mcp_token t | kinds)"
+        printf 'RENDER k8s_render_mcp_config %s\n' "$(k8s_render_mcp_config | kinds)"
     } > "$SCRATCH/facts"
 )
 
@@ -70,11 +74,12 @@ scripts, facts_path = sys.argv[1], sys.argv[2]
 
 # ---- the rules and renders --------------------------------------------------------------------
 rules, renders, cur = {}, {}, None
+unnamed = {}  # per rules table, the (resource, verb) grants not narrowed to one object's name
 groups = []   # (rules table, resource, API group, resourceName or "")
 for line in open(facts_path):
     line = line.rstrip("\n")
     if line.startswith("RULES "):
-        cur = line.split()[1]; rules[cur] = set(); continue
+        cur = line.split()[1]; rules[cur] = set(); unnamed[cur] = set(); continue
     if line.startswith("RENDER "):
         f = line.split(" ", 2); renders[f[1]] = [k for k in (f[2] if len(f) > 2 else "").split(",") if k]; cur = None; continue
     if cur and line.strip():
@@ -83,6 +88,7 @@ for line in open(facts_path):
         groups.append((cur, f[1], g, f[3] if len(f) > 3 else ""))
         for v in f[2].split(","):
             rules[cur].add((f[1], v))
+            if len(f) <= 3: unnamed[cur].add((f[1], v))
 
 KIND = {"Pod": "pods", "Service": "services", "ConfigMap": "configmaps",
         "PersistentVolumeClaim": "persistentvolumeclaims", "Deployment": "deployments",
@@ -127,7 +133,7 @@ OTHER_NS = {("k8s/net.sh", "$target")}
 # Decided against, and why (a test fails if they are ever granted).
 NOT_GRANTED = {
     ("ingresses", "list", "user-cluster"): "it would show every user's page names; the page name check reads the user's own namespace and the admission policy keeps users' names apart",
-    ("secrets", "get", "user"): "a page's login is made with create and removed by name: no read of the namespace's Secrets",
+    ("secrets", "get", "user"): "a page's login is made with create and removed by name: no read of the namespace's Secrets (only the MCP token Secret, by name)",
     ("secrets", "list", "user"): "as get",
     ("services", "list", "user-cluster"): "another namespace's Services are readable only where an admin grants it (aidc user allow-network)",
 }
@@ -321,18 +327,24 @@ GROUP = {"pods": "", "pods/exec": "", "pods/log": "", "pods/portforward": "", "s
          "ingresses": "networking.k8s.io", "ingressclasses": "networking.k8s.io",
          "middlewares": "traefik.io", "runtimeclasses": "node.k8s.io",
          "storageclasses": "storage.k8s.io"}
-RESOURCE_NAMES = {("user", "serviceaccounts/token"): "aidc-user"}
+# The named grants: the user's own token (to renew their kubeconfig) and their MCP server's
+# token Secret (aidc mcp reads it into ~/.config/aidc/mcp-token); a grant of a resource with no
+# name here is not narrowed.
+RESOURCE_NAMES = {("user", "serviceaccounts/token"): {"aidc-user"},
+                  ("user", "secrets"): {"", "aidc-mcp-token"}}
 before = len(problems)
 for which, r, g, n in groups:
     if r not in GROUP: problems.append(f"{which}: {r} has no known API group (teach GROUP)"); continue
     if g != GROUP[r]: problems.append(f"{which}: {r} is granted under API group '{g}', not '{GROUP[r]}'")
-    want = RESOURCE_NAMES.get((which, r), "")
-    if n != want: problems.append(f"{which}: {r} is restricted to '{n}', not '{want}'")
-for (which, r), n in RESOURCE_NAMES.items():
-    if not any(w == which and x == r for w, x, _, _ in groups): problems.append(f"{which}: {r} ({n}) is not granted")
-if len(problems) == before: print(f"  PASS: {len(groups)} rules each under their resource's API group, resourceNames only on the aidc-user token")
+    want = RESOURCE_NAMES.get((which, r), {""})
+    if n not in want: problems.append(f"{which}: {r} is restricted to '{n}', not one of {sorted(want)}")
+for (which, r), names in RESOURCE_NAMES.items():
+    for n in names - {""}:
+        if not any(w == which and x == r and y == n for w, x, _, y in groups):
+            problems.append(f"{which}: {r} ({n}) is not granted")
+if len(problems) == before: print(f"  PASS: {len(groups)} rules each under their resource's API group, resourceNames only on the aidc-user token and the MCP token Secret")
 for (r, v, which), why in sorted(NOT_GRANTED.items()):
-    if (r, v) in rules[which]: problems.append(f"{v} {r} ({which}) is granted, decided against: {why}")
+    if (r, v) in unnamed[which]: problems.append(f"{v} {r} ({which}) is granted, decided against: {why}")
     else: print(f"  PASS: not granted, {v} {r} ({which}): {why}")
 extra = (rules["mcp"] - granted_ns) | (rules["mcp-cluster"] - granted_cl)
 if extra: problems.append(f"the MCP's rules grant what the user's do not: {sorted(extra)}")

@@ -610,3 +610,29 @@ def test_a_server_with_unusable_backend_settings_does_not_start(kind, ns, monkey
     monkeypatch.setattr(server, "open_state_store", lambda: pytest.fail("store opened"))
     assert server.main() == 1
     assert logged[-1][0] == "server_start_refused"
+
+
+async def test_a_kubernetes_servers_cli_calls_go_to_the_cluster(k8s, monkeypatch):
+    """session_list, session_status and their resources run the CLI's session verbs with
+    --backend kubernetes: without it the CLI asks the cluster and falls back to Docker,
+    which the server's pod does not have, so a session the cluster lacks would read as a
+    Docker failure. A Docker server passes nothing (its CLI's own rule decides)."""
+    from aidc_mcp import resources
+    from aidc_mcp.service import common as com
+    from aidc_mcp.service import sessions as ses
+
+    seen = []
+
+    def cli(args, timeout=60.0):
+        seen.append(args)
+        return {"exit": 0, "stdout": "", "stderr": ""}
+    monkeypatch.setattr(com, "run_cli", cli)
+    monkeypatch.setattr(resources, "_run", lambda args: seen.append(args) or "")
+    await ses.list_sessions()
+    await ses.status("p")
+    await resources.list_all_sessions()
+    await resources.session_status_resource("p")
+    assert seen.count(["list", "--backend", "kubernetes"]) == 2
+    assert seen.count(["status", "p", "--backend", "kubernetes"]) == 2
+    monkeypatch.setenv(backend.KIND_ENV, "docker")
+    assert backend.cli_backend_args() == []

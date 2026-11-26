@@ -177,8 +177,9 @@ def latest_hook_event(name: str, mirror_base: Path | None = None
     """Whether session `name` has any hook events, and its latest one about the turn.
 
     Read on from the last event this process read, so a poll reads only what is new; after
-    an MCP restart every file is read once. Once read, all but the newest
-    HOOK_EVENTS_KEPT files are removed, so the dir stays small."""
+    an MCP restart every file is read once. Nothing here removes one: the session's hook
+    writer keeps its dir small (.devcontainer/hook-event.sh), and in the cluster this
+    server's mount of the mirror is read-only."""
     mirror = Path(ss.TRANSCRIPTS_BASE if mirror_base is None else mirror_base) / name
     new = he.read_events(mirror, after=ss.hook_events_read.get(name, ""))
     for event in new:
@@ -186,23 +187,7 @@ def latest_hook_event(name: str, mirror_base: Path | None = None
             ss.hook_turn_event[name] = event
     if new:
         ss.hook_events_read[name] = new[-1].name
-        _prune_hook_events(mirror)
     return name in ss.hook_events_read, ss.hook_turn_event.get(name)
-
-
-#: how many of a session's hook event files are kept once read
-HOOK_EVENTS_KEPT = 200
-
-
-def _prune_hook_events(mirror: Path) -> None:
-    try:
-        names = sorted(p.name for p in he.events_dir(mirror).iterdir()
-                       if p.name.endswith(".json"))
-        for old in names[:-HOOK_EVENTS_KEPT]:
-            (he.events_dir(mirror) / old).unlink(missing_ok=True)
-    except OSError as exc:
-        audit.log_event("hook_events_prune_failed", dir=str(mirror),
-                        error_type=type(exc).__name__)
 
 
 def _epoch(at: str) -> float:

@@ -324,12 +324,22 @@ class TestCheckFree:
         ss.forget_session_send_state("proj")
         assert "proj" not in ss.hook_events_read and "proj" not in ss.hook_turn_event
 
-    async def test_read_events_are_pruned_to_the_newest_few(self, session, monkeypatch):
-        monkeypatch.setattr(tn, "HOOK_EVENTS_KEPT", 3)
+    async def test_the_server_only_reads_hook_events(self, session):
+        """The session's hook writer keeps its dir small (.devcontainer/hook-event.sh,
+        tests/unit/test-hook-event.sh); the server removes nothing there: in the cluster its
+        mount of the mirror is read-only, and a dir with two owners would be one too many."""
         for _ in range(6):
             session.hook(hk.he.STOP)
-        await session.check()
-        assert len(list((session.base / "proj" / "hook-events").iterdir())) == 3
+        events = session.base / "proj" / "hook-events"
+        before = sorted(p.name for p in events.iterdir())
+        events.chmod(0o555)
+        try:
+            await session.check()
+            await session.check()
+        finally:
+            events.chmod(0o755)
+        assert sorted(p.name for p in events.iterdir()) == before
+        assert not hasattr(tn, "_prune_hook_events")
 
     async def test_reply_whose_stop_hooks_are_still_running_is_busy(self, session):
         session.write([*FINISHED, _typed("u1", "q"), _reply("a1", "B.")], age=1.0)

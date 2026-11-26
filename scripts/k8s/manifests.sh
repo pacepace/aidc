@@ -330,6 +330,8 @@ _k8s_mirror_dir_cmd() {
 #     namespace. Credentials are issued only where those policies can exist
 #     (ValidatingAdmissionPolicy, Kubernetes 1.30; lib.sh, K8S_NO_VAP_WHY).
 #   serviceaccounts/token on aidc-user only: the user renews their own kubeconfig
+#   secrets get on aidc-mcp-token only: `aidc mcp` reads the user's MCP token into
+#     ~/.config/aidc/mcp-token (MCP-05), and no other Secret of the namespace
 K8S_USER_SA=aidc-user
 K8S_USER_RULES='core pods get,list,watch,create,patch,delete
 core pods/exec create,get
@@ -341,6 +343,7 @@ core persistentvolumeclaims get,list,watch,create,patch,delete
 core events get,list,watch
 core secrets create,delete
 core serviceaccounts/token create aidc-user
+core secrets get aidc-mcp-token
 apps deployments get,list,watch,create,patch,delete
 apps statefulsets get,list,watch,create,patch,delete
 networking.k8s.io networkpolicies get,list,watch,create,patch,delete
@@ -1292,5 +1295,183 @@ spec:
       volumeMounts: [{name: disk, mountPath: "/home/${AIDC_K8S_USER}"}]
   volumes:
     - {name: disk, persistentVolumeClaim: {claimName: disk}}
+EOF
+}
+
+# --- The user's MCP server (K8S-07; MCP-02/03/05/06/13/14 as amended; TRS-23) -----------------
+#
+# The same server as Docker's aidc-mcp, from the same image, as one replica in the user's
+# namespace, so one process holds the user's queues and watchers and replies keep arriving while
+# the user's machines are off. It drives the user's sessions with the CLI baked into its image,
+# under the aidc-mcp ServiceAccount `aidc user add` makes (K8S_MCP_RULES: the session lifecycle
+# in this namespace only).
+#
+# - State: its store, watermarks and access log on a claim of its own (aidc-mcp-state, the
+#   user's retained class); one process per store, so the Deployment is Recreate, never two.
+# - Transcripts: the user's mirror claim, mounted whole and read-only (k8s_render_transcripts).
+#   Its files are each session's (uid 1000, the git agent's 2000) and 0600, so the server runs
+#   as root with only DAC_OVERRIDE, the one capability reading them takes: no other.
+# - Token: a Secret (MCP-05), never in the image or a ConfigMap, beside the config in one
+#   projected volume at /aidc-config, where the server reads its token on every request and
+#   the orchestrator settings (a rotated Secret reaches the file; `token rotate` also restarts).
+# - Config: a ConfigMap of the user's config as this server's CLI needs it (k8s_mcp_config).
+# - Network: nothing reaches it and it reaches only the API server (aidc-mcp NetworkPolicy, on
+#   top of the namespace's default-deny); the in-cluster Service, exposure and the callback
+#   egress are added with them.
+K8S_MCP_NAME=aidc-mcp
+K8S_MCP_TOKEN_SECRET=aidc-mcp-token
+K8S_MCP_CONFIG=aidc-mcp-config
+K8S_MCP_STATE_CLAIM=aidc-mcp-state
+K8S_MCP_PORT=7878
+# Where the server keeps its state in its pod (its claim) and reads the mirror.
+K8S_MCP_STATE_DIR=/var/lib/aidc-mcp
+
+# k8s_mcp_config: the user's global config as the server's CLI reads it, on stdout: the backend
+# is the cluster; kubernetes.user is set (the pod's own login name is root); the settings that
+# name this machine's kubeconfig and context are left out (in the pod kubectl uses its
+# ServiceAccount); ports: are left out (a tunnel ends on the machine that runs it, and the
+# server may not open one). Returns 1, saying why, when the config cannot be read.
+k8s_mcp_config() {
+    local cfg
+    cfg=$(_aidc_global_config_file)
+    if [ -z "$cfg" ]; then
+        printf '[aidc] error: no config to give the MCP server\n' >&2
+        return 1
+    fi
+    AIDC_K8S_USER="$AIDC_K8S_USER" yq '.backend = "kubernetes"
+        | .kubernetes.user = strenv(AIDC_K8S_USER)
+        | del(.kubernetes.kubeconfig) | del(.kubernetes.context) | del(.ports)' "$cfg" \
+        || { printf '[aidc] error: cannot read %s\n' "$cfg" >&2; return 1; }
+}
+
+# k8s_render_mcp_config: the server's config (k8s_mcp_config) as its ConfigMap. Every value goes
+# to yq as an environment string (strenv), never spliced into its program. Returns 1, saying
+# why, when the config cannot be read.
+k8s_render_mcp_config() {
+    local cfg
+    cfg=$(k8s_mcp_config) || return 1
+    AIDC_MCP_CFG="$cfg" AIDC_MCP_CM="$K8S_MCP_CONFIG" AIDC_MCP_NS="$(k8s_user_ns "$AIDC_K8S_USER")" \
+        AIDC_MCP_USER="$AIDC_K8S_USER" AIDC_MCP_APP="$K8S_MCP_NAME" yq -n '
+        .apiVersion = "v1" | .kind = "ConfigMap"
+        | .metadata.name = strenv(AIDC_MCP_CM) | .metadata.namespace = strenv(AIDC_MCP_NS)
+        | .metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/user": strenv(AIDC_MCP_USER), "app": strenv(AIDC_MCP_APP)}
+        | .data."config.yaml" = strenv(AIDC_MCP_CFG)'
+}
+
+# k8s_render_mcp_token <token>: the token's Secret. Applied from stdin (`kubectl create -f -`),
+# so the token is never on a command line.
+k8s_render_mcp_token() {
+    cat <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${K8S_MCP_TOKEN_SECRET}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}}
+type: Opaque
+stringData: {token: "${1}"}
+EOF
+}
+
+# k8s_render_mcp_state: the server's state claim. Made when missing, never applied over (a
+# changed size would be refused as a resize).
+k8s_render_mcp_state() {
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${K8S_MCP_STATE_CLAIM}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: ${AIDC_K8S_MCP_STATE_SIZE}}}
+EOF
+}
+
+# k8s_render_mcp <node-selector-json> [<ip>:<port> ...]: the server's NetworkPolicy (egress to
+# the API server at those addresses only) and its Deployment.
+k8s_render_mcp() {
+    local sel="$1" ns ep egress="" session_create="false"
+    shift
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    for ep in "$@"; do
+        egress="${egress}    - to: [{ipBlock: {cidr: ${ep%:*}/32}}]
+      ports: [{protocol: TCP, port: ${ep##*:}}]
+"
+    done
+    [ -n "$egress" ] || egress="    []
+"
+    [ "${AIDC_MCP_SESSION_CREATE:-}" = true ] && session_create=true
+    local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}"
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {app: ${K8S_MCP_NAME}}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+${egress}---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  replicas: 1
+  # One process per state store (a second server on it stops at start): never two at once.
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: ${K8S_MCP_NAME}}}
+  template:
+    metadata: {labels: {${labels}}}
+    spec:
+      serviceAccountName: ${K8S_MCP_SA}
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: mcp
+          image: ${AIDC_K8S_REGISTRY_PULL}/aidc/mcp:${AIDC_VERSION_TAG}
+          imagePullPolicy: Always
+          # The CLI starts a session it creates here, at /home/<user> on the disk.
+          workingDir: "/home/${AIDC_K8S_USER}"
+          env:
+            - {name: AIDC_MCP_BACKEND, value: kubernetes}
+            - {name: AIDC_K8S_NAMESPACE, value: ${ns}}
+            - {name: HOME, value: "/home/${AIDC_K8S_USER}"}
+            - {name: AIDC_MCP_PORT, value: "${K8S_MCP_PORT}"}
+            - {name: AIDC_MCP_TOKEN_FILE, value: /aidc-config/mcp-token}
+            - {name: AIDC_MCP_AUDIT_LOG, value: ${K8S_MCP_STATE_DIR}/access.log}
+            - {name: AIDC_MCP_WATCHER_STATE, value: ${K8S_MCP_STATE_DIR}/watcher-state}
+            - {name: AIDC_MCP_TRANSCRIPTS, value: ${K8S_MCP_STATE_DIR}/transcripts}
+            - {name: AIDC_MCP_SESSION_CREATE, value: "${session_create}"}
+          ports: [{name: mcp, containerPort: ${K8S_MCP_PORT}, protocol: TCP}]
+          readinessProbe: {tcpSocket: {port: ${K8S_MCP_PORT}}, periodSeconds: 10}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL], add: [DAC_OVERRIDE]}
+          resources: {requests: {cpu: 100m, memory: 256Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /aidc-config, readOnly: true}
+            - {name: state, mountPath: ${K8S_MCP_STATE_DIR}}
+            - {name: transcripts, mountPath: ${K8S_MCP_STATE_DIR}/transcripts, readOnly: true}
+            - {name: home, mountPath: "/home/${AIDC_K8S_USER}"}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - secret: {name: ${K8S_MCP_TOKEN_SECRET}, items: [{key: token, path: mcp-token, mode: 256}]}  # 0400
+              - configMap: {name: ${K8S_MCP_CONFIG}, items: [{key: config.yaml, path: config.yaml}]}
+        - {name: state, persistentVolumeClaim: {claimName: ${K8S_MCP_STATE_CLAIM}}}
+        - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
+        - {name: home, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
 EOF
 }

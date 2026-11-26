@@ -108,7 +108,8 @@ case "$*" in
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }
         cat >/dev/null 2>&1 || true; echo "ok: $*" | cut -c1-80 ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
-    *"get pvc transcripts"*) [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
+    *"get pvc transcripts"*) [ "${K_TRANSCRIPTS_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
     *"get pvc disk"*)
         [ "${K_PVC_WARN:-}" = 1 ] && echo "Warning: client version skew" >&2
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -307,6 +308,12 @@ assert_has "exit 0" "exit=0" "$out"
 assert_eq "the user's mirror claim is made first, on the session class, labelled for the user only" \
     '{"name":"transcripts","labels":{"app.kubernetes.io/managed-by":"aidc","aidc/user":"alice"},"class":"scratch"}' \
     "$(yq -N e 'select(.kind == "PersistentVolumeClaim") | {"name": .metadata.name, "labels": .metadata.labels, "class": .spec.storageClassName}' -o=json -I=0 "$K_APPLIED" | head -1)"
+
+out=$(K_TRANSCRIPTS_READ_FAIL=1 run git setup)
+assert_has "a cluster that does not say whether the mirror claim is there stops setup" \
+    "cannot read the transcript mirror claim in aidc-u-alice: the cluster did not answer" "$out"
+assert_eq "...before the git container is applied" "" \
+    "$(yq -N e 'select(.kind == "Deployment") | .metadata.name' "$K_APPLIED")"
 
 echo "=== aidc git setup: failures ==="
 out=$(K_NO_DISK=1 run git setup)

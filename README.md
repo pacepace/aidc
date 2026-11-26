@@ -919,6 +919,9 @@ kubernetes:
                                  # (default: storage_class); like storage_class, several pods on
                                  # a node must be able to mount one volume (the audit sidecar reads
                                  # the home), and it should delete its volumes when released
+  mcp_state_size: 5Gi            # your MCP server's state and access log (aidc mcp start)
+  api_endpoints: []              # where your MCP server reaches the API server, ["<ipv4>:<port>"]
+                                 # (default: your kubeconfig's server, resolved here)
   transcripts_size: 10Gi         # the transcript mirror your MCP server reads (on the session
                                  # class; each session sees only its own folder of it)
   git_store_size: 10Gi           # the git container's private copies of GitHub repos (on the
@@ -1178,6 +1181,24 @@ aidc mcp token rotate       # new token + restart, prints the new one (an open s
 aidc mcp token show         # print current token (for the client config)
 aidc mcp stop               # tear down
 ```
+
+**On Kubernetes** (`backend: kubernetes` in your config, or `--backend kubernetes`) the same
+verbs run your own server in your namespace, so your sessions keep answering while your
+machines are off. `aidc mcp start` makes its token (a Secret in your namespace, copied to
+`~/.config/aidc/mcp-token` on this machine, mode 0600), its state claim (`aidc-mcp-state`, on
+your disk's class; `kubernetes.mcp_state_size`, default 5Gi) and its config (yours, for the
+cluster), then the server: one replica of the `aidc/mcp` image from the cluster's registry
+(`aidc k8s build`), under the `aidc-mcp` ServiceAccount `aidc user add` made. It reads every
+session's transcripts from your mirror claim, and may reach only the API server: where your
+kubeconfig names it, and its in-cluster address. When your kubeconfig names it by an address
+the cluster does not see (a load balancer, 127.0.0.1 on the node), set
+`kubernetes.api_endpoints: ["<ipv4>:<port>", ...]`. `stop` keeps its state and token;
+`token rotate` restarts it; `token show` reads the Secret. A user added before 2.0 needs
+`aidc user add <name>` run again by an admin, which lets them read that one Secret. Nothing
+can connect to it until its in-cluster Service and VPN exposure land (the next 2.0 step);
+until then reach it from your machine with
+`kubectl -n aidc-u-<user> port-forward deployment/aidc-mcp 7878` and
+`http://127.0.0.1:7878/mcp`.
 
 **Logs and telemetry:** the server logs through 3tears-observe to `aidc mcp logs`, each tool call's lines carrying one correlation id (`cid`); the access log (`access.log`) stays the record of every request. Nothing is exported unless asked: `AIDC_MCP_OTEL_ENDPOINT` (an OTLP/HTTP collector's base URL) exports one span per tool call, and `AIDC_MCP_METRICS=true` serves per-tool call counts and durations at `/metrics` behind the bearer; they need the server's `otel` and `prometheus` extras, which the default image leaves out.
 

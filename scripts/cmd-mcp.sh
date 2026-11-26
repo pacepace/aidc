@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: Manage the aidc-mcp control plane server (start/stop/status/logs/token).
 #
-# Usage:
+# Usage (Docker; on Kubernetes the same verbs, scripts/k8s/mcp.sh):
 #   aidc mcp start                   - launch the server container
 #   aidc mcp stop                    - tear it down
 #   aidc mcp status                  - is it running? bind, port, last-access
@@ -18,6 +18,13 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/lib/common.sh"
 # shellcheck source=lib/config.sh
 . "$AIDC_SCRIPTS/lib/config.sh"
+# shellcheck source=lib/git-common.sh
+. "$AIDC_SCRIPTS/lib/git-common.sh"
+
+# The server of the backend the config selects (MCP-02 as amended): on Kubernetes the user's own
+# server in their namespace (scripts/k8s/mcp.sh); `--backend docker|kubernetes` chooses.
+_backend=$(aidc_default_backend) || exit 2
+[ "$_backend" != kubernetes ] || exec bash "$AIDC_SCRIPTS/k8s/mcp.sh" "$@"
 
 CONTAINER="aidc-mcp"
 # Versioned per task-13; AIDC_VERSION_TAG is exported by the dispatcher.
@@ -221,6 +228,9 @@ case "$VERB" in
     ""|help|-h|--help)
         cat <<'EOF'
 aidc mcp <verb> [args]
+
+The server of the backend your config selects (backend:), or --backend docker|kubernetes:
+on Kubernetes your own server in your namespace (aidc mcp help --backend kubernetes).
 
 Verbs:
   start              Launch the aidc-mcp server container

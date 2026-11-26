@@ -426,6 +426,13 @@ def create_backend() -> str:
     return "docker"
 
 
+def cli_backend_args() -> list[str]:
+    """What a session verb of the CLI (list, status) is given so it goes to this server's
+    backend: nothing on Docker; `--backend kubernetes` on Kubernetes, where the CLI would
+    otherwise ask the cluster and fall back to Docker, which the server's pod has not."""
+    return ["--backend", KUBERNETES] if _k8s() else []
+
+
 def is_kubernetes(name: str) -> bool:
     """Whether a backend name, as the CLI spells it, is the Kubernetes one."""
     return name in ("kubernetes", "k8s")

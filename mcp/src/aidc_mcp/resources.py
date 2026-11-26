@@ -34,7 +34,7 @@ def _run(args: list[str]) -> str:
 @off_loop
 def list_all_sessions() -> str:
     """Live list of all aidc sessions on this host."""
-    return json.dumps({"raw": scope.filter_list(_run(["list"]))})
+    return json.dumps({"raw": scope.filter_list(_run(["list", *backend.cli_backend_args()]))})
 
 
 @off_loop
@@ -46,7 +46,7 @@ def show_global_config() -> str:
 @off_loop
 def session_status_resource(name: str) -> str:
     """Live status for one named session."""
-    return json.dumps({"raw": _run(["status", name])})
+    return json.dumps({"raw": _run(["status", name, *backend.cli_backend_args()])})
 
 
 #: Lists the audit dir given first, as NUL-separated name, size and 1 for a folder (0 not).

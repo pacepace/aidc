@@ -243,7 +243,8 @@ async def list_sessions() -> dict[str, Any]:
     audit.log_event("tool_call", tool="session_list")
     # The CLI runs in a thread; the per-session facts below read state the event
     # loop owns (send queues, watchers), so they are gathered here on the loop.
-    result, rows = await asyncio.gather(asyncio.to_thread(com.run_cli, ["list"]),
+    result, rows = await asyncio.gather(asyncio.to_thread(com.run_cli,
+                                                          ["list", *backend.cli_backend_args()]),
                                         sf.dev_containers())
     if result["exit"] != 0:
         return com.envelope_err(result["stderr"] or "list failed", result, code="cli_failed")
@@ -268,7 +269,7 @@ async def status(name: str) -> dict[str, Any]:
     audit.log_event("tool_call", tool="session_status", session=name)
     # The CLI call runs in a thread; the send queue below is read back here on
     # the event loop, the only thread that changes it.
-    result = await asyncio.to_thread(com.run_cli, ["status", name])
+    result = await asyncio.to_thread(com.run_cli, ["status", name, *backend.cli_backend_args()])
     if result["exit"] != 0:
         return com.envelope_err(result["stderr"] or "status failed", result, code="cli_failed")
     report, found = await asyncio.gather(

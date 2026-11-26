@@ -253,7 +253,8 @@ EOF
 # config names testament's repo (lib/testament.sh: optional, never fails a build); gitctl from a
 # copy of its context with the scripts it shares with the sessions' image beside it
 # (AIDC_GITCTL_SHARED, from .devcontainer/), so the git agent runs the one copy every session
-# runs, never a second one kept in the tree; every other image from its own context. One rule for every builder: aidc rebuild, ensure_image and
+# runs, never a second one kept in the tree; mcp from a copy of its context with the CLI
+# (scripts/ and VERSION) beside it as aidc/; every other image from its own context. One rule for every builder: aidc rebuild, ensure_image and
 # aidc k8s build. Returns 1 only when the copy could not be made.
 # The scripts the git image takes from .devcontainer/, the sessions' own (gitctl/Dockerfile
 # copies each from its staged context): the Claude Code hook writer, the gh stand-in that
@@ -274,6 +275,26 @@ aidc_build_context() {
             done
             if [ "$ok" != 1 ]; then
                 echo "cannot stage the gitctl build context with the sessions' scripts" >&2
+                rm -rf "$AIDC_BUILD_STAGE"; AIDC_BUILD_STAGE=""
+                return 1
+            fi
+            AIDC_BUILD_CONTEXT="${AIDC_BUILD_STAGE}/context"
+            return 0 ;;
+        aidc/mcp:*)
+            # The CLI, which the server runs in the cluster (MCP-13): the scripts and the
+            # version the dispatcher reads, beside the server's own context as aidc/. Only what
+            # the image takes is copied (not a local .venv).
+            local f ok=1
+            AIDC_BUILD_STAGE=$(mktemp -d) || return 1
+            mkdir -p "${AIDC_BUILD_STAGE}/context/aidc" || ok=0
+            for f in Dockerfile .dockerignore pyproject.toml uv.lock src; do
+                [ "$ok" = 1 ] || break
+                cp -a "$2/$f" "${AIDC_BUILD_STAGE}/context/$f" || ok=0
+            done
+            [ "$ok" = 1 ] && { cp -a "$2/../scripts" "${AIDC_BUILD_STAGE}/context/aidc/scripts" || ok=0; }
+            [ "$ok" = 1 ] && { cp "$2/../VERSION" "${AIDC_BUILD_STAGE}/context/aidc/VERSION" || ok=0; }
+            if [ "$ok" != 1 ]; then
+                echo "cannot stage the mcp build context with the aidc CLI" >&2
                 rm -rf "$AIDC_BUILD_STAGE"; AIDC_BUILD_STAGE=""
                 return 1
             fi

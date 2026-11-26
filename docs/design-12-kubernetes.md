@@ -44,7 +44,7 @@ cluster (the session node)
     ├─ <session>-audit (PVC)                kept by `aidc kill`, removed by `aidc audit trim`
     ├─ transcripts (PVC)                    the transcript mirror the user's MCP reads (MCP-15)
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
-    ├─ aidc-mcp (not built yet: aidc 2.0)   the user's MCP server (K8S-07)
+    ├─ aidc-mcp (Deployment) + aidc-mcp-state (PVC)  the user's MCP server (K8S-07; "Control plane")
     └─ syncthing (not built yet: aidc 2.0)  Claude state <-> user's machines (K8S-18)
 ```
 
@@ -56,7 +56,9 @@ disk, which Q-M3 first named: every session mounts the whole disk, so a mirror t
 session write another's transcripts and events; a pod mounts only its own folder of the claim,
 as a Docker session mounts only its own folder of the MCP's state. A root init step makes the
 folder, gives it to the session user (the git agent's to uid 2000), 0700, and empties its hook
-events on every pod start, so the MCP never reads a Claude's state from the one before. The
+events on every pod start, so the MCP never reads a Claude's state from the one before; the
+session's hook writer keeps only the newest 200 events, and the MCP, whose mount is read-only,
+removes nothing (MCP-46). The
 claim is on the session class (a copy of what each home holds), made by the first `aidc create`
 or `aidc git setup` that needs it and never applied over (`kubernetes.transcripts_size`, default
 10Gi); it carries no session label, so `aidc kill` keeps a session's folder, as Docker keeps its.
@@ -1043,6 +1045,45 @@ the laptop sleeps (K8S-07). The user drives sessions from any of their machines 
 
 Sessions come back on their own after a node reboot, with files, branches and conversation
 intact, and Claude resumes where it left off (K8S-22).
+
+### The user's MCP server
+
+`aidc mcp start|stop|status|logs|token rotate|token show` with the kubernetes backend
+(`scripts/k8s/mcp.sh`; the manifests are `scripts/k8s/manifests.sh`, "The user's MCP server")
+run the same server as Docker's aidc-mcp, from the same image, as one replica in the user's
+namespace (TRS-23, MCP-02/03 as amended):
+
+- **Image:** `aidc/mcp` carries the CLI (staged into its build context as `aidc/`), `kubectl`
+  and `yq`; the Docker server mounts the host's CLI over the baked one.
+- **Identity:** the `aidc-mcp` ServiceAccount (K8S_MCP_RULES: the session lifecycle in this
+  namespace only), its token mounted, because the server runs kubectl. Its environment says the
+  backend and the namespace (`AIDC_MCP_BACKEND=kubernetes`, `AIDC_K8S_NAMESPACE`), and its CLI
+  calls pass `--backend kubernetes`.
+- **State:** its store, watermarks and access log on its own claim, `aidc-mcp-state` (the
+  user's retained class), Recreate and one replica, since one process holds a store.
+- **Transcripts:** the user's mirror claim, mounted whole and read-only. Its files are 0600 and
+  owned by each session's user (the git agent's is uid 2000), so the server runs as root with
+  only `DAC_OVERRIDE`, a read-only root filesystem and no privilege escalation.
+- **Token:** a Secret, `aidc-mcp-token` (MCP-05), projected with the config into
+  `/aidc-config`, where the server reads the token on every request and the CLI its config.
+  `start` makes it when missing and copies it to `~/.config/aidc/mcp-token` (0600) on the
+  user's machine; `token rotate` replaces it (delete, then create from stdin, never on a command
+  line) and restarts the server, so an MCP session opened with the old token is refused on its
+  next message (TRS-08). The user's Role may read that one Secret by name, no other.
+- **Config:** a ConfigMap of the user's config for the cluster: `backend: kubernetes`,
+  `kubernetes.user` set, the kubeconfig and context left out (kubectl uses the ServiceAccount),
+  `ports:` left out (a tunnel ends on the machine that runs it).
+- **Network:** a NetworkPolicy on top of the namespace's default-deny: no ingress yet, egress
+  to the API server only, at the address the user's kubeconfig names (resolved on their
+  machine, refused when it is loopback; `kubernetes.api_endpoints` overrides) and at its
+  in-cluster Service address, as the server's own pod reports it. Both, because a network
+  policy may see a connection before or after the Service's address is translated, depending
+  on the CNI. Over a running server the in-cluster address is read first and the policy applied
+  once, so it is never narrowed under the server (a server that does not answer keeps what
+  its policy allows); a new server's is read once it runs and added.
+- **Status:** `aidc mcp status` says why a server that is not ready waits (its pod's reason:
+  an image not built yet, a crash) and how full its state claim is, warning from 80%: the
+  access log grows on the claim the store needs, and a full claim stops replies.
 
 ### Backend seam
 

@@ -74,7 +74,11 @@ case "$*" in
     *"get ingressclass"*) printf '%s' "${K_IC:-traefik.io/ingress-controller}" ;;
     *"get runtimeclass"*"-o json"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     # Each apply its own YAML document, as each is its own request to the API server.
-    *"apply -f -"*|*"create -f -"*) { echo '---'; cat; } >> "$K_APPLIED" ;;
+    *"apply -f -"*|*"create -f -"*) doc=$(cat)
+        if [ "${K_TRANSCRIPTS_APPLY_FAIL:-}" = 1 ] && printf '%s\n' "$doc" | grep -qx '  name: transcripts'; then
+            echo 'Error from server (Forbidden): persistentvolumeclaims is forbidden' >&2; exit 1
+        fi
+        printf -- '---\n%s\n' "$doc" >> "$K_APPLIED" ;;
     *"get pvc disk"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ -n "${K_DISK_PHASE:-}" ] && { printf '%s' "$K_DISK_PHASE"; exit 0; }
         [ "${K_NO_DISK:-}" = 1 ] || printf 'Bound' ;;
@@ -352,6 +356,12 @@ out=$(K_NO_TRANSCRIPTS=1 K_TRANSCRIPTS_READ_FAIL=1 run create demo --backend kub
 assert_has "a cluster that does not say whether the claim is there stops create" \
     "cannot read the transcript mirror claim in aidc-u-alice: the cluster did not answer" "$out"
 assert_eq "and nothing of the session is made" "" \
+    "$(q 'select(.kind == "StatefulSet" or .kind == "Deployment") | .metadata.name')"
+
+out=$(K_NO_TRANSCRIPTS=1 K_TRANSCRIPTS_APPLY_FAIL=1 run create demo --backend kubernetes)
+assert_has "a mirror claim the cluster does not take stops create" \
+    "could not make the transcript mirror claim in aidc-u-alice" "$out"
+assert_eq "...before anything of the session is made" "" \
     "$(q 'select(.kind == "StatefulSet" or .kind == "Deployment") | .metadata.name')"
 
 echo "=== create refusals ==="

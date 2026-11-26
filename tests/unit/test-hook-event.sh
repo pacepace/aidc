@@ -69,6 +69,22 @@ check "no temp file is left (written by rename)" "$([ "$others" -eq 0 ] && echo 
 check "file names are <epoch-ns>-<pid>.json, sorting in time order" \
     "$([ "$badname" -eq 0 ] && echo yes || echo no)"
 
+echo "=== the writer keeps only the newest events (the dir's one owner) ==="
+P="$S/prune/hook-events"
+mkdir -p "$P"
+for i in 1 2 3 4 5; do printf '{}\n' > "$P/170000000000000000${i}-1.json"; done
+printf 'x\n' > "$P/.keep-me.tmp"
+r=$(AIDC_HOOK_EVENTS_DIR="$P" AIDC_HOOK_EVENTS_KEPT=3 run_hook '{"hook_event_name":"Stop","session_id":"sid-1"}')
+check "it still exits 0 and prints nothing" "$([ "$r" = "0|" ] && echo yes || echo no)"
+left=$(cd "$P" && ls -1 ./*.json | sed 's|^\./||' | paste -sd' ' -)
+check "the oldest go, the newest 3 stay, the new event among them (got: $left)" \
+    "$([ "$(printf '%s' "$left" | wc -w)" -eq 3 ] && case "$left" in "1700000000000000004-1.json 1700000000000000005-1.json "*) echo yes ;; *) echo no ;; esac)"
+check "a file that is not an event is left alone" "$([ -f "$P/.keep-me.tmp" ] && echo yes || echo no)"
+r=$(AIDC_HOOK_EVENTS_DIR="$P" run_hook '{"hook_event_name":"Stop","session_id":"sid-1"}')
+check "under the default cap (200) nothing is removed" \
+    "$([ "$(ls -1 "$P"/*.json | wc -l)" -eq 4 ] && echo yes || echo no)"
+check "the cap is 200 by default" "$(grep -q 'AIDC_HOOK_EVENTS_KEPT:-200' "$HOOK" && echo yes || echo no)"
+
 echo "=== the writer never fails or blocks Claude ==="
 count() { local n=0 f; for f in "$AIDC_HOOK_EVENTS_DIR"/*.json; do [ -e "$f" ] && n=$((n + 1)); done; echo "$n"; }
 before=$(count)

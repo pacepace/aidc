@@ -47,4 +47,22 @@ if printf '%s\n' "$event" > "$tmp" 2>/dev/null; then
     mv -f -- "$tmp" "${dir}/${name}.json" 2>/dev/null
 fi
 rm -f -- "$tmp" 2>/dev/null
+
+# The dir stays small: only the newest AIDC_HOOK_EVENTS_KEPT (200) events are kept. The writer
+# is the dir's one owner on both backends; the MCP only reads it (in the cluster its mount of
+# the mirror is read-only). The MCP reads on from the last event it read and needs only the
+# newest; after a long MCP outage the older ones it missed matter no more than the transcript,
+# which it catches up from. Names sort in the order the events happened (fixed-width epoch ns).
+keep="${AIDC_HOOK_EVENTS_KEPT:-200}"
+case "$keep" in ''|*[!0-9]*) keep=200 ;; esac
+LC_COLLATE=C
+set -- "$dir"/*.json
+if [ -e "${1:-}" ] && [ "$#" -gt "$keep" ]; then
+    drop=$(( $# - keep ))
+    for f in "$@"; do
+        [ "$drop" -gt 0 ] || break
+        rm -f -- "$f" 2>/dev/null
+        drop=$(( drop - 1 ))
+    done
+fi
 exit 0

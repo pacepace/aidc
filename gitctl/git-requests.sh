@@ -42,7 +42,10 @@
 # Modes (the settings' mode: the user's kubernetes.git_mode, or git.mode on Docker): "ask"
 # (default) holds a request that changes GitHub until the user approves it (`aidc git
 # approve`); "rules" runs it at once by gitctl's rules, the check done here, out of the agent's
-# reach. Reading a pull request runs at once in both.
+# reach. Reading a pull request runs at once in both. So does every issue call (action api,
+# GIT-07: gh api and gh issue, through gitctl api's table of issue endpoints), read or write,
+# once the holder's checks pass: issue writes never wait for approval (owner ruling 2026-11-26,
+# Q-G1).
 # Every mode decision is keyed on the session's token (AIDC_GIT_TOKEN, made by aidc create, in
 # that session's pod or container only; no other session can read it). The holder keeps, per
 # session, its token's SHA-256 and its mode (state/modes/<session>: "<mode> <sha256>", mode
@@ -173,18 +176,22 @@ enter() {
 
 # result ID STATE MESSAGE: results/<id>.json, written whole and renamed into place, readable by
 # the session group (the folder's group). R_* add to it.
-R_ACTION="" R_OUTPUT="" R_URL="" R_BRANCH="" R_SHA="" R_PROTECTION="" R_MODE=""
+# An api request's answer is GitHub's as gh gave it: its stdout, its messages and its exit
+# status (R_STDOUT, R_STDERR, R_EXIT), so the session's gh prints the same and exits the same.
+R_ACTION="" R_OUTPUT="" R_URL="" R_BRANCH="" R_SHA="" R_PROTECTION="" R_MODE="" R_STDOUT="" R_STDERR="" R_EXIT=""
 result() {
     local id="$1" tmp
     tmp=$(mktemp "results/.${id}.XXXXXX") || return 1
     if ! jq -n --arg id "$id" --arg state "$2" --arg message "$3" --arg action "$R_ACTION" \
         --arg output "$R_OUTPUT" --arg url "$R_URL" --arg branch "$R_BRANCH" --arg sha "$R_SHA" \
         --arg protection "$R_PROTECTION" --arg updated "$(now)" --arg mode "${R_MODE:-$MODE}" \
+        --arg stdout "$R_STDOUT" --arg stderr "$R_STDERR" --arg exit "$R_EXIT" \
         '{id: $id, state: $state, action: $action, message: $message, mode: $mode, updated: $updated}
          + (if $url != "" then {url: $url} else {} end)
          + (if $sha != "" then {pushed: {branch: $branch, sha: $sha}} else {} end)
          + (if $output != "" then {output: $output} else {} end)
-         + (if $protection != "" then {protection: $protection} else {} end)' > "$tmp" \
+         + (if $protection != "" then {protection: $protection} else {} end)
+         + (if $exit != "" then {stdout: $stdout, stderr: $stderr, exit: ($exit | tonumber)} else {} end)' > "$tmp" \
         || ! chmod 0640 "$tmp" || ! mv -f -- "$tmp" "results/${id}.json"; then
         rm -f -- "$tmp"; return 1
     fi
@@ -238,13 +245,17 @@ pr_base() {
     printf '%s\n' "$base"
 }
 
-ALLOWED='["version","id","session","action","repo","worktree","branch","base","title","body","number","state","head","created","token"]'
-FIELDS=(version id session action repo worktree branch base title body number state head token)
-# The request's fields, set by check and load (printf -v Q_<field>). Q_slug, Q_sha and Q_mode
-# are not the session's: check records them (the repo and the branch's commit when the request
-# is taken, and the mode that applies to it). The token is checked, then dropped: never saved.
+ALLOWED='["version","id","session","action","repo","worktree","branch","base","title","body","number","state","head","created","token","method","path","input","include","etag"]'
+FIELDS=(version id session action repo worktree branch base title body number state head token method path input include etag)
+# The request's fields, set by check and load (printf -v Q_<field>). Q_slug, Q_sha, Q_mode and
+# Q_kind are not the session's: check records them (the repo and the branch's commit when the
+# request is taken, the mode that applies to it, and whether an api call reads or writes). The
+# token is checked, then dropped: never saved. method, path, input (a write's JSON body),
+# include and etag are an api request's (GIT-07: the issue-scoped GitHub API passthrough).
 Q_version="" Q_id="" Q_session="" Q_action="" Q_repo="" Q_worktree="" Q_branch="" Q_base=""
 Q_title="" Q_body="" Q_number="" Q_state="" Q_head="" Q_token="" Q_received="" Q_slug="" Q_sha="" Q_mode=""
+Q_method="" Q_path="" Q_input="" Q_include="" Q_etag="" Q_kind=""
+MAX_API_BYTES=8388608
 
 # In the request folder (relative: every verb that reads it enters the folder first).
 MODES_DIR=state/modes
@@ -288,7 +299,7 @@ check() {
     if ! mapfile -t lines < <(printf '%s' "$raw" | jq -r --argjson allowed "$ALLOWED" '
             if type != "object" then error("not an object") else . end
             | if ((keys - $allowed) | length) > 0 then error("unknown field") else . end
-            | [.version, .id, .session, .action, .repo, .worktree, .branch, .base, .title, .body, .number, .state, .head, .token]
+            | [.version, .id, .session, .action, .repo, .worktree, .branch, .base, .title, .body, .number, .state, .head, .token, .method, .path, .input, .include, .etag]
             | map(if . == null then "" elif type == "string" or type == "number" then tostring else error("not text") end)
             | .[] | @base64' 2>/dev/null) || [ ${#lines[@]} != ${#FIELDS[@]} ]; then
         WHY="not a request: a JSON object with only known, text fields"; return 1
@@ -298,18 +309,25 @@ check() {
         printf -v "Q_${FIELDS[$i]}" '%s' "$v"
     done
     # Control characters: none anywhere but newline, tab and CR in the body.
-    for i in version id session action repo worktree branch base title number state head token; do
+    for i in version id session action repo worktree branch base title number state head token method path include etag; do
         v="Q_${i}"
         # Counted, not captured: a command substitution would drop a trailing newline.
         if [ "$(printf '%s' "${!v}" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then WHY="${i} has control characters"; return 1; fi
     done
-    if [ "$(printf '%s' "$Q_body" | LC_ALL=C tr -d -c '\000-\010\013\014\016-\037\177' | wc -c)" != 0 ]; then WHY="the body has control characters"; return 1; fi
+    for i in body input; do
+        v="Q_${i}"
+        if [ "$(printf '%s' "${!v}" | LC_ALL=C tr -d -c '\000-\010\013\014\016-\037\177' | wc -c)" != 0 ]; then WHY="the ${i} has control characters"; return 1; fi
+    done
     [ "$Q_version" = 1 ] || { WHY="unknown request version"; return 1; }
     [ "$Q_id" = "$id" ] || { WHY="its id is not its file's"; return 1; }
     [[ "$Q_session" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { WHY="session: not a session name"; return 1; }
     if [ -n "$Q_token" ]; then [[ "$Q_token" =~ ^[0-9a-f]{64}$ ]] || { WHY="token: not a session token"; return 1; }; fi
     Q_mode=$(mode_for "$Q_session" "$Q_token") Q_token=""
-    case "$Q_action" in push|pr-create|pr-merge|pr-view|pr-list) ;; *) WHY="action: not one of push, pr-create, pr-merge, pr-view, pr-list"; return 1 ;; esac
+    case "$Q_action" in push|pr-create|pr-merge|pr-view|pr-list|api) ;; *) WHY="action: not one of push, pr-create, pr-merge, pr-view, pr-list, api"; return 1 ;; esac
+    if [ "$Q_action" = api ]; then check_api; return; fi
+    for i in method path input include etag; do
+        v="Q_${i}"; [ -z "${!v}" ] || { WHY="${i}: only an api request has one"; return 1; }
+    done
     path_ok "$Q_repo" || { WHY="repo: not a folder on the user's disk"; return 1; }
     { [ -d "$Q_repo/.git" ] && [ ! -L "$Q_repo/.git" ]; } || { WHY="repo: not a working copy (its .git folder)"; return 1; }
     url=$(origin_url "$Q_repo") || { WHY="repo: no origin"; return 1; }
@@ -345,15 +363,32 @@ check() {
     return 0
 }
 
-# save ID: the checked request as the agent's own file (work/<id>.json), rebuilt from Q_*, with
+# check_api: an api request (GIT-07). The call is checked by gitctl's own rules (the table of
+# issue endpoints, the body's keys and texts: gitctl-rules.sh), and again by gitctl when it runs.
+# The repo is the one the path names; a working copy is not needed (gh api user has none).
+check_api() {
+    for i in repo worktree branch base title body number state head; do
+        v="Q_${i}"; case "$i" in repo|worktree) ;; *) [ -z "${!v}" ] || { WHY="${i}: an api request has none"; return 1; } ;; esac
+    done
+    Q_repo="" Q_worktree=""
+    gitctl_api_check "$REAL_GIT" "$Q_method" "$Q_path" || { WHY="$GITCTL_REASON"; return 1; }
+    Q_path="$GITCTL_API_PATH" Q_slug="$GITCTL_API_SLUG" Q_kind="$GITCTL_API_KIND" Q_sha=""
+    case "$Q_include" in ""|1) ;; *) WHY="include: not 1"; return 1 ;; esac
+    if [ -n "$Q_etag" ]; then gitctl_api_etag "$Q_etag" || { WHY="$GITCTL_REASON"; return 1; }; Q_include=1; fi
+    [ -z "$Q_include" ] || [ "$Q_method" = GET ] || { WHY="only a GET is read with its headers"; return 1; }
+    Q_input=$(gitctl_api_body "$GITCTL_API_BODY" "$Q_input") || { WHY="$GITCTL_REASON"; return 1; }
+}
+
+# save ID: the checked request as the holder's own file (work/<id>.json), rebuilt from Q_*, with
 # the repo and commit it was checked against.
 save() {
     local a=() f v
     for f in "${FIELDS[@]}"; do v="Q_${f}"; a+=(--arg "$f" "${!v}"); done
-    jq -n "${a[@]}" --arg received "$(now)" --arg slug "$Q_slug" --arg sha "$Q_sha" --arg mode "$Q_mode" \
+    jq -n "${a[@]}" --arg received "$(now)" --arg slug "$Q_slug" --arg sha "$Q_sha" --arg mode "$Q_mode" --arg kind "$Q_kind" \
         '{version: 1, id: $id, session: $session, action: $action, repo: $repo, worktree: $worktree,
           branch: $branch, base: $base, title: $title, body: $body, number: $number, state: $state,
-          head: $head, received: $received, slug: $slug, sha: $sha, mode: $mode}' > "work/${1}.json.tmp" \
+          head: $head, method: $method, path: $path, input: $input, include: $include, etag: $etag,
+          received: $received, slug: $slug, sha: $sha, mode: $mode, kind: $kind}' > "work/${1}.json.tmp" \
         && mv -f -- "work/${1}.json.tmp" "work/${1}.json"
 }
 
@@ -361,7 +396,7 @@ save() {
 load() {
     local f
     [ -f "work/${1}.json" ] || return 1
-    for f in "${FIELDS[@]}" received slug sha mode; do
+    for f in "${FIELDS[@]}" received slug sha mode kind; do
         printf -v "Q_${f}" '%s' "$(jq -r --arg k "$f" '.[$k] // ""' "work/${1}.json")"
     done
 }
@@ -459,7 +494,9 @@ run() {
         R_ACTION=""; result "$id" failed "the request is gone (expired?)"; rmdir -- "work/${id}.lock" 2>/dev/null || true; return 1
     fi
     R_ACTION="$Q_action" R_OUTPUT="" R_URL="" R_BRANCH="" R_SHA="" R_PROTECTION="" R_MODE="$Q_mode"
-    if ! bound; then
+    R_STDOUT="" R_STDERR="" R_EXIT=""
+    # An api call names its repo in its path and acts on no working copy: nothing to bind.
+    if [ "$Q_action" != api ] && ! bound; then
         result "$id" failed "$WHY"; rmdir -- "work/${id}.lock" 2>/dev/null || true; return 1
     fi
     expect=(--expect-repo "$Q_slug")
@@ -467,6 +504,16 @@ run() {
     result "$id" running "running"
     rc=0
     case "$Q_action" in
+        api)
+            local opts=()
+            [ -z "$Q_include" ] || opts+=(--include)
+            [ -z "$Q_etag" ] || opts+=(--if-none-match "$Q_etag")
+            out=$(printf '%s' "$Q_input" | "$GITCTL" api "$Q_method" "$Q_path" ${opts[@]+"${opts[@]}"} "${ASK[@]}" 2>"work/${id}.err") || rc=$?
+            R_STDOUT=$(printf '%s' "$out" | printable "$MAX_API_BYTES")
+            R_STDERR=$(printable 4096 < "work/${id}.err" 2>/dev/null)
+            R_EXIT="$rc"
+            rm -f -- "work/${id}.err"
+            out="$R_STDERR" ;;
         push|pr-create)
             # A pull request's base is settled before anything is pushed (pr_base).
             local base=""
@@ -515,6 +562,7 @@ run() {
             push) result "$id" "done" "pushed ${Q_branch}${note:+. $note}" ;;
             pr-create) result "$id" "done" "pushed ${Q_branch} and opened ${R_URL:-the pull request}${note:+. $note}" ;;
             pr-merge) result "$id" "done" "merged pull request ${Q_number} (merge commit)" ;;
+            api) result "$id" "done" "${Q_method} ${Q_path}" ;;
             *) result "$id" "done" "read" ;;
         esac
     else
@@ -597,6 +645,9 @@ take() {
     save "$id" || { result "$id" failed "cannot keep the request"; return 0; }
     case "$Q_action" in
         pr-view|pr-list) run "$id" "" ;;
+        # An issue call, read or write, runs at once in every mode, once checked (owner ruling
+        # 2026-11-26, Q-G1): prawduct's backlog makes several writes for one change.
+        api) run "$id" "" ;;
         *) if [ "$Q_mode" = rules ]; then run "$id" ""
            else result "$id" pending "waiting for the user's approval (aidc git requests)"
                 log "${id} waits for the user (${Q_action} ${Q_slug} ${Q_branch:-#$Q_number})"; fi ;;
@@ -613,9 +664,9 @@ expire() {
     while IFS= read -r -d '' f; do
         id="${f##*/}" id="${id%.json}"
         [ "$(result_state "$id")" != pending ] || log "${id} expired: it waited 30 days without a decision; deleted"
-        rm -rf -- "work/${id}.json" "work/${id}.lock" "work/${id}.title" "work/${id}.body" "work/${id}.handed" "results/${id}.json"
+        rm -rf -- "work/${id}.json" "work/${id}.lock" "work/${id}.title" "work/${id}.body" "work/${id}.handed" "work/${id}.err" "results/${id}.json"
     done < <(find work -maxdepth 1 -type f -name '*.json' -mmin +"$EXPIRE_MIN" -print0 2>/dev/null)
-    find work -maxdepth 1 \( -type f -o -type l \) \( -name '*.req' -o -name '*.json.tmp' -o -name '.notified.tmp' \) \
+    find work -maxdepth 1 \( -type f -o -type l \) \( -name '*.req' -o -name '*.json.tmp' -o -name '.notified.tmp' -o -name '*.err' \) \
         -mmin +"$STALE_MIN" -delete 2>/dev/null || true
     find results -maxdepth 1 \( -type f -o -type l \) -mmin +"$EXPIRE_MIN" -delete 2>/dev/null || true
     # The log keeps its last lines only (the main process trims its copy of the watcher's errors).
@@ -733,12 +784,20 @@ case "$cmd" in
             id="${f#work/}" id="${id%.json}"
             waiting "$id" || continue
             load "$id" || continue
-            printf '%-32s  %-20s  %-16s  %-9s  %-24s  %s\n' "$id" "$Q_received" "$Q_session" "$Q_action" "$Q_slug" \
-                "${Q_branch:-#$Q_number}${Q_sha:+@${Q_sha:0:12}}${Q_title:+: $Q_title}" | printable 1000
+            what="${Q_branch:-#$Q_number}${Q_sha:+@${Q_sha:0:12}}${Q_title:+: $Q_title}"
+            [ "$Q_action" != api ] || what="${Q_method} ${Q_path}"
+            printf '%-32s  %-20s  %-16s  %-9s  %-24s  %s\n' "$id" "$Q_received" "$Q_session" "$Q_action" "$Q_slug" "$what" \
+                | printable 1000
         done ;;
     show)
         id_ok "${1:-}"; enter
         load "$1" || die "no request ${1}"
+        if [ "$Q_action" = api ]; then
+            { printf 'request:  %s (%s)\nsession:  %s\naction:   api\ngithub:   %s\ncall:     %s %s\n' \
+                "$1" "$(result_state "$1")" "$Q_session" "${Q_slug:--}" "$Q_method" "$Q_path"
+              [ -z "$Q_input" ] || printf 'body:\n%s\n' "$(printf '%s' "$Q_input" | jq . 2>/dev/null || printf '%s' "$Q_input")"; } | printable
+            exit 0
+        fi
         { printf 'request:  %s (%s)\nsession:  %s\naction:   %s\ngithub:   %s\nrepo:     %s\nworktree: %s\nbranch:   %s\ncommit:   %s\nbase:     %s\nnumber:   %s\ntitle:    %s\n' \
             "$1" "$(result_state "$1")" "$Q_session" "$Q_action" "$Q_slug" "$Q_repo" "$Q_worktree" "$Q_branch" "$Q_sha" "$Q_base" "$Q_number" "$Q_title"
           [ -z "$Q_body" ] || printf 'body:\n%s\n' "$Q_body"; } | printable ;;

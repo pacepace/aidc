@@ -167,6 +167,137 @@ gitctl_branch_ok() {
     fi
 }
 
+# --- the issue-scoped GitHub API passthrough (GIT-07) ----------------------------------------
+#
+# GitHub issues go through the git container: `gitctl api` (as gitcred) passes a request to
+# GitHub's REST API only when its method and path are one of the rows below, on a repo the user
+# added, with a body of the row's keys only and no AI attribution. These are the calls prawduct's
+# backlog makes (`gh api`, lib/backlog/transport.py) and the `gh issue` forms of the sessions' gh
+# stand-in. No issue delete, transfer or lock: there is no row for them.
+#
+# One row an endpoint: METHOD PATH KIND QUERY BODY. PATH is under repos/<owner>/<name>/, except
+# /user (who the login is). {n} is an issue number, {label} a URL-encoded label name, {id} an
+# issue's id or node id, {branch} a branch name (it may hold slashes). KIND is read or write: a
+# write runs only for the request holder (gitctl.sh, WRITE_VERBS). QUERY lists the query keys a
+# GET may carry; BODY the JSON body's keys (- for none).
+GITCTL_API_TABLE='
+GET    /user                                read   -                                                        -
+GET    issues                               read   state,labels,assignee,since,sort,direction,per_page,page -
+GET    issues/{n}                           read   -                                                        -
+GET    issues/{n}/comments                  read   per_page,page                                            -
+GET    issues/{n}/sub_issues                read   per_page,page                                            -
+GET    issues/{n}/timeline                  read   per_page,page                                            -
+GET    issues/{n}/dependencies/blocked_by   read   per_page,page                                            -
+GET    labels                               read   per_page,page                                            -
+GET    branches/{branch}                    read   -                                                        -
+POST   issues                               write  -   title,body,labels,assignees,milestone
+PATCH  issues/{n}                           write  -   title,body,state,state_reason,labels,assignees,milestone
+POST   issues/{n}/labels                    write  -   labels
+DELETE issues/{n}/labels/{label}            write  -   -
+POST   issues/{n}/comments                  write  -   body
+POST   labels                               write  -   name,color,description
+POST   issues/{n}/sub_issues                write  -   sub_issue_id
+DELETE issues/{n}/sub_issue                 write  -   sub_issue_id
+POST   issues/{n}/dependencies/blocked_by   write  -   issue_id
+DELETE issues/{n}/dependencies/blocked_by/{id} write -  -
+'
+GITCTL_API_MAX_BODY=65536
+
+# gitctl_api_check GIT METHOD PATH: 0 when the call is a row of the table, with
+# GITCTL_API_SLUG (owner/name; empty for /user), GITCTL_API_KIND (read or write), GITCTL_API_BODY
+# (the row's body keys, or -) and GITCTL_API_PATH (the path as GitHub is given it: no leading /).
+gitctl_api_check() {
+    local git="$1" method="$2" path="${3#/}" query="" rest="" m pat kind qkeys bkeys re seg q k v seen=","
+    local n_re='[1-9][0-9]{0,9}' label_re='[A-Za-z0-9._~%:-]{1,300}' id_re='[A-Za-z0-9_-]{1,100}'
+    GITCTL_API_SLUG="" GITCTL_API_KIND="" GITCTL_API_BODY="" GITCTL_API_PATH=""
+    case "$method" in GET|POST|PATCH|DELETE) ;; *) gitctl_refuse "${method}: not GET, POST, PATCH or DELETE"; return 1 ;; esac
+    case "$path" in *\?*) query="${path#*\?}"; path="${path%%\?*}" ;; esac
+    # Plain path characters only; no empty, . or .. part, and no encoded dot, so nothing GitHub
+    # decodes can climb out of the row's place.
+    [[ "$path" =~ ^[A-Za-z0-9._~%:/-]+$ ]] || { gitctl_refuse "${path:0:80}: not a GitHub API path"; return 1; }
+    case "/${path}/" in *//*|*/./*|*/../*|*%2[eE]*|*..*) gitctl_refuse "${path:0:80}: not a GitHub API path"; return 1 ;; esac
+    if [ "$path" = user ]; then rest=/user
+    else
+        [[ "$path" =~ ^repos/([^/]+)/([^/]+)/(.+)$ ]] || { gitctl_refuse "${path:0:80}: not under repos/<owner>/<name>/"; return 1; }
+        GITCTL_API_SLUG="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}"
+        gitctl_slug_ok "$GITCTL_API_SLUG" || { GITCTL_API_SLUG=""; return 1; }
+    fi
+    while read -r m pat kind qkeys bkeys; do
+        [ -n "$m" ] && [ "$m" = "$method" ] || continue
+        re="${pat//'{n}'/$n_re}"
+        re="${re//'{label}'/$label_re}"
+        re="${re//'{id}'/$id_re}"
+        re="${re//'{branch}'/(.+)}"
+        [[ "$rest" =~ ^${re}$ ]] || continue
+        if [[ "$pat" == *"{branch}"* ]]; then gitctl_branch_ok "$git" "${BASH_REMATCH[1]}" || return 1; fi
+        if [ -n "$query" ]; then
+            [ "$method" = GET ] && [ "$qkeys" != - ] || { gitctl_refuse "${method} ${pat} takes no query"; return 1; }
+            IFS='&' read -ra q <<<"$query"
+            for seg in "${q[@]}"; do
+                k="${seg%%=*}" v="${seg#*=}"
+                [ "$seg" != "$k" ] || { gitctl_refuse "${seg:0:40}: a query part with no value"; return 1; }
+                case ",${qkeys}," in *",${k},"*) ;; *) gitctl_refuse "${k:0:40}: not a query key ${pat} takes"; return 1 ;; esac
+                case "$seen" in *",${k},"*) gitctl_refuse "${k}: given twice"; return 1 ;; esac
+                seen+="${k},"
+                [[ "$v" =~ ^[A-Za-z0-9._~%+:,*-]{0,200}$ ]] || { gitctl_refuse "${k}: not a plain value"; return 1; }
+                case "$k" in per_page|page) [[ "$v" =~ ^[1-9][0-9]{0,3}$ ]] || { gitctl_refuse "${k}: not a page number"; return 1; } ;; esac
+            done
+        fi
+        GITCTL_API_KIND="$kind" GITCTL_API_BODY="$bkeys" GITCTL_API_PATH="${path}${query:+?$query}"
+        return 0
+    done <<<"$GITCTL_API_TABLE"
+    gitctl_refuse "${method} ${path:0:80}: not an issue call the git container passes on (gitctl api --help)"
+}
+
+# gitctl_api_body KEYS TEXT: the body of a write, checked against the row's KEYS (- for none):
+# a JSON object of those keys only, each of its type, with no AI attribution and no control
+# characters but in a body. Prints it again (compact, only those keys), or 1 with the reason.
+gitctl_api_body() {
+    local keys="$1" text="$2" json words
+    if [ "$keys" = - ]; then
+        [ -z "${text//[[:space:]]/}" ] || { gitctl_refuse "this call takes no body"; return 1; }
+        return 0
+    fi
+    [ "${#text}" -le "$GITCTL_API_MAX_BODY" ] || { gitctl_refuse "the body is longer than ${GITCTL_API_MAX_BODY} bytes"; return 1; }
+    json=$(printf '%s' "$text" | jq -c --arg keys "$keys" '
+        def str: type == "string";
+        def strs: type == "array" and length <= 100 and all(.[]; type == "string" and length <= 300);
+        ($keys | split(",")) as $k
+        | if type != "object" then error("not an object")
+          elif (keys - $k | length) > 0 then error("a key this call does not take: \(keys - $k | join(","))")
+          else . end
+        | if has("title") and ((.title | str) | not) then error("title: not text") else . end
+        | if has("body") and ((.body | str) | not) then error("body: not text") else . end
+        | if has("name") and ((.name | str) | not) then error("name: not text") else . end
+        | if has("description") and ((.description | str) | not) then error("description: not text") else . end
+        | if has("color") and ((.color | str and test("^[0-9a-fA-F]{6}$")) | not) then error("color: not a colour") else . end
+        | if has("state") and (.state != "open" and .state != "closed") then error("state: not open or closed") else . end
+        | if has("state_reason") and ((.state_reason == null or .state_reason == "completed" or .state_reason == "not_planned" or .state_reason == "reopened") | not) then error("state_reason: not completed, not_planned or reopened") else . end
+        | if has("labels") and ((.labels | strs) | not) then error("labels: not a list of names") else . end
+        | if has("assignees") and ((.assignees | strs) | not) then error("assignees: not a list of logins") else . end
+        | if has("milestone") and ((.milestone == null or (.milestone | type) == "number") | not) then error("milestone: not a number") else . end
+        | if has("sub_issue_id") and (((.sub_issue_id | type) == "number" or (.sub_issue_id | str)) | not) then error("sub_issue_id: not an id") else . end
+        | if has("issue_id") and (((.issue_id | type) == "number" or (.issue_id | str)) | not) then error("issue_id: not an id") else . end
+        | with_entries(select(.key as $x | $k | index($x)))' 2>&1) \
+        || { gitctl_refuse "the body: $(printf '%s' "$json" | sed -n 's/^jq: error ([^)]*): //p' | head -n1 | cut -c1-120)"; return 1; }
+    # One-line texts: no control characters at all.
+    if printf '%s' "$json" | jq -e '[.title, .name, .description, (.labels // [])[], (.assignees // [])[]]
+            | map(select(. != null) | explode[]) | any(. < 32 or . == 127)' >/dev/null; then
+        gitctl_refuse "a title, name or label carries control characters"; return 1
+    fi
+    if printf '%s' "$json" | jq -e '(.body // "") | explode | any((. < 32 and . != 9 and . != 10 and . != 13) or . == 127)' >/dev/null; then
+        gitctl_refuse "the body carries control characters"; return 1
+    fi
+    words=$(printf '%s' "$json" | jq -r '[.title, .body, .name, .description, (.labels // [])[]] | map(select(. != null)) | .[]')
+    gitctl_check_text "$words" "the issue text" || return 1
+    printf '%s' "$json"
+}
+
+# gitctl_api_etag ETAG: an ETag as GitHub gives one (a quoted token, maybe weak).
+gitctl_api_etag() {
+    [[ "$1" =~ ^(W/)?\"[A-Za-z0-9_-]{1,128}\"$ ]] || { gitctl_refuse "${1:0:40}: not an ETag"; return 1; }
+}
+
 # gitctl_agent_git GIT ARGS...: the agent's own git, in a working copy anyone in the session
 # group may have written (gitctl's `ag`, and the request watcher's reads). It runs as the agent,
 # never as gitrun, so the copy's config cannot reach the login; still, the settings that run a

@@ -528,8 +528,41 @@ read_file() {
     cat -- "$1"
 }
 
+# api_args ARGS...: gitctl api's arguments, both sides: METHOD, PATH (checked against the table,
+# gitctl-rules.sh) and the options a GET may take, into API_METHOD, GITCTL_API_* and API_OPTS.
+api_args() {
+    API_METHOD="${1:-}" API_OPTS=()
+    [ $# -ge 2 ] || die "usage: gitctl api <GET|POST|PATCH|DELETE> <path> [--include] [--if-none-match <etag>]"
+    gitctl_api_check "$REAL_GIT" "$1" "$2" || die "$GITCTL_REASON"
+    shift 2
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --include) API_OPTS+=(--include); shift ;;
+            --if-none-match)
+                [ $# -ge 2 ] || die "--if-none-match needs an ETag"
+                gitctl_api_etag "$2" || die "$GITCTL_REASON"
+                API_OPTS+=(--if-none-match "$2"); shift 2 ;;
+            *) die "${1:0:40}: not an option of gitctl api" ;;
+        esac
+    done
+    [ ${#API_OPTS[@]} = 0 ] || [ "$API_METHOD" = GET ] || die "only a GET takes --include or --if-none-match"
+}
+# api_body: a write's body from stdin, checked (gitctl_api_body), printed compact; nothing for a
+# call that takes none (its stdin is not read).
+api_body() {
+    local raw
+    [ "$GITCTL_API_BODY" != - ] || return 0
+    raw=$(head -c $((GITCTL_API_MAX_BODY + 1)))
+    gitctl_api_body "$GITCTL_API_BODY" "$raw" || die "$GITCTL_REASON"
+}
+
 agent_side() {
     case "$verb" in
+        api)
+            api_args "$@"
+            local body
+            body=$(api_body) || exit 1
+            printf '%s' "$body" | switch_to cred api "$API_METHOD" "$GITCTL_API_PATH" ${API_OPTS[@]+"${API_OPTS[@]}"} ;;
         clone) agent_clone "$@" ;;
         fetch) agent_fetch "$@" ;;
         push) agent_push "$@" ;;

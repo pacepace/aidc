@@ -130,13 +130,20 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "outside_repo": "a path that leaves the session's repository",
     "session_outdated": ("the session predates aidc 2.0's hook events; kill it and create "
                          "it again (the git agent: rebuild its image and set it up again)"),
+    "git_answer_unclear": ("session_send to the git agent asking about a git request: the "
+                           "answer is not plainly Approve or Deny; nothing was sent"),
+    "git_request_ambiguous": ("session_send to the git agent: its question names several git "
+                              "requests; nothing was approved or sent"),
+    "git_requests_unreadable": ("session_send to the git agent: its waiting git requests "
+                                "could not be read; nothing was approved or sent"),
 }
 ERROR_CODES = frozenset(ERROR_CODE_DESCRIPTIONS)
 
 # The codes whose call, made again unchanged, can succeed later (design-10 D6's Retryable
-# column): an aidc CLI call that failed is transient, and a headless run that is busy ends.
-# Every other code meets the same refusal until something changes.
-RETRYABLE_ERROR_CODES = frozenset({"cli_failed", "invoke_busy"})
+# column): an aidc CLI call that failed is transient, a headless run that is busy ends, and
+# the git container's request list read again can answer. Every other code meets the same
+# refusal until something changes.
+RETRYABLE_ERROR_CODES = frozenset({"cli_failed", "invoke_busy", "git_requests_unreadable"})
 
 
 def envelope_err(error: str, data: Any = None, *, code: str) -> dict[str, Any]:

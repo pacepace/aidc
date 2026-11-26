@@ -51,6 +51,32 @@ that ships separately.
 - **Rule**: a change to the shapes the watcher relies on is re-measured against a real session, not
   assumed; ownership of those directories is asserted at create time, loudly.
 
+### A session's Claude Code hook events ↔ the MCP's turn state
+- **Producer**: `aidc-hook-event` (`.devcontainer/hook-event.sh`; the git image takes the same file
+  through its staged build context), run by Claude Code's SessionStart, UserPromptSubmit,
+  Notification and Stop hooks from the managed settings, only for the Claude in tmux window
+  `main:claude`, as the container's session user.
+- **Consumer**: aidc-mcp (`hook_events.py`, `service/turns.py`), reading
+  `<mirror>/<session>/hook-events/` on the host-mounted state dir.
+- **Contract**: one file per event, `<epoch-ns>-<pid>.json`, written temp-then-rename; the hook's
+  JSON input with `event` and `at` (UTC, milliseconds) added; names sort in time order. The folder
+  starts empty with each session instance (`aidc create`; the git container's main process).
+- **Rule**: the writer never fails or prints (a Stop hook's output is read as a decision); a
+  writer that cannot write shows as `hook_events_missing`, never as silence. A new Claude Code
+  hook field the reader depends on is measured against a real session first.
+
+### The MCP server ↔ the git container's request holder
+- **Producer**: aidc-mcp's `service/gitapprove.py`, carrying out an orchestrator's answer to the
+  git agent's question; the user's `aidc git approve|deny|requests` uses the same entry point.
+- **Consumer**: `git-requests` (`gitctl/git-requests.sh`) running as gitreq in the git container.
+- **Contract**: `git-requests list` (a header line, then one waiting request per line, its 32-hex
+  id first), `approve <id>`, `deny <id> [why]`; reached on Docker by `docker exec -u gitreq -e
+  HOME=/var/lib/gitctl/gitreq aidc-git-dev`, on Kubernetes by `kubectl exec -c gitreq` into the
+  git pod. Each verb acts only on a request still waiting and exits non-zero saying why otherwise.
+- **Rule**: the request id always comes from the agent's own question, never from the caller's
+  text; the holder refuses these verbs to anything reaching it through sudo or as another user,
+  so only an exec from outside the container decides.
+
 ### The session compose file
 - **Producer**: `scripts/cmd-create.sh` + `proxy/compose.yaml.template`.
 - **Consumer**: the host docker daemon, and every later `aidc` command for that session.

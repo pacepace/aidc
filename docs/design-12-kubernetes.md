@@ -303,8 +303,8 @@ AskUserQuestion, naming the request id, Deny first; aidc delivers that question 
 orchestrator as any session's. Whatever the answer, the agent replies with the command that
 carries it out, `aidc git approve|deny <id>`, for the user to run on their machine: choosing
 Approve in the question approves nothing. An orchestrator's answer is carried out by the MCP
-server, as gitreq, matched to the request id in the question (the MCP work of plan chunks 03-04
-and 14). The one request the agent may be asking about is the one last handed over or the one
+server, as gitreq, matched to the request id in the question (design-10 S10; on Docker built
+with plan chunk 13's fix round, on Kubernetes plan chunk 14). The one request the agent may be asking about is the one last handed over or the one
 it last ran `prompt` for; after a watcher start, when which one is open is not known, it is every
 request then waiting, until each is decided or the agent runs `prompt` for one.
 
@@ -425,9 +425,11 @@ on a request still waiting), matched to the request id the question names. Where
 delivery stands (2026-11-24):
 
 - Docker: the git agent's transcript reaches `aidc mcp` (above), so an orchestrator that watches
-  the session `git` gets the question as that session's reply. Whether `session_send` can answer
-  it is not yet checked: the MCP server's own notes say the question widget may not take a
-  pasted answer and Enter. Checked by hand with a logged-in git agent (tests/smoke/README.md).
+  the session `git` gets the question as that session's reply, and answers it with
+  `session_send` "Approve" or "Deny: <why>": the MCP server runs `git-requests approve|deny`
+  as gitreq for the one waiting request the question names, then sends the answer into the
+  question (design-10 S10). Whether the question widget takes the pasted answer is checked by
+  hand with a logged-in git agent (tests/smoke/README.md); the decision does not depend on it.
 - Kubernetes: the question does not reach an orchestrator yet. The MCP server's session tools
   reach cluster sessions only through the per-user MCP server (K8S-07). Owner ruling 2026-11-24
   ("aidc 2.0 is the Kubernetes work and the 3tears adoption, released together"): the Kubernetes
@@ -1061,7 +1063,7 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
 | Session behaviour at real access-token expiry with no refresh token | live test (hours) |
 | Syncthing in a pod | one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
-| Git agent's question answered by `session_send` (Docker) | live check with a logged-in git agent (tests/smoke/README.md) |
+| Git agent's question answered by `session_send` (Docker) | the decision: `mcp/tests/test_git_approve.py` (approve, deny with a reason, a request not waiting, ambiguous and unclear answers, the gitreq command); the answer into the widget and the request run: live check with a logged-in git agent (tests/smoke/README.md) |
 | Git agent's question reaching an orchestrator on Kubernetes | owner ruling; aidc 2.0's per-user MCP server |
 | A real push, PR, merge, tidy and protect through the git container | the smokes' GitHub part, with a login and a scratch repo |
 | The Docker git container on macOS (volume ownership, the mount check) | live test on a Mac |

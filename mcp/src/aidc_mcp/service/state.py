@@ -156,20 +156,13 @@ waiting_notice_shown: set[str] = set()
 
 def forget_session_send_state(name: str) -> None:
     """Send-path state lives as long as the session, not as long as a watcher: a
-    session_unwatch must not drop a paste's busy hold. It is cleared here, when the
-    session is gone."""
-    hook_events_read.pop(name, None)
-    hook_turn_event.pop(name, None)
-    hooks_installed.pop(name, None)
-    hooks_silent_since.pop(name, None)
-    hooks_silence_logged.discard(name)
-    sent_awaiting_echo.pop(name, None)
-    unsubmitted_paste.pop(name, None)
-    last_free_verdict.pop(name, None)
-    last_screen_raw.pop(name, None)
-    waiting_notice_shown.discard(name)
-    reported_interrupts.pop(name, None)
-    session_instances.pop(name, None)
+    session_unwatch must not drop a paste's busy hold. Every table whose lifetime is
+    SESSION (LIFETIMES) is cleared here, when the session is gone or replaced."""
+    for table in _tables(SESSION):
+        if isinstance(table, dict):
+            table.pop(name, None)
+        else:
+            table.discard(name)
     lock = invoke_locks.get(name)
     if lock is not None and not lock.locked():
         del invoke_locks[name]
@@ -267,16 +260,68 @@ def evict_session_state(name: str) -> None:
     by session count, not conversations) and may be held by an in-flight
     `session_send`/`session_run` right now — popping it would let a concurrent send
     create a fresh lock and paste into the same tmux window simultaneously."""
-    for key in [k for k in settle_state if k[0] == name]:
-        settle_state.pop(key, None)
-    for drop in [d for d in logged_withdrawn_drops if d[0] == name]:
-        logged_withdrawn_drops.discard(drop)
-    for key in [k for k in unanswered_polls if k[0] == name]:
-        unanswered_polls.pop(key, None)
-    for key in [k for k in torn_read_counts if k[0] == name]:
-        torn_read_counts.pop(key, None)
-    for key in [k for k in consumed_idle_counts if k[0] == name]:
-        consumed_idle_counts.pop(key, None)
-    for key in [k for k in _drain_locks if k[0] == name]:
-        _drain_locks.pop(key, None)
+    for table in _tables(WATCH):
+        for key in [k for k in table if k[0] == name]:
+            if isinstance(table, dict):
+                table.pop(key, None)
+            else:
+                table.discard(key)
     ts.forget_transcripts(Path(TRANSCRIPTS_BASE) / name)
+
+
+# --- how long each table's entries live ------------------------------------------------
+#
+# Every module-level table above holds facts about sessions, and a fact outlives its session
+# only by mistake (a session killed and created again under the same name must not inherit
+# it). So each table declares its lifetime here, and test_state_lifetimes fails for a table
+# that does not:
+#
+#   SESSION  keyed by session name; cleared by forget_session_send_state when the session is
+#            gone or replaced (a new instance). Bounded by the live sessions.
+#   WATCH    keyed by (session, conversation, ...); cleared by evict_session_state when the
+#            session's watcher ends. Bounded by the conversations watched.
+#   TASK     an entry is removed by the task or call that added it, when it ends (a drainer,
+#            a watcher, a headless run). Bounded by what is running.
+#   KEPT     kept for the process, deliberately, for the reason given. Bounded by the session
+#            names this process has seen.
+#   PROCESS  not about one session (the server's listeners).
+SESSION, WATCH, TASK, KEPT, PROCESS = "session", "watch", "task", "kept", "process"
+
+LIFETIMES: dict[str, tuple[str, str]] = {
+    "hook_events_read": (SESSION, ""),
+    "hook_turn_event": (SESSION, ""),
+    "hooks_installed": (SESSION, ""),
+    "hooks_silent_since": (SESSION, ""),
+    "hooks_silence_logged": (SESSION, ""),
+    "sent_awaiting_echo": (SESSION, ""),
+    "unsubmitted_paste": (SESSION, ""),
+    "last_free_verdict": (SESSION, ""),
+    "last_screen_raw": (SESSION, ""),
+    "waiting_notice_shown": (SESSION, ""),
+    "reported_interrupts": (SESSION, ""),
+    "session_instances": (SESSION, ""),
+    "drainer_failures": (SESSION, ""),
+    "settle_state": (WATCH, ""),
+    "logged_withdrawn_drops": (WATCH, ""),
+    "unanswered_polls": (WATCH, ""),
+    "torn_read_counts": (WATCH, ""),
+    "consumed_idle_counts": (WATCH, ""),
+    "_drain_locks": (WATCH, ""),
+    "background_tasks": (TASK, "each task removes itself when done (common.fire)"),
+    "pending_drainers": (TASK, "the drainer removes itself when it ends"),
+    "session_watchers": (TASK, "the watcher's done callback, or session_unwatch"),
+    "invokes_in_flight": (TASK, "keyed by run id; the call removes it when its run ends"),
+    "pending_sends": (TASK, "the drainer removes a session's queue once it is empty, and "
+                            "a gone session's queue is dead-lettered and removed (MCP-30)"),
+    "session_send_locks": (KEPT, "may be held by a send in flight: dropping it would let a "
+                                 "second send paste into the same window at once"),
+    "invoke_locks": (KEPT, "dropped by forget_session_send_state only when no run holds it"),
+    "queue_loaded": (KEPT, "a saved queue is read once per process; a session created again "
+                           "has its old queue dropped (MCP-33) and its new one saved from "
+                           "memory, never read back over it"),
+    "session_change_listeners": (PROCESS, "the MCP face's, while it serves"),
+}
+
+
+def _tables(lifetime: str) -> list[Any]:
+    return [globals()[name] for name, (kind, _) in LIFETIMES.items() if kind == lifetime]

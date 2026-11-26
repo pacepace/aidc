@@ -150,7 +150,7 @@ Chunks 03-04 change what a caller sees, and chunk 07 what an operator sees (aidc
   the first start reads 1.x's files in and keeps them in `watcher-state/migrated-1x/`; `python -m
   aidc_mcp.store` in the server's container prints it. Two servers cannot share a state dir.
 
-## Consumer note (chunk 13)
+### Chunk 13
 - `aidc git setup` must run again on each backend (new image, the gitreq container on
   Kubernetes, the settings file). Sessions must be created again: their gh stand-in checks the
   request folder is gitreq's. Sessions' own modes start again from the user's mode.

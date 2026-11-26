@@ -251,20 +251,29 @@ EOF
 # a folder for the caller to remove when the build is done, in AIDC_BUILD_STAGE ("" for none).
 # dev-base builds from a copy of its context with testament's newest wheel beside it when the
 # config names testament's repo (lib/testament.sh: optional, never fails a build); gitctl from a
-# copy of its context with the sessions' hook writer (.devcontainer/hook-event.sh) beside it, so
-# the git agent runs the one writer every session runs, never a copy of it in the tree; every
-# other image from its own context. One rule for every builder: aidc rebuild, ensure_image and
+# copy of its context with the scripts it shares with the sessions' image beside it
+# (AIDC_GITCTL_SHARED, from .devcontainer/), so the git agent runs the one copy every session
+# runs, never a second one kept in the tree; every other image from its own context. One rule for every builder: aidc rebuild, ensure_image and
 # aidc k8s build. Returns 1 only when the copy could not be made.
+# The scripts the git image takes from .devcontainer/, the sessions' own (gitctl/Dockerfile
+# copies each from its staged context): the Claude Code hook writer, the gh stand-in that
+# writes requests, and the transcript copy-forward.
+AIDC_GITCTL_SHARED="hook-event.sh gh-standin.sh transcript-mirror.sh"
 aidc_build_context() {
     local lib
     AIDC_BUILD_CONTEXT="$2" AIDC_BUILD_STAGE=""
     case "$1" in
         aidc/dev-base:*) ;;
         aidc/gitctl:*)
+            local shared ok=1
             AIDC_BUILD_STAGE=$(mktemp -d) || return 1
-            if ! cp -a "$2" "${AIDC_BUILD_STAGE}/context" \
-                    || ! cp "$2/../.devcontainer/hook-event.sh" "${AIDC_BUILD_STAGE}/context/hook-event.sh"; then
-                echo "cannot stage the gitctl build context with the hook writer" >&2
+            cp -a "$2" "${AIDC_BUILD_STAGE}/context" || ok=0
+            for shared in $AIDC_GITCTL_SHARED; do
+                [ "$ok" = 1 ] || break
+                cp "$2/../.devcontainer/${shared}" "${AIDC_BUILD_STAGE}/context/${shared}" || ok=0
+            done
+            if [ "$ok" != 1 ]; then
+                echo "cannot stage the gitctl build context with the sessions' scripts" >&2
                 rm -rf "$AIDC_BUILD_STAGE"; AIDC_BUILD_STAGE=""
                 return 1
             fi

@@ -561,8 +561,8 @@ for f in gitctl-run.sh gitctl-cred.sh gitctl-agent.sh; do
 done
 assert_has "plain gh is the sessions' stand-in: it writes requests (a gh login as the agent would be readable by it)" \
     "ln -s /opt/aidc/lib/gitctl/gh-standin.sh /opt/aidc/bin/gh" "$df"
-assert_eq "gitctl/gh-standin.sh is identical to .devcontainer/gh-standin.sh (the image's build folder is gitctl/)" "" \
-    "$(cmp "$GITCTL/gh-standin.sh" "$AIDC_ROOT/.devcontainer/gh-standin.sh" 2>&1)"
+assert_eq "no second gh stand-in in gitctl/: the image's staged context takes the sessions' own" no \
+    "$([ -e "$GITCTL/gh-standin.sh" ] && echo yes || echo no)"
 assert_has "the sudo rules are root's, 0440" "chmod 0440 /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "and checked at build" "visudo -c -f /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "the managed settings are installed" "COPY managed-settings.json /etc/claude-code/managed-settings.json" "$df"

@@ -30,6 +30,14 @@ out, or change a mode. To upgrade:
 What changes in use:
 - Answering the git agent's question in its terminal no longer approves. It replies with the
   command to run: `aidc git approve <id>` or `aidc git deny <id>`.
+- On Docker an orchestrator approves by answering the git agent's question: `session_send git
+  "Approve"` (or `"Deny: <why>"`) decides the waiting request the question names, as `gitreq`,
+  and the result's `git_request` says what happened. Any other answer to such a question is
+  refused unsent (`git_answer_unclear`), as is one to a question naming several requests
+  (`git_request_ambiguous`). On Kubernetes this comes with the per-user MCP server.
+- The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
+  hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a
+  bare `docker build gitctl/`.
 - Asking the git agent to push, open or merge a pull request makes a request too, which waits
   for your `aidc git approve`.
 - `gh issue list|view|create|edit|comment|close|reopen` and `gh api` on the issue endpoints work

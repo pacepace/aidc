@@ -103,6 +103,8 @@ RUN groupadd -g 2003 gitreq \
     && install -d -o gitreq -g gitreq -m 0700 /var/lib/gitctl/gitreq \
     && install -d -o root -g root -m 0755 /var/aidc /etc/aidc \
     && install -d -o gitreq -g session -m 2755 /var/aidc/git-requests
+# gh-standin.sh and transcript-mirror.sh are the sessions' own (.devcontainer/), put beside this
+# Dockerfile by the staged build context (aidc_build_context, scripts/lib/common.sh).
 COPY gitctl-rules.sh gitctl.sh gitctl-run.sh gitctl-cred.sh gitctl-agent.sh git-requests.sh gh-standin.sh cred-helper.sh claude-hook.sh \
      git-claude.sh git-notify.sh transcript-mirror.sh claude-refresh.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig

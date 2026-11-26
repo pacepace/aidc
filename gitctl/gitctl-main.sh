@@ -17,6 +17,10 @@ cd "${HOME:-/home/git}" || exit 1
 mkdir -p "${HOME:-/home/git}/.cache/gitctl"
 LOG="${HOME:-/home/git}/.cache/gitctl/requests.log"
 GR=/opt/aidc/lib/gitctl/git-requests.sh
+# Where the MCP server reads the agent's transcript and hook events (mounted on Docker), and
+# the copy-forward that writes it; set otherwise only by the unit test.
+OUT="${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}"
+MIRROR="${AIDC_MIRROR_LIB:-/opt/aidc/lib/gitctl/transcript-mirror.sh}"
 start_tmux() {
     tmux new-session -d -s main -n claude -x 200 -y 50 -c "${HOME:-/home/git}" || return 1
     # Typed into the window's shell, as a session's tmux starts aidc-claude: when Claude exits,
@@ -27,16 +31,17 @@ start_tmux() {
 }
 # On Docker the git agent's transcript is copied where aidc's MCP server reads every session's
 # (/var/aidc/transcript-out, mounted by aidc git setup), so an orchestrator sees its questions as
-# it sees any session's. The same copy-forward as a session's (transcript-mirror.sh, a copy of
-# the dev image's file, kept identical by its unit test).
-if [ -d /var/aidc/transcript-out ]; then
+# it sees any session's. The same copy-forward as a session's: the dev image's
+# transcript-mirror.sh, which the image's staged build context carries (aidc_build_context).
+if [ -d "$OUT" ]; then
     # The agent's Claude Code hook events (MCP-46) start empty with the container, as a
     # session's do with aidc create: the MCP must not read this Claude's state from the
     # last event of the one before it (a rebuilt image, a restart).
-    rm -rf -- /var/aidc/transcript-out/hook-events
-    . /opt/aidc/lib/gitctl/transcript-mirror.sh
+    rm -rf -- "$OUT/hook-events"
+    # shellcheck source=../.devcontainer/transcript-mirror.sh
+    . "$MIRROR"
     proj="${HOME:-/home/git}/.claude/projects/$(printf '%s' "${HOME:-/home/git}" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')"
-    ( while :; do aidc_mirror_copy_forward_pass "$proj" /var/aidc/transcript-out; sleep 2; done ) &
+    ( while :; do aidc_mirror_copy_forward_pass "$proj" "$OUT"; sleep 2; done ) &
 fi
 # handover: one waiting request, if the holder names one, typed into the agent's Claude.
 handover() {

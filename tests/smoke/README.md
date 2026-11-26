@@ -107,11 +107,15 @@ an orchestrator connected:
 2. In a session created after setup, on an added repo: `gh pr create --title t --body b`
    (it waits).
 3. The orchestrator receives the git agent's question as session `git`'s reply.
-4. Answer with `session_send git "<the option's label>"` (try the label, then the option's
-   number). Check that the question was answered (`aidc attach git`), that the request is
-   approved or denied as chosen (`aidc git requests`), and that the session reads the result
-   (`gh pr status`). If paste and Enter do not answer the question, record it: the owner ruling
-   "Ask-mode git approvals bubble up through the orchestrator" then needs another way back.
+4. Answer with `session_send git "Approve"` (or `"Deny: <why>"`). The result's `git_request`
+   says `done: true`: aidc's MCP server ran `git-requests approve|deny` as gitreq for the
+   request the question names (design-10 S10), with `git_request_answered` in its access log.
+   Check that the request is approved or denied as chosen (`aidc git requests`), that the
+   session reads the result (`gh pr status`), and that the question was answered (`aidc attach
+   git`). If paste and Enter do not answer the question, record it: the decision stands
+   either way, but the agent's turn then needs another way on.
+5. Send `"Approve"` again for the same question: `git_request.code` is
+   `git_request_not_waiting`, and nothing runs twice.
 
 On Kubernetes the question does not reach an orchestrator until aidc 2.0's per-user MCP server.
 

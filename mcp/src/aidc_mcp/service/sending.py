@@ -24,6 +24,7 @@ from aidc_mcp.service import callbacks as cbk
 from aidc_mcp.service import common as com
 from aidc_mcp.service import config as orc
 from aidc_mcp.service import delivery as dlv
+from aidc_mcp.service import gitapprove
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import tmux as tmx
 from aidc_mcp.service import turns as tn
@@ -798,6 +799,25 @@ async def send(
             f"is free. {tn.outdated_remedy(name)}",
             code="session_outdated")
 
+    # An answer to the git agent's question about a waiting git request is carried out
+    # here, as the request holder, before it goes into the question (gitapprove.py).
+    answer = await gitapprove.answer_in(name, prompt)
+    if answer.refusal is not None:
+        return answer.refusal
+    decided = await gitapprove.carry_out(answer.decision) if answer.decision else None
+    result = await _send_accepted(name, prompt, conversation_id, sent_by, sender_label,
+                                  deliver, container, announce)
+    if decided is not None:
+        result.setdefault("data", {})
+        if isinstance(result["data"], dict):
+            result["data"]["git_request"] = decided
+    return result
+
+
+async def _send_accepted(name: str, prompt: str, conversation_id: str | None, sent_by: str,
+                         sender_label: str | None, deliver: str, container: str,
+                         announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
+    """session_send past its door checks: open the webhook, then paste or queue."""
     # Auto-register the transcript watcher if one isn't already running.
     # Capture WHY when we can't: both gates fail silently, and a send with no
     # watcher still injects the prompt and reports ok — so the reply is

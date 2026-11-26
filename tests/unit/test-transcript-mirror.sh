@@ -151,13 +151,13 @@ assert "final destination matches final source" \
 echo
 
 # --- the git container's copy ---------------------------------------------
-# The git agent's transcript is mirrored by the same function (gitctl/gitctl-main.sh); its image
-# is built from gitctl/ alone, so it carries a copy, which must not drift from this one.
-echo "=== the git container's copy is this file ==="
-assert "gitctl/transcript-mirror.sh is identical to .devcontainer/transcript-mirror.sh" \
-    "cmp -s '$AIDC_ROOT/gitctl/transcript-mirror.sh' '$AIDC_ROOT/.devcontainer/transcript-mirror.sh'"
+# The git agent's transcript is mirrored by the same function (gitctl/gitctl-main.sh): its image
+# is built from a staged context holding this file (aidc_build_context), never a copy in gitctl/.
+echo "=== the git container runs this file ==="
+assert "no second copy in gitctl/" "[ ! -e '$AIDC_ROOT/gitctl/transcript-mirror.sh' ]"
 assert "gitctl-main.sh runs it into the MCP surface when that is mounted" \
-    "grep -q 'aidc_mirror_copy_forward_pass \"\$proj\" /var/aidc/transcript-out' '$AIDC_ROOT/gitctl/gitctl-main.sh'"
+    "grep -q 'aidc_mirror_copy_forward_pass \"\$proj\" \"\$OUT\"' '$AIDC_ROOT/gitctl/gitctl-main.sh' \
+        && grep -q 'OUT=\"\${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}\"' '$AIDC_ROOT/gitctl/gitctl-main.sh'"
 echo
 
 # --- summary ------------------------------------------------------------

@@ -286,7 +286,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Owner's hands: the orchestrator running for the live test; the DNS/ingress name if Q-M1 picks Ingress.
 
 ### W-M3: git approvals through the orchestrator on Kubernetes (K8S-06, ruling)
-- 00 Q-K8 (§5): bind each approval in code to the answer: the question carries a one-time code only the user's or orchestrator's answer returns, and `git-requests approve` refuses without it (both backends). Done when: the agent cannot approve its own request (unit test + mutation), and an orchestrator answer approves.
+- 00 Q-K8 (§5), as refined by the owner ruling 2026-11-26 ("git approvals out of the agent's reach"): approvals are bound in code by who can decide, not by a one-time code. A separate user in the git container, `gitreq`, holds and decides every request, and the agent (uid git) cannot act as it. The user decides with `aidc git approve|deny <id>` (exec as gitreq from their machine); an orchestrator decides by answering the agent's question, which the MCP server carries out as gitreq (`git-requests approve|deny <id> [why]`, design-10 S10), matched to the one waiting request the question names. Done when: the agent cannot approve its own request (unit test + mutation), and an orchestrator answer approves (Docker: build-plan-3tears-adoption chunk 13; Kubernetes: chunk 14).
 - 01 The git agent (`git` session) reached by the in-cluster MCP: watch, status, send. 02 The answer path from W-K0-03's result (paste works, or a dedicated answer, Q-M5). 03 The smoke's Claude part made automatic. Done when: an orchestrator approves a k8s session's PR request end to end.
 
 ### W-M4: the taint webhook path (K8S-13)
@@ -340,7 +340,7 @@ W-K7 ops (any time, owner) ; W-R release last
 - Q-K3: "freeze" on Kubernetes cuts the session's egress (a deny-all policy on its proxy pod) and marks it frozen, like Docker's freeze keeps the container but stops it acting; the per-user MCP acts on the sidecar's webhook.
 - Q-K4: VS Code attaches to a per-user editor pod that mounts the user's disk (no API token, egress only through its own proxy).
 - Q-K6: `aidc user add` mints namespace-scoped credentials (Role/RoleBinding + a kubeconfig); a user may still bring their own.
-- Q-K8: yes, bind approvals in code: the question carries a one-time code that only the user's answer returns, and `git-requests approve` refuses without it.
+- Q-K8: yes, bind approvals in code. Refined by the owner ruling 2026-11-26: not by a one-time code but by who can decide: the request holder (gitreq), which only the user's machine and the MCP server (carrying out an orchestrator's answer) reach, and the agent cannot (W-M3-00).
 - Q-K9: `aidc egress add` stays live (no pod restart); resolve names through the session's own proxy/relay instead of hostAliases.
 - Q-K10: `--dns`, `--network` and `clean-env` get cluster forms (owner ruling: nothing left behind); where a form truly cannot exist, K8S-01 is amended with the owner's yes.
 - Q-K11: Syncthing reaches only the user's own machines (LAN/VPN), no public relays or discovery.

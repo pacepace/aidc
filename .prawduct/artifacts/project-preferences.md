@@ -69,5 +69,5 @@ itself (2026-09-17), not from a survey: everything below is what the repo alread
 - **Tests**: `cd mcp && uv run --frozen pytest -q`, then `for t in tests/unit/*.sh; do bash "$t"; done`.
 - **Lint/types**: `uv run --frozen --extra dev ruff check .` and `mypy src`; `shellcheck` for shell.
 - **CI**: `.github/workflows/ci.yml` runs shellcheck (advisory), every `tests/unit/*.sh`
-  (blocking), and the MCP suite on 3.12 and 3.14.
+  (blocking), and the MCP suite on Python 3.14.
 - **Commit attribution**: none, ever (see CLAUDE.md). Merge commits, PRs onto `develop`.

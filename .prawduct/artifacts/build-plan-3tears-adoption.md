@@ -351,9 +351,12 @@ Order follows design-13 "Upstream work".
   carrying out the orchestrator's answer as gitreq, matched to the request id in the question.
   Every push, PR and merge, including terminal-requested ones, is a request. rules mode runs
   passing requests at once, with the check done by gitreq. Only the user changes a mode. Docker
-  in full; on Kubernetes, the gitreq container and the CLI path. The MCP side (the orchestrator's
-  answer performed as gitreq) lands with chunk 14 on Kubernetes and with the chunk 03-04 MCP
-  work on Docker.
+  in full; on Kubernetes, the gitreq container and the CLI path. The MCP side on Docker (the
+  orchestrator's answer performed as gitreq) is this chunk's too, built in its review-fix round
+  after the merge (`service/gitapprove.py`, design-10 S10: session_send to `git` whose open
+  question names one waiting request, answered plainly Approve or Deny, runs `git-requests
+  approve|deny` as gitreq, then sends the answer into the question; ambiguous or unclear answers
+  approve nothing and send nothing). Kubernetes is chunk 14.
 - **Depends on:** none in this plan for the container and CLI part (W-K0 done).
 - **Requirements:** K8S-05, K8S-06, K8S-24, GIT-07.
 - **Also (GIT-07):** gitctl issue verbs (list, view, create, edit, comment, close, reopen) on added
@@ -361,8 +364,12 @@ Order follows design-13 "Upstream work".
   the approval policy per Q-G1.
 - **Done when:** a test and a mutation show uid git cannot approve, deny, change a mode, or push,
   PR or merge outside a request (Docker and the Kubernetes pod spec); `aidc git approve` approves;
-  rules mode runs a passing request with no question; `/prawduct:critic`; committed.
-- **Owner's hands:** none.
+  rules mode runs a passing request with no question; on Docker an orchestrator's "Approve" or
+  "Deny: <why>" to the agent's question decides the request it names, and a test and a mutation
+  show an answer to a question naming no waiting request approves nothing
+  (`mcp/tests/test_git_approve.py`); `/prawduct:critic`; committed.
+- **Owner's hands:** the live check of the orchestrator approving a request on Docker (a
+  logged-in git agent and the orchestrator; tests/smoke/README.md).
 - **Notes (the MCP side's entry point):** the MCP server carries out an orchestrator's answer by
   running, as gitreq, `git-requests approve <id>` or `git-requests deny <id> [<why>]`. On Docker
   that is `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests ...`; on
@@ -382,9 +389,13 @@ Order follows design-13 "Upstream work".
 
 ### Chunk 14: Git approvals through the orchestrator on Kubernetes (W-M3-01..03)
 
-- **Description:** The in-cluster server watches the `git` session; the orchestrator's answer
-  reaches the agent's question (paste, or the key sequence per W-K0-03 / Q-M5); the smoke's Claude
-  part automatic.
+- **Description:** The in-cluster server watches the `git` session, and an orchestrator's answer
+  to the agent's question decides the request it names as on Docker (design-10 S10,
+  `service/gitapprove.py`), the holder reached by `kubectl -n <user ns> exec <git pod> -c gitreq
+  -- git-requests approve|deny <id> [why]` (the pod's own gitreq container; kubectl exec cannot
+  choose a user) instead of `docker exec -u gitreq`. The answer still goes into the question
+  (paste, or the key sequence per W-K0-03 / Q-M5) so the agent's turn goes on; the decision does
+  not depend on it, since the agent approves nothing. The smoke's Claude part automatic.
 - **Depends on:** 12, 13; gate W-K0-03 / Q-M5.
 - **Requirements:** K8S-06 (ruling: a 2.0 ship blocker), K8S-07.
 - **Done when:** live: an orchestrator approves a cluster session's PR request end to end and the

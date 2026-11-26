@@ -358,6 +358,32 @@ def _blocking_tool_use_block(message: dict) -> dict | None:
     return None
 
 
+def open_question(objs: list[dict]) -> dict | None:
+    """The input of the session's AskUserQuestion still waiting for its answer: the last
+    one asked whose tool_use no later tool_result answers. None when none waits."""
+    asked: dict[str, dict] = {}
+    order: list[str] = []
+    for obj in objs:
+        message = obj.get("message") if isinstance(obj, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if (obj.get("type") == "assistant" and b.get("type") == "tool_use"
+                    and b.get("name") == "AskUserQuestion" and isinstance(b.get("id"), str)
+                    and isinstance(b.get("input"), dict)):
+                asked[b["id"]] = b["input"]
+                order.append(b["id"])
+            elif b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
+                asked.pop(b["tool_use_id"], None)
+    for tool_use_id in reversed(order):
+        if tool_use_id in asked:
+            return asked[tool_use_id]
+    return None
+
+
 def _render_interactive_prompt(block: dict) -> str:
     """Render an interactive-input tool_use block into deliverable text.
 

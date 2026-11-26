@@ -36,6 +36,8 @@ assert_eq() {
         echo "  FAIL: $desc (want '$want', got '$got')"; FAIL=$((FAIL + 1))
     fi
 }
+# names_in DIR PREFIX: the names in DIR that start with PREFIX, one per line (none: nothing).
+names_in() { local f; for f in "$1/$2"*; do [ -e "$f" ] && basename "$f"; done; return 0; }
 assert_has() {
     local desc="$1" needle="$2" hay="$3"
     case "$hay" in
@@ -408,7 +410,7 @@ assert_eq "  when it can be read again (the same pod), still the same forward" "
     "$([ -e "$K_STATE/pf.3" ] && echo yes || echo no)|$(kill -0 "$fwd" 2>/dev/null && echo running || echo gone)"
 k8s_tunnel_stop aidc-u-alice demo 18080
 assert_eq "stop ends the supervisor" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
-assert_eq "  and deletes its log" "" "$(ls "$TD" | grep '^demo-18080\.' || true)"
+assert_eq "  and deletes its log" "" "$(names_in "$TD" demo-18080.)"
 sleep 0.5
 assert_eq "  and its port-forward" "" "$(pgrep -f 'sleep 300' || true)"
 assert_eq "  and forgets the tunnel" "" "$(k8s_tunnels aidc-u-alice demo)"
@@ -425,7 +427,7 @@ assert_has "past the cap the log is emptied, saying so" "log capped at 2000 byte
 assert_eq "  well under the cap now; the older lines are in .log.1" "yes|yes" \
     "$([ "$(wc -c < "$TD/demo-18080.log")" -lt 2000 ] && echo yes)|$(grep -q xxxxx "$TD/demo-18080.log.1" && echo yes)"
 k8s_tunnel_stop aidc-u-alice demo 18080
-assert_eq "  stop deletes both" "" "$(ls "$TD" | grep '^demo-18080\.' || true)"
+assert_eq "  stop deletes both" "" "$(names_in "$TD" demo-18080.)"
 out=$(K_PF_BUSY=1 k8s_tunnel_start aidc-u-alice demo 18080 8080 2>&1); rc=$?
 assert_has "a host port in use here is said so" "localhost:18080 is taken on this machine" "$out"
 assert_eq "  start fails" 1 "$rc"
@@ -450,7 +452,7 @@ assert_eq "the StatefulSet not found (aidc kill on another machine): the supervi
     "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
 assert_eq "  and the tunnel is forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
 assert_eq "  its pid, spec and log all deleted (the session is gone: nothing left to read)" "" \
-    "$(ls "$(k8s_tunnel_dir aidc-u-alice)" | grep '^demo-18080\.' || true)"
+    "$(names_in "$(k8s_tunnel_dir aidc-u-alice)" demo-18080.)"
 rm -f "$K_STATE/sts_gone"; unset AIDC_K8S_TUNNEL_GONE_CHECKS
 
 run() { : > "$K_APPLIED"; : > "$K_LOG"; (cd "$HOME" && "$AIDC_ROOT/scripts/aidc" "$@" 2>&1 </dev/null); echo "exit=$?"; }
@@ -615,7 +617,7 @@ assert_has "kill says which tunnels it stopped" "stopped this machine's tunnels 
 assert_eq "  the supervisor is gone" "gone" "$(kill -0 "$pid" 2>/dev/null && echo running || echo gone)"
 assert_eq "  and forgotten" "" "$(k8s_tunnels aidc-u-alice demo)"
 assert_eq "  every tunnel file of the session deleted, a leftover log too; demo-x's kept" "demo-x-18080.log" \
-    "$(ls "$TD" | grep '^demo-' || true)"
+    "$(names_in "$TD" demo-)"
 rm -f "$TD/demo-x-18080.log"
 assert_eq "kill removes the pages, login and certificate, then the session, then its claims but the kept audit one" \
 "-n aidc-u-alice delete ingress -l aidc/session=demo,app=expose --ignore-not-found

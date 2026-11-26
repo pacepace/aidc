@@ -83,11 +83,17 @@ assert_has "the image installs the sessions' hook writer there, root's" "COPY ho
 assert_has "..." "chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event" "$df"
 # One writer: the image is built from a staged context holding the sessions' own
 # .devcontainer/hook-event.sh, never a copy kept in gitctl/.
-assert_eq "no second copy of the writer in gitctl/" no "$([ -e "$G/hook-event.sh" ] && echo yes || echo no)"
 staged=$(bash -c '. "$1/scripts/lib/common.sh" && aidc_build_context aidc/gitctl:t "$1/gitctl" && printf "%s|%s" "$AIDC_BUILD_CONTEXT" "$AIDC_BUILD_STAGE"' _ "$AIDC_ROOT")
 ctx=${staged%|*}; stage=${staged#*|}
-assert_eq "the staged gitctl context holds the sessions' writer, byte for byte" "" \
-    "$(cmp "$ctx/hook-event.sh" "$AIDC_ROOT/.devcontainer/hook-event.sh" 2>&1)"
+for f in hook-event.sh gh-standin.sh transcript-mirror.sh; do
+    assert_eq "the staged gitctl context holds the sessions' ${f}, byte for byte" "" \
+        "$(cmp "$ctx/${f}" "$AIDC_ROOT/.devcontainer/${f}" 2>&1)"
+    assert_eq "...and gitctl/ keeps no copy of ${f}" no "$([ -e "$G/${f}" ] && echo yes || echo no)"
+done
+assert_eq "every file gitctl/Dockerfile copies is in the staged context" "" \
+    "$(awk '/^COPY /{c=1} c{line=line" "$0} c&&!/\\$/{print line; line=""; c=0}' "$G/Dockerfile" \
+        | sed 's/\\//g' | awk '{for (i = 2; i < NF; i++) print $i}' \
+        | while read -r f; do [ -e "$ctx/$f" ] || printf '%s ' "$f"; done)"
 assert_eq "...and the Dockerfile it builds from" yes "$([ -f "$ctx/Dockerfile" ] && echo yes || echo no)"
 # Run as the agent in its tmux window main:claude (gitctl-main.sh names it so), it writes
 # into the mirror the MCP reads for the session git (Docker: /var/aidc/transcript-out; here a
@@ -97,8 +103,22 @@ mkdir -p "$S/mirror" "$S/wbin"; printf '#!/bin/sh\necho main:claude\n' > "$S/wbi
 printf '{"hook_event_name":"SessionStart","session_id":"s"}' | PATH="$S/wbin:$PATH" TMUX_PANE=%0 AIDC_HOOK_EVENTS_DIR="$S/mirror/hook-events" bash "$ctx/hook-event.sh"
 assert_eq "a SessionStart event lands in the mirror's hook-events" "SessionStart" "$(jq -r .event "$S"/mirror/hook-events/*.json 2>/dev/null)"
 [ -n "$stage" ] && rm -rf "$stage"
-assert_has "the agent's hook events start empty with the container (the last Claude's are not read)" \
-    "rm -rf -- /var/aidc/transcript-out/hook-events" "$(cat "$G/gitctl-main.sh")"
+# The container's main process run as it starts (tmux and sudo stand-ins; killed with its
+# mirror loop by process group): the last Claude's events are gone, the transcript stays.
+M="$S/main"; mkdir -p "$M/home" "$M/out/hook-events" "$M/bin"
+printf '{"event":"Stop"}\n' > "$M/out/hook-events/1-1.json"
+printf 'kept\n' > "$M/out/old.jsonl"
+printf '#!/bin/sh\nexit 1\n' > "$M/bin/sudo"
+printf '#!/bin/sh\ncase "$1" in has-session) exit 1 ;; esac\nexit 0\n' > "$M/bin/tmux"
+chmod +x "$M/bin/sudo" "$M/bin/tmux"
+HOME="$M/home" PATH="$M/bin:$PATH" AIDC_TRANSCRIPT_OUT="$M/out" \
+    AIDC_MIRROR_LIB="$AIDC_ROOT/.devcontainer/transcript-mirror.sh" setsid sh "$G/gitctl-main.sh" >/dev/null 2>&1 &
+mpid=$!
+for _ in $(seq 50); do [ -e "$M/out/hook-events" ] || break; sleep 0.1; done
+kill -- "-$mpid" 2>/dev/null; wait "$mpid" 2>/dev/null
+assert_eq "the agent's hook events start empty with the container (the last Claude's are not read)" \
+    gone "$([ -e "$M/out/hook-events" ] && echo there || echo gone)"
+assert_eq "...and only those: the mirrored transcript stays" kept "$(cat "$M/out/old.jsonl" 2>/dev/null)"
 
 echo "=== git-claude: the git agent's Claude ==="
 H="$S/home"; mkdir -p "$H/.local/bin"

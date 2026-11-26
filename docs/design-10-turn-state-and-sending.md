@@ -287,10 +287,14 @@ missing a code or uses one outside the set:
 | `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call | no |
 | `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` | yes |
 | `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again (the git agent, which `aidc kill` refuses: `aidc rebuild`, then `aidc git setup`) | no |
+| `git_answer_unclear` | `session_send` to the git agent while its open question names a waiting git request: the answer is not plainly Approve (alone) or Deny (with its reason), or the question offers no such option; nothing was approved or sent (S10) | fix the call: "Approve", or "Deny: <why>" | no |
+| `git_request_ambiguous` | `session_send` to the git agent: its open question names several git requests; nothing was approved or sent; `data.request_ids` names them (S10) | tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
+| `git_requests_unreadable` | `session_send` to the git agent: the git container's waiting requests could not be read; nothing was approved or sent (S10) | retry | yes |
 
 **Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
 call, made again unchanged, can succeed later. It follows the Caller column: `cli_failed` is
-transient (retry once), and `invoke_busy` succeeds once the running headless run ends. Every
+transient (retry once), `invoke_busy` succeeds once the running headless run ends, and
+`git_requests_unreadable` once the git container answers. Every
 other code meets the same refusal until something changes (the person acts, or the call is
 fixed). `RETRYABLE_ERROR_CODES` in `service/common.py` is this column, held to it by a test.
 
@@ -515,6 +519,34 @@ in another window writes nothing, since its Stop is not the session's.
 - **The screen** is read only for what a paste needs: the input box, a dialog (S2), the agent
   list, and AskUserQuestion. The reply's content is still the transcript's, and exactly-once
   delivery (the watermark and ledger) is unchanged.
+
+### S10. An orchestrator's answer to the git agent's question about a git request (K8S-05)
+
+Owner ruling 2026-11-26 ("git approvals out of the agent's reach"): the git agent decides
+nothing; in ask mode it asks about each waiting push, pull request or merge with its question
+tool, naming the request's id, and an orchestrator approves by answering. So `session_send` to
+the session `git` carries the answer out itself (`service/gitapprove.py`), before the answer goes
+into the question:
+
+- **Which request.** The id comes from the agent's open question (its last AskUserQuestion with
+  no tool_result, in the session's transcript), never from the orchestrator's text. A question
+  naming no request id is an ordinary send; one naming several is refused,
+  `git_request_ambiguous`, nothing sent.
+- **Which decision.** The answer must start with Approve or Deny, Approve standing alone and Deny
+  followed by its reason if any, and the question must offer that option. Anything else is
+  refused, `git_answer_unclear`, nothing sent: an approval pushes to GitHub, so a conditional
+  or mixed answer is never read as one.
+- **Waiting, then decided.** The waiting requests are read from the holder (`git-requests list`
+  as gitreq; unreadable is `git_requests_unreadable`, retryable). A waiting one is decided by
+  `git-requests approve|deny <id> [why]` run as gitreq in the git container (Docker:
+  `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev`, as `aidc git approve`
+  runs it; Kubernetes: the pod's gitreq container, plan chunk 14), which acts only on a request
+  still waiting. One no longer waiting is decided by nothing.
+- **Reported.** The send goes on as any other (the answer reaches the question, so the agent's
+  turn goes on), and its result carries `git_request`: `request_id`, `decision`, `done`, the
+  holder's `exit` and `message`, or `code` `git_request_not_waiting` / `git_request_not_decided`.
+  The access log records each as `git_request_answered`, and each refusal as
+  `git_request_answer_refused` with its reason.
 
 ### S2. What the screen is still read for (MCP-28, MCP-29)
 

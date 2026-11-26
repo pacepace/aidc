@@ -54,7 +54,10 @@ INSTRUCTIONS = (
     "Claude, read/write files inside sessions, and surface audit data. "
     "Give a session's agent any task or anything long (edits, builds, tests, "
     "multi-step work) with session_send; session_invoke is only for short, "
-    "single-shot questions."
+    "single-shot questions. When the git agent (session \"git\") asks about a git "
+    "request, answer with session_send and exactly \"Approve\" or \"Deny: <why>\": aidc "
+    "carries the decision out (the agent cannot), and the result's git_request says what "
+    "happened."
 )
 
 MCP_PATH = "/mcp"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The git container's request holder, live on Docker, touching nothing of the user's: an
-# aidc/gitctl image built with a test tag (docker build -t aidc/gitctl:<tag> gitctl/), a
-# container and volumes of their own names, no network. It checks what unit tests cannot: the
+# aidc/gitctl image with a test tag, built from its staged context as every builder builds it
+# (aidc_build_context: gitctl/ with the sessions' scripts beside it; `--build` does that here),
+# a container and volumes of their own names, no network. It checks what unit tests cannot: the
 # real users, sudo rules and process layout. The agent's Claude Code hooks land in the mirror
 # (SessionStart, UserPromptSubmit; a turn's Stop needs a real Claude login), the watcher runs as
 # gitreq started through its sudo rule (a second one waits on the lock), a session's request is
@@ -9,9 +10,12 @@
 # writes and logout (by gitctl and by sudo), the holder's approve runs it, rules mode runs at
 # once, and an issue call is answered in under half a second. GitHub is never reached.
 #
-# Usage: bash tests/smoke/git-holder.sh <tag>
+# Usage: bash tests/smoke/git-holder.sh [--build] <tag>
+#   --build   build aidc/gitctl:<tag> first, from the staged context (then run the check)
 set -u
-TAG="${1:?usage: tests/smoke/git-holder.sh <image tag of a locally built aidc/gitctl>}"
+BUILD=0
+[ "${1:-}" != --build ] || { BUILD=1; shift; }
+TAG="${1:?usage: tests/smoke/git-holder.sh [--build] <image tag of aidc/gitctl>}"
 IMG="aidc/gitctl:${TAG}"
 N="gitreq-live-$$"
 AIDC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -26,6 +30,21 @@ cleanup() {
     rm -rf "$S"
 }
 trap cleanup EXIT
+
+# git_holder_build <root> <image>: build the image from the context aidc_build_context stages
+# (gitctl/Dockerfile copies the sessions' scripts, which gitctl/ alone does not hold).
+git_holder_build() {
+    local rc=0
+    # shellcheck source=../../scripts/lib/common.sh
+    . "$1/scripts/lib/common.sh"
+    aidc_build_context "aidc/gitctl:t" "$1/gitctl" || return 1
+    docker build -t "$2" -f "$AIDC_BUILD_CONTEXT/Dockerfile" "$AIDC_BUILD_CONTEXT" || rc=$?
+    [ -z "$AIDC_BUILD_STAGE" ] || rm -rf "$AIDC_BUILD_STAGE"
+    return "$rc"
+}
+if [ "$BUILD" = 1 ]; then
+    git_holder_build "$AIDC_ROOT" "$IMG" || { echo "FAIL: could not build ${IMG}"; exit 1; }
+fi
 
 mkdir -p "$S/disk" "$S/settings" "$S/added"
 printf 'requests=/var/aidc/git-requests\ndisk=/home/tester\nmode=ask\n' > "$S/settings/settings"

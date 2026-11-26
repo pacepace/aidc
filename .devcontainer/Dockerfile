@@ -461,6 +461,8 @@ COPY tmux-start.sh         /usr/local/bin/aidc-tmux-start.sh
 COPY entrypoint.sh         /usr/local/bin/aidc-entrypoint.sh
 COPY user-main.sh          /usr/local/bin/aidc-user-main.sh
 COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
+COPY hook-event.sh        /usr/local/bin/aidc-hook-event
+COPY managed-settings.sh  /usr/local/bin/aidc-managed-settings.sh
 COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
 COPY gh-standin.sh         /usr/local/bin/gh
@@ -476,6 +478,8 @@ RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/git-remote-aidc /usr/local/bin/a
                 /usr/local/bin/aidc-user-main.sh \
                 /usr/local/bin/aidc-transcript-mirror.sh \
                 /usr/local/bin/aidc-claude-state-install.sh \
+                /usr/local/bin/aidc-hook-event \
+                /usr/local/bin/aidc-managed-settings.sh \
                 /usr/local/bin/aidc-dockerd-start.sh
 
 # testament (K8S-25), when the user's config names its repo: aidc builds its newest release

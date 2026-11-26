@@ -10,8 +10,9 @@ The callers are synchronous, as 1.x's file writes were: transcript.py's persiste
 functions keep their names and arguments, and a write returns once it is committed. The
 store's statements run on one loop thread of this module's, which every caller (the
 server's loop, a worker thread) waits on for the statement's length, as it waited on the
-file write before. Writes to one store are serialized there, so a read and the write it
-leads to are never interleaved with another's.
+file write before. Each write to a store is serialized there (one at a time); a caller
+that reads a document and writes it back (a send record, the pasted ids) is not atomic
+across threads, as 1.x's read-then-rename was not, and relies on its own callers' order.
 
 The first open of a state dir that holds 1.x files reads each one into the store, then moves
 them to `migrated-1x/` beside it, kept for a downgrade. Reading one in is idempotent (a

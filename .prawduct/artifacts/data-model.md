@@ -2,8 +2,8 @@
 
 aidc's own files are config YAML and each session's audit dir, documented where they are written.
 aidc-mcp's durable state (TRS-25, from 2.0) is one store: a 3tears L3 holding a few tables,
-SQLite by default (`<watcher-state>/aidc-state.sqlite`, one process), Postgres by configuration
-(`AIDC_MCP_STATE_STORE`, an L3 URL) on a mesh.
+SQLite (`<watcher-state>/aidc-state.sqlite`, one process). On a mesh the same tables move to the
+Postgres L3 by configuration; that switch is built with the mesh face (adoption chunk 21).
 
 ## Persisted-format questions (asked before the fields were designed)
 
@@ -64,7 +64,7 @@ All tables carry `date_created` (immutable) and `date_updated` (`datetimetz`).
 | `sent_prompts` | session | `session` | the send record list (`<s>.sent-prompts.json`) |
 | `prompt_origins` | session | `session` | the origin record (`<s>.prompt-origin.json`) |
 | `joined_batches` | session | `session` | the joined-batch list (`<s>.joined-batches.json`) |
-| `pasted_ids` | session | `session` | the pasted prompt ids (`<s>.pasted-ids.json`) |
+| `pasted_ids` | session | `session` | the pasted prompt ids (`<s>.pasted-prompts.json`) |
 | `markers` | session, kind | `session`, `kind` | the marker's content (`<s>.working-text-seen`, `<s>.interrupt-reported`) |
 | `dead_letters` | a UUID | `kind` (`reply`, `send`), `session`, `conversation_id`, `reason` | the dead letter as 1.x wrote it (`dead-letter/*.json`) |
 

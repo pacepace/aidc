@@ -24,6 +24,9 @@ dependencies = [
     # (the store's refusals are asyncpg's error types) and SQLAlchemy; nothing connects to
     # Postgres, and no NATS client is installed (owner ruling 2026-11-26, TRS-01/TRS-17).
     "3tears>=0.95,<0.96",
+    # store.py builds the L1's tables from the store's schemas with it (3tears core's own
+    # dependency; named because aidc imports it)
+    "sqlalchemy",
 ]
 
 [project.optional-dependencies]

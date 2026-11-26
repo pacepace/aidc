@@ -41,13 +41,14 @@ token inside a `--dangerously-skip-permissions` sandbox would undo the sandbox.
 
 `AIDC_MCP_ALLOWED_SESSIONS=jointtest` limits a server to the named sessions (`scope.py`):
 
-- every tool that takes a session `name` is wrapped by `tools._scoped`, which refuses any other
-  name before the tool runs (a test asserts every such tool is wrapped);
+- every tool that takes a session `name` is refused for any other name by the server's
+  authorizer (`authz.py`) before the tool runs (a test asserts every such tool is refused);
 - `session_create` is refused;
 - `session_list` and the `aidc://sessions` resource show only the allowed rows;
 - the per-session resources refuse other names, and `aidc://config` is refused;
-- `resume_send_queues` skips other sessions' queue files, so a scoped server sharing a state dir
-  can neither resume nor dead-letter them.
+- `resume_send_queues` skips other sessions' saved queues, so a scoped server can neither resume
+  nor dead-letter them. A scoped server needs a state dir of its own: from 2.0 the state store
+  admits one server per state dir, and a second is refused at start.
 
 Unset, the server behaves exactly as before.
 

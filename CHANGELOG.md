@@ -118,6 +118,13 @@ and the envelope are unchanged; what an MCP caller sees differently:
   Always with the token. It may post only to your `orchestrator.callback_url` host and port
   (`mcp.kubernetes.callback_address` when the cluster reaches it at another address). A session
   may no longer be named `mcp` on Kubernetes.
+- **A tainted cluster session is frozen by your MCP server** (taint response `freeze`, the
+  default): its policy sidecar tells the server on its own port, and the server, which also
+  looks at every session's flag each minute, cuts every way out of the session and marks it.
+  `aidc status` says `freeze: FROZEN`, or `PENDING` while your server is not running.
+  `aidc egress add` and `aidc network add` refuse a tainted session. The first `aidc create`
+  makes your MCP server's Service (its address is the webhook's), and `aidc mcp stop` keeps
+  it. Create sessions again to give them the webhook.
 - **`session_create` and `session_mcp_set` through your cluster server** (with
   `mcp.session_create: true`): a session made there needs no repo (it starts at your disk's top,
   `/home/<user>`), keeps running and answering with your machines off, and reports the cluster

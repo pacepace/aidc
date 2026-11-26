@@ -277,6 +277,22 @@ for _ in $(seq 15); do
 done
 assert "the audit volume holds the policy events" \
     "k8s_kubectl -n '$NS' exec '$(proxy_pod)' -c audit -- grep -q tainted /var/aidc/audit/policy-events.log </dev/null"
+# The freeze (SEC-05/08, W-K4): the user's MCP server, told by the sidecar's webhook, cuts the
+# session's way out within seconds (60 s at most, its own look at every flag). Without a running
+# server it is pending, and says so.
+if "$AIDC" mcp status --backend kubernetes </dev/null 2>/dev/null | grep -q '): RUNNING'; then
+    for _ in $(seq 30); do status_has 'freeze:   FROZEN' && break; sleep 3; done
+    assert "the user's MCP server freezes the tainted session within 90 s, and aidc status says so" \
+        "status_has 'freeze:   FROZEN'"
+    code=$(in_dev 'curl -s -m 10 -o /dev/null -w "%{http_code}" https://example.com/' 2>/dev/null)
+    assert "the frozen session reaches nothing, not even its own proxy (got ${code:-none})" \
+        "[ '${code:-000}' = 000 ]"
+    assert "egress add refuses the frozen session (never cleaned)" \
+        "! '$AIDC' egress '$SESSION' add 192.0.2.1:22 </dev/null"
+else
+    assert "with no MCP server running, the freeze is pending, and aidc status says so" \
+        "status_has 'freeze:   PENDING'"
+fi
 
 echo "[7/7] kill"
 REL="${REPO#"$HOME"}"

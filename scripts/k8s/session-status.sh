@@ -43,6 +43,23 @@ case "$taint" in
     no) printf 'taint:    clean\n' ;;
     *) printf 'taint:    %s\n' "$taint" ;;
 esac
+# A tainted session's freeze (SEC-05/08 on Kubernetes): the user's MCP server cuts its egress and
+# marks it frozen; until it has, a freeze response is pending, never done.
+if [ "${taint%% *}" = yes ]; then
+    frozen=$(k8s_session_frozen "$ns" "$NAME")
+    response=$(k8s_get "$ns" deployment "${NAME}-proxy" \
+        -o 'jsonpath={.spec.template.spec.containers[?(@.name=="policy")].env[?(@.name=="AIDC_TAINT_RESPONSE")].value}') \
+        || response="unknown"
+    case "$frozen" in
+        yes*) printf 'freeze:   FROZEN %s (its egress is cut)\n' "${frozen#yes }" ;;
+        no) if [ "$response" = freeze ]; then
+                printf 'freeze:   PENDING: your MCP server cuts its egress when it runs (aidc mcp status)\n'
+            else
+                printf 'freeze:   not frozen (taint response: %s)\n' "${response:-?}"
+            fi ;;
+        *) printf 'freeze:   %s\n' "$frozen" ;;
+    esac
+fi
 # The malware feeds behind the blocklist (#60), from the refresher's state file; a refresher that
 # cannot be asked is unknown, never fine.
 if ! proxy=$(k8s_get "$ns" pod -l "aidc/session=${NAME},app=proxy" -o name); then

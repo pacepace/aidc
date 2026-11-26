@@ -21,6 +21,8 @@ from aidc_mcp import audit, backend
 
 # Where proxy/policy/policy.sh writes the flag, inside the policy sidecar.
 TAINT_FILE = "/var/state/tainted"
+# Where the user's server marks a session it froze (Kubernetes), beside the taint flag.
+FROZEN_FILE = "/var/state/frozen"
 # Where the policy sidecar appends one JSON event per line.
 POLICY_EVENTS_FILE = "/var/log/aidc/policy-events.log"
 # Where the audit sidecar has the session's audit dir mounted.
@@ -98,6 +100,46 @@ async def read_taint(name: str) -> dict[str, str] | None:
         "trigger": str(data.get("trigger") or "unknown"),
         "domain": str(data.get("domain") or ""),
     }
+
+
+async def read_frozen(name: str) -> dict[str, Any] | None:
+    """The mark the user's server left when it froze the session ({frozen_at, ...}), or None
+    when it is not frozen.
+
+    :raises TaintUnknown: when the policy sidecar could not be asked
+    """
+    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+                                              ["cat", FROZEN_FILE]))
+    if res.returncode != 0:
+        if _missing_file(res.err):
+            return None
+        raise TaintUnknown(res.err.strip() or f"{backend.program()} exec exited {res.returncode}")
+    try:
+        data = json.loads(res.stdout.decode("utf-8", errors="replace"))
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+async def mark_frozen(name: str, mark: dict[str, Any]) -> bool:
+    """Write the frozen mark into the session's policy sidecar (whole, by rename)."""
+    script = 'printf "%s\\n" "$1" > "$2.new" && mv -f "$2.new" "$2"'
+    res = await run_docker(*backend.exec_args(
+        backend.target(name, backend.ROLE_POLICY),
+        ["sh", "-c", script, "aidc-freeze", json.dumps(mark, separators=(",", ":")),
+         FROZEN_FILE]))
+    return res.returncode == 0
+
+
+async def taint_response(name: str) -> str | None:
+    """The session's taint response (log, notify or freeze; SEC-05) as its policy sidecar runs
+    with it, or None when it cannot be read."""
+    tgt = backend.target(name, backend.ROLE_POLICY)
+    res = await run_docker(*backend.env_workdir_args(tgt))
+    if res.returncode != 0:
+        return None
+    env, _ = backend.env_and_workdir(res.stdout, tgt)
+    return env.get("AIDC_TAINT_RESPONSE", "").strip() or "notify"
 
 
 async def taint_or_none(name: str) -> dict[str, str] | None:

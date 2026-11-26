@@ -123,6 +123,10 @@ case "$*" in
     *"-n shop get service -o json"*) echo '{"items":[{"metadata":{"name":"db"},"spec":{"clusterIP":"10.45.8.8"}},{"metadata":{"name":"headless"},"spec":{"clusterIP":"None"}}]}' ;;
     *"get pod -l aidc/session=demo,app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec -i pod/demo-proxy-abc -c names"*) cat > "$K_STATE/names" ;;
+    # The taint flag in the policy sidecar: clean unless K_TAINTED=1; K_POLICY_DOWN=1: no answer.
+    *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
+        [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
+        if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
     *"exec demo-dev-0 -c dev -- getent hosts"*) exit 0 ;;
     *"get pod demo-dev-0"*"jsonpath="*)
         [ -e "$K_STATE/pod_fail" ] && { echo 'Unable to connect to the server' >&2; exit 1; }
@@ -496,6 +500,13 @@ out=$(K_EXISTS=1 run egress demo rm 192.168.5.21:22)
 assert_has "rm of its only port removes the relay" "delete deployment/demo-egress-192-168-5-21 service/demo-egress-192-168-5-21 networkpolicy/demo-egress-192-168-5-21 networkpolicy/demo-egress-192-168-5-21-dev" "$(cat "$K_LOG")"
 assert_has "  and writes the names again" "exec -i pod/demo-proxy-abc -c names" "$(cat "$K_LOG")"
 
+: > "$K_APPLIED"
+out=$(K_EXISTS=1 K_TAINTED=1 run egress demo add 192.168.5.21:5432)
+assert_has "a tainted session gets no new relay (SEC-06: never cleaned, no new way out)" "demo is tainted: it gets no new way out" "$out"
+assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
+out=$(K_EXISTS=1 K_POLICY_DOWN=1 run egress demo add 192.168.5.21:5432)
+assert_has "a session whose taint cannot be read gets none either" "cannot tell whether demo is tainted" "$out"
+
 echo "=== aidc network on Kubernetes ==="
 rm -f "$K_STATE/relays.json" "$K_STATE/nets.json"
 out=$(K_EXISTS=1 run network demo add kube-system)
@@ -523,6 +534,10 @@ out=$(K_EXISTS=1 run network demo add shop)
 assert_has "add of a namespace already given reads its Services again" "reading its Services again" "$out"
 assert_has "  into the responder" "10.45.8.8 db.shop" "$(cat "$K_STATE/names" 2>/dev/null)"
 assert_eq "  and changes no policy" "" "$(cat "$K_APPLIED")"
+: > "$K_APPLIED"
+out=$(K_EXISTS=1 K_TAINTED=1 run network demo add shop)
+assert_has "a tainted session is given no namespace" "demo is tainted: it gets no new way out" "$out"
+assert_eq "  (nothing applied)" "" "$(cat "$K_APPLIED")"
 out=$(K_EXISTS=1 run network demo --help)
 assert_has "help says the names are read on create, add, rm, sync and egress changes" "resolves after the next sync" "$out"
 rm -f "$K_STATE/nets.json"

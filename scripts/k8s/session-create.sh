@@ -281,6 +281,10 @@ k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/
     | k8s_kubectl apply -f - >&2
 # The session's transcripts and hook events reach the user's MCP server through the mirror claim.
 k8s_ensure_transcripts "$ns" || exit 1
+# Its policy sidecar pokes the user's MCP server when it is tainted (W-M4): at the server's
+# Service address, made now when missing so it is stable whether or not the server runs yet.
+AIDC_K8S_TAINT_WEBHOOK_IP=$(k8s_mcp_service_ip "$ns") || exit 1
+export AIDC_K8S_TAINT_WEBHOOK_IP
 k8s_render_session "$NAME" "$REPO_PATH" "$PROFILE" "$sel" "$AUDIT_CLAIM" | k8s_kubectl apply -f - >&2
 # Not there yet is asked again; a read that fails is "the cluster did not answer" (k8s_read).
 proxy_ip=""

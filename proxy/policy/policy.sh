@@ -23,13 +23,18 @@ AIDC_SESSION="${AIDC_SESSION:-unknown}"
 AIDC_TAINT_RESPONSE="${AIDC_TAINT_RESPONSE:-notify}"   # log | notify | freeze
 AIDC_TLD_TAINTS="${AIDC_TLD_TAINTS:-false}"            # true | false
 AIDC_NOTIFY_WEBHOOK="${AIDC_NOTIFY_WEBHOOK:-}"
+# Kubernetes: the user's MCP server's taint webhook (W-M4). The poke names only the session; the
+# server reads the flag itself and acts on it (on a freeze, cuts the session's egress).
+AIDC_TAINT_WEBHOOK="${AIDC_TAINT_WEBHOOK:-}"
 
-ACCESS_LOG="/var/log/squid/access.log"
-BLOCKLIST_FILE="/etc/squid/blocklist.txt"
-TLDS_FILE="/etc/squid/state-actor-tlds.txt"
-STATE_DIR="/var/state"
+# The sidecar's mounts; set otherwise only by the unit test (tests/unit/test-policy-webhook.sh).
+ACCESS_LOG="${AIDC_POLICY_ACCESS_LOG:-/var/log/squid/access.log}"
+BLOCKLIST_FILE="${AIDC_POLICY_BLOCKLIST:-/etc/squid/blocklist.txt}"
+TLDS_FILE="${AIDC_POLICY_TLDS:-/etc/squid/state-actor-tlds.txt}"
+STATE_DIR="${AIDC_POLICY_STATE_DIR:-/var/state}"
 TAINT_FLAG="${STATE_DIR}/tainted"
-EVENTS_LOG="/var/log/aidc/policy-events.log"
+EVENTS_LOG="${AIDC_POLICY_EVENTS_LOG:-/var/log/aidc/policy-events.log}"
+NOTIFY="${AIDC_POLICY_NOTIFY:-/usr/local/bin/notify.sh}"
 
 mkdir -p "$STATE_DIR" "$(dirname "$EVENTS_LOG")"
 
@@ -158,8 +163,19 @@ do_taint() {
     log "TAINTED: trigger=${trigger} domain=${domain}"
 
     # Always notify on first taint (notify.sh handles webhook + FIFO).
-    printf '%s' "$payload" | /usr/local/bin/notify.sh || \
+    printf '%s' "$payload" | "$NOTIFY" || \
         log "notify.sh exited non-zero"
+
+    # The user's MCP server, when there is one to tell (Kubernetes). A lost poke is made up for:
+    # the server also looks at every session's flag on its own.
+    if [ -n "$AIDC_TAINT_WEBHOOK" ]; then
+        if curl -fsS -X POST -H 'Content-Type: application/json' --max-time 5 \
+                -d "{\"session\":\"$(json_escape "$AIDC_SESSION")\"}" "$AIDC_TAINT_WEBHOOK" >/dev/null 2>&1; then
+            log "taint webhook: told the MCP server"
+        else
+            log "taint webhook: the MCP server did not answer (it finds the flag on its own)"
+        fi
+    fi
 
     # Response dispatch.
     case "$AIDC_TAINT_RESPONSE" in

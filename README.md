@@ -1152,7 +1152,7 @@ Three responses (`taint_response` config):
 
 - `log` — write the flag, no other action. Quietest.
 - `notify` — flag + notify (webhook + a FIFO under the audit dir).
-- `freeze` (default) — flag + `docker pause` on the dev container. The agent stops mid-step; you investigate via `aidc status` / `aidc logs` / audit dir before deciding whether to kill+recreate. Strictest, and the right stance for a sandbox.
+- `freeze` (default) — flag + `docker pause` on the dev container. The agent stops mid-step; you investigate via `aidc status` / `aidc logs` / audit dir before deciding whether to kill+recreate. Strictest, and the right stance for a sandbox. On Kubernetes your MCP server freezes the session when its policy sidecar tells it: every way out of the session is cut (its pods keep running, reaching nothing), and `aidc status` says `freeze: FROZEN`, or `PENDING` while your server is not running (`aidc mcp start`).
 
 Once tainted, **kill and recreate** is the only path. The session does not get "cleaned." Your committed work in the host repo is unaffected.
 

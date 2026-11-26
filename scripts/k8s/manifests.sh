@@ -690,6 +690,18 @@ k8s_render_session() {
     # The GPU only when asked for (K8S-11): the device plugin hands one to the pod.
     local gpu=""
     [ "${AIDC_K8S_GPU:-0}" = 1 ] && gpu=", nvidia.com/gpu: 1"
+    # The taint webhook (W-M4): the policy sidecar pokes the user's MCP server at its Service
+    # address (AIDC_K8S_TAINT_WEBHOOK_IP, read at create; the proxy pod has no cluster DNS), on
+    # that one port; the rule names both the server's pods and the Service address, since a
+    # network plugin may judge before or after the address is translated. Squid refuses every
+    # private address, so nothing a session asks for reaches it.
+    local webhook="" webhook_rule=""
+    if [ -n "${AIDC_K8S_TAINT_WEBHOOK_IP:-}" ]; then
+        webhook="http://${AIDC_K8S_TAINT_WEBHOOK_IP}:${K8S_MCP_TAINT_PORT}/taint"
+        webhook_rule="    - to: [{podSelector: {matchLabels: {app: ${K8S_MCP_NAME}}}}, {ipBlock: {cidr: ${AIDC_K8S_TAINT_WEBHOOK_IP}/32}}]
+      ports: [{protocol: TCP, port: ${K8S_MCP_TAINT_PORT}}]
+"
+    fi
     cat <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -715,7 +727,7 @@ spec:
   egress:
     - to: [{ipBlock: {cidr: 9.9.9.9/32}}, {ipBlock: {cidr: 149.112.112.112/32}}]
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-${dns_rule}    - to:
+${dns_rule}${webhook_rule}    - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
@@ -840,6 +852,7 @@ spec:
             - {name: AIDC_TAINT_RESPONSE, value: "${AIDC_TAINT_RESPONSE:-freeze}"}
             - {name: AIDC_TLD_TAINTS, value: "${AIDC_TLD_TAINTS:-false}"}
             - {name: AIDC_NOTIFY_WEBHOOK, value: "${AIDC_NOTIFY_WEBHOOK:-}"}
+            - {name: AIDC_TAINT_WEBHOOK, value: "${webhook}"}
           volumeMounts:
             - {name: blocklist, mountPath: /etc/squid, readOnly: true}
             - {name: squid-log, mountPath: /var/log/squid, readOnly: true}
@@ -1329,6 +1342,9 @@ K8S_MCP_TOKEN_SECRET=aidc-mcp-token
 K8S_MCP_CONFIG=aidc-mcp-config
 K8S_MCP_STATE_CLAIM=aidc-mcp-state
 K8S_MCP_PORT=7878
+# The taint webhook (W-M4, K8S-13's one exception): each session's policy sidecar pokes it when
+# the session is tainted; nothing else may reach this port, and nothing on it but the poke.
+K8S_MCP_TAINT_PORT=7879
 # Where the server keeps its state in its pod (its claim) and reads the mirror.
 K8S_MCP_STATE_DIR=/var/lib/aidc-mcp
 
@@ -1434,13 +1450,8 @@ spec:
 "
     [ "${AIDC_MCP_SESSION_CREATE:-}" = true ] && session_create=true
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}"
+    k8s_render_mcp_service
     cat <<EOF
-apiVersion: v1
-kind: Service
-metadata: {name: ${K8S_MCP_NAME}, namespace: ${ns}, labels: {${labels}}}
-spec:
-  selector: {app: ${K8S_MCP_NAME}}
-  ports: [{name: mcp, port: ${K8S_MCP_PORT}, targetPort: ${K8S_MCP_PORT}, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -1452,6 +1463,9 @@ spec:
     # Every namespace but the user's own: an orchestrator in the cluster, the ingress controller.
     - from: [{namespaceSelector: {matchExpressions: [{key: kubernetes.io/metadata.name, operator: NotIn, values: [${ns}]}]}}]
       ports: [{protocol: TCP, port: ${K8S_MCP_PORT}}]
+    # The user's sessions' proxy pods (their policy sidecars), to the taint webhook only.
+    - from: [{podSelector: {matchLabels: {app: proxy}}}]
+      ports: [{protocol: TCP, port: ${K8S_MCP_TAINT_PORT}}]
   egress:
 ${egress}${callback}---
 apiVersion: apps/v1
@@ -1488,7 +1502,10 @@ spec:
             - {name: AIDC_MCP_WATCHER_STATE, value: ${K8S_MCP_STATE_DIR}/watcher-state}
             - {name: AIDC_MCP_TRANSCRIPTS, value: ${K8S_MCP_STATE_DIR}/transcripts}
             - {name: AIDC_MCP_SESSION_CREATE, value: "${session_create}"}
-          ports: [{name: mcp, containerPort: ${K8S_MCP_PORT}, protocol: TCP}]
+            - {name: AIDC_MCP_TAINT_PORT, value: "${K8S_MCP_TAINT_PORT}"}
+          ports:
+            - {name: mcp, containerPort: ${K8S_MCP_PORT}, protocol: TCP}
+            - {name: taint, containerPort: ${K8S_MCP_TAINT_PORT}, protocol: TCP}
           # From inside the pod: the policy lets in no connection from the node, which a
           # tcpSocket probe would be on some network plugins.
           readinessProbe:
@@ -1518,6 +1535,45 @@ spec:
         - {name: home, emptyDir: {}}
         - {name: tmp, emptyDir: {}}
 EOF
+}
+
+# k8s_render_mcp_service: the server's Service: the MCP port, and the taint webhook's. Its
+# address is stable for the namespace's life: session create makes it when missing (each
+# session's policy sidecar is given it then, since the proxy pod has no cluster DNS), and
+# `aidc mcp stop` keeps it.
+k8s_render_mcp_service() {
+    cat <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${K8S_MCP_NAME}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}}
+spec:
+  selector: {app: ${K8S_MCP_NAME}}
+  ports:
+    - {name: mcp, port: ${K8S_MCP_PORT}, targetPort: ${K8S_MCP_PORT}, protocol: TCP}
+    - {name: taint, port: ${K8S_MCP_TAINT_PORT}, targetPort: ${K8S_MCP_TAINT_PORT}, protocol: TCP}
+EOF
+}
+
+# k8s_mcp_service_ip <namespace>: the server's Service address, made when the Service is not
+# there yet; prints it, or says why on stderr and returns 1.
+k8s_mcp_service_ip() {
+    local ip
+    if ! ip=$(k8s_get "$1" service "$K8S_MCP_NAME" -o 'jsonpath={.spec.clusterIP}'); then
+        printf '[aidc] error: cannot read your MCP server'"'"'s Service in %s: the cluster did not answer (%s)\n' "$1" "$ip" >&2
+        return 1
+    fi
+    if [ -z "$ip" ]; then
+        k8s_render_mcp_service | k8s_kubectl apply -f - >/dev/null \
+            || { printf '[aidc] error: could not make your MCP server'"'"'s Service in %s\n' "$1" >&2; return 1; }
+        ip=$(k8s_get "$1" service "$K8S_MCP_NAME" -o 'jsonpath={.spec.clusterIP}') || ip=""
+    fi
+    case "$ip" in
+        ''|None) printf '[aidc] error: your MCP server'"'"'s Service in %s has no address\n' "$1" >&2; return 1 ;;
+    esac
+    printf '%s' "$ip"
 }
 
 # k8s_mcp_host: the server's name on the user's network (mcp-<user>.<domain>): one of the user's

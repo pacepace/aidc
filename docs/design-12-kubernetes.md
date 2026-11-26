@@ -20,8 +20,9 @@ list, status, logs, restart, upgrade, refresh, kill) with the lockdown (NetworkP
 public-only squid), Docker inside, the blocklist and its feeds in `aidc status`, taint and
 audit (with `aidc audit list|trim`), testament when configured, the git container ("Git",
 on this backend and on Docker), tunnels and LAN pages ("Ports"), TCP egress relays, `--dns` and
-`--network` ("Egress"), and the GPU on request. Not built yet: the in-cluster MCP server, account
-switching, Syncthing, the taint freeze; all of it ships in aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
+`--network` ("Egress"), and the GPU on request. Built, not yet checked on the cluster: the
+per-user MCP server ("Control plane") and the taint freeze ("Taint on Kubernetes"). Not built
+yet: account switching, Syncthing; all of it ships in aidc 2.0 (owner ruling 2026-11-24). Owner rulings are
 in `.prawduct/owner-rulings.md`; each open item says what will settle it, and items marked
 **proposal** await the owner.
 
@@ -786,11 +787,41 @@ Same model as Docker (NET-01/02/03/14), rebuilt with NetworkPolicy (K8S-12, K8S-
   `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10`, `127/8`), so it cannot reach the MCP
   server, the git container, other namespaces, the API server, nodes, the LAN or a VPN;
   squid also denies those destinations itself;
-- the policy sidecar's taint webhook is the one allowed path to the user's MCP server;
+- the policy sidecar's taint webhook is the one allowed path to the user's MCP server: the proxy
+  pod may reach the server's pods, and its Service address, on the webhook port (7879) only,
+  and the server lets the user's proxy pods in on that port only. Squid refuses private
+  addresses, so nothing a session asks for reaches it ("Taint on Kubernetes", below);
 - `--egress-tcp HOST:PORT` (NET-15) becomes a socat relay pod per host with a ClusterIP Service
   and an egress rule for exactly that `/32:port` (below: "TCP egress relays"); its name resolves
   through the session's names responder, not `hostAliases`, so `aidc egress add` never restarts
   the dev pod.
+
+### Taint on Kubernetes: the webhook and the freeze
+
+The policy sidecar writes the taint flag on the session's state claim, as on Docker (SEC-02).
+It has no API token, so it cannot pause or cut anything itself; the user's MCP server does
+(plan-aidc-2.0 Q-K3, W-M4, W-K4):
+
+- **The poke (K8S-13's one exception):** on the first taint the sidecar POSTs
+  `{"session": "<name>"}` to `http://<the server's Service address>:7879/taint`
+  (`AIDC_TAINT_WEBHOOK`, set at create; the proxy pod has no cluster DNS). The server's own
+  Service is made by the first `aidc create` when missing and kept by `aidc mcp stop`, so the
+  address a session holds stays good. The port serves nothing else and logs every request; a
+  poke carries no token and is never trusted: it only says which session's flag to read.
+- **The server acts:** it reads the flag itself (exec into the policy sidecar), logs the taint
+  once and tells subscribers (`resources/updated`). When the session's response is `freeze`
+  (the default, SEC-08), it cuts every egress rule of the session's NetworkPolicies (the dev
+  pod's, the proxy's, its relays' and `--network` ones: each becomes `egress: []`, keeping
+  what it lets in), so under the namespace's default-deny none of the session's pods reaches
+  anything, and writes `/var/state/frozen` beside the flag. The dev pod keeps running (exec,
+  `aidc attach` and the audit trail still work), as Docker's pause keeps the container.
+- **Never cleaned (SEC-06):** a policy a later apply opens again (a re-render) is cut again;
+  `aidc egress add` and `aidc network add` refuse a tainted session, and one whose taint
+  cannot be read.
+- **A missed poke:** the server looks at every session's flag at start and every minute, so a
+  poke lost while it was down or restarting is made up for within that bound.
+- **`aidc status`** says `freeze: FROZEN <mark>` once done, `PENDING` while the server has not
+  done it (it is not running, say), or the session's other response.
 
 As built, the lockdown carries three details the measurements above did not need:
 - the proxy pod resolves through Quad9 only (`dnsPolicy: None`): the refresher's feed downloads

@@ -333,6 +333,38 @@ k8s_session_taint() {
     fi
 }
 
+# k8s_session_frozen <namespace> <session>: "yes <mark json>", "no", or "unknown <why>": whether
+# the user's MCP server froze the session (cut its egress; the mark is on its state claim, beside
+# the taint flag). A sidecar that cannot be asked is unknown, never "not frozen".
+k8s_session_frozen() {
+    local ns="$1" s="$2" proxy out
+    proxy=$(k8s_get "$ns" pod -l "aidc/session=${s},app=proxy" -o name) \
+        || { printf 'unknown (the cluster did not answer: %s)\n' "$proxy"; return 0; }
+    proxy=$(printf '%s\n' "$proxy" | head -n1)
+    [ -n "$proxy" ] || { printf 'unknown (no proxy pod)\n'; return 0; }
+    if out=$(k8s_kubectl -n "$ns" exec "$proxy" -c policy -- \
+            sh -c 'if [ -e /var/state/frozen ]; then printf "yes "; cat /var/state/frozen; else echo no; fi' \
+            </dev/null 2>&1); then
+        printf '%s\n' "$out"
+    else
+        printf 'unknown (the policy sidecar did not answer)\n'
+    fi
+}
+
+# k8s_untainted <namespace> <session>: 0 when the session is clean; says why on stderr and returns
+# 1 when it is tainted (it gets no new way out: SEC-06, a tainted session is never cleaned) or
+# when its taint cannot be read (unknown is never clean).
+k8s_untainted() {
+    local t
+    t=$(k8s_session_taint "$1" "$2")
+    case "$t" in
+        no) return 0 ;;
+        yes*) printf '[aidc] error: %s is tainted: it gets no new way out (aidc kill %s, then aidc create)\n' "$2" "$2" >&2 ;;
+        *) printf '[aidc] error: cannot tell whether %s is tainted: %s\n' "$2" "$t" >&2 ;;
+    esac
+    return 1
+}
+
 # k8s_session_lookup <namespace> <session>: prints "found", "absent" or "unknown <why>", and
 # returns 0, 1 or 2 alike. A cluster that cannot be asked is never "no such session".
 k8s_session_lookup() {

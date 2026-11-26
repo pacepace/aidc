@@ -17,6 +17,7 @@ Host a client sends is the user's bind choice, which this container cannot know.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -24,7 +25,7 @@ from typing import Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 from threetears.mcp import (
@@ -46,6 +47,7 @@ from aidc_mcp.service import common as com
 from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import startup as sup
 from aidc_mcp.service import state as ss
+from aidc_mcp.service import taint as tnt
 from aidc_mcp.tearstools import AidcTool, ToolHooks, build_tools
 
 INSTRUCTIONS = (
@@ -186,6 +188,10 @@ def build_app(face: Face | None = None) -> Any:
         try:
             async with endpoint.transport.lifespan():
                 com.fire(face.resume())
+                if backend.server_freezes():
+                    # A tainted session's freeze is this server's on Kubernetes: every
+                    # session's flag is looked at now and then, for a poke that never came.
+                    com.fire(tnt.watch())
                 yield
         finally:
             ss.session_change_listeners.remove(face.session_changed)
@@ -194,6 +200,47 @@ def build_app(face: Face | None = None) -> Any:
     app = Starlette(routes=[Route(MCP_PATH, endpoint=endpoint),
                             Route(METRICS_PATH, endpoint=_metrics)], lifespan=lifespan)
     return auth.BearerAuthMiddleware(app)
+
+
+#: The taint webhook's path, on its own port (AIDC_MCP_TAINT_PORT), apart from the MCP's.
+TAINT_PATH = "/taint"
+#: A poke is one session name; anything longer is not one.
+_TAINT_BODY_MAX = 1024
+
+
+async def _taint_poke(request: Request) -> Response:
+    """POST /taint {"session": <name>} from a session's policy sidecar (Kubernetes, W-M4). It
+    carries no token: the proxy pods are aidc's own, and nothing else reaches the port. A
+    poke is never trusted: it only says which session's flag to read (service/taint.py)."""
+    body = await request.body()
+    client = request.client.host if request.client else ""
+    name: Any = None
+    if len(body) <= _TAINT_BODY_MAX:
+        try:
+            parsed = json.loads(body)
+            name = parsed.get("session") if isinstance(parsed, dict) else None
+        except ValueError:
+            name = None
+    if not tnt.valid_session(name):
+        audit.log_event("taint_webhook_refused", client=client, bytes=len(body))
+        return JSONResponse({"ok": False, "error": "expected {\"session\": <name>}"},
+                            status_code=400)
+    audit.log_event("taint_webhook", session=name, client=client)
+    tnt.poked(name)
+    return JSONResponse({"ok": True}, status_code=202)
+
+
+async def _taint_other(request: Request) -> Response:
+    audit.log_event("taint_webhook_refused", client=request.client.host if request.client else "",
+                    method=request.method, path=request.url.path)
+    return PlainTextResponse("not found", status_code=404)
+
+
+def build_taint_app() -> Starlette:
+    """The taint webhook's app: POST /taint only; every request logged (MCP-14)."""
+    return Starlette(routes=[Route(TAINT_PATH, endpoint=_taint_poke, methods=["POST"]),
+                             Route("/{rest:path}", endpoint=_taint_other,
+                                   methods=["GET", "POST", "PUT", "DELETE", "PATCH"])])
 
 
 def open_state_store() -> bool:
@@ -222,9 +269,31 @@ def main() -> int:
         return 1
     wrapped = build_app()
 
+    import asyncio
+
     import uvicorn
 
-    uvicorn.run(wrapped, host="0.0.0.0", port=port, log_level="info")
+    taint_port = os.environ.get("AIDC_MCP_TAINT_PORT", "").strip()
+    if not taint_port:
+        uvicorn.run(wrapped, host="0.0.0.0", port=port, log_level="info")
+        return 0
+    # The taint webhook on a port of its own, in the same process and event loop as the MCP,
+    # which owns the sessions' state: a NetworkPolicy lets the sessions' proxies reach this
+    # port and no other (K8S-13).
+    servers = [uvicorn.Server(uvicorn.Config(wrapped, host="0.0.0.0", port=port,
+                                             log_level="info")),
+               uvicorn.Server(uvicorn.Config(build_taint_app(), host="0.0.0.0",
+                                             port=int(taint_port), log_level="info",
+                                             lifespan="off"))]
+
+    async def serve_both() -> None:
+        # A signal reaches one server's handler; when either stops, both stop.
+        tasks = [asyncio.ensure_future(srv.serve()) for srv in servers]
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for srv in servers:
+            srv.should_exit = True
+        await asyncio.gather(*tasks, return_exceptions=True)
+    asyncio.run(serve_both())
     return 0
 
 

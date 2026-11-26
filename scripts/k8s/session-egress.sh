@@ -87,6 +87,7 @@ remove_relay() {
 do_add() {
     local spec="${1:-}" row kind ports ip why port
     [ -n "$spec" ] || die "add requires host:port (e.g. db.internal.example:5432)"
+    k8s_untainted "$ns" "$NAME" || exit 1
     aidc_egress_parse "$spec" || die "invalid destination: ${spec}"
     local host="$AIDC_EGRESS_HOST" want="$AIDC_EGRESS_PORT"
     row=$(relay_for "$host")

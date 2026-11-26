@@ -397,6 +397,49 @@ def instance_gone(session: str, stderr: str) -> bool:
     return f"aidc-{session}-net" in err and ("not found" in err or "no such" in err)
 
 
+def server_freezes() -> bool:
+    """Whether this server carries out a tainted session's freeze (SEC-05/08). On Docker the
+    session's policy sidecar pauses its dev container itself; on Kubernetes it has no API
+    token, so the user's server cuts the session's egress (plan-aidc-2.0 Q-K3)."""
+    return _k8s()
+
+
+def session_policies_args(session: str) -> list[str]:
+    """Arguments (after the program) that print the session's NetworkPolicies as JSON
+    (Kubernetes), for :func:`egress_to_cut`."""
+    return ["-n", namespace(), "get", "networkpolicy", "-l", f"aidc/session={session}",
+            "-o", "json", _K8S_READ_WAIT]
+
+
+def egress_to_cut(stdout: bytes) -> list[str] | None:
+    """The session's NetworkPolicies that still let one of its pods out: each that governs
+    egress and has an egress rule. None when the listing cannot be read. Under the namespace's
+    default-deny, a pod whose every egress policy has no rule reaches nothing."""
+    try:
+        items = json.loads(stdout.decode("utf-8", errors="replace") or "{}").get("items")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(items, list):
+        return None
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        spec = item.get("spec") or {}
+        if "Egress" in (spec.get("policyTypes") or []) and spec.get("egress"):
+            name = (item.get("metadata") or {}).get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
+def cut_egress_args(policy: str) -> list[str]:
+    """Arguments (after the program) that leave the NetworkPolicy `policy` with no egress rule
+    (its pods then reach nothing), keeping what it lets in."""
+    return ["-n", namespace(), "patch", "networkpolicy", policy, "--type=json",
+            "-p", '[{"op": "add", "path": "/spec/egress", "value": []}]', _K8S_READ_WAIT]
+
+
 _BACKEND_LINE = re.compile(r"""backend:\s*["']?([a-z0-9]*)""")
 
 

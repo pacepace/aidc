@@ -89,6 +89,11 @@ case "$*" in
           [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
     *"get deployment -l app=git,aidc/session=git"*) [ "${K_GIT:-}" = 1 ] && printf '1\t2026-11-24T03:00:00Z\n' ;;
     *"get pod -l app=git"*) echo '{"items":[{"metadata":{"name":"git-7d9f-abc"}}]}' ;;
+    *"AIDC_TAINT_RESPONSE"*) printf '%s' "${K_RESPONSE:-freeze}" ;;
+    # The user's MCP server's Service: K_NO_MCP_SVC=1 until something applies it (then it has
+    # an address); K_MCP_SVC_FAIL=1: no answer.
+    *"get service aidc-mcp"*) [ "${K_MCP_SVC_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        if [ "${K_NO_MCP_SVC:-}" != 1 ] || grep -q 'name: aidc-mcp$' "$K_APPLIED" 2>/dev/null; then printf '10.43.7.7'; fi ;;
     *"get deployment "*"-proxy"*) [ "${K_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_EXISTS:-}" = 1 ] && echo "deployment.apps/demo-proxy" ;;
     *"get service"*"clusterIP"*) printf '10.45.9.9' ;;
@@ -128,6 +133,9 @@ case "$*" in
     *"exec -i demo-dev-0 -c dev -- sudo -u vscode -H env HOME=/home/vscode sh -c"*) : ;;
     *"get pod demo-dev-0 -o jsonpath={.status.phase}"*) printf 'Running' ;;
     *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
+    *"exec pod/demo-proxy-abc -c policy -- sh -c"*"/var/state/frozen"*)
+        [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
+        if [ "${K_FROZEN:-}" = 1 ]; then echo 'yes {"frozen_at":"2026-11-26T09:00:05Z","by":"aidc-mcp"}'; else echo no; fi ;;
     *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
         if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
@@ -253,7 +261,10 @@ assert_eq "the proxy takes connections only from its own dev pod (squid and the 
     "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '.ingress')"
 assert_eq "the proxy reaches public addresses only (no cluster, node, LAN or VPN range)" \
     '["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","169.254.0.0/16","100.64.0.0/10","127.0.0.0/8"]' \
-    "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '.egress[1].to[0].ipBlock.except')"
+    "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '.egress[] | select(.to[0].ipBlock.cidr == "0.0.0.0/0") | .to[0].ipBlock.except')"
+assert_eq "...and its only other ways out are Quad9's DNS and the MCP server's taint port" \
+    '[[53,53],[7879]]' \
+    "$(np demo-proxy-public-only | jq -c '[.egress[] | select(.to[0].ipBlock.cidr != "0.0.0.0/0") | [.ports[].port]]')"
 assert_eq "the proxy's DNS is Quad9 only" '["9.9.9.9/32","149.112.112.112/32"]' \
     "$(np demo-proxy-public-only | yq -p=json -o=json -I=0 '[.egress[0].to[].ipBlock.cidr]')"
 assert_eq "the proxy pod resolves through Quad9, the only DNS its policy allows (the refresher needs it for the blocklist feeds)" \
@@ -342,6 +353,28 @@ assert_not_has "  nor the page offered" "page: https://" "$out"
 assert_has "  and create fails" "exit=1" "$out"
 assert_has "  though the session itself runs" "session demo runs, but WITHOUT its pages" "$out"
 cp "$SCRATCH/config.plain" "$HOME/.config/aidc/config.yaml"
+
+echo "=== the taint webhook (W-M4): the policy sidecar may poke the user's MCP server ==="
+out=$(run create demo --backend kubernetes)
+pp() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "demo-proxy-public-only") | .spec.egress' | tail -1; }
+assert_eq "the proxy pod may reach the MCP server's taint port, by its pods or its Service address, and no other port of it" \
+    '{"to":[{"podSelector":{"matchLabels":{"app":"aidc-mcp"}}},{"ipBlock":{"cidr":"10.43.7.7/32"}}],"ports":[{"protocol":"TCP","port":7879}]}' \
+    "$(pp | jq -c '.[] | select(.ports[0].port == 7879)')"
+assert_eq "...and no other rule names the server" "1" "$(pp | jq '[.[] | select(tostring | test("aidc-mcp|10.43.7.7"))] | length')"
+assert_eq "the policy sidecar is told the webhook, by address (the proxy pod has no cluster DNS)" \
+    '"http://10.43.7.7:7879/taint"' \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "policy") | .env[] | select(.name == "AIDC_TAINT_WEBHOOK") | .value' | tail -1)"
+assert_eq "no other container of the proxy pod is" "" \
+    "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name != "policy") | .env[]? | select(.name == "AIDC_TAINT_WEBHOOK") | .name')"
+out=$(K_NO_MCP_SVC=1 run create demo --backend kubernetes)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "with no MCP server yet, its Service is made first, so the address is stable from now on" \
+    '{"name":"aidc-mcp","ports":[7878,7879]}' \
+    "$(q 'select(.kind == "Service" and .metadata.name == "aidc-mcp") | {"name": .metadata.name, "ports": [.spec.ports[].port]}' | head -1)"
+out=$(K_MCP_SVC_FAIL=1 run create demo --backend kubernetes)
+assert_has "a cluster that does not say where the server is stops create" "cannot read your MCP server's Service" "$out"
+assert_eq "...before anything of the session is made" "" \
+    "$(q 'select(.kind == "StatefulSet" or .kind == "Deployment") | .metadata.name')"
 
 echo "=== the transcript mirror claim, made by the first create that needs it ==="
 out=$(K_NO_TRANSCRIPTS=1 run create demo --backend kubernetes)
@@ -720,6 +753,16 @@ assert_has "status names the repo" "repo:     /home/alice/code/proj" "$out"
 assert_has "status says the session is clean" "taint:    clean" "$out"
 out=$(K_EXISTS=1 K_TAINTED=1 run status demo)
 assert_has "status shows a taint" "taint:    TAINTED" "$out"
+assert_has "...and a freeze the MCP server has not made yet as pending, never done" \
+    "freeze:   PENDING: your MCP server cuts its egress when it runs" "$out"
+out=$(K_EXISTS=1 K_TAINTED=1 K_FROZEN=1 run status demo)
+assert_has "a frozen session says so, with when (SEC-05 on Kubernetes)" \
+    'freeze:   FROZEN {"frozen_at":"2026-11-26T09:00:05Z","by":"aidc-mcp"} (its egress is cut)' "$out"
+out=$(K_EXISTS=1 K_TAINTED=1 K_RESPONSE=notify run status demo)
+assert_has "a session whose response is not freeze is not frozen, and says its response" \
+    "freeze:   not frozen (taint response: notify)" "$out"
+out=$(K_EXISTS=1 run status demo)
+assert_not_has "a clean session has no freeze line" "freeze:" "$out"
 out=$(K_EXISTS=1 K_POLICY_DOWN=1 run status demo)
 assert_has "a policy sidecar that does not answer is unknown, never clean" "taint:    unknown" "$out"
 assert_has "status confirms the lockdown's policies are there" "egress:   enforced" "$(K_EXISTS=1 run status demo)"

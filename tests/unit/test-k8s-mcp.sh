@@ -207,12 +207,14 @@ assert_eq "the first policy, before the in-cluster address is read, allows the k
     "$(q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp") | .spec.egress' | head -1)"
 
 echo "=== reaching the server: its Service, in the cluster ==="
-assert_eq "a ClusterIP Service on the server's port (no node port, no external address)" \
-    '{"type":null,"selector":{"app":"aidc-mcp"},"ports":[{"name":"mcp","port":7878,"targetPort":7878,"protocol":"TCP"}]}' \
+assert_eq "a ClusterIP Service on the server's port and the taint webhook's (no node port, no external address)" \
+    '{"type":null,"selector":{"app":"aidc-mcp"},"ports":[{"name":"mcp","port":7878,"targetPort":7878,"protocol":"TCP"},{"name":"taint","port":7879,"targetPort":7879,"protocol":"TCP"}]}' \
     "$(q 'select(.kind == "Service") | .spec | {"type": .type, "selector": .selector, "ports": .ports}' | tail -1)"
-assert_eq "every namespace but the user's own may connect, to that port only (no session of the user reaches it)" \
-    '[{"from":[{"namespaceSelector":{"matchExpressions":[{"key":"kubernetes.io/metadata.name","operator":"NotIn","values":["aidc-u-alice"]}]}}],"ports":[{"protocol":"TCP","port":7878}]}]' \
+assert_eq "every namespace but the user's own may connect to the MCP port (no session of the user reaches it); the user's session proxies to the taint webhook's port only (K8S-13's one exception)" \
+    '[{"from":[{"namespaceSelector":{"matchExpressions":[{"key":"kubernetes.io/metadata.name","operator":"NotIn","values":["aidc-u-alice"]}]}}],"ports":[{"protocol":"TCP","port":7878}]},{"from":[{"podSelector":{"matchLabels":{"app":"proxy"}}}],"ports":[{"protocol":"TCP","port":7879}]}]' \
     "$(pol | jq -c '.ingress')"
+assert_eq "the server listens for the webhook on its own port" '["7879",[7878,7879]]' \
+    "$(pod '.containers[0]' | jq -c '[(.env[] | select(.name == "AIDC_MCP_TAINT_PORT") | .value), [.ports[].containerPort]]')"
 assert_eq "the readiness probe connects from inside the pod (the policy lets nothing in from the node)" \
     '["python","-c","import socket; socket.create_connection(('"'"'127.0.0.1'"'"', 7878), 2)"]' \
     "$(pod '.containers[0].readinessProbe.exec.command')"
@@ -390,7 +392,9 @@ write_config
 
 echo "=== aidc mcp stop, status, logs ==="
 out=$(K_RUNNING=1 run stop)
-assert_has "stop removes the server, its policies, Service and Ingress" "delete deployment,networkpolicy,service,ingress -l app=aidc-mcp" "$(cat "$K_LOG")"
+assert_has "stop removes the server, its policies and Ingress" "delete deployment,networkpolicy,ingress -l app=aidc-mcp" "$(cat "$K_LOG")"
+assert_not_has "...and keeps its Service: sessions' policy sidecars hold its address for the taint webhook" "service" \
+    "$(grep ' delete ' "$K_LOG")"
 assert_not_has "...and keeps its state, token and the transcripts" "delete pvc" "$(cat "$K_LOG")"
 assert_not_has "..." "delete secret" "$(cat "$K_LOG")"
 out=$(run stop)

@@ -342,8 +342,9 @@ mcp_stop() {
         info "your MCP server is not running"
         return 0
     fi
-    info "stopping your MCP server in ${ns} (its state, token and transcripts are kept)"
-    k8s_kubectl -n "$ns" delete deployment,networkpolicy,service,ingress -l "app=${K8S_MCP_NAME}" --wait=true >&2 \
+    # The Service stays: sessions' policy sidecars hold its address for the taint webhook.
+    info "stopping your MCP server in ${ns} (its state, token, Service and transcripts are kept)"
+    k8s_kubectl -n "$ns" delete deployment,networkpolicy,ingress -l "app=${K8S_MCP_NAME}" --wait=true >&2 \
         || die "could not stop the MCP server"
 }
 

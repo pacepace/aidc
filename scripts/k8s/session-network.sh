@@ -58,6 +58,7 @@ current() {
 do_add() {
     local target="${1:-}" why
     [ -n "$target" ] || die "add requires a namespace"
+    k8s_untainted "$ns" "$NAME" || exit 1
     if why=$(k8s_network_refusal "$target"); then die "refusing ${target}: ${why}"; fi
     if why=$(k8s_network_ungranted "$target"); then die "refusing ${target}: ${why}"; fi
     if current | grep -qxF "$target"; then

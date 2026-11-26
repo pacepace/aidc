@@ -24,7 +24,7 @@ governed_by:
     dispositions:
       - "a value produced in one place and consumed in another must resolve in the same namespace and lifetime → applies throughout: the bearer identity per message, not per MCP session (TRS-08); paths the per-user server reads in its pod, not on the laptop (chunks 08-12); state on a claim that outlives the pod (07, 10); mesh caller identity from the hub, not from arguments (TRS-21)"
       - "run the real path once before calling it done → applies: every chunk's done-when names a live run (Docker smoke, a cluster session, a real mesh), not only unit tests"
-partition: "serial for 01-07 (each changes the MCP package the next builds on) and 08-12 (each needs the last running in the cluster); 13-19 (scripts/k8s, gitctl, broker, Syncthing) touch no code 20-21 touch, so a wave of them may be delegated to an isolated worktree when its gate is open, decided when that wave starts"
+partition: "serial for 01-07, then 23-24 (each changes the MCP package the next builds on) and 08-12 (each needs the last running in the cluster); 13-19 (scripts/k8s, gitctl, broker, Syncthing) touch no code 20-21 touch, so a wave of them may be delegated to an isolated worktree when its gate is open, decided when that wave starts"
 ---
 
 # Build Plan — 3tears adoption and the per-user MCP (aidc 2.0)
@@ -225,24 +225,53 @@ Order follows design-13 "Upstream work".
   `/prawduct:critic`; committed.
 - **Owner's hands:** the gate answer; the 3tears release with U10.
 
-### Chunk 07: Durable state (design-13 Q4)
+### Chunk 07: Durable state on a SQLite L3 (design-13 Q4, answered 2026-11-25)
 
-- **Description:** Option A: move queues, ledger, watches and dead letters onto an L1-only 3tears
-  store on a file. Option B: keep aidc's files, and make the state dir a path the Kubernetes server
-  puts on a claim (no format change).
-- **Depends on:** 05; gate Q4; U11 if A.
+- **Description:** Move the queues, ledger, watches and dead letters onto 3tears collections. Locally
+  they are backed by a single SQLite file as a 3tears L3, with no L2 and L1 as the normal cache (the
+  sqlite-l3 work on the pinned 3tears branch). The state dir is a path the Kubernetes server puts
+  on a claim. On a mesh, the L3 becomes Postgres by configuration.
+- **Depends on:** 05; gate Q4 (answered: SQLite L3).
 - **Requirements:** TRS-25, MCP-17, MCP-30, MCP-33, MCP-34, MCP-36, MCP-45.
-- **Done when:** every restart test passes unchanged; under A, the kill -9 test after each kind of
-  write; `/prawduct:critic`; committed. Under A, the persisted-format questions (planning:
-  lock-in) are listed before fields are designed.
-- **Owner's hands:** the Q4 answer.
+- **Done when:** every restart test passes unchanged; a kill -9 test after each kind of write loses
+  nothing that was acknowledged; the persisted-format questions (planning: lock-in) are listed
+  before the collections' fields are designed; existing state files are migrated or read once on
+  upgrade (tested); `/prawduct:critic`; committed.
+- **Owner's hands:** none.
+
+### Chunk 23: Session state from Claude Code hooks (W-H-01, owner ruling 2026-11-26)
+
+- **Description:** Each session's managed settings install the `Stop` hook (turn done, with
+  `last_assistant_message`), the `Notification` hook (`permission_prompt`, `idle_prompt`) and the
+  `UserPromptSubmit` hook. The hooks write events as files under the session's state dir, which the
+  MCP already reads on Docker and on Kubernetes. The hook process does not reach the MCP.
+- **Depends on:** 05.
+- **Requirements:** plan-aidc-2.0 W-H-01. Requirement IDs are added to docs/requirements.md
+  before code.
+- **Done when:** a real Docker session writes each event kind (live check); unit tests for the
+  event format and the writer; `/prawduct:critic`; committed.
+- **Owner's hands:** none.
+
+### Chunk 24: Busy, idle, permission and replies from hook events (W-H-02)
+
+- **Description:** The service takes busy, idle and waiting-on-permission, and the reply, from hook
+  events instead of screen reads. The transcript stays the record, used for catch-up after an MCP or
+  Claude restart. Screen reads and tmux keys stay only for AskUserQuestion, dialogs and the paste
+  send path.
+- **Depends on:** 07, 23.
+- **Requirements:** plan-aidc-2.0 W-H-02.
+- **Done when:** the delivery and turns suites pass with screen classification removed from the
+  busy/idle and reply paths; a Docker session delivers a reply once across an MCP restart; a
+  human-typed prompt's reply still reaches the orchestrator; `/prawduct:critic`; committed. The
+  Kubernetes half of the plan-aidc-2.0 done-when is proved in chunk 09.
+- **Owner's hands:** the orchestrator for the human-typed-prompt check.
 
 ### Chunk 08: MCP Kubernetes backend (W-M1-01)
 
 - **Description:** `mcp/src/aidc_mcp/backend.py` gains a kubectl implementation (target to
   namespace, pod and container; exec, inspect, list, instance id, missing); the confinement test
   extended.
-- **Depends on:** 04 (W-K5's RBAC is built).
+- **Depends on:** 04, 24 (W-K5's RBAC is built; the Kubernetes backend is built on hook events).
 - **Requirements:** K8S-01, MCP-13.
 - **Done when:** unit tests mirror the Docker ones with a kubectl stub; a probe against a real
   cluster session lists and execs; `/prawduct:critic`; committed.

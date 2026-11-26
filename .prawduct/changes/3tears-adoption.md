@@ -53,6 +53,11 @@ ruling 2026-11-26).
   conditional read; writes run only for gitreq. The gh stand-in sends `gh api` and `gh issue`
   as `api` requests; the holder runs them at once in every mode (Q-G1) and the caller gets
   GitHub's stdout, messages and exit status.
+- Chunk 13, also: the holder wakes on a new request (inotify) and reads requests with one jq, so
+  an issue call takes about 0.3 s; `gitctl logout` is the holder's too; the mode left the
+  containers' environment; the git agent's managed settings run aidc's hook writer on
+  SessionStart, Stop, Notification and UserPromptSubmit, into its Docker mirror (MCP-46/47);
+  `tests/smoke/git-holder.sh` checks the users, sudo rules and process layout live on Docker.
 
 - Chunk 03: the local face is 3tears-mcp's `McpServer` (`server.py`), stateful Streamable HTTP on
   SSE responses, serving the TearsTools through the bridge under their 1.x names, with the

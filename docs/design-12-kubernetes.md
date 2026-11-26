@@ -308,6 +308,14 @@ and 14). The one request the agent may be asking about is the one last handed ov
 it last ran `prompt` for; after a watcher start, when which one is open is not known, it is every
 request then waiting, until each is decided or the agent runs `prompt` for one.
 
+The git agent's Claude Code runs aidc's hooks as every session's does (MCP-46/47): its managed
+settings add SessionStart, Stop, Notification and UserPromptSubmit, each running
+`/usr/local/bin/aidc-hook-event` (the sessions' writer, copied into the image), which writes the
+event as the agent into `/var/aidc/transcript-out/hook-events`, the mirror aidc's MCP server
+reads for the session `git`. On Docker that is the mounted transcript folder; on Kubernetes the
+git pod has no mirror until the per-user server reads its transcripts (W-M1-02), and the hook
+writes nothing meanwhile.
+
 GitHub issues (GIT-07; owner rulings 2026-11-26, Q-G1) go through the git container as an
 issue-scoped API passthrough, not as a general one. `gitctl api <method> <path>` passes a call
 to GitHub's REST API only when it is a row of one table (`GITCTL_API_TABLE`,

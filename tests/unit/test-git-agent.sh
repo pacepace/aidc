@@ -74,6 +74,20 @@ assert_eq "writes only under /tmp (the PR texts), not its own settings" 'Write(/
     "$(printf '%s\n' "$allow" | grep -E '^(Write|Edit)' | paste -sd' ' -)"
 assert_eq "the hook and managed-hooks-only stay" "true /opt/aidc/lib/gitctl/claude-hook.sh" \
     "$(jq -r '"\(.allowManagedHooksOnly) \(.hooks.PreToolUse[0].hooks[0].command)"' "$ms")"
+# aidc's MCP reads the git agent's state from Claude Code's hook events, as every session's
+# (MCP-46/47): SessionStart says its Claude is up with hooks installed.
+assert_eq "SessionStart, Stop, Notification and UserPromptSubmit each run aidc-hook-event" \
+    "Notification:/usr/local/bin/aidc-hook-event SessionStart:/usr/local/bin/aidc-hook-event Stop:/usr/local/bin/aidc-hook-event UserPromptSubmit:/usr/local/bin/aidc-hook-event" \
+    "$(jq -r '.hooks | to_entries[] | select(.key != "PreToolUse") | "\(.key):\(.value[0].hooks[0].command)"' "$ms" | sort | paste -sd' ' -)"
+assert_has "the image installs the sessions' hook writer there, root's" "COPY hook-event.sh /usr/local/bin/aidc-hook-event" "$df"
+assert_has "..." "chmod 0755 /usr/local/bin/gitctl-main.sh /usr/local/bin/aidc-hook-event" "$df"
+assert_eq "gitctl/hook-event.sh is identical to .devcontainer/hook-event.sh" "" \
+    "$(cmp "$G/hook-event.sh" "$AIDC_ROOT/.devcontainer/hook-event.sh" 2>&1)"
+# Run as the agent, it writes into the mirror the MCP reads for the session git (Docker:
+# /var/aidc/transcript-out; here a scratch stand-in).
+mkdir -p "$S/mirror"
+printf '{"hook_event_name":"SessionStart","session_id":"s"}' | AIDC_HOOK_EVENTS_DIR="$S/mirror/hook-events" bash "$G/hook-event.sh"
+assert_eq "a SessionStart event lands in the mirror's hook-events" "SessionStart" "$(jq -r .event "$S"/mirror/hook-events/*.json 2>/dev/null)"
 
 echo "=== git-claude: the git agent's Claude ==="
 H="$S/home"; mkdir -p "$H/.local/bin"

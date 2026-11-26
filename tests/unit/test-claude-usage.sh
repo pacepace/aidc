@@ -42,14 +42,20 @@ echo "== a session the broker manages"
 fresh 2
 echo work > "$D/.aidc-account"
 out=$(printf '%s' "$STATUS" | bash "$U" statusline)
-assert_eq "the weekly usage and its reset are left for the broker" '[42.5,1790000000,true]' \
-    "$(jq -c '[.seven_day, .resets_at, (.at_s | type == "number")]' "$D/.aidc-usage.json")"
+assert_eq "the weekly usage and its reset are left for the broker, naming the account" '["work",42.5,1790000000,true]' \
+    "$(jq -c '[.account, .seven_day, .resets_at, (.at_s | type == "number")]' "$D/.aidc-usage.json")"
+echo personal > "$D/.aidc-account"
+printf '%s' "$STATUS" | bash "$U" statusline >/dev/null
+assert_eq "right after a switch, the old account's numbers are not reported as the new one's" "work" "$(jq -r .account "$D/.aidc-usage.json")"
+printf '%s' "$STATUS" | jq -c '.rate_limits.seven_day = {used_percentage: 3, resets_at: 1790500000}' | bash "$U" statusline >/dev/null
+assert_eq "...the new account's own numbers are" '["personal",3]' "$(jq -c '[.account, .seven_day]' "$D/.aidc-usage.json")"
+echo work > "$D/.aidc-account"
 assert_eq "the status line names the account" "Opus  week 42%  [work]" "$out"
 echo "work at its threshold: aidc claude account use personal" > "$D/.aidc-notice"
 out=$(printf '%s' "$STATUS" | bash "$U" statusline)
 assert_eq "the broker's notice shows under it" "aidc: work at its threshold: aidc claude account use personal" "$(printf '%s\n' "$out" | tail -1)"
 printf '{"error":"rate_limit"}' | bash "$U" rate-limited
-assert_eq "a rate limit is left for the broker" "number" "$(jq -r '.at_s | type' "$D/.aidc-limit.json")"
+assert_eq "a rate limit is left for the broker, naming the account" '["work","number"]' "$(jq -c '[.account, (.at_s | type)]' "$D/.aidc-limit.json")"
 printf '{"model":{"display_name":"Opus"}}' | bash "$U" statusline >/dev/null
 assert_eq "a status with no weekly usage (an API-key login) leaves the last report" "42.5" "$(jq -r .seven_day "$D/.aidc-usage.json")"
 assert_eq "no temp file is left" "" "$(find "$D" -name '.*.json.*')"

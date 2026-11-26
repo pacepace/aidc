@@ -215,16 +215,7 @@ mcp_private_ipv4() {
 
 # mcp_state: RUNNING, STARTING or NOT RUNNING, from the Deployment; returns 2 when the cluster
 # did not answer.
-mcp_state() {
-    local out
-    out=$(k8s_get "$ns" deployment "$K8S_MCP_NAME" -o 'jsonpath={.metadata.name}|{.status.readyReplicas}') \
-        || { printf 'unknown (the cluster did not answer: %s)' "$out"; return 2; }
-    case "$out" in
-        "") printf 'NOT RUNNING' ;;
-        *"|"|*"|0") printf 'STARTING' ;;
-        *) printf 'RUNNING' ;;
-    esac
-}
+mcp_state() { k8s_deployment_state "$ns" "$K8S_MCP_NAME"; }
 
 # mcp_incluster_api: the API server's in-cluster Service address as the running server's pod
 # sees it (KUBERNETES_SERVICE_HOST and _PORT), "<ipv4>:<port>"; returns 1 when it cannot be read.
@@ -345,8 +336,7 @@ mcp_stop() {
     fi
     # The Service stays: sessions' policy sidecars hold its address for the taint webhook.
     info "stopping your MCP server in ${ns} (its state, token, Service and transcripts are kept)"
-    k8s_kubectl -n "$ns" delete deployment,networkpolicy,ingress -l "app=${K8S_MCP_NAME}" --wait=true >&2 \
-        || die "could not stop the MCP server"
+    k8s_deployment_stop "$ns" "$K8S_MCP_NAME" ingress || die "could not stop the MCP server"
 }
 
 mcp_status() {
@@ -388,11 +378,7 @@ mcp_status() {
     fi
 }
 
-mcp_logs() {
-    local follow=()
-    case "${1:-}" in --follow|-f) follow=(-f) ;; "") ;; *) die "unknown flag: $1" ;; esac
-    k8s_kubectl -n "$ns" logs ${follow[@]+"${follow[@]}"} "deployment/${K8S_MCP_NAME}" -c mcp
-}
+mcp_logs() { k8s_deployment_logs "$ns" "$K8S_MCP_NAME" mcp "${1:-}"; }
 
 mcp_token() {
     local tok rc=0

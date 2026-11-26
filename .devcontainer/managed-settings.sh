@@ -36,7 +36,7 @@ aidc_managed_settings() {
                  + (if $cluster then {StopFailure: [{matcher: "rate_limit",
                         hooks: [{type: "command", command: ($usage + " rate-limited")}]}]} else {} end)
                  | if $cluster then
-                       reduce ("SessionStart", "Stop", "SessionEnd") as $e (.;
+                       reduce ("SessionStart", "PostToolUse", "Stop", "SessionEnd") as $e (.;
                            .[$e] = ((.[$e] // []) + [{hooks: [{type: "command", command: ($lease + " hook")}]}]))
                        # A prompt goes through the lease first, which hands on only one it lets
                        # through to the event writer: a refused prompt opens no turn, and an

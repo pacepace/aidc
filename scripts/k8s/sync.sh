@@ -85,16 +85,7 @@ sync_private_ip() {
 }
 
 # sync_state: RUNNING, STARTING or NOT RUNNING; returns 2 when the cluster did not answer.
-sync_state() {
-    local out
-    out=$(k8s_get "$ns" deployment "$K8S_SYNC_NAME" -o 'jsonpath={.metadata.name}|{.status.readyReplicas}') \
-        || { printf 'unknown (the cluster did not answer: %s)' "$out"; return 2; }
-    case "$out" in
-        "") printf 'NOT RUNNING' ;;
-        *"|"|*"|0") printf 'STARTING' ;;
-        *) printf 'RUNNING' ;;
-    esac
-}
+sync_state() { k8s_deployment_state "$ns" "$K8S_SYNC_NAME"; }
 
 # sync_device_id: the pod's device ID, "" when it cannot be read.
 sync_device_id() {
@@ -106,13 +97,15 @@ sync_device_id() {
 }
 
 sync_start() {
-    local peers sel have
+    local peers sel rc
     peers=$(sync_peers)
     [ -n "$peers" ] || info "no sync.peers in your config: the pod starts, reaching no machine until you add one (then aidc sync start again)"
-    have=$(k8s_get "$ns" pvc "$K8S_SYNC_CLAIM" -o name) || die "cannot read the Syncthing claim in ${ns}: the cluster did not answer (${have})"
-    if [ -z "$have" ]; then
-        k8s_render_sync_claim | k8s_kubectl apply -f - >/dev/null || die "could not make the Syncthing claim"
-    fi
+    rc=0
+    _k8s_claim_missing "$ns" "$K8S_SYNC_CLAIM" "Syncthing" || rc=$?
+    case "$rc" in
+        0) k8s_render_sync_claim | k8s_kubectl apply -f - >/dev/null || die "could not make the Syncthing claim" ;;
+        2) exit 1 ;;
+    esac
     k8s_render_sync_config "$peers" | k8s_kubectl apply -f - >/dev/null || die "could not write Syncthing's settings"
     sel=$(k8s_node_selector) || exit 1
     k8s_render_sync "$sel" "$peers" | k8s_kubectl apply -f - >&2 || die "could not apply the Syncthing pod"
@@ -130,8 +123,44 @@ sync_status() {
     [ "$rc" = 0 ] && [ "$state" = RUNNING ] || return 0
     id=$(sync_device_id)
     printf '  device ID:  %s\n' "${id:-unknown (aidc sync logs)}"
-    printf '  folder:     %s (your disk'"'"'s .claude), LAN/VPN only: no discovery, no relays\n' "$AIDC_SYNC_FOLDER_ID"
-    _k8s_cfg_json '.sync.peers' '[]' | jq -r '.[] | "  peer:       \(.name // "?") \(.address // "?") \(.device_id // "?")"'
+    printf '  folders:    %s (your disk'"'"'s .claude/projects, both ways), %s (.claude-shared, from your machines only); LAN/VPN only\n' \
+        "$AIDC_SYNC_PROJECTS_ID" "$AIDC_SYNC_SHARED_ID"
+    sync_live
+}
+
+# sync_live: what Syncthing itself says, from its REST API on the pod's loopback (its own API
+# key, from the config it keeps): each peer connected or not, and each folder's state and
+# errors. A pairing that never connects (a device not accepted on the machine, an address that
+# changed) shows here, not only in the log.
+sync_live() {
+    local out conns peers p id name addr cid folder st
+    out=$(k8s_kubectl -n "$ns" exec "deployment/${K8S_SYNC_NAME}" -c syncthing -- sh -c '
+        k=$(sed -n "s:.*<apikey>\(.*\)</apikey>.*:\1:p" /var/syncthing/config/config.xml | head -n1)
+        get() { wget -q -O- --header "X-API-Key: $k" "http://127.0.0.1:8384/rest/$1" 2>/dev/null || echo null; echo; }
+        get system/connections; get "db/status?folder=$1"; get "db/status?folder=$2"' \
+        sh "$AIDC_SYNC_PROJECTS_ID" "$AIDC_SYNC_SHARED_ID" </dev/null 2>/dev/null) || out=""
+    conns=$(printf '%s\n' "$out" | sed -n 1p)
+    peers=$(_k8s_cfg_json '.sync.peers' '[]')
+    for p in $(printf '%s' "$peers" | jq -r 'keys[]'); do
+        name=$(printf '%s' "$peers" | jq -r ".[$p].name // \"?\"")
+        addr=$(printf '%s' "$peers" | jq -r ".[$p].address // \"?\"")
+        id=$(printf '%s' "$peers" | jq -r ".[$p].device_id // \"\"")
+        cid=$(printf '%s' "$conns" | jq -r --arg id "$id" '
+            if type != "object" then "unknown (Syncthing did not answer)"
+            elif (.connections[$id].connected // false) then "connected"
+            else "NOT CONNECTED (is this device accepted on that machine, and the address still \(.connections[$id].address // "right")?)" end' 2>/dev/null)
+        printf '  peer:       %s %s %s: %s\n' "$name" "$addr" "$id" "${cid:-unknown}"
+    done
+    for folder in 2 3; do
+        st=$(printf '%s\n' "$out" | sed -n "${folder}p" | jq -r '
+            if type != "object" then "unknown (Syncthing did not answer)"
+            else "\(.state // "?")\(if ((.errors // 0) + (.pullErrors // 0)) > 0 then ", \((.errors // 0) + (.pullErrors // 0)) ERRORS (aidc sync logs)" else "" end)\(if (.needFiles // 0) > 0 then ", \(.needFiles) files to fetch" else "" end)" end' 2>/dev/null)
+        if [ "$folder" = 2 ]; then
+            printf '  %s: %s\n' "$AIDC_SYNC_PROJECTS_ID" "${st:-unknown}"
+        else
+            printf '  %s: %s\n' "$AIDC_SYNC_SHARED_ID" "${st:-unknown}"
+        fi
+    done
 }
 
 sync_push_settings() {
@@ -140,13 +169,13 @@ sync_push_settings() {
     if [ -f "${src}/settings.json" ]; then
         # Without the hooks `aidc sync setup --hooks` added here: they name this machine's
         # paths, and a cluster session runs its own from its managed settings.
-        tmpl=$(jq 'if (.hooks | type) == "object" then
-                       .hooks |= (with_entries(.value |= map(select(any(.hooks[]?; (.command // "") | test("claude-lease[.]sh|aidc sync reconcile")) | not)))
+        tmpl=$(jq --arg mark "$AIDC_SYNC_HOOK_MARK" 'if (.hooks | type) == "object" then
+                       .hooks |= (with_entries(.value |= map(select(any(.hooks[]?; (.command // "") | test($mark)) | not)))
                                   | with_entries(select(.value | length > 0)))
                        | if .hooks == {} then del(.hooks) else . end
                    else . end' "${src}/settings.json") || die "${src}/settings.json is not JSON"
         printf '%s\n' "$tmpl" | k8s_kubectl -n "$ns" exec -i "deployment/${K8S_SYNC_NAME}" -c syncthing -- \
-            sh -c 'umask 022 && t=$(mktemp /var/syncthing/claude/.settings.template.XXXXXX) && cat > "$t" && mv -f "$t" /var/syncthing/claude/settings.template.json' \
+            sh -c 'umask 022 && t=$(mktemp /var/syncthing/shared/.settings.template.XXXXXX) && cat > "$t" && mv -f "$t" /var/syncthing/shared/settings.template.json' \
             || die "could not copy settings.json"
         info "settings.json: the template new cluster sessions start from"
     fi
@@ -160,7 +189,7 @@ sync_push_settings() {
     script="${script%% *}"
     if [ -n "$script" ] && [ -f "$script" ]; then
         k8s_kubectl -n "$ns" exec -i "deployment/${K8S_SYNC_NAME}" -c syncthing -- \
-            sh -c 'umask 022 && n="$1" && t=$(mktemp "/var/syncthing/claude/.$n.XXXXXX") && cat > "$t" && chmod 0755 "$t" && mv -f "$t" "/var/syncthing/claude/$n"' \
+            sh -c 'umask 022 && n="$1" && t=$(mktemp "/var/syncthing/shared/.$n.XXXXXX") && cat > "$t" && chmod 0755 "$t" && mv -f "$t" "/var/syncthing/shared/$n"' \
             sh "$(basename -- "$script")" < "$script" || die "could not copy the status line script"
         info "status line: $(basename -- "$script") (cluster sessions run it through aidc, which reads its usage)"
     fi
@@ -175,13 +204,9 @@ case "$VERB" in
     start) sync_start ;;
     stop)
         info "stopping Syncthing in ${ns} (its identity and your history are kept)"
-        k8s_kubectl -n "$ns" delete deployment,networkpolicy -l "app=${K8S_SYNC_NAME}" --wait=true >&2 \
-            || die "could not stop Syncthing" ;;
+        k8s_deployment_stop "$ns" "$K8S_SYNC_NAME" || die "could not stop Syncthing" ;;
     status) sync_status ;;
-    logs)
-        case "${1:-}" in --follow|-f) k8s_kubectl -n "$ns" logs -f "deployment/${K8S_SYNC_NAME}" -c syncthing ;;
-                         "") k8s_kubectl -n "$ns" logs "deployment/${K8S_SYNC_NAME}" -c syncthing ;;
-                         *) die "unknown flag: $1" ;; esac ;;
+    logs) k8s_deployment_logs "$ns" "$K8S_SYNC_NAME" syncthing "${1:-}" ;;
     push-settings) sync_push_settings ;;
     *) err "unknown 'aidc sync' verb: ${VERB} (try: aidc sync help)"; exit 2 ;;
 esac

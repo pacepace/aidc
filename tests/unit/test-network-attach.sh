@@ -146,9 +146,9 @@ eq "single dev networks block" \
 # --- 6: rendering with several attachments -----------------------------------
 echo
 echo "-- rendering: several attachments --"
-aidc_render_extnet_blocks "$(printf 'webapp_default\nfaidh_default\nthird.net\n')"
+aidc_render_extnet_blocks "$(printf 'webapp_default\nother_default\nthird.net\n')"
 contains "declares extnet0 by name" "name: webapp_default" "$EXTNET_DECLARATIONS"
-contains "declares extnet1 by name" "name: faidh_default"   "$EXTNET_DECLARATIONS"
+contains "declares extnet1 by name" "name: other_default"   "$EXTNET_DECLARATIONS"
 contains "declares extnet2 by name" "name: third.net"       "$EXTNET_DECLARATIONS"
 contains "marks them external"      "external: true"        "$EXTNET_DECLARATIONS"
 eq "one external: true per network" "3" \

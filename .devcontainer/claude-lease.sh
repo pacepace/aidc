@@ -5,19 +5,21 @@
 #
 # A conversation's lease is a file beside its transcript, synced with it:
 #   <project dir>/<session id>.aidc-lease   {"machine": "...", "until_s": <epoch>}
-# held while the machine's Claude works on it, renewed at each prompt and turn end, and let go
-# when Claude exits. A lease past its time is free (a machine that went away does not hold a
+# held while the machine's Claude works on it, renewed at each prompt, each tool call (so a turn
+# longer than the lease time keeps it) and each turn end, and let go when Claude exits. A lease past its time is free (a machine that went away does not hold a
 # conversation for ever).
 #
 #   aidc-claude-lease hook [--then <command>]
-#                                   Claude Code's SessionStart, UserPromptSubmit, Stop and
-#                                   SessionEnd hook (the hook's input on stdin). A prompt to a
+#                                   Claude Code's SessionStart, UserPromptSubmit, PostToolUse,
+#                                   Stop and SessionEnd hook (the hook's input on stdin). A prompt to a
 #                                   conversation another machine holds is blocked (exit 2, the
 #                                   reason shown to the user); otherwise the lease is taken or
 #                                   renewed. With --then, a prompt that goes through is handed
 #                                   on to <command> with the same input (a cluster session's
-#                                   aidc-hook-event): a refused prompt is recorded nowhere, since
-#                                   no turn follows it, and aidc-mcp must not wait for one.
+#                                   aidc-hook-event); a refused one is handed on as a
+#                                   PromptRefused event naming the holder instead, which opens
+#                                   no turn: aidc-mcp, reading the events in the session pod's own
+#                                   order, keeps a prompt it pasted queued.
 #                                   SessionStart also removes symlinks inside the project's
 #                                   folder: a synced symlink would point at whatever that path
 #                                   is on this machine (#35).
@@ -56,26 +58,6 @@ take() {
     fi
 }
 
-# Where aidc-mcp reads a cluster session's state (its transcript mirror folder); a machine's
-# own Claude has none.
-MIRROR="${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}"
-
-# held_note <holder> <lease-file>: for aidc-mcp, that a prompt was refused because <holder>
-# holds the conversation, until when (held-elsewhere.json in the mirror folder): it keeps a
-# prompt it pasted queued, and pastes none until then.
-held_note() {
-    local until tmp
-    [ -d "$MIRROR" ] || return 0
-    until=$(jq -r '.until_s // 0' "$2" 2>/dev/null) || until=0
-    tmp=$(mktemp "${MIRROR}/.held-elsewhere.XXXXXX" 2>/dev/null) || return 0
-    if jq -n -c --arg h "$1" --argjson u "${until:-0}" --argjson a "$(now_s)" \
-            '{holder: $h, until_s: $u, at_s: $a}' > "$tmp" 2>/dev/null; then
-        mv -f -- "$tmp" "${MIRROR}/held-elsewhere.json" 2>/dev/null || rm -f -- "$tmp"
-    else
-        rm -f -- "$tmp"
-    fi
-}
-
 do_hook() {
     local input event sid tpath dir lease other then=""
     [ "${1:-}" = --then ] && then="${2:-}"
@@ -102,12 +84,16 @@ do_hook() {
         UserPromptSubmit)
             if [ -n "$other" ]; then
                 printf 'aidc: this conversation is open on %s right now (it is synced between your machines, and two at once would both write it). Continue it there, or start a new one here (/clear).\n' "$other" >&2
-                held_note "$other" "$lease"
+                # For aidc-mcp: the refusal, in the event writer's own sequence (pod clock).
+                [ -z "$then" ] || jq -n -c --arg s "$sid" --arg h "$other" \
+                    '{hook_event_name: "PromptRefused", session_id: $s, holder: $h}' 2>/dev/null \
+                    | "$then" >/dev/null 2>&1 || true
                 exit 2
             fi
             take "$lease"
-            [ ! -f "${MIRROR}/held-elsewhere.json" ] || rm -f -- "${MIRROR}/held-elsewhere.json"
             pass_on ;;
+        PostToolUse)
+            [ -n "$other" ] || take "$lease" ;;
         Stop)
             [ -n "$other" ] || take "$lease" ;;
         SessionEnd)

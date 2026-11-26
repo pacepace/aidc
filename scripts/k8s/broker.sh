@@ -5,18 +5,9 @@
 # What runs in the cluster: manifests.sh, "Claude: one login per user, and its broker", and
 # broker/claude-broker.sh.
 
-# k8s_broker_state <namespace>: RUNNING, STARTING or NOT RUNNING, from the Deployment; returns 2,
-# saying why, when the cluster did not answer.
-k8s_broker_state() {
-    local out
-    out=$(k8s_get "$1" deployment "$K8S_BROKER_NAME" -o 'jsonpath={.metadata.name}|{.status.readyReplicas}') \
-        || { printf 'unknown (the cluster did not answer: %s)' "$out"; return 2; }
-    case "$out" in
-        "") printf 'NOT RUNNING' ;;
-        *"|"|*"|0") printf 'STARTING' ;;
-        *) printf 'RUNNING' ;;
-    esac
-}
+# k8s_broker_state <namespace>: RUNNING, STARTING or NOT RUNNING; returns 2, saying why, when the
+# cluster did not answer.
+k8s_broker_state() { k8s_deployment_state "$1" "$K8S_BROKER_NAME"; }
 
 # k8s_broker_exec <namespace> <claude-broker args...>: run claude-broker in the broker's pod, with
 # no stdin (an exec reads all of it otherwise).
@@ -104,9 +95,8 @@ k8s_claude_token_secret() {
 # by the broker when it runs, else by a one-shot pod. A failure is said, never fatal (the
 # folder is reused by a later session of the same name).
 k8s_claude_session_forget() {
-    local ns="$1" session="$2" state rc=0 sel have pod="${2}-claude-forget"
-    have=$(k8s_get "$ns" pvc "$K8S_CLAUDE_CONFIG_CLAIM" -o name) || have="?"
-    [ -n "$have" ] || return 0
+    local ns="$1" session="$2" state rc=0 sel pod="${2}-claude-forget"
+    _k8s_claim_missing "$ns" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" 2>/dev/null && return 0
     state=$(k8s_broker_state "$ns") || rc=$?
     if [ "$rc" = 0 ] && [ "$state" = RUNNING ] && k8s_broker_exec "$ns" forget "$session" >/dev/null 2>&1; then
         return 0

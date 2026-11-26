@@ -31,6 +31,9 @@ SESSION_START = "SessionStart"
 STOP = "Stop"
 NOTIFICATION = "Notification"
 USER_PROMPT_SUBMIT = "UserPromptSubmit"
+#: aidc's own: a cluster session's conversation lease refused a prompt (another of the user's
+#: machines holds the conversation); no turn follows it (.devcontainer/claude-lease.sh)
+PROMPT_REFUSED = "PromptRefused"
 
 PERMISSION_PROMPT = "permission_prompt"
 IDLE_PROMPT = "idle_prompt"

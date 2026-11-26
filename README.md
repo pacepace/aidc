@@ -912,25 +912,27 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   after that, with no broker running, gets it as `CLAUDE_CODE_OAUTH_TOKEN` from a Secret of its
   own (inference only: no Remote Control). Once a broker runs, new sessions use the broker
   instead.
-- **One Claude history per repo, on every machine** (`aidc sync`): your cluster disk's `.claude`
-  (every session's conversations and memory, and the `CLAUDE.md`, `rules/`, `skills/`,
-  `agents/`, `commands/` and `keybindings.json` sessions link to) and each machine's
-  `~/.claude` are one Syncthing folder (id `aidc-claude`), kept in step by a Syncthing pod in
-  your namespace that reaches only your own machines, at the LAN or VPN addresses you list
-  (`sync.peers`), with no discovery and no relays. Never synced: credentials, `.claude.json`,
-  live state. On each machine: `aidc sync setup --hooks` writes the folder's ignore list and
-  adds aidc's hooks to your `~/.claude/settings.json` (a conversation's lease, so two machines
-  never write one conversation at once; on a Mac the alias folders, below); then pair it with
-  the pod (`aidc sync status` gives the pod's device ID), add it under `sync.peers`, and `aidc
-  sync start`. `aidc sync push-settings` copies this machine's `settings.json` (the template new
-  cluster sessions start from) and its status line script to the cluster, one way. History is
-  kept under the Linux name (`-home-<user>-...`); on a Mac, `aidc sync reconcile` (also run by
-  the hook) gives each such folder a `-Users-<name>-...` alias, so Claude there finds the same
-  transcripts and memory. A cluster session does not continue the last conversation of its repo
-  while another machine holds it (it starts a new one and says so), and a prompt to a
-  conversation open elsewhere is refused with where it is open. Symlinks inside a synced
-  conversation folder are removed when a session starts there (they would point at whatever
-  that path is on the receiving machine).
+- **One Claude history per repo, on every machine** (`aidc sync`): a Syncthing pod in your
+  namespace keeps two folders in step with your own machines, at the LAN or VPN addresses you
+  list (`sync.peers`), with no discovery and no relays: `aidc-claude-projects` (every session's
+  conversations and memory, your disk's `.claude/projects` and each machine's
+  `~/.claude/projects`, both ways) and `aidc-claude-shared` (`CLAUDE.md`, `rules/`, `skills/`,
+  `agents/`, `commands/`, `keybindings.json`: from each machine's `~/.claude`, Send Only, to the
+  cluster only; sessions read them and cannot change them, so nothing a session writes reaches
+  what a Claude on your machine loads). Never synced: credentials, `.claude.json`, live state.
+  On each machine: `aidc sync setup --hooks` writes the two ignore lists and adds aidc's hooks
+  to your `~/.claude/settings.json` (`aidc sync lease-hook`, the conversation lease, so two
+  machines never write one conversation at once; on a Mac `aidc sync reconcile --hook`); then
+  pair it with the pod (`aidc sync status` gives the pod's device ID and says whether each
+  machine is connected), share the two folders, add it under `sync.peers`, and `aidc sync
+  start`. `aidc sync push-settings` copies this machine's `settings.json` (the template new
+  cluster sessions start from, aidc's own hooks left out) and its status line script to the
+  cluster, one way. History is kept under the Linux name (`-home-<user>-...`); on a Mac each
+  such folder gets a `-Users-<name>-...` alias, so Claude there finds the same transcripts and
+  memory. A cluster session resumes only its own conversation, not one another machine holds,
+  and a prompt to a conversation open elsewhere is refused with where it is open. Symlinks inside
+  a synced conversation folder are removed when a session starts there (they would point at
+  whatever that path is on the receiving machine).
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
 the pod: the dev pod reaches only its own Squid (plus the relays and namespaces you gave it) and

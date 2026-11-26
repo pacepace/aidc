@@ -89,6 +89,41 @@ that ships separately.
 - **Rule**: the frozen mark is written only after every egress rule is cut; a sidecar that cannot
   be read is "unknown", never "not frozen".
 
+### A cluster session ↔ the user's Claude account broker (files in the session's Claude config dir)
+- **Producer → consumer**: the broker (`broker/claude-broker.sh`) writes `.credentials.json`
+  (access token only), `.aidc-account` and `.aidc-notice` into each session's folder of
+  `claude-config`; the session's Claude and `aidc-claude-usage` read them. `aidc-claude-usage`
+  (`.devcontainer/claude-usage.sh`, in the session) writes `.aidc-usage.json`
+  (`{account, seven_day, resets_at, at_s}`) and `.aidc-limit.json` (`{account, at_s}`); the
+  broker reads them.
+- **Contract**: every file by temp then rename; the refresh token never in a session's folder;
+  a report names the account it measured (the producer's, not the consumer's guess).
+- **Rule**: `at_s` is the session pod's clock and is compared only with the broker's within a
+  freshness window of half an hour; a report naming no account is not counted. The session image
+  and the broker image are built by the same `aidc k8s build`, so their versions match.
+
+### A cluster session ↔ the user's MCP server: the account and the lease (the transcript mirror)
+- **Producer**: in the session, `aidc-claude-usage` writes `claude-account.json`
+  (`{account, notice, at}`); `aidc-hook-event` writes `own-transcripts` (a transcript file name a
+  line) and, through the lease (`aidc-claude-lease hook --then`), a `PromptRefused` hook event
+  (`{holder}`) in place of a refused prompt's UserPromptSubmit.
+- **Consumer**: aidc-mcp (`service/sessions.py` claude_account; the mirror, `user-main.sh`,
+  copying only `own-transcripts`' files; `service/sending.py` `_refused_by_lease`).
+- **Rule**: the session's clock is never compared with the server's: the refusal is read as the
+  first prompt event after the newest event name taken before Enter (the pod's own sequence),
+  and the retry a minute later is the server's own clock.
+
+### The user's machines ↔ the cluster: the lease and the synced folders (Syncthing)
+- **Producer and consumer**: `aidc-claude-lease` on every side (cluster sessions from their
+  managed settings, a machine through `aidc sync lease-hook`), writing and reading
+  `<project>/<session id>.aidc-lease` (`{machine, until_s}`), carried by `aidc-claude-projects`.
+  `aidc-claude-shared` carries the Claude files from the machines to the cluster only.
+- **Contract**: `until_s` is the holder's clock, read by another machine against its own: a
+  lease is good for its 15 minutes give or take the machines' skew and Syncthing's seconds.
+- **Rule**: a machine may run an older aidc than the cluster image, so a change to the lease's
+  fields is additive and both readers must accept the other's; the folder ids and directions are
+  fixed (`scripts/lib/claude-sync.sh`) and changed only with an upgrade note.
+
 ### The MCP server ↔ the git container's request holder
 - **Producer**: aidc-mcp's `service/gitapprove.py`, carrying out an orchestrator's answer to the
   git agent's question; the user's `aidc git approve|deny|requests` uses the same entry point.

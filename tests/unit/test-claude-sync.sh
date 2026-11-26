@@ -77,19 +77,23 @@ assert_has "a prompt that goes through is handed on, whole" '"hook_event_name":"
 : > "$SCRATCH/handed-on"
 out=$(hookthen UserPromptSubmit mac 2>&1; echo "|$?")
 assert_has "a refused one is still refused" "|2" "$out"
-assert_eq "...and handed on to nothing: no turn follows it, so aidc-mcp must not see a prompt" "" "$(cat "$SCRATCH/handed-on")"
-MOUT="$SCRATCH/mirror"; mkdir -p "$MOUT"
-jq -n -c --arg s "$SID" --arg t "$T" '{hook_event_name: "UserPromptSubmit", session_id: $s, transcript_path: $t}' \
-    | AIDC_TRANSCRIPT_OUT="$MOUT" AIDC_LEASE_MACHINE=mac bash "$L" hook --then "$NEXT" 2>/dev/null
-assert_eq "a refusal tells aidc-mcp who holds it, until when (the session's mirror folder)" '["cluster/s1",true]' \
-    "$(jq -c '[.holder, (.until_s > .at_s)]' "$MOUT/held-elsewhere.json")"
-rm -f "$P"/*.aidc-lease
-jq -n -c --arg s "$SID" --arg t "$T" '{hook_event_name: "UserPromptSubmit", session_id: $s, transcript_path: $t}' \
-    | AIDC_TRANSCRIPT_OUT="$MOUT" AIDC_LEASE_MACHINE=mac bash "$L" hook --then "$NEXT" 2>/dev/null
-assert_eq "a prompt that goes through removes the note" "no" "$([ -e "$MOUT/held-elsewhere.json" ] && echo yes || echo no)"
+assert_eq "...and handed on only as a PromptRefused event naming the holder (no turn follows it), in the event writer's own order" \
+    '["PromptRefused","cluster/s1"]' "$(jq -c '[.hook_event_name, .holder]' "$SCRATCH/handed-on")"
 : > "$SCRATCH/handed-on"
 printf 'not json' | bash "$L" hook --then "$NEXT"
 assert_eq "input it cannot read is handed on as it came (the event writer decides)" "not json" "$(cat "$SCRATCH/handed-on")"
+rm -f "$P"/*.aidc-lease
+
+echo "== a turn longer than the lease time keeps the lease (each tool call renews it)"
+rm -f "$P"/*.aidc-lease
+hook UserPromptSubmit cluster/s1 >/dev/null 2>&1
+jq '.until_s = (now | floor) + 5' "$P/$SID.aidc-lease" > "$P/x" && mv "$P/x" "$P/$SID.aidc-lease"   # 15 minutes into the turn
+hook PostToolUse cluster/s1
+assert_eq "a tool call renews it for the lease time" "yes" "$([ "$(jq -r .until_s "$P/$SID.aidc-lease")" -gt "$(( $(date +%s) + 600 ))" ] && echo yes)"
+out=$(hook UserPromptSubmit mac 2>&1; echo "|$?")
+assert_has "...so the other machine is still refused" "|2" "$out"
+hook PostToolUse mac
+assert_eq "another machine's tool call takes nothing" "cluster/s1" "$(jq -r .machine "$P/$SID.aidc-lease")"
 rm -f "$P"/*.aidc-lease
 
 echo "== free-id: may aidc-claude resume this conversation here?"
@@ -116,22 +120,23 @@ assert_eq "...the alias itself stays" "yes" "$([ -L "$ALIAS" ] && echo yes)"
 # shellcheck source=../../scripts/lib/claude-sync.sh
 . "$AIDC_ROOT/scripts/lib/claude-sync.sh"
 
-echo "== the folder's ignore list: the ruled sync set, exclusions first"
-ig=$(aidc_sync_stignore)
-for n in /projects /CLAUDE.md /rules /skills /agents /commands /keybindings.json; do
-    assert_has "$n is synced" "!$n" "$ig"
+echo "== two folders: conversations both ways; the Claude files a Claude loads from the machines only"
+ig=$(aidc_sync_stignore_shared)
+for n in /CLAUDE.md /rules /skills /agents /commands /keybindings.json; do
+    assert_has "$n is in the shared folder" "!$n" "$ig"
 done
-assert_eq "everything else is not (last line)" "*" "$(printf '%s\n' "$ig" | tail -1)"
-first_include=$(printf '%s\n' "$ig" | grep -n '^!' | head -1 | cut -d: -f1)
-alias_line=$(printf '%s\n' "$ig" | grep -n '^/projects/-Users-\*$' | cut -d: -f1)
-assert_eq "a Mac's alias folders are never synced, and that line comes before projects/ is let in" "yes" \
-    "$([ -n "$alias_line" ] && [ "$alias_line" -lt "$first_include" ] && echo yes)"
-for n in .credentials.json .claude.json settings.json sessions shell-snapshots; do
-    assert_eq "$n is not let in" "0" "$(printf '%s\n' "$ig" | grep -c "^!/$n")"
+assert_eq "everything else of ~/.claude is not (last line)" "*" "$(printf '%s\n' "$ig" | tail -1)"
+for n in projects .credentials.json .claude.json settings.json sessions shell-snapshots; do
+    assert_eq "$n is not in the shared folder" "0" "$(printf '%s\n' "$ig" | grep -c "^!/$n")"
 done
-mkdir -p "$SCRATCH/home/.claude"
-aidc_sync_write_stignore "$SCRATCH/home/.claude"
-assert_eq "it is written whole" "$ig" "$(cat "$SCRATCH/home/.claude/.stignore")"
+pj=$(aidc_sync_stignore_projects)
+assert_has "a Mac's alias folders are never synced (projects folder)" "/-Users-*" "$pj"
+assert_eq "...and nothing else of projects is left out" "0" "$(printf '%s\n' "$pj" | grep -c '^\*$')"
+assert_eq "the two folder ids" "aidc-claude-projects aidc-claude-shared" "$AIDC_SYNC_PROJECTS_ID $AIDC_SYNC_SHARED_ID"
+mkdir -p "$SCRATCH/home/.claude/projects"
+aidc_sync_write_ignore "$SCRATCH/home/.claude" shared
+aidc_sync_write_ignore "$SCRATCH/home/.claude/projects" projects
+assert_eq "each is written whole" "yes" "$([ "$(cat "$SCRATCH/home/.claude/.stignore")" = "$ig" ] && [ "$(cat "$SCRATCH/home/.claude/projects/.stignore")" = "$pj" ] && echo yes)"
 
 echo "== a Mac's alias folders (history kept under the Linux name)"
 PR="$SCRATCH/mac/projects"
@@ -157,16 +162,23 @@ out=$(aidc_sync_strip_links "$PR")
 assert_has "symlinks inside a folder are removed and said" "removed a synced symlink" "$out"
 assert_eq "...the top-level aliases stay" "-home-alice-code-proj" "$(readlink "$PR/-Users-alice-code-proj")"
 
-echo "== the hooks added to a machine's own settings, once, keeping the rest"
+echo "== the hooks added to a machine's own settings: a stable command, once, keeping the rest"
 S="$SCRATCH/home/.claude/settings.json"
-printf '{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-stop"}]}]}}' > "$S"
-aidc_sync_install_hooks "$S" "/opt/aidc/.devcontainer/claude-lease.sh hook"
-aidc_sync_install_hooks "$S" "/opt/aidc/.devcontainer/claude-lease.sh hook"
-assert_eq "each of the four hooks once" '[1,1,1,1]' \
-    "$(jq -c '[.hooks.SessionStart, .hooks.UserPromptSubmit, .hooks.Stop, .hooks.SessionEnd] | map([.[].hooks[] | select(.command | test("claude-lease"))] | length)' "$S")"
+# an earlier install named a versioned path (aidc-1.9.10), since updated and pruned
+printf '{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-stop"}]},{"hooks":[{"type":"command","command":"/home/u/.local/share/aidc/aidc-1.9.10/.devcontainer/claude-lease.sh hook"}]}]}}' > "$S"
+aidc_sync_install_hooks "$S" lease
+aidc_sync_install_hooks "$S" lease
+aidc_sync_install_hooks "$S" reconcile
+assert_eq "each lease hook once, by the aidc on PATH (no versioned path left)" '[1,1,1,1,1,0]' \
+    "$(jq -c '([.hooks.SessionStart, .hooks.UserPromptSubmit, .hooks.PostToolUse, .hooks.Stop, .hooks.SessionEnd] | map([.[].hooks[] | select(.command == "aidc sync lease-hook")] | length)) + [[.hooks[][].hooks[] | select(.command | test("aidc-1[.]9"))] | length]' "$S")"
+assert_eq "the reconciler beside it at session start, once" "1" \
+    "$(jq '[.hooks.SessionStart[].hooks[] | select(.command == "aidc sync reconcile --hook")] | length' "$S")"
+aidc_sync_install_hooks "$S" lease
+assert_eq "...re-running the lease's install keeps the reconciler" "1" \
+    "$(jq '[.hooks.SessionStart[].hooks[] | select(.command == "aidc sync reconcile --hook")] | length' "$S")"
 assert_eq "the user's own hook and settings are kept" '["opus","my-stop"]' "$(jq -c '[.model, .hooks.Stop[0].hooks[0].command]' "$S")"
 printf 'not json' > "$S"
-out=$(aidc_sync_install_hooks "$S" "x" 2>&1; echo "|$?")
+out=$(aidc_sync_install_hooks "$S" lease 2>&1; echo "|$?")
 assert_has "a settings file that is not JSON is left alone, and said" "nothing changed" "$out"
 assert_eq "...failing" "|1" "${out##*$'\n'}"
 assert_eq "...unchanged" "not json" "$(cat "$S")"

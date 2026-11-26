@@ -151,12 +151,18 @@ state_json() {
     fi
 }
 
-# state_update <jq filter> [jq args...]: state.json changed by the filter, written whole.
+# state_update <jq filter> [jq args...]: state.json changed by the filter, written whole. Says so
+# in the log when it cannot be (a full or read-only claim), and returns 1: what follows a failed
+# update must not be logged as done.
 state_update() {
     local filter="$1" new
     shift
-    new=$(state_json | jq -c "$@" "$filter") || return 1
-    printf '%s\n' "$new" | write_file "$STATE" 0600
+    if new=$(state_json | jq -c "$@" "$filter") && printf '%s\n' "$new" | write_file "$STATE" 0600; then
+        return 0
+    fi
+    log "could not record the broker's state in ${STATE} (is its claim full or read-only?)"
+    STATE_FAILED=1
+    return 1
 }
 
 # --- credentials ----------------------------------------------------------------------------
@@ -194,7 +200,7 @@ renew() {
     exp=$(expires_s "$name") now=$(now_s)
     if [ "$rc" = 0 ] && [ "$exp" -gt $((now + margin)) ]; then
         state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renewed_at: $at} | del(.renew_error))' \
-            --arg n "$name" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --arg n "$name" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
         log "renewed ${name}"
         return 0
     fi
@@ -208,8 +214,8 @@ renew() {
 # --- usage and switching --------------------------------------------------------------------
 
 # usage_reports: every session's fresh usage report, one JSON object a line ({session, account,
-# seven_day, resets_at, at_s}): what its statusline wrapper wrote, the account being the one the
-# broker last gave it.
+# seven_day, resets_at, at_s}): what its statusline wrapper wrote, credited to the account the
+# report names (the wrapper's, at the source); a report naming none is not counted.
 usage_reports() {
     local d f now fresh n
     now=$(now_s) fresh="$BROKER_USAGE_FRESH_S"
@@ -217,16 +223,17 @@ usage_reports() {
         [ -n "$n" ] || continue
         d="${BROKER_ACCESS}/${n}" f="${BROKER_ACCESS}/${n}/.aidc-usage.json"
         [ -f "$f" ] && [ ! -L "$f" ] || continue
-        jq -c --arg s "$n" --arg a "$(session_account "$n")" --argjson now "$now" --argjson fresh "$fresh" '
+        jq -c --arg s "$n" --argjson now "$now" --argjson fresh "$fresh" '
             select(type == "object" and (.at_s | type) == "number" and ($now - .at_s) <= $fresh
-                   and (.seven_day | type) == "number")
-            | {session: $s, account: $a, seven_day, resets_at: (.resets_at // null), at_s}' \
+                   and (.seven_day | type) == "number" and (.account | type) == "string" and .account != "")
+            | {session: $s, account, seven_day, resets_at: (.resets_at // null), at_s}' \
             "$f" 2>/dev/null
     done < <(sessions)
 }
 
 # rate_limited_since <epoch-s>: the sessions whose Claude hit its rate limit since then, one
-# {session, at_s} a line (their StopFailure rate_limit hook's .aidc-limit.json).
+# {session, account, at_s} a line (their StopFailure rate_limit hook's .aidc-limit.json, naming
+# the account it was on).
 rate_limited_since() {
     local since="$1" f n
     while IFS= read -r n; do
@@ -234,15 +241,11 @@ rate_limited_since() {
         f="${BROKER_ACCESS}/${n}/.aidc-limit.json"
         [ -f "$f" ] && [ ! -L "$f" ] || continue
         jq -c --arg s "$n" --argjson since "$since" '
-            select((.at_s | type) == "number" and .at_s > $since) | {session: $s, at_s}' "$f" 2>/dev/null
+            select((.at_s | type) == "number" and .at_s > $since and (.account | type) == "string"
+                   and .account != "") | {session: $s, account, at_s}' "$f" 2>/dev/null
     done < <(sessions)
 }
 
-# session_account <session>: the account the broker last wrote into the session's folder.
-session_account() {
-    local f="${BROKER_ACCESS}/$1/.aidc-account"
-    [ -f "$f" ] && [ ! -L "$f" ] && head -n1 -- "$f"
-}
 
 # record_usage: what the sessions reported, into state.json per account (the newest report), and
 # rate limits, which mark the account the session was on as at its limit.
@@ -262,8 +265,7 @@ record_usage() {
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         s=$(printf '%s' "$line" | jq -r .session) t=$(printf '%s' "$line" | jq -r .at_s)
-        acct=$(session_account "$s")
-        [ -n "$acct" ] || continue
+        acct=$(printf '%s' "$line" | jq -r .account)
         log "session ${s} hit the rate limit of ${acct}"
         state_update '.accounts[$a] = ((.accounts[$a] // {}) + {limited_until_s: ($t + $d)})' \
             --arg a "$acct" --argjson t "$t" --argjson d "$BROKER_LIMIT_S"
@@ -315,8 +317,8 @@ log_states() {
         reason=$(spent_reason "$n")
         was=$(state_json | jq -r --arg n "$n" '.accounts[$n].state_logged // "none"')
         [ "${reason:-usable}" != "$was" ] || continue
+        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {state_logged: $r})' --arg n "$n" --arg r "${reason:-usable}" || continue
         if [ -n "$reason" ]; then log "${n}: $(reason_text "$n" "$reason")"; else log "${n}: usable"; fi
-        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {state_logged: $r})' --arg n "$n" --arg r "${reason:-usable}"
     done < <(cycle)
 }
 
@@ -345,7 +347,7 @@ decide() {
     first=$(cycle | head -n1)
     if [ -z "$active" ] || [ ! -s "$(account_creds "$active")" ]; then
         [ -n "$first" ] || { state_update 'del(.active, .waiting, .none_usable)'; return 0; }
-        state_update '.active = $a | del(.waiting)' --arg a "$first"
+        state_update '.active = $a | del(.waiting)' --arg a "$first" || return 1
         log "active account: ${first}"
         active="$first"
     fi
@@ -358,20 +360,24 @@ decide() {
         done < <(cycle)
         local what=limits
         [ "$ended" = 1 ] && what=logins_ended
-        [ "$(state_json | jq -r '.none_usable // ""')" = "$what" ] \
+        local was
+        was=$(state_json | jq -r '.none_usable // ""')
+        state_update '.none_usable = $w | del(.waiting)' --arg w "$what" || return 1
+        [ "$was" = "$what" ] \
             || log "no account can be used ($( [ "$what" = logins_ended ] && echo "every login ended: aidc claude account add <name> again for each" || echo "every one at a limit" )): staying on ${active}"
-        state_update '.none_usable = $w | del(.waiting)' --arg w "$what"
         return 0
     fi
     # An account whose login ended serves nothing: the switch does not wait for the user.
     if [ "$(switch_mode)" = wait ] && [ "$reason" != login_ended ]; then
-        [ "$(state_json | jq -r '.waiting // ""')" = "$next" ] \
+        local waited
+        waited=$(state_json | jq -r '.waiting // ""')
+        state_update '.waiting = $n | del(.none_usable)' --arg n "$next" || return 1
+        [ "$waited" = "$next" ] \
             || log "${active} is $(reason_text "$active" "$reason"): switch to ${next} waiting for you (claude-broker use ${next})"
-        state_update '.waiting = $n | del(.none_usable)' --arg n "$next"
         return 0
     fi
     state_update '.active = $n | .switched_at = $at | .switched_from = $f | del(.waiting, .none_usable)' \
-        --arg n "$next" --arg f "$active" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        --arg n "$next" --arg f "$active" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
     log "switched from ${active} ($(reason_text "$active" "$reason")) to ${next}"
 }
 
@@ -405,9 +411,9 @@ write_session() {
     fi
     creds=$(access_only "$active") || creds=""
     if [ -n "$creds" ]; then
-        printf '%s\n' "$creds" | _write_if_changed "${dir}/.credentials.json" "$mode"
+        printf '%s\n' "$creds" | _write_if_changed "${dir}/.credentials.json" "$mode"  || return 1
     fi
-    printf '%s\n' "$active" | _write_if_changed "${dir}/.aidc-account" "$mode"
+    printf '%s\n' "$active" | _write_if_changed "${dir}/.aidc-account" "$mode" || return 1
     waiting=$(state_json | jq -r '.waiting // ""')
     notice=""
     case "$(state_json | jq -r '.none_usable // ""')" in
@@ -458,17 +464,21 @@ locked() {
     ( flock -w 900 9 || { log "the broker's lock stayed held: ${1} not run"; exit 1; }; "$@" ) 9>>"${BROKER_HOME}/.lock"
 }
 
+# do_pass: returns 1 when any state update or session write failed (serve says the pass failed).
 do_pass() {
-    local n
+    local n bad=0
+    STATE_FAILED=0
     while IFS= read -r n; do
         [ -n "$n" ] && renew "$n"
     done < <(logged_in_accounts)
     record_usage
     log_states
-    decide
+    decide || bad=1
     while IFS= read -r n; do
-        [ -n "$n" ] && write_session "$n"
+        [ -n "$n" ] || continue
+        write_session "$n" || { log "could not write ${n}'s credentials"; bad=1; }
     done < <(sessions)
+    [ "$bad" = 0 ] && [ "$STATE_FAILED" = 0 ]
 }
 
 do_serve() {
@@ -516,7 +526,7 @@ do_use() {
     local name="${1:-}"
     valid_name "$name" && [ -s "$(account_creds "$name")" ] || { say "no such account: ${name:-}"; return 1; }
     state_update '.active = $n | .switched_at = $at | del(.waiting)' --arg n "$name" \
-        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || { say "could not record ${name} as the active account"; return 1; }
     say "active account: ${name}"
     while IFS= read -r n; do [ -n "$n" ] && write_session "$n"; done < <(sessions)
 }

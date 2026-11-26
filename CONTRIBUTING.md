@@ -67,6 +67,19 @@ type(scope): imperative summary
 
 Keep the summary short and imperative. Explain the *why* in the body when it isn't obvious.
 
+### No private names
+
+aidc is public: code, docs, tests and records name none of a maintainer's own infrastructure,
+projects or people. `scripts/hooks/pre-commit` refuses a commit whose added lines (or file names)
+match a pattern in your own list, kept outside the repo and never committed:
+
+```bash
+git config core.hooksPath scripts/hooks      # once per clone
+$EDITOR ~/.config/aidc/private-names         # one extended regex a line; # comments
+```
+
+Without the list the hook says names were not checked and lets the commit through.
+
 ### Releases
 
 A release is a `chore(release):` commit that bumps every version reference together (the

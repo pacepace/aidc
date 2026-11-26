@@ -328,8 +328,11 @@ K8S_BROKER_CONFIG=claude-broker-config
 # Where the broker mounts the two claims (broker/claude-broker.sh: BROKER_ACCESS, BROKER_HOME).
 K8S_BROKER_ACCESS=/var/aidc/claude-config
 K8S_BROKER_HOME=/var/lib/claude-broker
-# The user's disk's Claude history folder (relative to the disk).
+# The user's disk's Claude history folder (relative to the disk), and its shared Claude files
+# (CLAUDE.md, rules/, skills/, agents/, commands/, keybindings.json, the settings template and
+# status line), which come from the user's machines only: sessions mount them read-only.
 K8S_DISK_PROJECTS=.claude/projects
+K8S_DISK_SHARED=.claude-shared
 
 k8s_render_claude_config() {
     cat <<EOF
@@ -418,7 +421,7 @@ _k8s_claude_seed_cmd() {
 # a file of the session's own by that name is left as it is. A new session's settings.json is
 # the template `aidc sync push-settings` left there, when there is one (laptop to cluster only).
 _k8s_claude_shared_cmd() {
-    printf '%s' "d=/claude-config-own; s=/home/${AIDC_K8S_USER}/${K8S_DISK_CLAUDE}; for n in CLAUDE.md rules skills agents commands keybindings.json; do if [ -L \"\$d/\$n\" ] || [ ! -e \"\$d/\$n\" ]; then ln -sfn \"\$s/\$n\" \"\$d/\$n\"; fi; done; if [ -f /shared-claude/settings.template.json ] && [ ! -e \"\$d/.aidc-settings-from-template\" ]; then cp /shared-claude/settings.template.json \"\$d/settings.json\" && : > \"\$d/.aidc-settings-from-template\"; fi; true"
+    printf '%s' "d=/claude-config-own; s=/home/${AIDC_K8S_USER}/${K8S_DISK_SHARED}; for n in CLAUDE.md rules skills agents commands keybindings.json; do if [ -L \"\$d/\$n\" ] || [ ! -e \"\$d/\$n\" ]; then ln -sfn \"\$s/\$n\" \"\$d/\$n\"; fi; done; if [ -f /shared-claude/settings.template.json ] && [ ! -e \"\$d/.aidc-settings-from-template\" ]; then cp /shared-claude/settings.template.json \"\$d/settings.json\" && : > \"\$d/.aidc-settings-from-template\"; fi; true"
 }
 
 # k8s_render_broker_config: the broker's settings from the user's config (claude_accounts: the
@@ -570,9 +573,11 @@ EOF
 
 # --- Syncthing: one Claude history per repo on every machine (K8S-18) -----------------------
 #
-# One pod per user (`aidc sync start`) syncing the user's disk's .claude (the folder every
-# session's conversations and memory are in, and the shared CLAUDE.md, rules, skills, agents,
-# commands and keybindings) with the user's own machines, over the LAN or VPN only (Q-K11):
+# One pod per user (`aidc sync start`) syncing the user's disk's .claude/projects (every
+# session's conversations and memory, both ways) and .claude-shared (the user's CLAUDE.md, rules,
+# skills, agents, commands and keybindings, from their machines only: Receive Only here, and
+# read-only in sessions; lib/claude-sync.sh) with the user's own machines, over the LAN or VPN
+# only (Q-K11):
 # no global discovery, no relays, no local announcements, no NAT traversal; it dials each
 # machine the config names, at the address given, and its NetworkPolicy lets it reach exactly
 # those, on Syncthing's port. Nothing may connect to it. aidc writes its whole configuration
@@ -586,8 +591,6 @@ K8S_SYNC_CONFIG=syncthing-config
 K8S_SYNC_CLAIM=syncthing
 K8S_SYNC_IMAGE="${K8S_SYNC_IMAGE:-docker.io/syncthing/syncthing:2.0.0}"
 K8S_SYNC_PORT=22000
-# The user's disk's Claude folder (relative to the disk), the one Syncthing syncs.
-K8S_DISK_CLAUDE=.claude
 
 k8s_render_sync_claim() {
     cat <<EOF
@@ -626,7 +629,12 @@ k8s_sync_config_xml() {
     done <<<"$peers"
     cat <<EOF
 <configuration version="37">
-    <folder id="${AIDC_SYNC_FOLDER_ID}" label="Claude (aidc)" path="/var/syncthing/claude" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+    <folder id="${AIDC_SYNC_PROJECTS_ID}" label="Claude conversations (aidc)" path="/var/syncthing/projects" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+        <filesystemType>basic</filesystemType>
+${folder_devices}        <minDiskFree unit="%">1</minDiskFree>
+        <versioning></versioning>
+    </folder>
+    <folder id="${AIDC_SYNC_SHARED_ID}" label="Claude files from your machines (aidc)" path="/var/syncthing/shared" type="receiveonly" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
         <filesystemType>basic</filesystemType>
 ${folder_devices}        <minDiskFree unit="%">1</minDiskFree>
         <versioning></versioning>
@@ -651,13 +659,15 @@ EOF
 
 # k8s_render_sync_config <peer-lines>: the ConfigMap holding config.xml and the .stignore.
 k8s_render_sync_config() {
-    AIDC_SYNC_XML="$(k8s_sync_config_xml "$1")" AIDC_SYNC_IGNORE="$(aidc_sync_stignore)" yq -n '
+    AIDC_SYNC_XML="$(k8s_sync_config_xml "$1")" AIDC_SYNC_IGNORE_P="$(aidc_sync_stignore_projects)" \
+        AIDC_SYNC_IGNORE_S="$(aidc_sync_stignore_shared)" yq -n '
         .apiVersion = "v1" | .kind = "ConfigMap"
         | .metadata.name = "'"${K8S_SYNC_CONFIG}"'"
         | .metadata.namespace = "'"$(k8s_user_ns "$AIDC_K8S_USER")"'"
         | .metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/user": "'"${AIDC_K8S_USER}"'", "app": "'"${K8S_SYNC_NAME}"'"}
         | .data."config.xml" = strenv(AIDC_SYNC_XML)
-        | .data.".stignore" = strenv(AIDC_SYNC_IGNORE)'
+        | .data."projects.stignore" = strenv(AIDC_SYNC_IGNORE_P)
+        | .data."shared.stignore" = strenv(AIDC_SYNC_IGNORE_S)'
 }
 
 # k8s_render_sync <node-selector-json> <peer-lines>: the NetworkPolicy (no way in; out to each
@@ -707,7 +717,7 @@ spec:
         # that is missing is made root-owned, which no session could then write).
         - name: claude-dir
           image: ${K8S_INIT_IMAGE}
-          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}"']
+          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}" "/disk/${K8S_DISK_SHARED}"']
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts: [{name: disk, mountPath: /disk}]
         # Its key's claim is its alone; a new claim is empty and root-owned.
@@ -719,12 +729,13 @@ spec:
         # user's config says wins at the next start), and the folder's .stignore.
         - name: settings
           image: ${K8S_INIT_IMAGE}
-          command: [sh, -c, 'umask 077 && cp /settings/config.xml /config/config.xml && umask 022 && cp /settings/.stignore /claude/.stignore']
+          command: [sh, -c, 'umask 077 && cp /settings/config.xml /config/config.xml && umask 022 && cp /settings/projects.stignore /projects/.stignore && cp /settings/shared.stignore /shared/.stignore']
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts:
             - {name: config, mountPath: /config}
             - {name: settings, mountPath: /settings, readOnly: true}
-            - {name: disk, mountPath: /claude, subPath: ${K8S_DISK_CLAUDE}}
+            - {name: disk, mountPath: /projects, subPath: ${K8S_DISK_PROJECTS}}
+            - {name: disk, mountPath: /shared, subPath: ${K8S_DISK_SHARED}}
       containers:
         - name: syncthing
           image: ${K8S_SYNC_IMAGE}
@@ -740,7 +751,8 @@ spec:
           resources: {requests: {cpu: 50m, memory: 128Mi}}
           volumeMounts:
             - {name: config, mountPath: /var/syncthing/config}
-            - {name: disk, mountPath: /var/syncthing/claude, subPath: ${K8S_DISK_CLAUDE}}
+            - {name: disk, mountPath: /var/syncthing/projects, subPath: ${K8S_DISK_PROJECTS}}
+            - {name: disk, mountPath: /var/syncthing/shared, subPath: ${K8S_DISK_SHARED}}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, persistentVolumeClaim: {claimName: ${K8S_SYNC_CLAIM}}}
@@ -1251,7 +1263,7 @@ spec:
         - name: claude-projects
           image: ${img}/audit:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
-          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}"']
+          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}" "/disk/${K8S_DISK_SHARED}"']
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts: [{name: disk, mountPath: /disk}]
         # The audit record's first files, as aidc create writes them on Docker: meta.json (the
@@ -1405,7 +1417,7 @@ spec:
           volumeMounts:
             - {name: home, mountPath: /seed, readOnly: true}
             - {name: claude-config, mountPath: /claude-config-own, subPath: ${session}}
-            - {name: disk, mountPath: /shared-claude, subPath: ${K8S_DISK_CLAUDE}, readOnly: true}
+            - {name: disk, mountPath: /shared-claude, subPath: ${K8S_DISK_SHARED}, readOnly: true}
         # The repo folder, made as the session user when it is not on the disk yet, group-writable
         # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
@@ -1441,7 +1453,7 @@ spec:
             # One history per repo (K8S-18): this session's name in a conversation's lease, and
             # the user's shared Claude folder on the disk (a synced status line runs from it).
             - {name: AIDC_LEASE_MACHINE, value: "cluster/${session}"}
-            - {name: AIDC_SHARED_CLAUDE, value: "/home/${AIDC_K8S_USER}/${K8S_DISK_CLAUDE}"}
+            - {name: AIDC_SHARED_CLAUDE, value: "/home/${AIDC_K8S_USER}/${K8S_DISK_SHARED}"}
 $(_k8s_claude_token_env "$session")            # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
             - {name: AIDC_DOCKER_STORAGE_DRIVER, value: overlay2}
             # The session's gh stand-in hands pull requests to the git container through this
@@ -1468,6 +1480,9 @@ $(_k8s_claude_token_env "$session")            # Sysbox gives the inner Docker a
             # credentials there), with the user's one Claude history over its projects/.
             - {name: claude-config, mountPath: /home/vscode/.claude, subPath: ${session}}
             - {name: disk, mountPath: /home/vscode/.claude/projects, subPath: ${K8S_DISK_PROJECTS}}
+            # The user's shared Claude files, which come from their machines, read-only over the
+            # disk: no session writes what a Claude on the user's machines loads.
+            - {name: disk, mountPath: "/home/${AIDC_K8S_USER}/${K8S_DISK_SHARED}", subPath: ${K8S_DISK_SHARED}, readOnly: true}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}

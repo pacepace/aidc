@@ -8,10 +8,13 @@ container/tmux helper monkeypatched, so the async contract is pinned without a
 real Docker session.
 """
 import asyncio
+import json
 import sqlite3
+import time
 
 import pytest
 
+from aidc_mcp import backend as be
 from aidc_mcp import server
 from aidc_mcp import store as state_store
 from aidc_mcp import transcript as ts
@@ -29,6 +32,8 @@ from tests.statefiles import dead_letters, put_raw, stored
 # asyncio module) with a non-yielding stub, so a test cannot use asyncio.sleep to
 # hand control to a background task. Capture the genuine one at import time.
 _REAL_SLEEP = asyncio.sleep
+# The wiring fixture patches the free check; the lease tests read the real one.
+_REAL_CHECK_FREE = snd._check_free
 
 
 async def _let_drainer_run(session: str, ticks: int = 50) -> None:
@@ -1371,65 +1376,71 @@ async def test_an_empty_prompt_pastes_no_header(wiring):
 
 # --- a cluster session whose conversation another machine holds (design 12, the lease) -----
 
-def _held(tmp_path, monkeypatch, *, until, at):
-    import json as _json
+def _mirror(tmp_path, monkeypatch):
     monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", tmp_path / "transcripts")
-    d = tmp_path / "transcripts" / "proj"
+    d = tmp_path / "transcripts" / "proj" / "hook-events"
     d.mkdir(parents=True, exist_ok=True)
-    (d / snd.HELD_ELSEWHERE_FILE).write_text(_json.dumps(
-        {"holder": "mac", "until_s": until, "at_s": at}))
     return d
 
 
-def test_a_conversation_held_elsewhere_is_known_until_its_lease_time(tmp_path, monkeypatch):
-    import time as _time
-    now = _time.time()
-    _held(tmp_path, monkeypatch, until=now + 600, at=now)
-    assert snd.held_elsewhere("proj")["holder"] == "mac"
-    _held(tmp_path, monkeypatch, until=now - 1, at=now - 700)
-    assert snd.held_elsewhere("proj") is None
-    assert snd.held_elsewhere("other") is None
-    assert "conversation_held_elsewhere" in snd.WAITING_EXPLAINED
+def _event(d, ns, event, **fields):
+    (d / f"{ns:019d}-1.json").write_text(json.dumps({"event": event, "at": "x", **fields}))
 
 
-async def test_a_prompt_the_lease_refuses_is_not_recorded_and_stays_queued(wiring, tmp_path,
-                                                                       monkeypatch):
-    """The lease refused the paste (another machine holds the conversation): no send
-    record, inject says it did not land, so session_send keeps the prompt queued."""
-    import time as _time
-
-    from aidc_mcp import backend as be
+@pytest.fixture
+def cluster(monkeypatch):
     monkeypatch.setattr(be, "kind", lambda: be.KUBERNETES)
-    d = _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() - 3)
-    ok = await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj")
-    assert ok is False   # a session pod's clock a few seconds behind still counts
+    ss.held_retry_at.clear()
+    ss.held_by.clear()
+
+
+async def test_a_prompt_the_lease_refuses_is_not_recorded_and_stays_held(wiring, tmp_path,
+                                                                     monkeypatch, cluster):
+    """The lease refused the paste (another machine holds the conversation): read in the
+    session pod's own event order (no clock of this server's is compared with the pod's),
+    inject says it did not land, nothing is recorded, and the free check holds the queue."""
+    d = _mirror(tmp_path, monkeypatch)
+    # the session's clock may be far from this server's: only the order of its events counts
+    _event(d, 1_000, "UserPromptSubmit")
+
+    async def tmux_exec(container, args):
+        if args and args[0] == "send-keys":
+            _event(d, 2_000, "PromptRefused", holder="mac")
+        return 0
+    monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is False
     assert "proj" not in ss.sent_awaiting_echo
-    # a prompt that went through: its own hook event ends the wait at once, the paste landed
-    (d / snd.HELD_ELSEWHERE_FILE).unlink()
-    ev = d / "hook-events"
-    ev.mkdir()
-    (ev / f"{int((_time.time() + 3600) * 1e9):019d}-1.json").write_text(
-        '{"event": "UserPromptSubmit", "at": "2026-11-26T00:00:00.000Z"}')
-    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
+    assert snd.held_elsewhere("proj") == {"holder": "mac"}
 
-
-async def test_on_docker_no_refusal_is_waited_for(wiring, tmp_path, monkeypatch):
-    import time as _time
-
-    from aidc_mcp import backend as be
-    monkeypatch.setattr(be, "kind", lambda: be.DOCKER)
-    _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() + 5)
-    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
-
-
-async def test_the_free_check_holds_a_prompt_while_another_machine_has_the_conversation(
-        tmp_path, monkeypatch):
-    import time as _time
     async def state(container, name):
         return tn.SessionState(True, None, tn.TURN_IDLE, "turn_stopped")
     monkeypatch.setattr(tn, "session_state", state)
     monkeypatch.setattr(tn, "paste_reason", lambda st: "")
-    _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time())
-    assert await snd._check_free("c", "proj") == "conversation_held_elsewhere"
-    _held(tmp_path, monkeypatch, until=_time.time() - 1, at=_time.time() - 900)
-    assert await snd._check_free("c", "proj") == ""
+    assert await _REAL_CHECK_FREE("c", "proj") == "conversation_held_elsewhere"
+    # the wait after a refusal ends on this server's clock, and the next paste asks again
+    assert snd.held_elsewhere("proj", now=time.time() + snd.HELD_RETRY_S + 1) is None
+    assert await _REAL_CHECK_FREE("c", "proj") == ""
+
+
+async def test_a_prompt_that_goes_through_lands_at_once(wiring, tmp_path, monkeypatch, cluster):
+    d = _mirror(tmp_path, monkeypatch)
+    _event(d, 1_000, "PromptRefused", holder="mac")   # an old refusal, before this paste
+
+    async def tmux_exec(container, args):
+        if args and args[0] == "send-keys":
+            _event(d, 2_000, "UserPromptSubmit")
+        return 0
+    monkeypatch.setattr(tmx, "tmux_exec", tmux_exec)
+    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
+    assert snd.held_elsewhere("proj") is None
+
+
+async def test_on_docker_no_refusal_is_waited_for(wiring, tmp_path, monkeypatch):
+    monkeypatch.setattr(be, "kind", lambda: be.DOCKER)
+    d = _mirror(tmp_path, monkeypatch)
+    _event(d, 9_000_000_000_000_000_000, "PromptRefused", holder="mac")
+    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
+
+
+def test_the_waiting_reason_is_explained():
+    assert "each minute" in snd.WAITING_EXPLAINED["conversation_held_elsewhere"]

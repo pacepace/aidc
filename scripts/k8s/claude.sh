@@ -88,22 +88,19 @@ claude_require_running() {
 }
 
 claude_broker() {
-    local verb="${1:-}" state rc=0 follow=()
+    local verb="${1:-}" state rc=0
     shift || true
     case "$verb" in
         start) k8s_broker_start "$ns" || exit 1; claude_broker status ;;
         stop)
             info "stopping your Claude account broker in ${ns} (accounts and sessions' Claude dirs are kept)"
-            k8s_kubectl -n "$ns" delete deployment,networkpolicy -l "app=${K8S_BROKER_NAME}" --wait=true >&2 \
-                || die "could not stop the Claude account broker" ;;
+            k8s_deployment_stop "$ns" "$K8S_BROKER_NAME" || die "could not stop the Claude account broker" ;;
         status)
             state=$(k8s_broker_state "$ns") || rc=$?
             printf 'claude-broker (kubernetes, %s): %s\n' "$ns" "$state"
             [ "$rc" = 0 ] && [ "$state" = RUNNING ] || return 0
             k8s_broker_exec "$ns" list | sed 's/^/  /' ;;
-        logs)
-            case "${1:-}" in --follow|-f) follow=(-f) ;; "") ;; *) die "unknown flag: $1" ;; esac
-            k8s_kubectl -n "$ns" logs ${follow[@]+"${follow[@]}"} "deployment/${K8S_BROKER_NAME}" -c broker ;;
+        logs) k8s_deployment_logs "$ns" "$K8S_BROKER_NAME" broker "${1:-}" ;;
         ""|help|-h|--help) usage ;;
         *) die "unknown 'aidc claude broker' verb: ${verb} (try: aidc claude help)" ;;
     esac

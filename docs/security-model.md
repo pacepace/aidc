@@ -238,6 +238,28 @@ What it does not: the broker mounts every session's Claude config dir, so whoeve
 broker's pod (a compromised Claude Code release, say) can read every session's Claude state and
 every account's login. That is the same trust a laptop gives the Claude Code it runs.
 
+### One Claude history across the cluster and your machines (K8S-18)
+
+`aidc sync` carries a cluster user's Claude state between the cluster and their own machines
+with Syncthing (docs/design-12-kubernetes.md, "One history per repo"). What holds:
+
+- The Claude files a Claude loads and that can run code or steer it, `CLAUDE.md`, `rules/`,
+  `skills/`, `agents/`, `commands/`, `keybindings.json`, `settings.json` and the status line,
+  go from the user's machines to the cluster only: a Send Only folder on the machine, a Receive
+  Only one in the cluster, mounted read-only in sessions; settings by `aidc sync push-settings`.
+  A session, prompt-injected or tainted, cannot write one that reaches a machine.
+- The Syncthing pod reaches only the machines in `sync.peers`, at their private addresses, and
+  takes no connections; no discovery or relay servers.
+- Symlinks inside a synced conversation folder are removed where a session or the machine's
+  hook starts (they would point at whatever that path is on the receiving machine).
+
+What it does not: `projects/` (each repo's transcripts and memory) still flows both ways. A
+session can write a conversation or a memory file that the user's machine then has, and a Claude
+there that resumes that conversation, or reads that memory, reads what the session wrote. That is
+the history being shared, which is what K8S-18 asks for; treat a cluster conversation's content
+as the cluster session's, as you would its replies. A tainted session's history is synced like
+any other.
+
 ### Host network position attacks
 
 If the host is on a network where attackers can reach Docker's exposed ports, aidc itself doesn't harden the host. **Mitigation:** out of scope. aidc assumes the host's perimeter is secured by other means.

@@ -48,6 +48,13 @@ case "$*" in
     *"get pvc syncthing"*) [ "${K_NO_CLAIM:-}" = 1 ] || echo "persistentvolumeclaim/syncthing" ;;
     *"apply -f -"*) { echo '---'; cat; } >> "$K_APPLIED" ;;
     *"device-id"*) echo "ZZZZZZZ-YYYYYYY-XXXXXXX-WWWWWWW-VVVVVVV-UUUUUUU-TTTTTTT-SSSSSSS" ;;
+    *"exec deployment/syncthing -c syncthing -- sh -c"*)
+        if [ "${K_CONNECTED:-}" = 1 ]; then
+            printf '{"connections":{"%s":{"connected":true}}}\n' "$K_ID"
+        else
+            printf '{"connections":{"%s":{"connected":false,"address":""}}}\n' "$K_ID"
+        fi
+        printf '{"state":"idle","errors":0,"pullErrors":0,"needFiles":0}\n{"state":"idle","errors":2,"pullErrors":0}\n' ;;
     *"exec -i deployment/syncthing"*) cat > "$K_PUSHED.$(printf '%s' "$*" | md5sum | cut -c1-6)" ;;
 esac
 exit 0
@@ -104,18 +111,20 @@ done
 assert_has "usage reporting refused" "<urAccepted>-1</urAccepted>" "$xml"
 assert_has "its GUI only on its own loopback" "<address>127.0.0.1:8384</address>" "$xml"
 assert_has "each machine dialled at its address" "<address>tcp://192.168.1.20:22000</address>" "$xml"
-assert_has "one folder, aidc-claude, the disk's .claude" 'folder id="aidc-claude" label="Claude (aidc)" path="/var/syncthing/claude" type="sendreceive"' "$xml"
-assert_has "...shared with the machines" "<device id=\"${ID1}\"></device>" "$xml"
-assert_eq "the folder's ignore list is the sync set" "$(. "$AIDC_ROOT/scripts/lib/claude-sync.sh"; aidc_sync_stignore)" \
-    "$(q 'select(.kind == "ConfigMap") | .data.".stignore"' | jq -r .)"
+assert_has "conversations and memory both ways: the disk's .claude/projects" 'folder id="aidc-claude-projects" label="Claude conversations (aidc)" path="/var/syncthing/projects" type="sendreceive"' "$xml"
+assert_has "the Claude files a Claude loads, from the machines only: Receive Only here" 'folder id="aidc-claude-shared" label="Claude files from your machines (aidc)" path="/var/syncthing/shared" type="receiveonly"' "$xml"
+assert_eq "...each shared with the machines" "2" "$(printf '%s\n' "$xml" | grep -c "<device id=\"${ID1}\"></device>" | awk '{print ($1 >= 2) ? 2 : $1}')"
+assert_eq "each folder's ignore list is its sync set" "yes" \
+    "$( . "$AIDC_ROOT/scripts/lib/claude-sync.sh"; [ "$(q 'select(.kind == "ConfigMap") | .data."projects.stignore"' | jq -r .)" = "$(aidc_sync_stignore_projects)" ] \
+        && [ "$(q 'select(.kind == "ConfigMap") | .data."shared.stignore"' | jq -r .)" = "$(aidc_sync_stignore_shared)" ] && echo yes)"
 pod() { dep ".spec.template.spec | $1"; }
 assert_eq "no API token, no service links, no DNS" '[false,false,"None"]' \
     "$(pod '[.automountServiceAccountToken, .enableServiceLinks, .dnsPolicy]')"
 assert_eq "it runs as the session user (the history's owner), read-only, with nothing" \
     '{"runAsUser":1000,"runAsGroup":1000,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
     "$(pod '.containers[0].securityContext')"
-assert_eq "it mounts its identity and the disk's .claude only" \
-    '[{"name":"config","mountPath":"/var/syncthing/config"},{"name":"disk","mountPath":"/var/syncthing/claude","subPath":".claude"},{"name":"tmp","mountPath":"/tmp"}]' \
+assert_eq "it mounts its identity and the two synced folders of the disk only" \
+    '[{"name":"config","mountPath":"/var/syncthing/config"},{"name":"disk","mountPath":"/var/syncthing/projects","subPath":".claude/projects"},{"name":"disk","mountPath":"/var/syncthing/shared","subPath":".claude-shared"},{"name":"tmp","mountPath":"/tmp"}]' \
     "$(pod '.containers[0].volumeMounts')"
 assert_eq "the disk's .claude is made first, as the session user, before any mount of it" \
     '["claude-dir",{"runAsUser":1000,"runAsGroup":1000}]' "$(pod '[.initContainers[0].name, .initContainers[0].securityContext]')"
@@ -136,9 +145,13 @@ assert_has "a machine with no address" "no address" "$out"
 write_config "    - {name: mac, device_id: ${ID1}, address: 192.168.1.20}"
 
 echo "=== status, stop, push-settings ==="
-out=$(K_RUNNING=1 run status)
+out=$(K_RUNNING=1 K_ID="$ID1" run status)
 assert_has "status gives the pod's device ID, to pair the machines with" "device ID:  ZZZZZZZ-YYYYYYY" "$out"
-assert_has "...and the peers" "peer:       mac 192.168.1.20" "$out"
+assert_has "...each peer as Syncthing sees it: a pairing that never connects says so" "peer:       mac 192.168.1.20 ${ID1}: NOT CONNECTED" "$out"
+assert_has "...each folder's state and errors" "aidc-claude-shared: idle, 2 ERRORS (aidc sync logs)" "$out"
+out=$(K_RUNNING=1 K_CONNECTED=1 K_ID="$ID1" run status)
+assert_has "...and a connected one" "${ID1}: connected" "$out"
+assert_has "...a folder in step" "aidc-claude-projects: idle" "$out"
 out=$(K_RUNNING=1 run stop)
 assert_has "stop removes its Deployment and policy (identity and history kept)" \
     "delete deployment,networkpolicy -l app=syncthing" "$(cat "$K_LOG")"
@@ -149,7 +162,7 @@ out=$(K_RUNNING=1 run push-settings)
 assert_has "push-settings copies settings.json as the template new sessions start from" "settings.template.json" "$(cat "$K_LOG")"
 assert_has "...and the status line script" "statusline.sh" "$(cat "$K_LOG")"
 assert_eq "what was sent is this machine's" "2" "$(cat "$K_PUSHED".* | grep -c -e '"model": "opus"' -e 'echo mine')"
-tmpl=$(cat "$K_PUSHED".* | jq -c 'select(type == "object")' 2>/dev/null)
+tmpl=$(for f in "$K_PUSHED".*; do jq -c 'select(type == "object")' "$f" 2>/dev/null; done)
 assert_eq "...the template without the hooks aidc sync setup added (this machine's paths), its own kept" \
     '{"SessionEnd":[{"hooks":[{"type":"command","command":"mine"}]}]}' "$(printf '%s' "$tmpl" | jq -c .hooks)"
 out=$(run push-settings)

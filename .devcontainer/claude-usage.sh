@@ -5,7 +5,7 @@
 #   aidc-claude-usage statusline     Claude Code's statusLine command (managed settings, in a
 #                                    cluster session): reads the status JSON on stdin, leaves the
 #                                    weekly usage in the Claude config dir (.aidc-usage.json:
-#                                    {seven_day, resets_at, at_s}), and prints the user's own
+#                                    {account, seven_day, resets_at, at_s}), and prints the user's own
 #                                    status line (their settings.json statusLine, run with the
 #                                    same input) or a short one, and the broker's notice if any.
 #                                    It also leaves the account and the notice in the session's
@@ -13,7 +13,7 @@
 #                                    notice, at}), where the user's MCP server reads them for
 #                                    session_status.
 #   aidc-claude-usage rate-limited   Claude Code's StopFailure hook, matcher rate_limit: leaves
-#                                    .aidc-limit.json ({at_s}) there.
+#                                    .aidc-limit.json ({account, at_s}) there.
 #
 # The broker reads both from the session's folder of claude-config, which is this Claude config
 # dir. Only where a broker manages the session (it wrote .aidc-account) is anything written. It
@@ -39,6 +39,9 @@ write_json() {
 
 managed() { [ -f "${dir}/.aidc-account" ] && [ ! -L "${dir}/.aidc-account" ]; }
 
+# account_now: the account the broker last gave this session ("" when none).
+account_now() { managed && head -n1 -- "${dir}/.aidc-account" 2>/dev/null; }
+
 # user_statusline: the user's own statusLine command from the session's settings.json, its
 # ~/.claude/ or /Users/<name>/.claude/ path (a status line from a laptop) made the shared
 # Claude folder's; "" when there is none or it is this one.
@@ -56,10 +59,19 @@ do_statusline() {
     local input usage cmd line notice
     input=$(cat 2>/dev/null) || input=""
     if managed; then
-        usage=$(printf '%s' "$input" | jq -c --argjson t "$(date -u +%s)" '
+        # The report names the account it measured. Claude shows the usage of its last API
+        # call: right after the broker switches accounts the status still carries the old
+        # account's numbers, so a report whose numbers are the previous report's, under a new
+        # account name, is the old account's and is not written; the new one's first call
+        # brings its own numbers (each account's week resets at its own time).
+        usage=$(printf '%s' "$input" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" \
+            --slurpfile prev <(cat "${dir}/.aidc-usage.json" 2>/dev/null || echo null) '
             .rate_limits.seven_day as $w
-            | select(($w.used_percentage | type) == "number")
-            | {seven_day: $w.used_percentage, resets_at: ($w.resets_at // null), at_s: $t}' 2>/dev/null) || usage=""
+            | select(($w.used_percentage | type) == "number" and $a != "")
+            | ($prev[0] // {}) as $p
+            | select(($p | type) != "object" or ($p.account // $a) == $a
+                     or $p.seven_day != $w.used_percentage or $p.resets_at != ($w.resets_at // null))
+            | {account: $a, seven_day: $w.used_percentage, resets_at: ($w.resets_at // null), at_s: $t}' 2>/dev/null) || usage=""
         [ -z "$usage" ] || write_json .aidc-usage.json "$usage"
     fi
     cmd=$(user_statusline)
@@ -97,7 +109,7 @@ do_statusline() {
 do_rate_limited() {
     cat >/dev/null 2>&1 || true
     managed || return 0
-    write_json .aidc-limit.json "{\"at_s\": $(date -u +%s)}"
+    write_json .aidc-limit.json "$(jq -n -c --arg a "$(account_now)" --argjson t "$(date -u +%s)" '{account: $a, at_s: $t}')"
 }
 
 case "${1:-}" in

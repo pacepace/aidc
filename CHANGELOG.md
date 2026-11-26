@@ -173,7 +173,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `commands/` and `keybindings.json`, take a
   conversation's lease, and start a new conversation rather than continue one open elsewhere.
   A prompt sent to a cluster session whose conversation is open on another of your machines
-  waits, `waiting_reason: "conversation_held_elsewhere"`, until that machine lets it go.
+  waits, `waiting_reason: "conversation_held_elsewhere"`, tried again each minute until that
+  machine has let it go. Two Syncthing folders: `aidc-claude-projects` (conversations and
+  memory, both ways) and `aidc-claude-shared` (CLAUDE.md, rules, skills, agents, commands,
+  keybindings: from your machines to the cluster only, read-only in sessions). Run `aidc sync
+  setup --hooks` again on each machine: the hooks now call the `aidc` on your PATH.
   Create sessions again for these.
 - **`session_status` and `session_list` give `claude_account`** for a cluster session whose
   login is your broker's: `{account, notice, at}`, the notice saying what needs you (a switch

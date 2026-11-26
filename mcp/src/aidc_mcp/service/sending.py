@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -318,13 +317,14 @@ async def inject(container: str, text: str, window: str, *, session: str,
                       waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
             return False
     ss.unsubmitted_paste.pop(session, None)
-    entered = time.time()
+    watermark = (_newest_event_name(Path(ss.TRANSCRIPTS_BASE) / session)
+                 if backend.kind() == backend.KUBERNETES else "")
     await tmx.tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
-    if await _refused_by_lease(session, entered):
+    if await _refused_by_lease(session, watermark):
         # Claude Code erased the prompt: no turn, nothing recorded. The caller keeps it
-        # queued, and the free check holds it while the other machine has the conversation.
+        # queued, and the free check holds it a while before asking again.
         audit.log_event("session_send_refused_held_elsewhere", session=session,
-                  prompt_len=len(text), holder=(held_elsewhere(session) or {}).get("holder"))
+                  prompt_len=len(text), holder=ss.held_by.get(session, ""))
         return False
     batch = ({"pasted_at": ts.now_iso(),
               "prompts": [q.batch_entry() for q in prompts]}
@@ -342,53 +342,61 @@ async def inject(container: str, text: str, window: str, *, session: str,
 
 #: A cluster session's conversation is synced with the user's machines, and one machine at a
 #: time works on it (its lease, .devcontainer/claude-lease.sh). The lease's prompt hook, refusing
-#: a prompt because another machine holds the conversation, leaves this in the session's
-#: mirror folder ({holder, until_s, at_s}), and removes it when a prompt goes through.
-HELD_ELSEWHERE_FILE = "held-elsewhere.json"
+#: a prompt because another machine holds the conversation, writes a PromptRefused hook event
+#: naming the holder, in the session's own event sequence; a prompt that goes through writes its
+#: UserPromptSubmit there. Both are read in that sequence (the session pod's clock), never
+#: against this server's clock.
 HELD_ELSEWHERE = "conversation_held_elsewhere"
-#: How long after Enter a refusal is waited for: the hook runs as the prompt is submitted;
-#: the prompt's own hook event, written when it goes through, ends the wait sooner.
+#: How long after Enter the prompt's own event is waited for.
 _REFUSAL_WAIT_S = 5.0
 _REFUSAL_POLL_S = 0.2
-_CLOCK_SLACK_S = 5
+#: After a refusal, how long the queue waits before it tries again (this server's clock): the
+#: other machine letting go of the conversation is not seen here, so the next paste asks.
+HELD_RETRY_S = 60.0
+
+
+def _newest_event_name(mirror: Path) -> str:
+    """The newest hook event's file name in the session's mirror ("" for none): a watermark
+    in the session pod's own sequence."""
+    events = he.read_events(mirror)
+    return events[-1].name if events else ""
 
 
 def held_elsewhere(name: str, now: float | None = None) -> dict[str, Any] | None:
-    """The machine holding session `name`'s conversation now ({holder, until_s, at_s}), or
-    None: no refusal recorded, one past its lease time, or one that cannot be read."""
-    try:
-        doc = json.loads((Path(ss.TRANSCRIPTS_BASE) / name / HELD_ELSEWHERE_FILE)
-                         .read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    """Who holds session `name`'s conversation, while its queue waits on that ({holder}), or
+    None: the newest prompt event is not a refusal, or the wait after it (HELD_RETRY_S, from
+    when this server saw it) is over, so the next paste asks again."""
+    retry_at = ss.held_retry_at.get(name)
+    if retry_at is None:
         return None
-    if not isinstance(doc, dict):
+    if retry_at <= (time.time() if now is None else now):
+        ss.held_retry_at.pop(name, None)
         return None
-    until, at = doc.get("until_s"), doc.get("at_s")
-    if not isinstance(until, (int, float)) or not isinstance(at, (int, float)):
-        return None
-    if until <= (time.time() if now is None else now):
-        return None
-    return {"holder": str(doc.get("holder") or ""), "until_s": until, "at_s": at}
+    return {"holder": ss.held_by.get(name, "")}
 
 
-async def _refused_by_lease(session: str, entered: float) -> bool:
+async def _refused_by_lease(session: str, watermark: str) -> bool:
     """Whether the prompt just entered into a cluster session was refused by its lease
-    (another machine holds the conversation): a refusal recorded since `entered`. Ends as
-    soon as the prompt's own UserPromptSubmit event shows it went through. Never on Docker,
-    whose sessions run no lease."""
+    (another machine holds the conversation): the first prompt event written after
+    `watermark` (the session's newest event before Enter) is a PromptRefused. Its
+    UserPromptSubmit ends the wait at once; with neither in time, the paste stands. Never on
+    Docker, whose sessions run no lease."""
     if backend.kind() != backend.KUBERNETES:
         return False
     mirror = Path(ss.TRANSCRIPTS_BASE) / session
-    after = f"{int(entered * 1e9):019d}"
     for _ in range(max(1, int(_REFUSAL_WAIT_S / _REFUSAL_POLL_S))):
-        held = held_elsewhere(session)
-        # The note's time is the session pod's clock, `entered` this server's: a few seconds
-        # of skew between the two must not hide a refusal.
-        if held is not None and held["at_s"] >= int(entered) - _CLOCK_SLACK_S:
-            return True
-        if any(e.event == he.USER_PROMPT_SUBMIT for e in he.read_events(mirror, after=after)):
-            return False
+        for event in he.read_events(mirror, after=watermark):
+            if event.event == he.PROMPT_REFUSED:
+                ss.held_retry_at[session] = time.time() + HELD_RETRY_S
+                holder = event.data.get("holder")
+                ss.held_by[session] = holder if isinstance(holder, str) else ""
+                return True
+            if event.event == he.USER_PROMPT_SUBMIT:
+                ss.held_retry_at.pop(session, None)
+                return False
         await asyncio.sleep(_REFUSAL_POLL_S)
+    audit.log_event("session_send_prompt_event_not_seen", session=session,
+              waited_s=_REFUSAL_WAIT_S)
     return False
 
 
@@ -801,8 +809,9 @@ WAITING_EXPLAINED = {
                       "(the session's status line tells them)",
     "claude_not_running": "Claude is not running in the session",
     "claude_not_at_prompt": "Claude is showing a dialog (e.g. login) instead of its prompt",
-    HELD_ELSEWHERE: ("the conversation is open on another of the person's machines right now "
-                     "(it is synced with them); it goes in once that machine lets it go"),
+    HELD_ELSEWHERE: ("the conversation is open on another of the person's machines (it is "
+                     "synced with them); the paste is tried again each minute, and goes in "
+                     "once that machine has let it go"),
     "screen_unrecognized": "aidc does not recognize Claude's screen",
     "paste_failing": "pasting into the session is failing and being retried",
     "queued_behind": "an earlier prompt is still waiting",

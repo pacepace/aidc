@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# pre-commit: refuse a commit whose staged changes name something private (aidc is public).
+#
+# The patterns are a maintainer's own, kept OUTSIDE the repo, one extended regular expression a
+# line (case-insensitive; blank lines and lines starting with # are skipped):
+#
+#   ${AIDC_PRIVATE_NAMES:-~/.config/aidc/private-names}
+#
+# The list is never committed: it would publish what it guards. Without it the hook says so
+# and lets the commit through. Install for this clone: git config core.hooksPath scripts/hooks
+set -u
+
+list="${AIDC_PRIVATE_NAMES:-${HOME}/.config/aidc/private-names}"
+if [ ! -r "$list" ]; then
+    printf 'pre-commit: no private-names list at %s: names not checked\n' "$list" >&2
+    exit 0
+fi
+
+patterns=$(grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' "$list")
+[ -n "$patterns" ] || exit 0
+
+# Only what this commit adds: the staged diff's added lines, and the names of added files.
+added=$( { git diff --cached --no-color -U0 --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+ '
+           git diff --cached --name-only --diff-filter=ACMR; } 2>/dev/null)
+hits=$(printf '%s\n' "$added" | grep -i -n -E -f <(printf '%s\n' "$patterns") || true)
+if [ -n "$hits" ]; then
+    printf 'pre-commit: the staged changes name something on your private-names list (%s):\n' "$list" >&2
+    # The matching lines, not the patterns: the list itself is never printed.
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    printf 'Replace them with a generic word, or commit with --no-verify if this is a false match.\n' >&2
+    exit 1
+fi
+exit 0

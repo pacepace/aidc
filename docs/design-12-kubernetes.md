@@ -1147,39 +1147,54 @@ cluster, because it carries hooks that run code on the receiving machine. One ma
 resumes a given conversation; aidc holds a lease so two machines do not both append.
 
 As built (chunk 19; Q-K11: the user's own machines only):
+- **Two folders, two directions** (`scripts/lib/claude-sync.sh`). `aidc-claude-projects` is the
+  conversations and memory (a machine's `~/.claude/projects`, the cluster disk's
+  `.claude/projects`), both ways, under the lease. `aidc-claude-shared` is the Claude files a
+  Claude loads, `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `commands/` and `keybindings.json`
+  (a machine's `~/.claude`, Send Only; the cluster disk's `.claude-shared`, Receive Only): from
+  the user's machines to the cluster only. The 2026-11-24 ruling sent `settings.json` one way
+  because it carries hooks that run code on the machine that receives it; skills, agents (their
+  hooks and scripts), commands, rules and CLAUDE.md are the same kind of thing, so they go the
+  same way: a sandboxed session must never write what an unsandboxed Claude on the user's
+  machine loads. Sessions mount `.claude-shared` read-only over the disk, and a change made to
+  it in the cluster (the git agent, which mounts the disk) is a Receive Only folder's local
+  change, never sent. `settings.json` and the status line go by `aidc sync push-settings`
+  (laptop to cluster, not Syncthing, the machine's own aidc hooks left out): the template becomes
+  a new session's `settings.json` once; the status line script stays in `.claude-shared`, where
+  `aidc-claude-usage` runs it from (`AIDC_SHARED_CLAUDE`). What still flows from the cluster to
+  the machines is `projects/` (transcripts and memory); see docs/security-model.md.
 - **The pod** (`aidc sync start`, `scripts/k8s/sync.sh`): `syncthing` in the user's namespace,
   the pinned official image, as uid 1000, read-only root, no API token, no DNS. aidc writes its
-  whole `config.xml` from `sync.peers` on every start (one folder, id `aidc-claude`, the disk's
-  `.claude`; global discovery, local announcements, relays, NAT traversal, usage and crash
-  reports off; the GUI on its loopback only), so what the config says wins. Its NetworkPolicy
-  lets nothing in and lets it out to each peer's address and port only; a peer whose address is
-  public is refused (a name is resolved on the user's machine, as a relay's is). Its key and
-  certificate, its identity to the user's machines, are on its own claim (retained class).
-  `aidc sync status` gives its device ID for pairing.
-- **The sync set** is the folder's `.stignore` (`scripts/lib/claude-sync.sh`), the same on every
-  side (`aidc sync setup` writes the machine's): the ruled set let in, a Mac's
-  `projects/-Users-*` aliases and everything else left out. `settings.json` and the status line
-  go laptop to cluster only, by `aidc sync push-settings` (not Syncthing): the template becomes
-  a new session's `settings.json` once; the status line script stays on the disk's `.claude`,
-  where `aidc-claude-usage` runs it from (`AIDC_SHARED_CLAUDE`).
-- **Sessions** link the synced files into their Claude config dir each start (a file of the
+  whole `config.xml` from `sync.peers` on every start (the two folders; global discovery, local
+  announcements, relays, NAT traversal, usage and crash reports off; the GUI on its loopback
+  only), so what the config says wins. Its NetworkPolicy lets nothing in and lets it out to each
+  peer's address and port only; a peer whose address is public is refused (a name is resolved on
+  the user's machine, as a relay's is). Its key and certificate, its identity to the user's
+  machines, are on its own claim (retained class). `aidc sync status` gives its device ID for
+  pairing, and asks Syncthing itself (its REST API on the loopback) whether each peer is
+  connected and each folder in step or in error.
+- **A machine** (`aidc sync setup [--hooks]`): the two `.stignore` files, a Mac's aliases, and
+  with `--hooks` aidc's hooks in `~/.claude/settings.json`, as the stable `aidc sync lease-hook`
+  and `aidc sync reconcile --hook` (the `aidc` on PATH, never a versioned install path); a re-run
+  replaces aidc's own entries, an older install path's included.
+- **Sessions** link the shared files into their Claude config dir each start (a file of the
   session's own by that name is left as it is).
 - **The lease** (`.devcontainer/claude-lease.sh`): `<project>/<session id>.aidc-lease`
-  (`{machine, until_s}`), synced with the transcript; taken at SessionStart, renewed at each
-  prompt and turn end for 15 minutes, let go at SessionEnd; a prompt to a conversation another
-  machine holds is refused (the hook's exit 2, the reason shown); a cluster session's
-  `aidc-claude` does not `--continue` one held elsewhere. Cluster sessions run it from their
-  managed settings (machine `cluster/<session>`); a machine from its own settings (`aidc sync
-  setup --hooks`). In a cluster session a prompt goes through the lease before the hook-event
-  writer (`--then`), so a refused prompt, which opens no turn, is recorded nowhere and aidc-mcp
-  never waits on it. The refusal also leaves `held-elsewhere.json` (`{holder, until_s, at_s}`)
-  in the session's mirror folder: aidc-mcp, having pressed Enter, waits a moment for either the
-  prompt's own hook event or that note, and on the note treats the paste as not landed (nothing
-  recorded, the prompt kept queued); while the note's time has not passed, a prompt waits with
-  `waiting_reason: "conversation_held_elsewhere"`, and goes in once the other machine lets the
-  conversation go (a prompt that goes through removes the note). Syncthing carries a lease in seconds, so two machines starting the same
-  conversation within that moment are not stopped; a lease is the common case's guard, not a
-  lock.
+  (`{machine, until_s}`, the holder's clock), synced with the transcript; taken at
+  SessionStart, renewed for 15 minutes at each prompt, each tool call (a turn longer than the
+  lease time keeps it) and each turn end, let go at SessionEnd. A prompt to a conversation
+  another machine holds is refused (the hook's exit 2, the reason shown); a cluster session's
+  `aidc-claude` resumes only its own conversation, and not one another machine holds. Cluster
+  sessions run it from their managed settings (machine `cluster/<session>`), a machine from its
+  own settings. In a cluster session a prompt goes through the lease before the hook-event
+  writer (`--then`): one that goes through is recorded as its UserPromptSubmit, a refused one as
+  a `PromptRefused` event naming the holder, in the same sequence. aidc-mcp takes the newest
+  event name before pressing Enter and reads what follows it, so no clock of its own is compared
+  with the pod's: on a refusal the paste has not landed (nothing recorded, the prompt kept
+  queued, `waiting_reason: "conversation_held_elsewhere"`), and the queue tries again a minute
+  later by its own clock, going in once the other machine has let go. Syncthing carries a lease
+  in seconds, so two machines starting the same conversation within that moment are not stopped;
+  a lease is the common case's guard, not a lock.
 - **The Mac's aliases** (`aidc sync reconcile`, and the SessionStart hook there): each
   `-home-<user>-...` folder gets a `-Users-<name>-...` symlink; a `-Users-` folder Claude made
   with no Linux one yet is moved to the Linux name and aliased; dangling aliases go; a name
@@ -1188,9 +1203,7 @@ As built (chunk 19; Q-K11: the user's own machines only):
 - **#35, a symlink in synced memory:** Syncthing carries a symlink as a symlink, which on the
   receiving machine points at whatever that path is there. The lease's SessionStart (both sides;
   through a Mac's alias too) and `aidc sync reconcile` remove every symlink inside a
-  conversation's folder; the top-level aliases are not inside one. `aidc sync push-settings`
-  leaves out of the template the hooks `aidc sync setup --hooks` added (they name the machine's
-  paths; cluster sessions run their own).
+  conversation's folder; the top-level aliases are not inside one.
 
 ## Control plane
 

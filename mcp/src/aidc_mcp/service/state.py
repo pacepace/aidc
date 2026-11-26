@@ -102,6 +102,10 @@ hooks_installed: dict[str, bool] = {}
 # (epoch seconds): past HOOK_EVENTS_DUE_S that is a writer that cannot write, logged once.
 hooks_silent_since: dict[str, float] = {}
 hooks_silence_logged: set[str] = set()
+# A cluster session whose conversation lease refused a pasted prompt (another of the user's
+# machines holds it): when its queue may try again (this process's clock), and who held it.
+held_retry_at: dict[str, float] = {}
+held_by: dict[str, str] = {}
 
 
 # session -> uuid of the latest prompt the watcher reported as interrupted before Claude
@@ -304,6 +308,8 @@ LIFETIMES: dict[str, tuple[str, str]] = {
     "hooks_installed": (SESSION, ""),
     "hooks_silent_since": (SESSION, ""),
     "hooks_silence_logged": (SESSION, ""),
+    "held_retry_at": (SESSION, ""),
+    "held_by": (SESSION, ""),
     "sent_awaiting_echo": (SESSION, ""),
     "unsubmitted_paste": (SESSION, ""),
     "last_free_verdict": (SESSION, ""),

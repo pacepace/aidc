@@ -86,12 +86,12 @@ fresh() {
 
 broker() { bash "$AIDC_ROOT/broker/claude-broker.sh" "$@"; }
 
-# usage <session> <account> <percent> [<resets_at epoch>]: the session's statusline report (the
-# account is the one the broker gave it: checked, since the report is about that one).
+# usage <session> <account> <percent> [<resets_at epoch>]: the session's statusline report, naming
+# the account it measured (the broker gave the session that account: checked).
 usage() {
     assert_eq "(the session $1 is on $2)" "$2" "$(cat "$BROKER_ACCESS/$1/.aidc-account")"
-    jq -n -c --argjson p "$3" --argjson r "${4:-null}" --argjson t "$(date +%s)" \
-        '{seven_day: $p, resets_at: $r, at_s: $t}' > "$BROKER_ACCESS/$1/.aidc-usage.json"
+    jq -n -c --arg a "$2" --argjson p "$3" --argjson r "${4:-null}" --argjson t "$(date +%s)" \
+        '{account: $a, seven_day: $p, resets_at: $r, at_s: $t}' > "$BROKER_ACCESS/$1/.aidc-usage.json"
 }
 
 echo "== an account added by Claude's own login reaches a session without its refresh token"
@@ -172,6 +172,12 @@ usage s1 work 91
 broker pass 2>/dev/null
 assert_eq "at its threshold the broker moves to the next account" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
 assert_eq "every session gets the new account's token" "at-personal-1" "$(jq -r .claudeAiOauth.accessToken "$BROKER_ACCESS/s2/.credentials.json")"
+broker pass 2>/dev/null
+assert_eq "the old account's report, still in place after the switch, is not counted for the new one" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+assert_eq "...the new account has no usage yet" "null" "$(broker list --json | jq -r '.accounts[] | select(.name == "personal") | .usage')"
+jq -c 'del(.account)' "$BROKER_ACCESS/s1/.aidc-usage.json" > "$W/u" && mv "$W/u" "$BROKER_ACCESS/s1/.aidc-usage.json"
+broker pass 2>/dev/null
+assert_eq "a report naming no account is not counted" "null" "$(broker list --json | jq -r '.accounts[] | select(.name == "personal") | .usage')"
 usage s1 personal 75 "$(( $(date +%s) + 86400 ))"
 broker pass 2>/dev/null
 assert_eq "when every other account is spent too, it stays" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
@@ -214,11 +220,11 @@ fresh 11 '{"accounts":[{"name":"work"},{"name":"personal"}]}'
 broker login work >/dev/null 2>&1; broker login personal >/dev/null 2>&1
 broker session s1 2>/dev/null
 broker pass 2>/dev/null
-printf '{"at_s":%s}\n' "$(( $(date +%s) - 7200 ))" > "$BROKER_ACCESS/s1/.aidc-limit.json"
+printf '{"account":"work","at_s":%s}\n' "$(( $(date +%s) - 7200 ))" > "$BROKER_ACCESS/s1/.aidc-limit.json"
 broker pass 2>/dev/null
 assert_eq "a rate limit from before the last pass does not" "work" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
 sleep 1
-printf '{"at_s":%s}\n' "$(date +%s)" > "$BROKER_ACCESS/s1/.aidc-limit.json"
+printf '{"account":"work","at_s":%s}\n' "$(date +%s)" > "$BROKER_ACCESS/s1/.aidc-limit.json"
 broker pass 2>/dev/null
 assert_eq "a new one does" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
 ln -s /etc/passwd "$BROKER_ACCESS/s1/.aidc-usage.json"
@@ -249,6 +255,18 @@ broker session s1 2>/dev/null
 jq '.claudeAiOauth.expiresAt = 1000' "$BROKER_HOME/accounts/a/.credentials.json" > "$W/c" && mv "$W/c" "$BROKER_HOME/accounts/a/.credentials.json"
 C_RENEW_FAIL=1 broker pass 2>/dev/null
 assert_eq "in wait mode too: a login that ended does not wait for the user" "b" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+
+echo "== a state that cannot be recorded is said, and no switch is logged as done"
+fresh 17 '{"accounts":[{"name":"a","switch_at":50},{"name":"b"}]}'
+broker login a >/dev/null 2>&1; broker login b >/dev/null 2>&1
+broker session s1 2>/dev/null
+usage s1 a 60
+chmod 0400 "$BROKER_HOME/state.json"; chmod 0500 "$BROKER_HOME"
+out=$(broker pass 2>&1); rc=$?
+chmod 0700 "$BROKER_HOME"; chmod 0600 "$BROKER_HOME/state.json"
+assert_has "the failed write is said" "could not record the broker's state" "$out"
+assert_eq "no switch is logged that was not recorded" "0" "$(printf '%s' "$out" | grep -c 'switched from')"
+assert_eq "the pass reports it failed" "1" "$rc"
 
 echo "== passes never run at once"
 fresh 15

@@ -319,6 +319,39 @@ k8s_get() {
     printf '%s' "$out"
 }
 
+# The user's own one-replica Deployments (the MCP server, the Claude account broker, Syncthing)
+# share these: their state, stop and logs.
+
+# k8s_deployment_state <namespace> <name>: RUNNING, STARTING or NOT RUNNING, from the Deployment;
+# returns 2, saying why on stdout, when the cluster did not answer.
+k8s_deployment_state() {
+    local out
+    out=$(k8s_get "$1" deployment "$2" -o 'jsonpath={.metadata.name}|{.status.readyReplicas}') \
+        || { printf 'unknown (the cluster did not answer: %s)' "$out"; return 2; }
+    case "$out" in
+        "") printf 'NOT RUNNING' ;;
+        *"|"|*"|0") printf 'STARTING' ;;
+        *) printf 'RUNNING' ;;
+    esac
+}
+
+# k8s_deployment_stop <namespace> <app> [ingress]: its Deployment and NetworkPolicies (and its
+# Ingress, when asked) removed, claims, Secrets and Services kept, waiting for them to go.
+k8s_deployment_stop() {
+    if [ "${3:-}" = ingress ]; then
+        k8s_kubectl -n "$1" delete deployment,networkpolicy,ingress -l "app=$2" --wait=true >&2
+    else
+        k8s_kubectl -n "$1" delete deployment,networkpolicy -l "app=$2" --wait=true >&2
+    fi
+}
+
+# k8s_deployment_logs <namespace> <name> <container> [--follow|-f]: its log.
+k8s_deployment_logs() {
+    local follow=()
+    case "${4:-}" in --follow|-f) follow=(-f) ;; "") ;; *) printf '[aidc] error: unknown flag: %s\n' "$4" >&2; return 2 ;; esac
+    k8s_kubectl -n "$1" logs ${follow[@]+"${follow[@]}"} "deployment/$2" -c "$3"
+}
+
 # k8s_session_taint <namespace> <session>: "yes <flag json>", "no", or "unknown <why>", read
 # from the session's policy sidecar. Only the flag file being absent is "no": a sidecar that
 # cannot be asked is unknown, never clean.

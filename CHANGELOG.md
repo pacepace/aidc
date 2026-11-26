@@ -164,6 +164,20 @@ and the envelope are unchanged; what an MCP caller sees differently:
 - **Until you add an account**, a cluster session logs in itself (`aidc attach`, `/login`), or
   gets the one-year inference token `aidc claude-token setup` stores (from `claude setup-token`)
   as `CLAUDE_CODE_OAUTH_TOKEN`, from a Secret of its own, when no broker runs.
+- **One Claude history per repo across the cluster and your machines** (`aidc sync`): a
+  Syncthing pod in your namespace (`aidc sync start|stop|status|logs`, image
+  `docker.io/syncthing/syncthing`, pinned) syncs your disk's `.claude` with each machine's
+  `~/.claude`, reaching only the machines under `sync.peers`, over your LAN or VPN; `aidc sync
+  setup --hooks` on each machine (ignore list, the conversation lease hooks, a Mac's alias
+  folders), `aidc sync reconcile`, `aidc sync push-settings`. Cluster sessions link the synced
+  `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `commands/` and `keybindings.json`, take a
+  conversation's lease, and start a new conversation rather than continue one open elsewhere.
+  A prompt sent to a cluster session whose conversation is open on another of your machines
+  waits, `waiting_reason: "conversation_held_elsewhere"`, until that machine lets it go.
+  Create sessions again for these.
+- **`session_status` and `session_list` give `claude_account`** for a cluster session whose
+  login is your broker's: `{account, notice, at}`, the notice saying what needs you (a switch
+  waiting, a failing renewal, no account that can be used); null otherwise.
 - **A cluster session's status line** runs through aidc (it reports the weekly usage to the
   broker), and still shows your own (`settings.json` statusLine) with the account's name.
 

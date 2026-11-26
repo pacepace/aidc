@@ -218,10 +218,18 @@ assert_eq "claude-config is the user's claim" \
 assert_eq "no container or step of the dev pod mounts another session's Claude config dir, or the whole claim" "[]" \
     "$(dev '[(.spec.template.spec.containers[], .spec.template.spec.initContainers[]) | .volumeMounts[] | select(.name == "claude-config" and (.subPath // "") != "demo")]')"
 assert_eq "the Claude config dir is filled once, as the session user, from its home's (read-only) or the image's" \
-    '[{"runAsUser":1000,"runAsGroup":1000},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"demo"}]]' \
+    '[{"runAsUser":1000,"runAsGroup":1000},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"demo"},{"name":"disk","mountPath":"/shared-claude","subPath":".claude","readOnly":true}]]' \
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | [.securityContext, .volumeMounts]')"
 assert_has "...its projects/ left out (the disk's is mounted over it)" "--exclude=./projects" \
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+assert_has "...the user's synced Claude files linked in every start (K8S-18), a file of its own kept" \
+    'for n in CLAUDE.md rules skills agents commands keybindings.json; do if [ -L \"$d/$n\" ] || [ ! -e \"$d/$n\" ]; then ln -sfn \"$s/$n\" \"$d/$n\"' \
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+assert_has "...a new session's settings.json from the template a laptop pushed, once" \
+    'cp /shared-claude/settings.template.json' "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+assert_has "the session's name in its conversations' leases, and the shared Claude folder" \
+    '{"name":"AIDC_LEASE_MACHINE","value":"cluster/demo"},{"name":"AIDC_SHARED_CLAUDE","value":"/home/alice/.claude"}' \
+    "$(dev '.spec.template.spec.containers[0].env')"
 proxyq() { yq -N ea "[select(.kind == \"Deployment\" and .metadata.name == \"demo-proxy\")] | .[-1] | $1" -o=json -I=0 "$K_APPLIED"; }
 assert_eq "the proxy pod's first steps make the session's Claude config dir (root: the session user's, private) and the disk's history folder (as the session user), before any pod mounts a part of them" \
     '[["claude-dirs","d=/claude-config/demo && mkdir -p \"$d\" && chown 1000:1000 \"$d\" && chmod 0700 \"$d\"","root"],["claude-projects","umask 002 && mkdir -p \"/disk/.claude/projects\"",{"runAsUser":1000,"runAsGroup":1000}]]' \

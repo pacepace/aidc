@@ -128,6 +128,9 @@ class SessionStatus(AidcTool):
         repo and branch (and head),
         tainted ({at, trigger, domain} or null: a tainted session takes no more work),
         audit_dir, watched_conversation_id (where its replies are delivered),
+        claude_account (a cluster session whose Claude login is your account broker's:
+        {account, notice, at}; notice says what needs you, e.g. that no account can be
+        used; null otherwise),
         `send_queue`: prompts sent with session_send that wait to be pasted, and why, and
         `headless_runs`: session_invoke / session_invoke_async runs going in the session
         ({run_id, started_at, tool, prompt, pid, orphan}; orphan: no request is waiting

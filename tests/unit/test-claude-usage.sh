@@ -54,6 +54,15 @@ printf '{"model":{"display_name":"Opus"}}' | bash "$U" statusline >/dev/null
 assert_eq "a status with no weekly usage (an API-key login) leaves the last report" "42.5" "$(jq -r .seven_day "$D/.aidc-usage.json")"
 assert_eq "no temp file is left" "" "$(find "$D" -name '.*.json.*')"
 
+echo "== the account and its notice reach the user's MCP server (session_status)"
+M="$SCRATCH/mirror2"; mkdir -p "$M"
+printf '%s' "$STATUS" | AIDC_TRANSCRIPT_OUT="$M" bash "$U" statusline >/dev/null
+assert_eq "claude-account.json in the session's mirror folder" '["work","work at its threshold: aidc claude account use personal",true]' \
+    "$(jq -c '[.account, .notice, (.at | test("Z$"))]' "$M/claude-account.json")"
+rm -f "$D/.aidc-notice"
+printf '%s' "$STATUS" | AIDC_TRANSCRIPT_OUT="$M" bash "$U" statusline >/dev/null
+assert_eq "...notice null when there is none" "null" "$(jq -r '.notice' "$M/claude-account.json")"
+
 echo "== the user's own status line, with its paths made the session's"
 fresh 3
 echo work > "$D/.aidc-account"

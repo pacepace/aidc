@@ -48,7 +48,7 @@ cluster (the session node)
     ├─ claude-broker (Deployment) + claude-accounts (PVC)  the user's Claude accounts ("Claude")
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (Deployment) + aidc-mcp-state (PVC)  the user's MCP server (K8S-07; "Control plane")
-    └─ syncthing (not built yet: aidc 2.0)  Claude state <-> user's machines (K8S-18)
+    └─ syncthing (Deployment) + syncthing (PVC)  the disk's .claude <-> the user's machines (K8S-18)
 ```
 
 The transcript mirror (MCP-15, Q-M3): each session's dev pod copies its Claude transcripts, and
@@ -1090,6 +1090,9 @@ never waits (main, 2026-11-26). With every account spent it stays, and every ses
 line says so: that every account's login ended (`aidc claude account add <name>` again for
 each) or that every one is at a limit. `aidc claude account list` gives each spent account's
 reason; the broker's log (`aidc claude broker logs`) says each account's change of state once.
+An orchestrator sees it too: the session's status line leaves the account and the notice in
+its mirror folder (`claude-account.json`), which the user's MCP server gives as
+`session_status`'s (and `session_list`'s) `claude_account`.
 The git agent's Claude reports its rate limits the same way (its managed settings' StopFailure
 hook).
 
@@ -1142,6 +1145,52 @@ script, laptop to cluster only; on the cluster aidc wraps it to read usage, and 
 state (`sessions/`, `shell-snapshots/`, caches). `settings.json` only as a template, laptop to
 cluster, because it carries hooks that run code on the receiving machine. One machine at a time
 resumes a given conversation; aidc holds a lease so two machines do not both append.
+
+As built (chunk 19; Q-K11: the user's own machines only):
+- **The pod** (`aidc sync start`, `scripts/k8s/sync.sh`): `syncthing` in the user's namespace,
+  the pinned official image, as uid 1000, read-only root, no API token, no DNS. aidc writes its
+  whole `config.xml` from `sync.peers` on every start (one folder, id `aidc-claude`, the disk's
+  `.claude`; global discovery, local announcements, relays, NAT traversal, usage and crash
+  reports off; the GUI on its loopback only), so what the config says wins. Its NetworkPolicy
+  lets nothing in and lets it out to each peer's address and port only; a peer whose address is
+  public is refused (a name is resolved on the user's machine, as a relay's is). Its key and
+  certificate, its identity to the user's machines, are on its own claim (retained class).
+  `aidc sync status` gives its device ID for pairing.
+- **The sync set** is the folder's `.stignore` (`scripts/lib/claude-sync.sh`), the same on every
+  side (`aidc sync setup` writes the machine's): the ruled set let in, a Mac's
+  `projects/-Users-*` aliases and everything else left out. `settings.json` and the status line
+  go laptop to cluster only, by `aidc sync push-settings` (not Syncthing): the template becomes
+  a new session's `settings.json` once; the status line script stays on the disk's `.claude`,
+  where `aidc-claude-usage` runs it from (`AIDC_SHARED_CLAUDE`).
+- **Sessions** link the synced files into their Claude config dir each start (a file of the
+  session's own by that name is left as it is).
+- **The lease** (`.devcontainer/claude-lease.sh`): `<project>/<session id>.aidc-lease`
+  (`{machine, until_s}`), synced with the transcript; taken at SessionStart, renewed at each
+  prompt and turn end for 15 minutes, let go at SessionEnd; a prompt to a conversation another
+  machine holds is refused (the hook's exit 2, the reason shown); a cluster session's
+  `aidc-claude` does not `--continue` one held elsewhere. Cluster sessions run it from their
+  managed settings (machine `cluster/<session>`); a machine from its own settings (`aidc sync
+  setup --hooks`). In a cluster session a prompt goes through the lease before the hook-event
+  writer (`--then`), so a refused prompt, which opens no turn, is recorded nowhere and aidc-mcp
+  never waits on it. The refusal also leaves `held-elsewhere.json` (`{holder, until_s, at_s}`)
+  in the session's mirror folder: aidc-mcp, having pressed Enter, waits a moment for either the
+  prompt's own hook event or that note, and on the note treats the paste as not landed (nothing
+  recorded, the prompt kept queued); while the note's time has not passed, a prompt waits with
+  `waiting_reason: "conversation_held_elsewhere"`, and goes in once the other machine lets the
+  conversation go (a prompt that goes through removes the note). Syncthing carries a lease in seconds, so two machines starting the same
+  conversation within that moment are not stopped; a lease is the common case's guard, not a
+  lock.
+- **The Mac's aliases** (`aidc sync reconcile`, and the SessionStart hook there): each
+  `-home-<user>-...` folder gets a `-Users-<name>-...` symlink; a `-Users-` folder Claude made
+  with no Linux one yet is moved to the Linux name and aliased; dangling aliases go; a name
+  both have is left, said. Windows junctions are not built (native Windows is a bonus; WSL has
+  the Linux layout).
+- **#35, a symlink in synced memory:** Syncthing carries a symlink as a symlink, which on the
+  receiving machine points at whatever that path is there. The lease's SessionStart (both sides;
+  through a Mac's alias too) and `aidc sync reconcile` remove every symlink inside a
+  conversation's folder; the top-level aliases are not inside one. `aidc sync push-settings`
+  leaves out of the template the hooks `aidc sync setup --hooks` added (they name the machine's
+  paths; cluster sessions run their own).
 
 ## Control plane
 
@@ -1275,7 +1324,7 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
 | Item | Settles it |
 |---|---|
 | Session behaviour at real access-token expiry with no refresh token | live test (hours) |
-| Syncthing in a pod | one per-user pod paired with a laptop |
+| Syncthing in a pod | built (chunk 19); live: one per-user pod paired with a laptop |
 | Alias symlinks: purge, retention, `/resume` picker, long hashed names | live test on a Mac |
 | Git agent's question answered by `session_send` (Docker) | the decision: `mcp/tests/test_git_approve.py` (approve, deny with a reason, a request not waiting, ambiguous and unclear answers, the gitreq command); the answer into the widget and the request run: live check with a logged-in git agent (tests/smoke/README.md) |
 | Git agent's question reaching an orchestrator on Kubernetes | owner ruling; aidc 2.0's per-user MCP server |

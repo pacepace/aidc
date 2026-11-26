@@ -127,7 +127,7 @@ if [ "$SUBCOMMAND" != audit ]; then
     case "${BACKEND:-}" in kubernetes|k8s) CLUSTER_CMD=1 ;; esac
     [ "${LIST_BOTH:-0}" = 1 ] && CLUSTER_CMD=1
     case "$SUBCOMMAND" in
-        git|repo|mcp|claude)
+        git|repo|mcp|claude|sync)
             # shellcheck source=lib/git-common.sh
             . "$AIDC_SCRIPTS/lib/git-common.sh"
             [ "$(AIDC_BACKEND_FLAG="$BACKEND" aidc_default_backend 2>/dev/null)" = kubernetes ] && CLUSTER_CMD=1 ;;
@@ -143,7 +143,7 @@ fi
 # `aidc git`, `aidc repo`, `aidc audit`, `aidc mcp` and `aidc claude` serve both backends themselves
 # (lib/git-common.sh, aidc_default_backend; cmd-audit.sh): the flag, if any, goes with them.
 case "$SUBCOMMAND" in
-    git|repo|audit|mcp|claude)
+    git|repo|audit|mcp|claude|sync)
         AIDC_BACKEND_FLAG="$BACKEND"; export AIDC_BACKEND_FLAG
         exec bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" "$@" ;;
 esac

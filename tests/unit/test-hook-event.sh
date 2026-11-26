@@ -150,8 +150,12 @@ check "in a cluster session: a StopFailure hook for rate limits only, run by aid
     "$([ "$(jq -c '.hooks.StopFailure' "$ms")" = '[{"matcher":"rate_limit","hooks":[{"type":"command","command":"/usr/local/bin/aidc-claude-usage rate-limited"}]}]' ] && echo yes || echo no)"
 check "...and the status line through aidc-claude-usage (the weekly usage the account broker reads)" \
     "$([ "$(jq -c '.statusLine' "$ms")" = '{"type":"command","command":"/usr/local/bin/aidc-claude-usage statusline"}' ] && echo yes || echo no)"
-check "...with aidc's four hooks still there" \
-    "$([ "$(jq -c '.hooks | keys' "$ms")" = '["Notification","SessionStart","Stop","StopFailure","UserPromptSubmit"]' ] && echo yes || echo no)"
+check "...with aidc's four hooks still there, and the conversation lease's SessionEnd" \
+    "$([ "$(jq -c '.hooks | keys' "$ms")" = '["Notification","SessionEnd","SessionStart","Stop","StopFailure","UserPromptSubmit"]' ] && echo yes || echo no)"
+check "...the lease (one history across machines) runs at session start and end and each turn's end, after aidc's event" \
+    "$([ "$(jq -c '[.hooks.SessionStart, .hooks.Stop, .hooks.SessionEnd] | map(.[-1].hooks[0].command)' "$ms")" = '["/usr/local/bin/aidc-claude-lease hook","/usr/local/bin/aidc-claude-lease hook","/usr/local/bin/aidc-claude-lease hook"]' ] && [ "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ms")" = /usr/local/bin/aidc-hook-event ] && echo yes || echo no)"
+check "...and a prompt goes through the lease alone, which hands only one it lets through to aidc-hook-event (a refused prompt opens no turn: no event of it)" \
+    "$([ "$(jq -c '.hooks.UserPromptSubmit' "$ms")" = '[{"hooks":[{"type":"command","command":"/usr/local/bin/aidc-claude-lease hook --then /usr/local/bin/aidc-hook-event"}]}]' ] && echo yes || echo no)"
 aidc_install_managed_settings "$root" "$reg" false
 check "on Docker neither (the host's status line is the session's own)" \
     "$([ "$(jq -c '[has("statusLine"), (.hooks | has("StopFailure"))]' "$ms")" = '[false,false]' ] && echo yes || echo no)"

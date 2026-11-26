@@ -76,6 +76,13 @@ EXTENDED_IN_2_0 = {
     "audit_get": ("audit_dir (where the session's audit trail is on the host)",
                   "audit_dir (where the session's audit trail is on the host; on Kubernetes\n"
                   "`pvc:<namespace>/<claim>`, its volume claim)"),
+    # a cluster session's Claude account (K8S-16/17): an orchestrator must see that no account
+    # can be used rather than a session that silently stops answering (main, 2026-11-26)
+    "session_status": ("watched_conversation_id (where its replies are delivered),\n",
+                       "watched_conversation_id (where its replies are delivered),\n"
+                       "claude_account (a cluster session whose Claude login is your account broker's:\n"
+                       "{account, notice, at}; notice says what needs you, e.g. that no account can be\n"
+                       "used; null otherwise),\n"),
 }
 
 

@@ -412,6 +412,15 @@ _k8s_claude_seed_cmd() {
     printf '%s' "d=/claude-config-own && if [ ! -e \"\$d/.aidc-seeded\" ]; then src=${1}; if [ -d /seed/.claude ] && [ -n \"\$(ls -A /seed/.claude 2>/dev/null)\" ]; then src=/seed/.claude; fi; (cd \"\$src\" && tar ${exclude}-cf - .) | tar -C \"\$d\" -xf - && mkdir -p \"\$d/projects\" && : > \"\$d/.aidc-seeded\"; fi"
 }
 
+# _k8s_claude_shared_cmd: the session user's step that links the user's shared Claude files (on
+# the disk's .claude, which Syncthing keeps in step with the user's machines: CLAUDE.md, rules/,
+# skills/, agents/, commands/, keybindings.json) into the session's Claude config dir, every start;
+# a file of the session's own by that name is left as it is. A new session's settings.json is
+# the template `aidc sync push-settings` left there, when there is one (laptop to cluster only).
+_k8s_claude_shared_cmd() {
+    printf '%s' "d=/claude-config-own; s=/home/${AIDC_K8S_USER}/${K8S_DISK_CLAUDE}; for n in CLAUDE.md rules skills agents commands keybindings.json; do if [ -L \"\$d/\$n\" ] || [ ! -e \"\$d/\$n\" ]; then ln -sfn \"\$s/\$n\" \"\$d/\$n\"; fi; done; if [ -f /shared-claude/settings.template.json ] && [ ! -e \"\$d/.aidc-settings-from-template\" ]; then cp /shared-claude/settings.template.json \"\$d/settings.json\" && : > \"\$d/.aidc-settings-from-template\"; fi; true"
+}
+
 # k8s_render_broker_config: the broker's settings from the user's config (claude_accounts: the
 # order and each account's switch_at; claude_account_switch: auto or wait) as config.json.
 k8s_render_broker_config() {
@@ -556,6 +565,188 @@ spec:
       volumeMounts: [{name: claude-config, mountPath: /claude-config}]
   volumes:
     - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
+EOF
+}
+
+# --- Syncthing: one Claude history per repo on every machine (K8S-18) -----------------------
+#
+# One pod per user (`aidc sync start`) syncing the user's disk's .claude (the folder every
+# session's conversations and memory are in, and the shared CLAUDE.md, rules, skills, agents,
+# commands and keybindings) with the user's own machines, over the LAN or VPN only (Q-K11):
+# no global discovery, no relays, no local announcements, no NAT traversal; it dials each
+# machine the config names, at the address given, and its NetworkPolicy lets it reach exactly
+# those, on Syncthing's port. Nothing may connect to it. aidc writes its whole configuration
+# (config.xml, the folder's .stignore) from the user's config on every start; its device key
+# and certificate, which are its identity to the user's machines, are on a claim of its own on
+# the user's retained class.
+# shellcheck source=../lib/claude-sync.sh
+. "${AIDC_SCRIPTS}/lib/claude-sync.sh"
+K8S_SYNC_NAME=syncthing
+K8S_SYNC_CONFIG=syncthing-config
+K8S_SYNC_CLAIM=syncthing
+K8S_SYNC_IMAGE="${K8S_SYNC_IMAGE:-docker.io/syncthing/syncthing:2.0.0}"
+K8S_SYNC_PORT=22000
+# The user's disk's Claude folder (relative to the disk), the one Syncthing syncs.
+K8S_DISK_CLAUDE=.claude
+
+k8s_render_sync_claim() {
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${K8S_SYNC_CLAIM}
+  namespace: $(k8s_user_ns "$AIDC_K8S_USER")
+  labels: {${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_SYNC_NAME}}
+spec:
+  storageClassName: ${AIDC_K8S_STORAGE_CLASS}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+EOF
+}
+
+# _k8s_xml <text>: <text> escaped for an XML attribute or element.
+_k8s_xml() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# k8s_sync_config_xml <peer-lines>: Syncthing's config.xml; <peer-lines> one
+# "<name> <device-id> <ipv4> <port>" a line.
+k8s_sync_config_xml() {
+    local peers="$1" name id ip port devices="" folder_devices=""
+    while read -r name id ip port; do
+        [ -n "$id" ] || continue
+        devices="${devices}    <device id=\"${id}\" name=\"$(_k8s_xml "$name")\" compression=\"metadata\" introducer=\"false\">
+        <address>tcp://${ip}:${port}</address>
+        <paused>false</paused>
+        <autoAcceptFolders>false</autoAcceptFolders>
+    </device>
+"
+        folder_devices="${folder_devices}        <device id=\"${id}\"></device>
+"
+    done <<<"$peers"
+    cat <<EOF
+<configuration version="37">
+    <folder id="${AIDC_SYNC_FOLDER_ID}" label="Claude (aidc)" path="/var/syncthing/claude" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+        <filesystemType>basic</filesystemType>
+${folder_devices}        <minDiskFree unit="%">1</minDiskFree>
+        <versioning></versioning>
+    </folder>
+${devices}    <gui enabled="true" tls="false">
+        <address>127.0.0.1:8384</address>
+    </gui>
+    <options>
+        <listenAddress>tcp://0.0.0.0:${K8S_SYNC_PORT}</listenAddress>
+        <globalAnnounceEnabled>false</globalAnnounceEnabled>
+        <localAnnounceEnabled>false</localAnnounceEnabled>
+        <relaysEnabled>false</relaysEnabled>
+        <natEnabled>false</natEnabled>
+        <urAccepted>-1</urAccepted>
+        <crashReportingEnabled>false</crashReportingEnabled>
+        <autoUpgradeIntervalH>0</autoUpgradeIntervalH>
+        <startBrowser>false</startBrowser>
+    </options>
+</configuration>
+EOF
+}
+
+# k8s_render_sync_config <peer-lines>: the ConfigMap holding config.xml and the .stignore.
+k8s_render_sync_config() {
+    AIDC_SYNC_XML="$(k8s_sync_config_xml "$1")" AIDC_SYNC_IGNORE="$(aidc_sync_stignore)" yq -n '
+        .apiVersion = "v1" | .kind = "ConfigMap"
+        | .metadata.name = "'"${K8S_SYNC_CONFIG}"'"
+        | .metadata.namespace = "'"$(k8s_user_ns "$AIDC_K8S_USER")"'"
+        | .metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/user": "'"${AIDC_K8S_USER}"'", "app": "'"${K8S_SYNC_NAME}"'"}
+        | .data."config.xml" = strenv(AIDC_SYNC_XML)
+        | .data.".stignore" = strenv(AIDC_SYNC_IGNORE)'
+}
+
+# k8s_render_sync <node-selector-json> <peer-lines>: the NetworkPolicy (no way in; out to each
+# of the user's machines on its port only) and the Deployment.
+k8s_render_sync() {
+    local sel="$1" peers="$2" ns egress="" name id ip port
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    while read -r name id ip port; do
+        [ -n "$ip" ] || continue
+        egress="${egress}    - to: [{ipBlock: {cidr: ${ip}/32}}]
+      ports: [{protocol: TCP, port: ${port}}]
+"
+    done <<<"$peers"
+    [ -n "$egress" ] || egress="    []
+"
+    local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_SYNC_NAME}"
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ${K8S_SYNC_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  podSelector: {matchLabels: {app: ${K8S_SYNC_NAME}}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+${egress}---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ${K8S_SYNC_NAME}, namespace: ${ns}, labels: {${labels}}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: ${K8S_SYNC_NAME}}}
+  template:
+    metadata: {labels: {${labels}}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: ${sel}
+      tolerations: ${AIDC_K8S_TOLERATIONS}
+      # No DNS: it dials the user's machines by address.
+      dnsPolicy: None
+      dnsConfig: {nameservers: [127.0.0.1]}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        # The disk's .claude, made as the session user before anything mounts it (a subPath
+        # that is missing is made root-owned, which no session could then write).
+        - name: claude-dir
+          image: ${K8S_INIT_IMAGE}
+          command: [sh, -c, 'umask 002 && mkdir -p "/disk/${K8S_DISK_PROJECTS}"']
+          securityContext: {runAsUser: 1000, runAsGroup: 1000}
+          volumeMounts: [{name: disk, mountPath: /disk}]
+        # Its key's claim is its alone; a new claim is empty and root-owned.
+        - name: config-dir
+          image: ${K8S_INIT_IMAGE}
+          command: [sh, -c, 'chown 1000:1000 /config && chmod 0700 /config']
+          volumeMounts: [{name: config, mountPath: /config}]
+        # aidc's configuration, every start (Syncthing rewrites config.xml as it runs; what the
+        # user's config says wins at the next start), and the folder's .stignore.
+        - name: settings
+          image: ${K8S_INIT_IMAGE}
+          command: [sh, -c, 'umask 077 && cp /settings/config.xml /config/config.xml && umask 022 && cp /settings/.stignore /claude/.stignore']
+          securityContext: {runAsUser: 1000, runAsGroup: 1000}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: settings, mountPath: /settings, readOnly: true}
+            - {name: disk, mountPath: /claude, subPath: ${K8S_DISK_CLAUDE}}
+      containers:
+        - name: syncthing
+          image: ${K8S_SYNC_IMAGE}
+          command: [/bin/syncthing, serve, --home=/var/syncthing/config, --no-browser, --no-restart, --no-upgrade, --gui-address=127.0.0.1:8384]
+          env:
+            - {name: HOME, value: /var/syncthing}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 50m, memory: 128Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /var/syncthing/config}
+            - {name: disk, mountPath: /var/syncthing/claude, subPath: ${K8S_DISK_CLAUDE}}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, persistentVolumeClaim: {claimName: ${K8S_SYNC_CLAIM}}}
+        - {name: settings, configMap: {name: ${K8S_SYNC_CONFIG}}}
+        - {name: disk, persistentVolumeClaim: {claimName: disk}}
+        - {name: tmp, emptyDir: {}}
 EOF
 }
 
@@ -1209,11 +1400,12 @@ spec:
         - name: claude-seed
           image: ${img}/dev-base:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
-          command: [sh, -c, '$(_k8s_claude_seed_cmd /home/vscode/.claude)']
+          command: [sh, -c, '$(_k8s_claude_seed_cmd /home/vscode/.claude) && $(_k8s_claude_shared_cmd)']
           securityContext: {runAsUser: 1000, runAsGroup: 1000}
           volumeMounts:
             - {name: home, mountPath: /seed, readOnly: true}
             - {name: claude-config, mountPath: /claude-config-own, subPath: ${session}}
+            - {name: disk, mountPath: /shared-claude, subPath: ${K8S_DISK_CLAUDE}, readOnly: true}
         # The repo folder, made as the session user when it is not on the disk yet, group-writable
         # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
@@ -1246,6 +1438,10 @@ spec:
             - {name: AIDC_CLAUDE_MODE, value: "${AIDC_CLAUDE_MODE:-yolo}"}
             - {name: AIDC_CLAUDE_RESUME, value: "${AIDC_CLAUDE_RESUME:-true}"}
             - {name: CLAUDE_CONFIG_DIR, value: /home/vscode/.claude}
+            # One history per repo (K8S-18): this session's name in a conversation's lease, and
+            # the user's shared Claude folder on the disk (a synced status line runs from it).
+            - {name: AIDC_LEASE_MACHINE, value: "cluster/${session}"}
+            - {name: AIDC_SHARED_CLAUDE, value: "/home/${AIDC_K8S_USER}/${K8S_DISK_CLAUDE}"}
 $(_k8s_claude_token_env "$session")            # Sysbox gives the inner Docker a real /var/lib/docker, where overlay2 works.
             - {name: AIDC_DOCKER_STORAGE_DRIVER, value: overlay2}
             # The session's gh stand-in hands pull requests to the git container through this

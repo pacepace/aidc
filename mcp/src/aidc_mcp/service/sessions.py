@@ -7,6 +7,7 @@ No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -135,7 +136,31 @@ async def session_report(name: str) -> dict[str, Any]:
         **(tv.turn_info(objs) if working else tv.NO_TURN),
         "last_reply_at": tv.last_reply_at(objs),
         "watched_conversation_id": dlv.watched_conversation(name) or None,
+        "claude_account": claude_account(name),
     }
+
+
+#: The file a cluster session's status line leaves in its mirror folder for the MCP
+#: (.devcontainer/claude-usage.sh): the account broker's account for it and its notice.
+CLAUDE_ACCOUNT_FILE = "claude-account.json"
+
+
+def claude_account(name: str) -> dict[str, Any] | None:
+    """The session's Claude account as its account broker gave it ({account, notice, at}),
+    from its mirror folder; None where no broker manages the session, or the file cannot be
+    read. `notice` is what needs the user: a switch waiting, a failing renewal, no account
+    that can be used."""
+    try:
+        doc = json.loads((Path(ss.TRANSCRIPTS_BASE) / name / CLAUDE_ACCOUNT_FILE)
+                         .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("account"), str):
+        return None
+    notice, at = doc.get("notice"), doc.get("at")
+    return {"account": doc["account"],
+            "notice": notice if isinstance(notice, str) and notice else None,
+            "at": at if isinstance(at, str) else None}
 
 
 #: How long a create may take with no progress to report: a cluster create waits up to five
@@ -275,6 +300,7 @@ async def list_sessions() -> dict[str, Any]:
                 "branch": report["branch"], "claude_running": report["claude_running"],
                 "working": report["working"],
                 "watched_conversation_id": report["watched_conversation_id"],
+                "claude_account": report["claude_account"],
                 "queue_depth": len(ss.pending_sends.get(name, []))}
 
     sessions = list(await asyncio.gather(*(one(r) for r in listed)))

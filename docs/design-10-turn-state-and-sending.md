@@ -684,6 +684,7 @@ a plain-language `waiting_because`, and `paste_attempts`):
 | `agent_list_selected` | the person has the keyboard in Claude Code's background-agent list, where typed keys are list commands |
 | `claude_not_running` | the `claude` window is at a shell |
 | `claude_not_at_prompt` | Claude is running and showing a dialog (e.g. the folder-trust or login screen) instead of its input box |
+| `conversation_held_elsewhere` | a cluster session: its conversation is open on another of the user's machines (its lease, design 12 "One history per repo"); a prompt pasted then was refused and kept queued, and none goes in until the lease's time passes |
 | `screen_unrecognized` | Claude is running but the screen is neither its input box nor a known dialog; the capture is saved to `watcher-state/screens/<session>-unrecognized.ansi` for whoever updates `screen.py` |
 | `paste_failing` | the paste did not land; retrying |
 | `queued_behind` | an earlier prompt in the queue is waiting |

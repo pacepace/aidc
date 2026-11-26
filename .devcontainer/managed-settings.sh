@@ -10,10 +10,12 @@
 #   - the host's installed plugins, enabled, when share_plugins is on;
 #   - in a cluster session, what its Claude tells the user's Claude account broker (K8S-17):
 #     the status line through aidc-claude-usage (the weekly usage; the user's own status line
-#     is still shown), and a StopFailure rate_limit hook.
+#     is still shown), and a StopFailure rate_limit hook; and the conversation lease
+#     (aidc-claude-lease), since its Claude history is shared with the user's other machines.
 
 AIDC_HOOK_EVENT_COMMAND="${AIDC_HOOK_EVENT_COMMAND:-/usr/local/bin/aidc-hook-event}"
 AIDC_CLAUDE_USAGE_COMMAND="${AIDC_CLAUDE_USAGE_COMMAND:-/usr/local/bin/aidc-claude-usage}"
+AIDC_CLAUDE_LEASE_COMMAND="${AIDC_CLAUDE_LEASE_COMMAND:-/usr/local/bin/aidc-claude-lease}"
 
 # aidc_managed_settings <plugin-registry> <share-plugins true|false> [cluster]
 # Prints the managed settings JSON. The registry is Claude Code's installed_plugins.json;
@@ -27,11 +29,20 @@ aidc_managed_settings() {
             || plugins='{}'
     fi
     jq -n -c --arg cmd "$AIDC_HOOK_EVENT_COMMAND" --arg usage "$AIDC_CLAUDE_USAGE_COMMAND" \
+        --arg lease "$AIDC_CLAUDE_LEASE_COMMAND" \
         --argjson plugins "$plugins" --argjson cluster "$([ "$cluster" = cluster ] && echo true || echo false)" '
         {hooks: ((["SessionStart", "Stop", "Notification", "UserPromptSubmit"]
                   | map({(.): [{hooks: [{type: "command", command: $cmd}]}]}) | add)
                  + (if $cluster then {StopFailure: [{matcher: "rate_limit",
-                        hooks: [{type: "command", command: ($usage + " rate-limited")}]}]} else {} end))}
+                        hooks: [{type: "command", command: ($usage + " rate-limited")}]}]} else {} end)
+                 | if $cluster then
+                       reduce ("SessionStart", "Stop", "SessionEnd") as $e (.;
+                           .[$e] = ((.[$e] // []) + [{hooks: [{type: "command", command: ($lease + " hook")}]}]))
+                       # A prompt goes through the lease first, which hands on only one it lets
+                       # through to the event writer: a refused prompt opens no turn, and an
+                       # event of it would leave aidc-mcp waiting on one.
+                       | .UserPromptSubmit = [{hooks: [{type: "command", command: ($lease + " hook --then " + $cmd)}]}]
+                   else . end)}
         + (if $cluster then {statusLine: {type: "command", command: ($usage + " statusline")}} else {} end)
         + (if ($plugins | length) > 0 then {enabledPlugins: $plugins} else {} end)' \
         || { echo "aidc_managed_settings: jq could not build the managed settings" >&2; return 1; }

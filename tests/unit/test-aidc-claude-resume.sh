@@ -37,7 +37,8 @@ WRAPPER="$SCRATCH/aidc-claude"
 # The heredoc body between `RUN cat > /usr/local/bin/aidc-claude <<'EOF'` and EOF.
 awk '/^RUN cat > \/usr\/local\/bin\/aidc-claude <<.EOF./ {on = 1; getline; next}
      on && /^EOF$/ {exit} on {print}' "$AIDC_ROOT/.devcontainer/Dockerfile" \
-    | sed "s#/usr/local/bin/aidc-claude-state-install.sh#$AIDC_ROOT/.devcontainer/claude-state-install.sh#" \
+    | sed -e "s#/usr/local/bin/aidc-claude-state-install.sh#$AIDC_ROOT/.devcontainer/claude-state-install.sh#" \
+          -e "s#/usr/local/bin/aidc-claude-lease#$AIDC_ROOT/.devcontainer/claude-lease.sh#" \
     > "$WRAPPER"
 assert "the wrapper body was found in the Dockerfile" "grep -q 'exec \"\${HOME}/.local/bin/claude\"' '$WRAPPER'"
 SEEN="$SCRATCH/seen"
@@ -87,6 +88,10 @@ assert "its own newest conversation is resumed by id, though another session's i
 printf '{"cost":1}\n' > "$CONV/s2.jsonl"; echo s2.jsonl >> "$OUT/own-transcripts"
 run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
 assert "a newer one of its own with no message is skipped" "grep -qx s1 '$SEEN'"
+printf '{"machine":"mac","until_s":%s}' "$(( $(date +%s) + 600 ))" > "$CONV/s1.aidc-lease"
+run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT" AIDC_LEASE_MACHINE=cluster/s
+assert "its own conversation open on another machine right now (its lease) is not resumed" "! grep -qx -- --resume '$SEEN'"
+rm -f "$CONV/s1.aidc-lease"
 ARGS=(--print x)
 run env AIDC_BACKEND=kubernetes AIDC_TRANSCRIPT_OUT="$OUT"
 assert "a headless run still resumes nothing" "! grep -qx -- --resume '$SEEN'"

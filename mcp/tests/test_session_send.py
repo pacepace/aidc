@@ -1367,3 +1367,69 @@ async def test_an_empty_prompt_pastes_no_header(wiring):
     ss.session_watchers["proj"] = _StubTask()
     await send(name="proj", prompt="  \n ", conversation_id="c1")
     assert all("[Sent through aidc" not in text for text in _pasted(wiring))
+
+
+# --- a cluster session whose conversation another machine holds (design 12, the lease) -----
+
+def _held(tmp_path, monkeypatch, *, until, at):
+    import json as _json
+    monkeypatch.setattr(ss, "TRANSCRIPTS_BASE", tmp_path / "transcripts")
+    d = tmp_path / "transcripts" / "proj"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / snd.HELD_ELSEWHERE_FILE).write_text(_json.dumps(
+        {"holder": "mac", "until_s": until, "at_s": at}))
+    return d
+
+
+def test_a_conversation_held_elsewhere_is_known_until_its_lease_time(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    _held(tmp_path, monkeypatch, until=now + 600, at=now)
+    assert snd.held_elsewhere("proj")["holder"] == "mac"
+    _held(tmp_path, monkeypatch, until=now - 1, at=now - 700)
+    assert snd.held_elsewhere("proj") is None
+    assert snd.held_elsewhere("other") is None
+    assert "conversation_held_elsewhere" in snd.WAITING_EXPLAINED
+
+
+async def test_a_prompt_the_lease_refuses_is_not_recorded_and_stays_queued(wiring, tmp_path,
+                                                                       monkeypatch):
+    """The lease refused the paste (another machine holds the conversation): no send
+    record, inject says it did not land, so session_send keeps the prompt queued."""
+    import time as _time
+
+    from aidc_mcp import backend as be
+    monkeypatch.setattr(be, "kind", lambda: be.KUBERNETES)
+    d = _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() + 5)
+    ok = await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj")
+    assert ok is False
+    assert "proj" not in ss.sent_awaiting_echo
+    # a prompt that went through: its own hook event ends the wait at once, the paste landed
+    (d / snd.HELD_ELSEWHERE_FILE).unlink()
+    ev = d / "hook-events"
+    ev.mkdir()
+    (ev / f"{int((_time.time() + 3600) * 1e9):019d}-1.json").write_text(
+        '{"event": "UserPromptSubmit", "at": "2026-11-26T00:00:00.000Z"}')
+    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
+
+
+async def test_on_docker_no_refusal_is_waited_for(wiring, tmp_path, monkeypatch):
+    import time as _time
+
+    from aidc_mcp import backend as be
+    monkeypatch.setattr(be, "kind", lambda: be.DOCKER)
+    _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time() + 5)
+    assert await snd.inject("c", "hello", tmx.SESSION_WINDOW, session="proj") is True
+
+
+async def test_the_free_check_holds_a_prompt_while_another_machine_has_the_conversation(
+        tmp_path, monkeypatch):
+    import time as _time
+    async def state(container, name):
+        return tn.SessionState(True, None, tn.TURN_IDLE, "turn_stopped")
+    monkeypatch.setattr(tn, "session_state", state)
+    monkeypatch.setattr(tn, "paste_reason", lambda st: "")
+    _held(tmp_path, monkeypatch, until=_time.time() + 600, at=_time.time())
+    assert await snd._check_free("c", "proj") == "conversation_held_elsewhere"
+    _held(tmp_path, monkeypatch, until=_time.time() - 1, at=_time.time() - 900)
+    assert await snd._check_free("c", "proj") == ""

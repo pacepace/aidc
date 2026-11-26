@@ -72,6 +72,9 @@ printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/
         printf 'RENDER k8s_render_broker %s\n' "$(k8s_render_broker '{}' | kinds)"
         printf 'RENDER k8s_render_claude_forget %s\n' "$(k8s_render_claude_forget s1 '{}' | kinds)"
         printf 'RENDER k8s_render_claude_token %s\n' "$(k8s_render_claude_token s1 t | kinds)"
+        printf 'RENDER k8s_render_sync_claim %s\n' "$(k8s_render_sync_claim | kinds)"
+        printf 'RENDER k8s_render_sync_config %s\n' "$(k8s_render_sync_config 'mac ABC 192.168.1.2 22000' | kinds)"
+        printf 'RENDER k8s_render_sync %s\n' "$(k8s_render_sync '{}' 'mac ABC 192.168.1.2 22000' | kinds)"
     } > "$SCRATCH/facts"
 )
 

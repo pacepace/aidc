@@ -912,6 +912,25 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   after that, with no broker running, gets it as `CLAUDE_CODE_OAUTH_TOKEN` from a Secret of its
   own (inference only: no Remote Control). Once a broker runs, new sessions use the broker
   instead.
+- **One Claude history per repo, on every machine** (`aidc sync`): your cluster disk's `.claude`
+  (every session's conversations and memory, and the `CLAUDE.md`, `rules/`, `skills/`,
+  `agents/`, `commands/` and `keybindings.json` sessions link to) and each machine's
+  `~/.claude` are one Syncthing folder (id `aidc-claude`), kept in step by a Syncthing pod in
+  your namespace that reaches only your own machines, at the LAN or VPN addresses you list
+  (`sync.peers`), with no discovery and no relays. Never synced: credentials, `.claude.json`,
+  live state. On each machine: `aidc sync setup --hooks` writes the folder's ignore list and
+  adds aidc's hooks to your `~/.claude/settings.json` (a conversation's lease, so two machines
+  never write one conversation at once; on a Mac the alias folders, below); then pair it with
+  the pod (`aidc sync status` gives the pod's device ID), add it under `sync.peers`, and `aidc
+  sync start`. `aidc sync push-settings` copies this machine's `settings.json` (the template new
+  cluster sessions start from) and its status line script to the cluster, one way. History is
+  kept under the Linux name (`-home-<user>-...`); on a Mac, `aidc sync reconcile` (also run by
+  the hook) gives each such folder a `-Users-<name>-...` alias, so Claude there finds the same
+  transcripts and memory. A cluster session does not continue the last conversation of its repo
+  while another machine holds it (it starts a new one and says so), and a prompt to a
+  conversation open elsewhere is refused with where it is open. Symlinks inside a synced
+  conversation folder are removed when a session starts there (they would point at whatever
+  that path is on the receiving machine).
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
 the pod: the dev pod reaches only its own Squid (plus the relays and namespaces you gave it) and
@@ -1164,6 +1183,12 @@ claude_accounts:                      # the order accounts are used in; after th
   - {name: personal, switch_at: 70}   #   (default 90); accounts not listed come after, by name
 claude_account_switch: auto           # auto: switch at once; wait: the switch waits for
                                       #   `aidc claude account use <name>` (account list and the status line say so)
+
+# Only relevant with aidc sync (one Claude history across the cluster and your machines):
+sync:
+  peers:                              # your machines: the cluster's Syncthing dials each, nothing else
+    - {name: mac, device_id: ABCDEFG-..., address: 192.168.1.20}   # LAN/VPN address (port 22000
+                                                                   #   unless `port:`); a name is resolved here
 
 # Only relevant if an orchestrator drives sessions over MCP:
 orchestrator:

@@ -153,6 +153,30 @@ async def test_status_carries_the_taint_as_a_typed_field(facts):
                             "domain": "evil.example"}
 
 
+async def test_status_says_when_the_sessions_claude_account_needs_the_person(facts, tmp_path):
+    """A cluster session whose Claude login is the user's account broker's: an orchestrator
+    sees that no account can be used, rather than a session that stops answering (main,
+    2026-11-26). The session's status line leaves it in its mirror folder."""
+    d = (await _tool("session_status")(name="proj"))["data"]
+    assert d["claude_account"] is None          # no broker manages it
+    f = tmp_path / "transcripts" / "proj" / "claude-account.json"
+    f.write_text(json.dumps({"account": "work", "at": "2026-11-26T21:00:00Z",
+                             "notice": "every Claude account's login has ended: aidc claude "
+                                       "account add <name> again for each"}))
+    d = (await _tool("session_status")(name="proj"))["data"]
+    assert d["claude_account"] == {
+        "account": "work", "at": "2026-11-26T21:00:00Z",
+        "notice": "every Claude account's login has ended: aidc claude account add <name> "
+                  "again for each"}
+    lst = (await _tool("session_list")())["data"]
+    assert {s["name"]: s for s in lst["sessions"]}["proj"]["claude_account"]["account"] == "work"
+    f.write_text("not json")
+    assert (await _tool("session_status")(name="proj"))["data"]["claude_account"] is None
+    f.write_text(json.dumps({"account": "work", "notice": ""}))
+    assert (await _tool("session_status")(name="proj"))["data"]["claude_account"] == {
+        "account": "work", "notice": None, "at": None}
+
+
 async def test_list_returns_a_record_per_session(facts):
     facts["tainted"] = True
     ss.pending_sends["proj"] = [ts.QueuedPrompt("x", "t"), ts.QueuedPrompt("y", "t")]

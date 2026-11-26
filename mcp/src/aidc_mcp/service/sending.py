@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from aidc_mcp import audit, backend, headless, scope
+from aidc_mcp import hook_events as he
 from aidc_mcp import screen as scr
 from aidc_mcp import session_facts as sf
 from aidc_mcp import store as state_store
@@ -150,6 +152,8 @@ async def _check_free(container: str, name: str) -> str:
     reason = tn.paste_reason(state)
     if reason == "input_has_text" and _own_unsent_text(name, state.screen):
         reason = ""
+    if not reason and held_elsewhere(name) is not None:
+        reason = HELD_ELSEWHERE
     verdict = (reason, state.why)
     if ss.last_free_verdict.get(name) != verdict:
         ss.last_free_verdict[name] = verdict
@@ -314,7 +318,14 @@ async def inject(container: str, text: str, window: str, *, session: str,
                       waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
             return False
     ss.unsubmitted_paste.pop(session, None)
+    entered = time.time()
     await tmx.tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
+    if await _refused_by_lease(session, entered):
+        # Claude Code erased the prompt: no turn, nothing recorded. The caller keeps it
+        # queued, and the free check holds it while the other machine has the conversation.
+        audit.log_event("session_send_refused_held_elsewhere", session=session,
+                  prompt_len=len(text), holder=(held_elsewhere(session) or {}).get("holder"))
+        return False
     batch = ({"pasted_at": ts.now_iso(),
               "prompts": [q.batch_entry() for q in prompts]}
              if prompts else None)
@@ -327,6 +338,55 @@ async def inject(container: str, text: str, window: str, *, session: str,
     com.fire(tn.watch_for_echo(session, text, sent_at))
     com.session_changed(session)
     return True
+
+
+#: A cluster session's conversation is synced with the user's machines, and one machine at a
+#: time works on it (its lease, .devcontainer/claude-lease.sh). The lease's prompt hook, refusing
+#: a prompt because another machine holds the conversation, leaves this in the session's
+#: mirror folder ({holder, until_s, at_s}), and removes it when a prompt goes through.
+HELD_ELSEWHERE_FILE = "held-elsewhere.json"
+HELD_ELSEWHERE = "conversation_held_elsewhere"
+#: How long after Enter a refusal is waited for: the hook runs as the prompt is submitted;
+#: the prompt's own hook event, written when it goes through, ends the wait sooner.
+_REFUSAL_WAIT_S = 5.0
+_REFUSAL_POLL_S = 0.2
+
+
+def held_elsewhere(name: str, now: float | None = None) -> dict[str, Any] | None:
+    """The machine holding session `name`'s conversation now ({holder, until_s, at_s}), or
+    None: no refusal recorded, one past its lease time, or one that cannot be read."""
+    try:
+        doc = json.loads((Path(ss.TRANSCRIPTS_BASE) / name / HELD_ELSEWHERE_FILE)
+                         .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    until, at = doc.get("until_s"), doc.get("at_s")
+    if not isinstance(until, (int, float)) or not isinstance(at, (int, float)):
+        return None
+    if until <= (time.time() if now is None else now):
+        return None
+    return {"holder": str(doc.get("holder") or ""), "until_s": until, "at_s": at}
+
+
+async def _refused_by_lease(session: str, entered: float) -> bool:
+    """Whether the prompt just entered into a cluster session was refused by its lease
+    (another machine holds the conversation): a refusal recorded since `entered`. Ends as
+    soon as the prompt's own UserPromptSubmit event shows it went through. Never on Docker,
+    whose sessions run no lease."""
+    if backend.kind() != backend.KUBERNETES:
+        return False
+    mirror = Path(ss.TRANSCRIPTS_BASE) / session
+    after = f"{int(entered * 1e9):019d}"
+    for _ in range(max(1, int(_REFUSAL_WAIT_S / _REFUSAL_POLL_S))):
+        held = held_elsewhere(session)
+        if held is not None and held["at_s"] >= int(entered):
+            return True
+        if any(e.event == he.USER_PROMPT_SUBMIT for e in he.read_events(mirror, after=after)):
+            return False
+        await asyncio.sleep(_REFUSAL_POLL_S)
+    return False
 
 
 async def _paste_in_box(container: str, window: str, session: str) -> bool:
@@ -738,6 +798,8 @@ WAITING_EXPLAINED = {
                       "(the session's status line tells them)",
     "claude_not_running": "Claude is not running in the session",
     "claude_not_at_prompt": "Claude is showing a dialog (e.g. login) instead of its prompt",
+    HELD_ELSEWHERE: ("the conversation is open on another of the person's machines right now "
+                     "(it is synced with them); it goes in once that machine lets it go"),
     "screen_unrecognized": "aidc does not recognize Claude's screen",
     "paste_failing": "pasting into the session is failing and being retried",
     "queued_behind": "an earlier prompt is still waiting",

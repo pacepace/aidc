@@ -357,7 +357,13 @@ if [ "$resume" = "true" ]; then
         # session's own newest conversation is resumed, by id (see
         # aidc_own_resumable_conversation); a new session starts a new one.
         own=$(aidc_own_resumable_conversation "$proj" "${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}/own-transcripts")
-        [ -z "$own" ] || args+=(--resume "$own")
+        # The history is synced with the user's machines too: one may hold that conversation now
+        # (its lease, aidc-claude-lease), and it is not resumed here then.
+        if [ -n "$own" ] && holder=$(/usr/local/bin/aidc-claude-lease free-id "$proj" "$own"); then
+            args+=(--resume "$own")
+        elif [ -n "$own" ]; then
+            echo "aidc: your last conversation here is open on ${holder}; starting a new one" >&2
+        fi
     elif aidc_has_resumable_conversation "$proj"; then
         args+=(--continue)
     fi
@@ -471,6 +477,7 @@ COPY transcript-mirror.sh  /usr/local/bin/aidc-transcript-mirror.sh
 COPY hook-event.sh        /usr/local/bin/aidc-hook-event
 COPY managed-settings.sh  /usr/local/bin/aidc-managed-settings.sh
 COPY claude-usage.sh      /usr/local/bin/aidc-claude-usage
+COPY claude-lease.sh      /usr/local/bin/aidc-claude-lease
 COPY claude-state-install.sh /usr/local/bin/aidc-claude-state-install.sh
 COPY dockerd-start.sh      /usr/local/bin/aidc-dockerd-start.sh
 COPY gh-standin.sh         /usr/local/bin/gh
@@ -489,6 +496,7 @@ RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/git-remote-aidc /usr/local/bin/a
                 /usr/local/bin/aidc-hook-event \
                 /usr/local/bin/aidc-managed-settings.sh \
                 /usr/local/bin/aidc-claude-usage \
+                /usr/local/bin/aidc-claude-lease \
                 /usr/local/bin/aidc-dockerd-start.sh
 
 # testament (K8S-25), when the user's config names its repo: aidc builds its newest release

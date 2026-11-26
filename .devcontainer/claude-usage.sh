@@ -8,6 +8,10 @@
 #                                    {seven_day, resets_at, at_s}), and prints the user's own
 #                                    status line (their settings.json statusLine, run with the
 #                                    same input) or a short one, and the broker's notice if any.
+#                                    It also leaves the account and the notice in the session's
+#                                    transcript mirror folder (claude-account.json: {account,
+#                                    notice, at}), where the user's MCP server reads them for
+#                                    session_status.
 #   aidc-claude-usage rate-limited   Claude Code's StopFailure hook, matcher rate_limit: leaves
 #                                    .aidc-limit.json ({at_s}) there.
 #
@@ -17,6 +21,10 @@
 set -u
 
 dir="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+# Where a status line synced from a laptop lives: the user's shared Claude folder in a cluster
+# session (AIDC_SHARED_CLAUDE, on the user's disk), else the Claude config dir.
+shared="${AIDC_SHARED_CLAUDE:-$dir}"
+mirror="${AIDC_TRANSCRIPT_OUT:-/var/aidc/transcript-out}"
 
 # write_json <name> <json>: into the Claude config dir by temp then rename.
 write_json() {
@@ -32,15 +40,15 @@ write_json() {
 managed() { [ -f "${dir}/.aidc-account" ] && [ ! -L "${dir}/.aidc-account" ]; }
 
 # user_statusline: the user's own statusLine command from the session's settings.json, its
-# path made this Claude config dir's (a status line synced from a laptop names ~/.claude/ or
-# /Users/<name>/.claude/); "" when there is none or it is this one.
+# ~/.claude/ or /Users/<name>/.claude/ path (a status line from a laptop) made the shared
+# Claude folder's; "" when there is none or it is this one.
 user_statusline() {
     local cmd
     cmd=$(jq -r '.statusLine.command // empty | select(type == "string")' "${dir}/settings.json" 2>/dev/null) || return 0
     case "$cmd" in ""|*aidc-claude-usage*) return 0 ;; esac
     # shellcheck disable=SC2016  # the literal $HOME a settings file may hold
-    cmd=$(printf '%s' "$cmd" | sed -e "s#~/\\.claude/#${dir}/#g" -e "s#\\\$HOME/\\.claude/#${dir}/#g" \
-        -e "s#\\\${HOME}/\\.claude/#${dir}/#g" -e "s#/Users/[^/ ]*/\\.claude/#${dir}/#g")
+    cmd=$(printf '%s' "$cmd" | sed -e "s#~/\\.claude/#${shared}/#g" -e "s#\\\$HOME/\\.claude/#${shared}/#g" \
+        -e "s#\\\${HOME}/\\.claude/#${shared}/#g" -e "s#/Users/[^/ ]*/\\.claude/#${shared}/#g")
     printf '%s' "$cmd"
 }
 
@@ -66,9 +74,23 @@ do_statusline() {
         line="${line}${line:+  }[$(head -n1 "${dir}/.aidc-account" 2>/dev/null)]"
     fi
     [ -z "$line" ] || printf '%s\n' "$line"
+    notice=""
     if [ -f "${dir}/.aidc-notice" ] && [ ! -L "${dir}/.aidc-notice" ]; then
         notice=$(head -n1 "${dir}/.aidc-notice" 2>/dev/null) || notice=""
         [ -z "$notice" ] || printf 'aidc: %s\n' "$notice"
+    fi
+    # For the user's MCP server (session_status's claude_account): the same, in the mirror.
+    if managed && [ -d "$mirror" ]; then
+        local doc tmp
+        doc=$(jq -n -c --arg a "$(head -n1 "${dir}/.aidc-account" 2>/dev/null)" --arg n "$notice" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{account: $a, notice: (if $n == "" then null else $n end), at: $at}' 2>/dev/null) || doc=""
+        if [ -n "$doc" ] && tmp=$(mktemp "${mirror}/.claude-account.XXXXXX" 2>/dev/null); then
+            if printf '%s\n' "$doc" > "$tmp" 2>/dev/null; then
+                mv -fT -- "$tmp" "${mirror}/claude-account.json" 2>/dev/null || rm -f -- "$tmp"
+            else
+                rm -f -- "$tmp"
+            fi
+        fi
     fi
 }
 

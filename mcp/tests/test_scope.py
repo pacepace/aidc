@@ -200,4 +200,4 @@ async def test_resume_leaves_other_sessions_queues_alone(monkeypatch, tmp_path):
     monkeypatch.setattr(tn, "session_instance", never)
     await snd.resume_send_queues()
     assert "orchestrator" not in ss.pending_sends
-    assert ts.send_queue_path(ss.WATCHER_STATE_DIR, "orchestrator").exists()
+    assert ts.has_send_queue(ss.WATCHER_STATE_DIR, "orchestrator")

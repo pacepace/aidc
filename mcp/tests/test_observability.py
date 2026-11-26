@@ -13,6 +13,18 @@ from aidc_mcp.service import sessions as ses
 from tests import toolcall
 
 
+@pytest.fixture(autouse=True)
+def _logging_restored():
+    """configure() sets the process's logging up; each test here leaves it as it found it,
+    so a later test's log capture does not depend on the order tests ran in."""
+    root = logging.getLogger()
+    saved = (list(root.handlers), root.level, logging.getLoggerClass())
+    yield
+    root.handlers[:] = saved[0]
+    root.setLevel(saved[1])
+    logging.setLoggerClass(saved[2])
+
+
 class _Lines(logging.Handler):
     """Every log record with the observe context it was logged in."""
 
@@ -160,3 +172,24 @@ def test_metrics_count_each_tools_calls_and_are_off_by_default(app_client, monke
         text = c.get("/metrics", headers=H).text
     assert 'aidc_mcp_tools_calls_total{outcome="ok",tool="session_status"} 1.0' in text
     assert "aidc_mcp_tools_call_duration_seconds_bucket" in text
+
+
+def test_export_asked_for_without_its_extra_is_said_and_the_server_carries_on(monkeypatch,
+                                                                             caplog):
+    import builtins
+    real_import = builtins.__import__
+
+    def without(name, *args, **kwargs):
+        if name in ("threetears.observe.setup", "prometheus_client"):
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", without)
+    monkeypatch.setenv(observability.OTEL_ENDPOINT_ENV, "http://collector.example:4318")
+    monkeypatch.setenv(observability.METRICS_ENV, "true")
+    monkeypatch.setattr(observability, "_metrics", None)
+    monkeypatch.setattr(observability, "_registry", None)
+    with caplog.at_level(logging.WARNING, logger="aidc_mcp"):
+        observability.configure()
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "otel extra" in said and "prometheus extra" in said
+    assert observability.metrics_text() is None

@@ -17,6 +17,7 @@ from aidc_mcp.service import delivery as dlv
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 from tests.logs import log_event_patched, patch_log_event
+from tests.statefiles import dead_letters, forget, put_raw, stored
 
 
 class _EmptyStrError(Exception):
@@ -339,9 +340,9 @@ class TestDrain:
                 return False
 
         await _drain(base, state, AlwaysFail())
-        dl = list((state / "dead-letter").glob("*.json"))
+        dl = dead_letters(state)
         assert len(dl) == 1
-        assert json.loads(dl[0].read_text())["turn_uuid"] == "a1"
+        assert dl[0]["turn_uuid"] == "a1"
         assert ts.load_watermark(state, "sess", "conv").last_delivered_uuid == "a1"
         # A later turn still delivers (a1 didn't block the line).
         _mk_transcript(base, "sess", "sid1", [
@@ -861,7 +862,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", self._turns(dlv._LOOP_GUARD_MAX_CONSECUTIVE + overflow, state))
         await self._drain_at(base, state, rec, wall=1000.0)          # constant clock -> one run
         assert rec.delivered == [f"a{i}" for i in range(1, dlv._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
-        assert len(list((state / "dead-letter").glob("*.json"))) == overflow
+        assert len(dead_letters(state)) == overflow
         mark = ts.load_watermark(state, "sess", "conv")
         assert mark.last_delivered_uuid == f"a{dlv._LOOP_GUARD_MAX_CONSECUTIVE + overflow}"
         assert mark.consecutive_deliveries == dlv._LOOP_GUARD_MAX_CONSECUTIVE + overflow
@@ -886,7 +887,7 @@ class TestLoopGuard:
             wall += slow_gap
             await self._drain_at(base, state, rec, wall=wall)
         assert rec.delivered == [f"a{i}" for i in range(1, dlv._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
-        assert len(list((state / "dead-letter").glob("*.json"))) == overflow
+        assert len(dead_letters(state)) == overflow
 
     async def test_long_idle_resets_the_run(self, tmp_path):
         """A genuinely idle gap (orchestrator stopped driving, longer than any
@@ -904,14 +905,14 @@ class TestLoopGuard:
             wall += 1.0
             await self._drain_at(base, state, rec, wall=wall)
         assert len(rec.delivered) == dlv._LOOP_GUARD_MAX_CONSECUTIVE
-        assert not (state / "dead-letter").exists()                  # at cap, not over
+        assert dead_letters(state) == []                  # at cap, not over
         # A long idle, then one more turn: the idle resets the run, so the turn
         # delivers instead of tripping (it would trip without the reset).
         _mk_transcript(base, "sess", "sid1", self._turns(dlv._LOOP_GUARD_MAX_CONSECUTIVE + 1, state))
         wall += dlv._LOOP_GUARD_IDLE_RESET_S + 1
         await self._drain_at(base, state, rec, wall=wall)
         assert rec.delivered[-1] == f"a{dlv._LOOP_GUARD_MAX_CONSECUTIVE + 1}"
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
 
     async def test_empty_turns_do_not_count(self, tmp_path):
         """Empty (tool-only) turns are not deliveries and must not advance the
@@ -932,7 +933,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
         assert rec.delivered == [f"a{i}" for i in range(1, dlv._LOOP_GUARD_MAX_CONSECUTIVE + 1)]
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
 
     async def test_short_restart_stays_latched(self, tmp_path):
         """The run is durable, so an MCP restart shorter than the idle reset (mark
@@ -974,7 +975,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)          # constant clock: one run
         assert rec.delivered == want
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
         assert ts.load_watermark(state, "sess", "conv").consecutive_deliveries == 0
 
     async def test_a_typed_prompt_resets_an_orchestrator_run(self, tmp_path):
@@ -997,7 +998,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
         assert len(rec.delivered) == 2 * half + 1
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
         assert ts.load_watermark(state, "sess", "conv").consecutive_deliveries == half
 
     async def test_a_prompt_sent_for_a_person_resets_the_run_too(self, tmp_path):
@@ -1020,7 +1021,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
         assert len(rec.delivered) == 2 * half + 1
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
 
     async def test_a_runaway_misread_as_typed_still_hits_the_backstop(self, tmp_path):
         """Origin rests on matching each prompt to the send record. If that match
@@ -1035,7 +1036,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", self._turns(dlv._LOOP_GUARD_BACKSTOP + overflow))  # no record
         await self._drain_at(base, state, rec, wall=1000.0)
         assert len(rec.delivered) == dlv._LOOP_GUARD_BACKSTOP
-        assert len(list((state / "dead-letter").glob("*.json"))) == overflow
+        assert len(dead_letters(state)) == overflow
         mark = ts.load_watermark(state, "sess", "conv")
         assert mark.consecutive_deliveries == 0                       # read as typed
         assert mark.deliveries_since_idle == dlv._LOOP_GUARD_BACKSTOP + overflow
@@ -1053,7 +1054,7 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", self._turns(n + 1))
         await self._drain_at(base, state, rec, wall=1000.0 + dlv._LOOP_GUARD_IDLE_RESET_S + 1)
         assert len(rec.delivered) == n + 1
-        assert not (state / "dead-letter").exists()
+        assert dead_letters(state) == []
         assert ts.load_watermark(state, "sess", "conv").deliveries_since_idle == 1
 
     async def test_the_orchestrators_continuations_still_count(self, tmp_path):
@@ -1072,14 +1073,14 @@ class TestLoopGuard:
         _mk_transcript(base, "sess", "sid1", objs)
         await self._drain_at(base, state, rec, wall=1000.0)
         assert len(rec.delivered) == dlv._LOOP_GUARD_MAX_CONSECUTIVE
-        assert (state / "dead-letter").exists()
+        assert dead_letters(state) != []
 
     async def test_old_watermark_without_new_fields_loads(self, tmp_path):
         """A watermark written before the loop-guard fields existed (missing
         consecutive_deliveries / last_delivery_at) loads with zero defaults, no
         crash — existing prod watermark files must not KeyError after deploy."""
         state = tmp_path / "s"; state.mkdir()
-        p = ts.watermark_path(state, "sess", "conv")
+        p = state / "sess__conv.json"   # a 1.x watermark file, read in on upgrade
         p.write_text(json.dumps({
             "session": "sess", "conversation_id": "conv", "session_id": "sid1",
             "byte_offset": 100, "last_delivered_uuid": "a1", "updated_at": "x",
@@ -1096,7 +1097,7 @@ class TestLoopGuard:
         ``consecutive_deliveries`` so a deploy mid-incident doesn't silently reset
         a latched run and let another cap's worth of echoes through."""
         state = tmp_path / "s"; state.mkdir()
-        p = ts.watermark_path(state, "sess", "conv")
+        p = state / "sess__conv.json"   # a 1.x watermark file, read in on upgrade
         p.write_text(json.dumps({
             "session": "sess", "conversation_id": "conv", "session_id": "sid1",
             "byte_offset": 100, "last_delivered_uuid": "a1",
@@ -1345,10 +1346,9 @@ class TestStalePinRotation:
         ])
         rec = Recorder()
         await self._drain_rot(base, state, rec, sess, conv)
-        state_file = next(state.glob("*.json"))
-        data = json.loads(state_file.read_text())
+        data = stored(state, "watermarks", sess, conv)
         data["updated_at"] = "2026-07-04T12:00:00Z"   # save_watermark stamps "now"
-        state_file.write_text(json.dumps(data))
+        put_raw(state, "watermarks", data, sess, conv, session=sess, conversation_id=conv)
         old.unlink()
         _mk_transcript(base, sess, "new", [
             _ts(_user("h1", "hi"), "2026-07-04T11:00:00.000Z"),
@@ -1426,7 +1426,7 @@ class TestDeliveryLedgerNeverReplays:
         # does), then rewind its anchor back into the delivered region so a1 is
         # re-read. Without the durable ledger this replays a1; with it, the
         # on-disk fingerprint held across the reload suppresses it.
-        ts.watermark_path(state, "sess", "conv").unlink()
+        forget(state, "watermarks", "sess", "conv")
         rec2 = Recorder()
         await _drain(base, state, rec2)                      # first pass = baseline again (anchor a1)
         mark = ts.load_watermark(state, "sess", "conv")
@@ -1889,9 +1889,9 @@ class TestTerminalPromptAttribution:
         rec = Recorder(always_fail=True)
         await dlv._drain_transcript_once("sess", "conv", "http://cb", transcripts_base=base,
                                      state_dir=state, post_fn=rec, sleep_fn=_nosleep)
-        dead = list((state / "dead-letter").glob("sess__conv__a1.json"))
+        dead = [d for d in dead_letters(state, session="sess") if d["turn_uuid"] == "a1"]
         assert len(dead) == 1
-        assert json.loads(dead[0].read_text())["content"] == ts.render_delivery("R", ["typed q"])
+        assert dead[0]["content"] == ts.render_delivery("R", ["typed q"])
 
     async def test_unwritable_record_counts_prompt_as_the_orchestrators(self, tmp_path):
         """Never err toward 'the person said this': if the record cannot be

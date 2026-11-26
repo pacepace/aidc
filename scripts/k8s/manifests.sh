@@ -1056,7 +1056,6 @@ spec:
             - {name: HOME, value: /home/git}
             - {name: AIDC_USER, value: "${AIDC_K8S_USER}"}
             - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
-            - {name: AIDC_GIT_MODE, value: "${AIDC_K8S_GIT_MODE:-ask}"}
             - {name: AIDC_SESSION, value: "${K8S_GIT_SESSION}"}
           securityContext:
             runAsUser: 2000

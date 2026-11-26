@@ -320,7 +320,7 @@ dk_git_start() {
         --label "aidc.session=${DK_GIT_SESSION}" --label aidc.role=dev --label aidc.profile=git-agent \
         --label aidc.git=container \
         -e HOME=/home/git -e "AIDC_USER=$(id -un)" -e AIDC_SESSION="$DK_GIT_SESSION" -e AIDC_BACKEND=docker \
-        -e AIDC_GIT_REQUESTS="$DK_GIT_REQUESTS" -e "AIDC_GIT_MODE=${AIDC_DK_GIT_MODE}" \
+        -e AIDC_GIT_REQUESTS="$DK_GIT_REQUESTS" \
         -e AIDC_GIT_WATCH_HERE=1 -e "AIDC_GIT_DISK=${disk}" \
         -e HTTPS_PROXY=http://aidc-proxy:3128 -e HTTP_PROXY=http://aidc-proxy:3128 \
         -e https_proxy=http://aidc-proxy:3128 -e http_proxy=http://aidc-proxy:3128 \

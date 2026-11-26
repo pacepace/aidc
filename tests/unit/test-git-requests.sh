@@ -717,6 +717,25 @@ issue_gh issue transfer 12 o/other
 assert_eq "nor transfer" 1 "$RC"
 issue_gh issue lock 12
 assert_eq "nor lock" 1 "$RC"
+# A backlog sync makes many calls one after another: each is answered well under half a second
+# (the watcher wakes on a request; gh looks for the answer every tenth of a second).
+bash "$GR" watch >/dev/null 2>&1 & wpid=$!
+sleep 1
+t0=$(date +%s%N)
+for _ in 1 2 3 4 5 6 7 8 9 10; do AIDC_GH_WAIT=15 bash "$GH" api repos/o/r/issues/12 >/dev/null 2>&1 || fail "a timed call failed"; done
+ms=$(( ($(date +%s%N) - t0) / 10000000 ))
+# A second watcher (the agent can start one through the sudo rule) waits for the first: never
+# both at once, and it takes over when the first stops.
+bash "$GR" watch >/dev/null 2>&1 & w2=$!
+sleep 1; reset_calls
+AIDC_GH_WAIT=15 bash "$GH" api repos/o/r/issues/12 >/dev/null 2>&1
+assert_eq "with two watchers started, a call runs once" 1 "$(calls | grep -c 'api GET repos/o/r/issues/12')"
+kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+reset_calls
+OUT=$(AIDC_GH_WAIT=15 bash "$GH" api repos/o/r/issues/12 2>&1); RC=$?
+assert_eq "and when the first stops, the second takes over" "0|1" "$RC|$(calls | grep -c 'api GET repos/o/r/issues/12')"
+kill "$w2" 2>/dev/null; wait "$w2" 2>/dev/null
+assert_eq "ten issue calls in a row, against the running watcher: under half a second each (${ms} ms each)" yes "$([ "$ms" -lt 500 ] && echo yes || echo no)"
 reset_calls
 watching 6; OUT=$(AIDC_SESSION=git AIDC_GIT_TOKEN="" AIDC_GH_WAIT=15 bash "$GH" issue comment 12 -b "From the agent." 2>&1); RC=$?; wait
 assert_eq "the git agent's own issue write runs at once as well (no token: ask mode holds no issue call)" "0" "$RC"

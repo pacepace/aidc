@@ -368,6 +368,11 @@ Order follows design-13 "Upstream work".
   matches the answer to it and passes nothing else. git-requests refuses these verbs when it is
   reached through sudo or runs as anything but gitreq, so only an exec from outside the
   container can use them. The same exec reads the list (`git-requests list`, `show <id>`).
+- **Notes (what the agent keeps):** reads (pull requests, issues, protections, fetch, the action
+  log) and `gitctl tidy`. Tidy's `delete-branch` stays the agent's (and gitwc's, on Docker): it
+  deletes only a branch GitHub reports merged, never a base, so it removes nothing a merge has
+  not already landed. `gitctl logout` is the holder's (the user's `aidc git logout`); `gitctl
+  login` stays the agent's, since it needs the user's own approval in a browser.
 
 ### Chunk 14: Git approvals through the orchestrator on Kubernetes (W-M3-01..03)
 

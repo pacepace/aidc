@@ -182,7 +182,7 @@ assert_has "it is the dev container of the session named git (aidc list, attach 
     "--label aidc.session=git --label aidc.role=dev --label aidc.profile=git-agent" "$git_run"
 assert_has "its request folder is the shared volume" "-e AIDC_GIT_REQUESTS=/var/aidc/git-requests" "$git_run"
 assert_has "mounted at that path" "-v aidc-git-requests:/var/aidc/git-requests" "$git_run"
-assert_has "the git mode is the user's (default ask)" "-e AIDC_GIT_MODE=ask" "$git_run"
+assert_not_has "the mode is not in its environment: the holder reads it from its read-only settings" "AIDC_GIT_MODE" "$git_run"
 assert_has "the request watcher runs here, as gitreq (started through its sudo rule)" "-e AIDC_GIT_WATCH_HERE=1" "$git_run"
 assert_has "the holder's settings are mounted read-only" "-v ${HOMEP}/.config/aidc/git-settings:/etc/aidc/git-settings:ro" "$git_run"
 assert_eq "and name the request folder, the disk and the user's mode" "requests=/var/aidc/git-requests|disk=${HOMEP}|mode=ask" \
@@ -209,7 +209,7 @@ assert_not_has "and the networks" "network create" "$(calls)"
 assert_has "the container is recreated on the current image" "rm -f aidc-git-dev" "$(calls)"
 printf 'git:\n  mode: rules\n' > "$HOME/.config/aidc/config.yaml"
 run git setup >/dev/null
-assert_has "git.mode reaches the git container" "-e AIDC_GIT_MODE=rules" "$(line 'run -d --name aidc-git-dev')"
+assert_eq "git.mode reaches the request holder's settings" "mode=rules" "$(grep '^mode=' "$HOMEP/.config/aidc/git-settings/settings")"
 printf 'git:\n  mode: yolo\n' > "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
 assert_has "a git.mode that is not ask or rules is refused" "git.mode 'yolo' is not ask or rules" "$out"
@@ -348,6 +348,9 @@ assert_has "approve runs git-requests approve as the request holder, from outsid
     "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests approve 0123456789abcdef0123456789abcdef" "$(calls)"
 out=$(run git deny 0123456789abcdef0123456789abcdef "not now")
 assert_has "deny too" "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests deny 0123456789abcdef0123456789abcdef not now" "$(calls)"
+out=$(run git logout)
+assert_has "logout runs as the request holder (the agent cannot log the container out)" \
+    "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev gitctl logout" "$(calls)"
 out=$(run git approve nope)
 assert_has "an id that is not one is refused" "not a request id" "$out"
 

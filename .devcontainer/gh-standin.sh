@@ -98,6 +98,8 @@ submit() {
 # await ID SECONDS: wait for a final result (done, failed or denied). Returns 0 with RESULT set,
 # or 1 when none came in time (RESULT holds the last one read, if any).
 await() {
+    # Looked at every tenth of a second: an issue call is answered in well under one (the git
+    # container wakes on the request), and a backlog sync makes many.
     local f="$REQ/results/${1}.json" i=0 s
     RESULT=""
     while :; do
@@ -106,8 +108,8 @@ await() {
             s=$(printf '%s' "$RESULT" | jq -r '.state // ""' 2>/dev/null)
             case "$s" in done|failed|denied) return 0 ;; esac
         fi
-        [ "$i" -lt "$2" ] || return 1
-        sleep 1; i=$((i + 1))
+        [ "$i" -lt $(( $2 * 10 )) ] || return 1
+        sleep 0.1; i=$((i + 1))
     done
 }
 
@@ -466,12 +468,11 @@ gh_api() {
         esac
     done
     [ -n "$path" ] || die "usage: gh api <path> [--method M] [--input F|-] [-i] [-H 'If-None-Match: <etag>']"
-    method=$(printf '%s' "${method:-GET}" | tr '[:lower:]' '[:upper:]')
+    method="${method:-GET}"; method="${method^^}"
     need_folder
     api_request "$method" "$path" "$input" "$include" "$etag" || exit 1
-    out=$(printf '%s' "$RESULT" | jq -r '.stdout // ""')
-    err=$(printf '%s' "$RESULT" | jq -r '.stderr // ""')
-    rc=$(printf '%s' "$RESULT" | jq -r '.exit // ""')
+    # The three in one jq: a backlog sync makes many calls.
+    eval "$(printf '%s' "$RESULT" | jq -r '"out=\(.stdout // "" | @sh) err=\(.stderr // "" | @sh) rc=\(.exit // "" | tostring | @sh)"')"
     if [ -z "$rc" ]; then
         # Refused before it reached GitHub (the git container's checks): its reason, exit 1.
         printf 'gh: the git container %s request %s: %s\n' "$(field state)" "$ID" "$(field message)" >&2

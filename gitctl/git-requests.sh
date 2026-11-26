@@ -161,7 +161,9 @@ enter() {
     (( 8#$(stat -c %a .) & 8#022 )) && die "${AIDC_GIT_REQUESTS} is writable by others"
     for d in requests:1730 results:0710 work:0700 state:0700; do
         want="${d#*:}" d="${d%%:*}"
-        [ -e "$d" ] || [ -L "$d" ] || mkdir -- "$d" || die "cannot make ${d}/"
+        # Another pass may make it at the same moment (two watchers starting): its being there
+        # is fine; what it is is checked next.
+        [ -e "$d" ] || [ -L "$d" ] || mkdir -- "$d" 2>/dev/null || [ -d "$d" ] || die "cannot make ${d}/"
         { [ -d "$d" ] && [ ! -L "$d" ] && [ "$(stat -c %u "$d")" = "$(id -u)" ]; } \
             || die "${AIDC_GIT_REQUESTS}/${d} is not the git container's folder"
         if [ -n "$SESSION_GID" ] && { [ "$d" = requests ] || [ "$d" = results ]; } && [ "$(stat -c %g "$d")" != "$SESSION_GID" ]; then
@@ -295,30 +297,30 @@ read_token() { # stdin: the session's token (64 hex); never waits on a terminal
 # check RAW ID: the request's fields into Q_*, or 1 with the reason in WHY. Strict: a JSON object
 # with only known fields, each text (or a number); then each field by its own rule.
 check() {
-    local raw="$1" id="$2" lines=() i v url
+    local raw="$1" id="$2" assigns i v url
     WHY=""
-    if ! mapfile -t lines < <(printf '%s' "$raw" | jq -r --argjson allowed "$ALLOWED" '
-            if type != "object" then error("not an object") else . end
-            | if ((keys - $allowed) | length) > 0 then error("unknown field") else . end
-            | [.version, .id, .session, .action, .repo, .worktree, .branch, .base, .title, .body, .number, .state, .head, .token, .method, .path, .input, .headers, .etag]
-            | map(if . == null then "" elif type == "string" or type == "number" then tostring else error("not text") end)
-            | .[] | @base64' 2>/dev/null) || [ ${#lines[@]} != ${#FIELDS[@]} ]; then
-        WHY="not a request: a JSON object with only known, text fields"; return 1
+    # One jq: the object of known, text fields; no control characters anywhere but newline, tab
+    # and CR in the body and input; then each field as a shell assignment (@sh quotes it whole,
+    # a trailing newline included), read with eval. One process for the whole request: an issue
+    # call is answered while the session's gh waits.
+    if ! assigns=$(printf '%s' "$raw" | jq -r --argjson allowed "$ALLOWED" '
+            if type != "object" then error("not a request: a JSON object with only known, text fields") else . end
+            | if ((keys - $allowed) | length) > 0 then error("not a request: a JSON object with only known, text fields") else . end
+            | . as $r
+            | $ARGS.positional[] | . as $f
+            | ($r[$f] | if . == null then "" elif type == "string" or type == "number" then tostring
+                        else error("not a request: a JSON object with only known, text fields") end) as $v
+            | if ($f == "body" or $f == "input") then
+                  (if ($v | explode | any((. < 32 and . != 9 and . != 10 and . != 13) or . == 127)) then error("the \($f) has control characters") else . end)
+              else
+                  (if ($v | explode | any(. < 32 or . == 127)) then error("\($f) has control characters") else . end)
+              end
+            | "Q_\($f)=\($v | @sh)"' --args "${FIELDS[@]}" 2>&1); then
+        WHY=$(printf '%s' "$assigns" | sed -n 's/^jq: error ([^)]*): //p' | head -n1)
+        [ -n "$WHY" ] || WHY="not a request: a JSON object with only known, text fields"
+        return 1
     fi
-    for i in "${!FIELDS[@]}"; do
-        v=$(printf '%s' "${lines[$i]}" | base64 -d 2>/dev/null) || { WHY="unreadable field ${FIELDS[$i]}"; return 1; }
-        printf -v "Q_${FIELDS[$i]}" '%s' "$v"
-    done
-    # Control characters: none anywhere but newline, tab and CR in the body.
-    for i in version id session action repo worktree branch base title number state head token method path headers etag; do
-        v="Q_${i}"
-        # Counted, not captured: a command substitution would drop a trailing newline.
-        if [ "$(printf '%s' "${!v}" | LC_ALL=C tr -d -c '\000-\037\177' | wc -c)" != 0 ]; then WHY="${i} has control characters"; return 1; fi
-    done
-    for i in body input; do
-        v="Q_${i}"
-        if [ "$(printf '%s' "${!v}" | LC_ALL=C tr -d -c '\000-\010\013\014\016-\037\177' | wc -c)" != 0 ]; then WHY="the ${i} has control characters"; return 1; fi
-    done
+    eval "$assigns"
     [ "$Q_version" = 1 ] || { WHY="unknown request version"; return 1; }
     [ "$Q_id" = "$id" ] || { WHY="its id is not its file's"; return 1; }
     [[ "$Q_session" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { WHY="session: not a session name"; return 1; }
@@ -395,11 +397,12 @@ save() {
 
 # load ID: work/<id>.json (written by save) into Q_*.
 load() {
-    local f
+    local assigns
     [ -f "work/${1}.json" ] || return 1
-    for f in "${FIELDS[@]}" received slug sha mode kind; do
-        printf -v "Q_${f}" '%s' "$(jq -r --arg k "$f" '.[$k] // ""' "work/${1}.json")"
-    done
+    # One jq, every field as a quoted assignment (the file is the holder's own, written by save).
+    assigns=$(jq -r '. as $r | $ARGS.positional[] | "Q_\(.)=\($r[.] // "" | tostring | @sh)"' \
+        --args "${FIELDS[@]}" received slug sha mode kind < "work/${1}.json") || return 1
+    eval "$assigns"
 }
 
 # --- running a request ----------------------------------------------------------------------
@@ -502,7 +505,8 @@ run() {
     fi
     expect=(--expect-repo "$Q_slug")
     ASK=(--asked-by "$id")
-    result "$id" running "running"
+    # An issue read is answered in a moment: no "running" result written before it.
+    { [ "$Q_action" = api ] && [ "$Q_kind" = read ]; } || result "$id" running "running"
     rc=0
     case "$Q_action" in
         api)
@@ -677,10 +681,11 @@ expire() {
     fi
 }
 
+ONCE_EXPIRE=1
 once() {
     local f id
     enter
-    expire
+    [ "$ONCE_EXPIRE" = 0 ] || expire
     for f in requests/*.json; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         id="${f#requests/}" id="${id%.json}"
@@ -765,16 +770,33 @@ case "$cmd" in
             [ "$msg" = "$last" ] || printf '%s waiting for the request folder: %s\n' "$(now)" "${msg#git-requests: }" >&2
             last="$msg"; sleep 10
         done
-        # One watcher at a time: a second one (the agent can start one through the sudo rule)
-        # leaves at once, so it can never mark a running request interrupted (recover).
+        # One watcher at a time: a second one (the agent can start one through the sudo rule,
+        # and may do so before the main process does) waits here for the first to stop, so it
+        # never runs beside it nor marks a running request interrupted (recover); the main
+        # process's watcher then takes over when the other ends, without a restart loop.
         exec 9>> "${AIDC_GIT_REQUESTS}/state/watch.lock" || die "cannot open the watcher's lock"
-        flock -n 9 || die "a request watcher already runs"
+        flock 9 || die "cannot take the watcher's lock"
         recover
-        last=""
+        last="" expired=0 again=0
         while :; do
+            # Old requests and results are swept once a minute, not on every wake.
+            if [ $(( $(date +%s) - expired )) -ge 60 ]; then ONCE_EXPIRE=1 expired=$(date +%s); else ONCE_EXPIRE=0; fi
             if msg=$( (once) 2>&1 ); then last=""; [ -z "$msg" ] || printf '%s\n' "$msg" >&2
             else [ "$msg" = "$last" ] || printf '%s %s\n' "$(now)" "$msg" >&2; last="$msg"; fi
-            sleep 2
+            # Woken by a request arriving (a session's gh renames one into requests/), so an
+            # issue call is answered at once; at least every 2 seconds anyway. Without inotify
+            # (a checkout), a short poll. A request that came while the pass ran is taken now,
+            # not after the wait (a backlog's next call follows the last one's answer at once);
+            # never twice in a row, so a file no pass can take cannot keep it from waiting.
+            if [ "$again" = 0 ] && compgen -G "${AIDC_GIT_REQUESTS}/requests/*.json" >/dev/null; then
+                again=1; continue
+            fi
+            again=0
+            if command -v inotifywait >/dev/null 2>&1; then
+                inotifywait -qq -t 2 -e moved_to -e close_write "${AIDC_GIT_REQUESTS}/requests" >/dev/null 2>&1 || true
+            else
+                sleep 0.1
+            fi
         done ;;
     once) once ;;
     list)

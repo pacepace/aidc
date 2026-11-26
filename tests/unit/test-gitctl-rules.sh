@@ -1193,7 +1193,7 @@ for who in git gitwc; do
     : > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r feature < "$S/agent.bundle" 2>&1); RC=$?; CALLS=""
     refused "${who}: gitrun refuses push when sudo names ${who} as the caller"
     assert_eq "${who}: and nothing reached the forge" "$before" "$(remote_sha feature)"
-    for v in "pr-create o/r feature main" "pr-merge o/r 5" "pr-comment o/r 5" "protect o/r"; do
+    for v in "pr-create o/r feature main" "pr-merge o/r 5" "pr-comment o/r 5" "protect o/r" logout; do
         # shellcheck disable=SC2086  # the verb and its arguments
         AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=cred ctl_in "Text" $v
         refused "${who}: gitcred refuses ${v%% *} when sudo names ${who}"

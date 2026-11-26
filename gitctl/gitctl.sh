@@ -163,15 +163,16 @@ esac
 # side, where CALLER is the one who ran gitctl, and as gitrun's and gitcred's, where it is the
 # user sudo names (SUDO_USER, set from the caller's real uid: the agent, and gitwc, cannot be
 # gitreq there). So the agent (git) cannot push, open, comment on or merge a pull request,
-# change protections, or write an issue (api with any method but GET), by gitctl or by sudo; it
-# asks with gh, which writes a request.
-WRITE_VERBS="push pr-create pr-comment pr-merge protect"
+# change protections, write an issue (api with any method but GET), or log the container out
+# (the user's aidc git logout), by gitctl or by sudo; it asks with gh, which writes a request.
+WRITE_VERBS="push pr-create pr-comment pr-merge protect logout"
 is_write=0
 case " $WRITE_VERBS " in *" $verb "*) is_write=1 ;; esac
 [ "$verb" = api ] && [ "${1:-}" != GET ] && is_write=1
 if [ "$is_write" = 1 ] && [ "$CALLER" != gitreq ]; then
     case "$verb" in
         api) die "api ${1:-}: an issue write changes GitHub, so it runs only as a request (gh api, or gh issue, writes one)" ;;
+        logout) die "logout takes the git container off GitHub: only the user does that (aidc git logout, on their own machine)" ;;
         *) die "${verb} changes GitHub, so it runs only as a request the user approves: in a working copy, gh pr create, gh pr merge or gh aidc push writes one (the user then runs aidc git approve <id>); or the user runs aidc git ${verb%%-*} from their own machine" ;;
     esac
 fi

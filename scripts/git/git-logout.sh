@@ -8,4 +8,4 @@ set -euo pipefail
 [ $# -eq 0 ] || die "aidc git logout takes no arguments (got: $*)"
 gb_require
 gb_target
-gb_exec gitctl logout
+gb_exec_req gitctl logout

@@ -15,7 +15,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # git for the pushes (HTTPS only: gitctl pins core.sshCommand off, so no ssh client is installed),
 # tmux for the user's terminal, tini to reap what tmux leaves.
 # curl only for the downloads below and Claude Code's own updates. sudo is how gitctl switches
-# to the users that hold the login; jq reads Claude Code's hook input and gh's JSON.
+# to the users that hold the login; jq reads Claude Code's hook input and gh's JSON; inotify-tools
+# wakes the request holder when a request arrives (git-requests watch).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
@@ -28,6 +29,7 @@ RUN apt-get update \
         procps \
         sudo \
         jq \
+        inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub's gh CLI, pinned and checksum-verified: it holds the user's GitHub token, so the build

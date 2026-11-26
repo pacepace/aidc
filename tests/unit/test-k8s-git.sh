@@ -229,8 +229,8 @@ assert_eq "the policy selects exactly the pods the Deployment makes" '"git"' \
     "$(dep '.spec.template.metadata.labels.app')"
 assert_has "every kubectl call uses the configured context" "--context lab apply" "$(cat "$K_LOG")"
 
-assert_eq "the git container is told its request folder and git mode" \
-    '[{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"},{"name":"AIDC_GIT_MODE","value":"ask"}]' \
+assert_eq "the git container is told its request folder (its gh writes requests there), not the mode" \
+    '[{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"}]' \
     "$(pod '[.containers[] | select(.name == "git") | .env[] | select(.name == "AIDC_GIT_REQUESTS" or .name == "AIDC_GIT_MODE")]')"
 assert_eq "setup makes the request folder on the disk, by the root folder step, for the request holder (gitreq, 2003; one the agent, 2000, held is given over)" \
     '["/home/alice/.aidc/git-requests","/home/alice","requests","2000","2003"]' \
@@ -246,7 +246,9 @@ assert_has "a request folder that cannot be made fails setup, saying so" "its re
 cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/config.bak"
 printf '  git_mode: rules\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
-assert_has "kubernetes.git_mode reaches the git container" '{"name":"AIDC_GIT_MODE","value":"rules"}' "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[]')"
+assert_has "kubernetes.git_mode reaches the request holder's settings" "mode=rules" \
+    "$(q 'select(.kind == "ConfigMap" and .metadata.name == "git-settings") | .data.settings')"
+assert_not_has "not the environment of any container" "AIDC_GIT_MODE" "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[].env[]?')"
 cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
 printf '  git_mode: yolo\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
@@ -476,7 +478,7 @@ out=$(run git deny "$id" "not now"); assert_has "deny <id> <why>" "git-requests 
 out=$(run git approve "../x"); assert_has "an id that is not one is refused" "not a request id" "$out"
 out=$(run git login)
 assert_has "login runs gitctl login interactively in the git container" "exec -it git-7d9f-abc -c git -- env TERM=xterm-test gitctl login" "$(xl)"
-out=$(run git logout); assert_has "logout" "gitctl logout" "$(xl)"
+out=$(run git logout); assert_has "logout runs as the request holder (the agent cannot log the container out)" "exec git-7d9f-abc -c gitreq -- gitctl logout" "$(xl)"
 out=$(run git log 5); assert_has "log reads gitctl's action log" "exec git-7d9f-abc -c git -- gitctl log 5" "$(xl)"
 out=$(K_NO_POD=1 run git push "$HOME/r" feat)
 assert_has "with no git container: says to set it up" "run \`aidc git setup\`" "$out"

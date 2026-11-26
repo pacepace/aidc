@@ -13,6 +13,30 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Upgrading: git approvals out of the git agent's reach (aidc 2.0)
+Requests are now held and decided by a user of their own in the git container, `gitreq`; the
+git agent can no longer approve, deny, push, open or merge a pull request, log the container
+out, or change a mode. To upgrade:
+1. Build the new git image: `aidc rebuild` on Docker, `aidc k8s build --only gitctl` on
+   Kubernetes.
+2. Run `aidc git setup` on each backend. It restarts the git container with its settings file
+   (Docker) or adds the `gitreq` container and the `git-settings` ConfigMap (Kubernetes), and
+   hands the existing request folder to `gitreq` with what is in it.
+3. Create your sessions again (`aidc kill <name>`, `aidc create <name>`): a session's `gh`
+   checks that the request folder is `gitreq`'s, so an older session's `gh pr create` says the
+   folder is not set up.
+4. Give sessions their own git mode again if you had (`aidc git mode <session> rules|ask`):
+   per-session modes start again from your mode.
+What changes in use:
+- Answering the git agent's question in its terminal no longer approves. It replies with the
+  command to run: `aidc git approve <id>` or `aidc git deny <id>`.
+- Asking the git agent to push, open or merge a pull request makes a request too, which waits
+  for your `aidc git approve`.
+- `gh issue list|view|create|edit|comment|close|reopen` and `gh api` on the issue endpoints work
+  in sessions and in the git agent, through the git container. They run at once, on repos you
+  added only, with no AI attribution, and never delete, transfer or lock an issue.
+- `aidc logs git --component gitreq` shows the request holder's log on Kubernetes.
+
 ### Upgrading: the MCP server on 3tears (aidc 2.0)
 The MCP server is now served by 3tears-mcp (design 13). Tool names, arguments, descriptions
 and the envelope are unchanged; what an MCP caller sees differently:

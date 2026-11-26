@@ -93,18 +93,18 @@ case "$*" in
     *"get pod repo-dir-"*"jsonpath"*)
         case "$*" in *"repo-dir-${K_FAIL_STEP:-none}-"*) printf Failed ;; *) printf Succeeded ;; esac ;;
     *"logs repo-dir-"*) echo "ready" ;;
-    *"exec git-7d9f-abc -c git -- gitctl protection"*|*"exec git-7d9f-abc -c git -- gitctl protect "*)
+    *"exec git-7d9f-abc -c git -- gitctl protection"*|*"exec git-7d9f-abc -c gitreq -- gitctl protect "*)
         printf '%b' "${K_PROT:-repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nsquash allowed\nrebase allowed\n}"; echo end ;;
     *"exec git-7d9f-abc -c git -- gitctl tidy"*) printf 'deleted-remote feat\nremoved-worktree /home/alice/r/wt\nunpushed 2 other\norphaned /home/alice/r/old\nend\n' ;;
-    *"exec git-7d9f-abc -c git -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
-    *"exec git-7d9f-abc -c git -- git-requests pr-base"*)
+    *"exec git-7d9f-abc -c gitreq -- git-requests first-use"*) [ -n "${K_FIRST:-}" ] && printf '%b\nend\n' "$K_FIRST" ;;
+    *"exec git-7d9f-abc -c gitreq -- git-requests pr-base"*)
         [ "${K_NO_BASE:-}" = 1 ] && { echo 'git-requests: no base branch given and origin has no default' >&2; exit 1; }
         echo main ;;
-    *"exec git-7d9f-abc -c git -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
-    *"exec -i git-7d9f-abc -c git -- git-requests mode"*) cat > "$K_STDIN"; echo "mode set" ;;
+    *"exec git-7d9f-abc -c gitreq -- git-requests list"*) printf 'ID  RECEIVED\nabc\033[31m  x\n' ;;
+    *"exec -i git-7d9f-abc -c gitreq -- git-requests mode"*) cat > "$K_STDIN"; echo "mode set" ;;
     *"get deployment,statefulset -l aidc/session=demo"*) [ "${K_NO_SESSION:-}" = 1 ] || echo "dev statefulset.apps/demo-dev" | pick ;;
     *"get statefulset demo-dev -o jsonpath"*) printf '%s' "${K_TOKEN-$(printf 'f%.0s' $(seq 64))}" ;;
-    *"exec git-7d9f-abc -c git -- gitctl"*|*"exec -i git-7d9f-abc -c git -- bash -c"*|*"exec git-7d9f-abc -c git -- git-requests"*)
+    *"exec git-7d9f-abc -c git -- gitctl"*|*"exec git-7d9f-abc -c gitreq -- gitctl"*|*"exec -i git-7d9f-abc -c gitreq -- bash -c"*|*"exec git-7d9f-abc -c gitreq -- git-requests"*)
         [ "${K_EXEC_FAIL:-}" = 1 ] && { echo 'gitctl: refused: no GitHub login' >&2; exit 1; }
         cat >/dev/null 2>&1 || true; echo "ok: $*" | cut -c1-80 ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
@@ -155,8 +155,8 @@ out=$(run git setup)
 assert_has "setup reports the container ready" "the git container is ready" "$out"
 assert_has "and exits 0" "exit=0" "$out"
 assert_has "and points the user at adding their own GitHub login" "aidc git login" "$out"
-assert_eq "it applies the egress policy, the home, login and private-copy claims and the Deployment, nothing else" \
-    "NetworkPolicy/git-egress PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred PersistentVolumeClaim/git-run Deployment/git" \
+assert_eq "it applies the egress policy, the request holder's settings, the home, login and private-copy claims and the Deployment, nothing else" \
+    "NetworkPolicy/git-egress ConfigMap/git-settings PersistentVolumeClaim/git-home PersistentVolumeClaim/git-cred PersistentVolumeClaim/git-run Deployment/git" \
     "$(yq -N e 'select(.kind != "Pod" and .kind != null) | [.kind, .metadata.name] | join("/")' "$K_APPLIED" | grep . | paste -sd' ' -)"
 assert_eq "everything goes in the user's namespace" "aidc-u-alice" "$(q '.metadata.namespace' | sort -u | tr -d '"')"
 assert_has "it waits for the Deployment to be ready" "rollout status deployment/git" "$(cat "$K_LOG")"
@@ -195,16 +195,16 @@ assert_eq "its image is aidc's gitctl from the in-cluster registry, pulled every
 assert_eq "every aidc image in it is pulled every time" "[]" \
     "$(pod '[(.containers[], .initContainers[]) | select(.imagePullPolicy != "Always")]')"
 assert_eq "the user's disk at /home/<user> (one path everywhere), its own home at /home/git, the login at gitcred's home, the private copies at gitrun's store" \
-    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true}]' \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"home","mountPath":"/home/git"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true}]' \
     "$(pod '.containers[] | select(.name == "git") | .volumeMounts')"
-assert_eq "the volumes are the user's disk claim and the git-home, git-cred and git-run claims" \
-    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}}]' \
+assert_eq "the volumes are the user's disk claim, the git-home, git-cred and git-run claims, and the two read-only lists" \
+    '[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}},{"name":"home","persistentVolumeClaim":{"claimName":"git-home"}},{"name":"cred","persistentVolumeClaim":{"claimName":"git-cred"}},{"name":"run-store","persistentVolumeClaim":{"claimName":"git-run"}},{"name":"repos","configMap":{"name":"git-repos","defaultMode":292}},{"name":"settings","configMap":{"name":"git-settings","defaultMode":292}}]' \
     "$(pod '.volumes')"
 # The list of repos the user added is the one thing gitctl takes "added" from: read-only in the
 # pod, a ConfigMap no one in the namespace can write (no container holds an API token), made
 # here when missing and never rewritten by setup.
 assert_eq "the list of added repos is mounted read-only (0444) in every container that has it, and in no init step" \
-    '[{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true}]' \
+    '[{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true}]' \
     "$(pod '[(.containers[], .initContainers[]) | .volumeMounts[] | select(.name == "repos")]')"
 assert_eq "no container can reach the API to change it (no service account token)" false "$(pod '.automountServiceAccountToken')"
 assert_eq "setup makes the list when there is none, empty, labelled for the user" \
@@ -229,12 +229,12 @@ assert_eq "the policy selects exactly the pods the Deployment makes" '"git"' \
     "$(dep '.spec.template.metadata.labels.app')"
 assert_has "every kubectl call uses the configured context" "--context lab apply" "$(cat "$K_LOG")"
 
-assert_eq "the git container is told its request folder and git mode" \
-    '[{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"},{"name":"AIDC_GIT_MODE","value":"ask"}]' \
+assert_eq "the git container is told its request folder (its gh writes requests there), not the mode" \
+    '[{"name":"AIDC_GIT_REQUESTS","value":"/home/alice/.aidc/git-requests"}]' \
     "$(pod '[.containers[] | select(.name == "git") | .env[] | select(.name == "AIDC_GIT_REQUESTS" or .name == "AIDC_GIT_MODE")]')"
-assert_eq "setup makes the request folder on the disk, by the root folder step, for the agent" \
-    '["/home/alice/.aidc/git-requests","/home/alice","requests","2000"]' \
-    "$(q 'select(.kind == "Pod") | .spec.containers[0].command[4:8]')"
+assert_eq "setup makes the request folder on the disk, by the root folder step, for the request holder (gitreq, 2003; one the agent, 2000, held is given over)" \
+    '["/home/alice/.aidc/git-requests","/home/alice","requests","2000","2003"]' \
+    "$(q 'select(.kind == "Pod") | .spec.containers[0].command[4:9]')"
 assert_eq "a Deployment that applied changed rolls by itself: no restart" "" "$(grep 'rollout restart' "$K_LOG")"
 out=$(K_UNCHANGED=1 run git setup)
 assert_has "an unchanged Deployment (same tag, maybe a rebuilt image) is restarted, so the pod pulls the image again" \
@@ -246,7 +246,9 @@ assert_has "a request folder that cannot be made fails setup, saying so" "its re
 cp "$HOME/.config/aidc/config.yaml" "$SCRATCH/config.bak"
 printf '  git_mode: rules\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
-assert_has "kubernetes.git_mode reaches the git container" '{"name":"AIDC_GIT_MODE","value":"rules"}' "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[]')"
+assert_has "kubernetes.git_mode reaches the request holder's settings" "mode=rules" \
+    "$(q 'select(.kind == "ConfigMap" and .metadata.name == "git-settings") | .data.settings')"
+assert_not_has "not the environment of any container" "AIDC_GIT_MODE" "$(q 'select(.kind == "Deployment") | .spec.template.spec.containers[].env[]?')"
 cp "$SCRATCH/config.bak" "$HOME/.config/aidc/config.yaml"
 printf '  git_mode: yolo\n' >> "$HOME/.config/aidc/config.yaml"
 out=$(run git setup)
@@ -259,7 +261,20 @@ assert_eq "the Deployment and its pod carry the reserved session label (aidc's l
     "$(dep '[.metadata.labels["aidc/session"], .spec.template.metadata.labels["aidc/session"]]')"
 assert_eq "the selector is unchanged (a Deployment's selector cannot change)" '{"app":"git"}' "$(dep '.spec.selector.matchLabels')"
 genv=$(pod '.containers[] | select(.name == "git") | .env')
-assert_has "ask mode hands waiting requests to the git agent's Claude" '{"name":"AIDC_GIT_NOTIFY","value":"/opt/aidc/lib/gitctl/git-notify.sh"}' "$genv"
+# The request holder: a container of its own, as gitreq, out of the agent's reach (owner ruling
+# 2026-11-26): kubectl exec cannot choose a user, so the user's aidc git approve|deny|mode reach
+# gitreq by exec into it, which nothing in the agent's container can.
+assert_eq "the request watcher runs in the pod's gitreq container, as gitreq (2003), with only a user switch's capabilities" \
+    '["/opt/aidc/lib/gitctl/git-requests.sh","watch"] {"runAsUser":2003,"runAsGroup":2003,"runAsNonRoot":true,"privileged":false,"allowPrivilegeEscalation":true,"capabilities":{"drop":["ALL"],"add":["SETUID","SETGID","AUDIT_WRITE"]}}' \
+    "$(pod '.containers[] | select(.name == "gitreq") | .command') $(pod '.containers[] | select(.name == "gitreq") | .securityContext')"
+assert_eq "it has the disk, the login and private copies (gitctl's sudo), and the two read-only lists; never the agent's home" \
+    '[{"name":"disk","mountPath":"/home/alice"},{"name":"cred","mountPath":"/var/lib/gitctl/gitcred"},{"name":"run-store","mountPath":"/var/lib/gitctl/gitrun"},{"name":"repos","mountPath":"/etc/aidc/git-repos","readOnly":true},{"name":"settings","mountPath":"/etc/aidc/git-settings","readOnly":true}]' \
+    "$(pod '.containers[] | select(.name == "gitreq") | .volumeMounts')"
+assert_eq "its settings name the request folder, the disk and the user's mode" \
+    '"requests=/home/alice/.aidc/git-requests\ndisk=/home/alice\nmode=ask\n"' \
+    "$(q 'select(.kind == "ConfigMap" and .metadata.name == "git-settings") | .data.settings')"
+assert_not_has "the agent's container no longer runs or notifies a watcher of its own" "AIDC_GIT_NOTIFY" "$genv"
+assert_not_has "..." "AIDC_GIT_WATCH_HERE" "$genv"
 assert_has "it knows its session name" '{"name":"AIDC_SESSION","value":"git"}' "$genv"
 assert_eq "an existing home gets the image's Claude: refresh-claude runs after the seed, as the git user, with nothing" \
     '["seed-home","refresh-claude"] {"runAsUser":2000,"runAsGroup":2000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}' \
@@ -315,12 +330,12 @@ assert_has "aidc attach git is the same as aidc git attach" \
 
 echo "=== aidc git mode: a session's own git mode ==="
 out=$(run git mode)
-assert_has "with no arguments it lists the modes" "exec git-7d9f-abc -c git -- git-requests modes" "$(cat "$K_LOG")"
+assert_has "with no arguments it lists the modes" "exec git-7d9f-abc -c gitreq -- git-requests modes" "$(cat "$K_LOG")"
 : > "$K_STDIN"
 out=$(run git mode demo rules)
 assert_has "rules: the session's token is read from its StatefulSet" "get statefulset demo-dev -o jsonpath" "$(cat "$K_LOG")"
 assert_has "and handed to the git container on stdin, never on its command line" \
-    "exec -i git-7d9f-abc -c git -- git-requests mode demo rules" "$(cat "$K_LOG")"
+    "exec -i git-7d9f-abc -c gitreq -- git-requests mode demo rules" "$(cat "$K_LOG")"
 assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
 assert_not_has "..." "ffffffff" "$(grep -v 'get statefulset' "$K_LOG")"
 out=$(K_TOKEN="" run git mode demo rules)
@@ -330,16 +345,16 @@ out=$(K_NO_SESSION=1 run git mode demo rules)
 assert_has "no such session is refused" "no session 'demo'" "$out"
 : > "$K_STDIN"
 out=$(run git mode demo default)
-assert_has "default, too, is keyed on the session's token, handed over on stdin" "exec -i git-7d9f-abc -c git -- git-requests mode demo default" "$(cat "$K_LOG")"
+assert_has "default, too, is keyed on the session's token, handed over on stdin" "exec -i git-7d9f-abc -c gitreq -- git-requests mode demo default" "$(cat "$K_LOG")"
 assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
 : > "$K_STDIN"
 out=$(run git mode demo ask)
-assert_has "ask holds one session to approval, keyed on its token the same way" "exec -i git-7d9f-abc -c git -- git-requests mode demo ask" "$(cat "$K_LOG")"
+assert_has "ask holds one session to approval, keyed on its token the same way" "exec -i git-7d9f-abc -c gitreq -- git-requests mode demo ask" "$(cat "$K_LOG")"
 assert_eq "..." "$(printf 'f%.0s' $(seq 64))" "$(tr -d '\n' < "$K_STDIN")"
 out=$(run git mode demo yolo)
 assert_has "an unknown mode is refused" "not rules, ask or default" "$out"
 out=$(run git mode git rules)
-assert_has "the git agent has no mode of its own" "the git agent sends no requests" "$out"
+assert_has "the git agent has no mode of its own: its requests always wait" "the git agent has no mode" "$out"
 
 echo "=== aidc git status ==="
 out=$(K_GH=yes run git status)
@@ -406,7 +421,7 @@ echo "=== push, pr, merge, tidy, protect, requests, login ==="
 mkdir -p "$HOME/r"
 xl() { grep ' exec ' "$K_LOG" | sed 's/^--context lab -n aidc-u-alice //'; }
 out=$(run git push "$HOME/r" feat)
-assert_has "push: gitctl push in the git container, the path mapped onto the disk" "exec git-7d9f-abc -c git -- gitctl push /home/alice/r feat" "$(xl)"
+assert_has "push: gitctl push in the git container, the path mapped onto the disk" "exec git-7d9f-abc -c gitreq -- gitctl push /home/alice/r feat" "$(xl)"
 assert_has "then the first-use protection check" "git-requests first-use /home/alice/r" "$(xl)"
 assert_has "exit 0" "exit=0" "$out"
 out=$(K_FIRST='repo o/r\ndefault main\nforce-push allowed\ndeletion allowed\nmerge-commit allowed' run git push "$HOME/r" feat)
@@ -420,7 +435,7 @@ assert_eq "..." "" "$(xl)"
 printf 'The body.\n' > "$SCRATCH/body.md"
 out=$(run git pr "$HOME/r" feat --title "Add it" --body-file "$SCRATCH/body.md")
 assert_has "pr: pushes first" "gitctl push /home/alice/r feat" "$(xl)"
-assert_has "then opens the PR with the body on stdin and the title as an argument" "exec -i git-7d9f-abc -c git -- bash -c" "$(xl)"
+assert_has "then opens the PR with the body on stdin and the title as an argument" "exec -i git-7d9f-abc -c gitreq -- bash -c" "$(xl)"
 assert_has "..." "gitctl pr-create" "$(cat "$K_LOG")"
 assert_has "exit 0" "exit=0" "$out"
 assert_eq "the base is settled first, then the push" "pr-base|push" \
@@ -463,7 +478,7 @@ out=$(run git deny "$id" "not now"); assert_has "deny <id> <why>" "git-requests 
 out=$(run git approve "../x"); assert_has "an id that is not one is refused" "not a request id" "$out"
 out=$(run git login)
 assert_has "login runs gitctl login interactively in the git container" "exec -it git-7d9f-abc -c git -- env TERM=xterm-test gitctl login" "$(xl)"
-out=$(run git logout); assert_has "logout" "gitctl logout" "$(xl)"
+out=$(run git logout); assert_has "logout runs as the request holder (the agent cannot log the container out)" "exec git-7d9f-abc -c gitreq -- gitctl logout" "$(xl)"
 out=$(run git log 5); assert_has "log reads gitctl's action log" "exec git-7d9f-abc -c git -- gitctl log 5" "$(xl)"
 out=$(K_NO_POD=1 run git push "$HOME/r" feat)
 assert_has "with no git container: says to set it up" "run \`aidc git setup\`" "$out"

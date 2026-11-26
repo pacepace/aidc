@@ -363,6 +363,22 @@ Order follows design-13 "Upstream work".
   PR or merge outside a request (Docker and the Kubernetes pod spec); `aidc git approve` approves;
   rules mode runs a passing request with no question; `/prawduct:critic`; committed.
 - **Owner's hands:** none.
+- **Notes (the MCP side's entry point):** the MCP server carries out an orchestrator's answer by
+  running, as gitreq, `git-requests approve <id>` or `git-requests deny <id> [<why>]`. On Docker
+  that is `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests ...`; on
+  Kubernetes, `kubectl -n <user ns> exec <git pod> -c gitreq -- git-requests ...` (the pod's own
+  gitreq container, since kubectl exec cannot choose a user). Each acts only on a request still
+  waiting: one that is gone, done, denied or being run exits 1 and says which, and nothing
+  happens. approve prints the result's message (and output) and exits with the run's status.
+  The id is the 32-hex request id the agent's question names (`git request <id>`); the MCP side
+  matches the answer to it and passes nothing else. git-requests refuses these verbs when it is
+  reached through sudo or runs as anything but gitreq, so only an exec from outside the
+  container can use them. The same exec reads the list (`git-requests list`, `show <id>`).
+- **Notes (what the agent keeps):** reads (pull requests, issues, protections, fetch, the action
+  log) and `gitctl tidy`. Tidy's `delete-branch` stays the agent's (and gitwc's, on Docker): it
+  deletes only a branch GitHub reports merged, never a base, so it removes nothing a merge has
+  not already landed. `gitctl logout` is the holder's (the user's `aidc git logout`); `gitctl
+  login` stays the agent's, since it needs the user's own approval in a browser.
 
 ### Chunk 14: Git approvals through the orchestrator on Kubernetes (W-M3-01..03)
 

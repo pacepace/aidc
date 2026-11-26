@@ -31,9 +31,11 @@ as_cred() {
 # request watcher so both read working copies the same way.
 ag() { gitctl_agent_git "$REAL_GIT" "$@"; }
 
-# The agent's bundles, in its own folder; each is deleted when the verb ends, whatever the
-# outcome, and any older than BUNDLE_MAX_AGE_MIN (a verb that was killed) at the next verb.
-if [ "$INSTALLED" = 1 ]; then BUNDLE_DIR="${HOME:-/home/git}/.cache/gitctl"
+# The caller's bundles (the agent's, or the request holder's), in a folder of its own home as
+# the user database names it: an exec into the container keeps the container's HOME, which is
+# the agent's. Each is deleted when the verb ends, whatever the outcome, and any older than
+# BUNDLE_MAX_AGE_MIN (a verb that was killed) at the next verb.
+if [ "$INSTALLED" = 1 ]; then BUNDLE_DIR="$(getent passwd "$(id -u)" | cut -d: -f6)/.cache/gitctl"
 else BUNDLE_DIR="${AIDC_GITCTL_BUNDLE_DIR:-${TMPDIR:-/tmp}/gitctl-bundles-$(id -u)}"; fi
 BUNDLE=""
 new_bundle() {
@@ -526,8 +528,41 @@ read_file() {
     cat -- "$1"
 }
 
+# api_args ARGS...: gitctl api's arguments, both sides: METHOD, PATH (checked against the table,
+# gitctl-rules.sh) and the options a GET may take, into API_METHOD, GITCTL_API_* and API_OPTS.
+api_args() {
+    API_METHOD="${1:-}" API_OPTS=()
+    [ $# -ge 2 ] || die "usage: gitctl api <GET|POST|PATCH|DELETE> <path> [--include] [--if-none-match <etag>]"
+    gitctl_api_check "$REAL_GIT" "$1" "$2" || die "$GITCTL_REASON"
+    shift 2
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --include) API_OPTS+=(--include); shift ;;
+            --if-none-match)
+                [ $# -ge 2 ] || die "--if-none-match needs an ETag"
+                gitctl_api_etag "$2" || die "$GITCTL_REASON"
+                API_OPTS+=(--if-none-match "$2"); shift 2 ;;
+            *) die "${1:0:40}: not an option of gitctl api" ;;
+        esac
+    done
+    [ ${#API_OPTS[@]} = 0 ] || [ "$API_METHOD" = GET ] || die "only a GET takes --include or --if-none-match"
+}
+# api_body: a write's body from stdin, checked (gitctl_api_body), printed compact; nothing for a
+# call that takes none (its stdin is not read).
+api_body() {
+    local raw
+    [ "$GITCTL_API_BODY" != - ] || return 0
+    raw=$(head -c $((GITCTL_API_MAX_BODY + 1)))
+    gitctl_api_body "$GITCTL_API_BODY" "$raw" || die "$GITCTL_REASON"
+}
+
 agent_side() {
     case "$verb" in
+        api)
+            api_args "$@"
+            local body
+            body=$(api_body) || exit 1
+            printf '%s' "$body" | switch_to cred api "$API_METHOD" "$GITCTL_API_PATH" ${API_OPTS[@]+"${API_OPTS[@]}"} ;;
         clone) agent_clone "$@" ;;
         fetch) agent_fetch "$@" ;;
         push) agent_push "$@" ;;

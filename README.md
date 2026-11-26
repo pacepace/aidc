@@ -700,7 +700,10 @@ must be inside the working copy, and the session must have been created after `a
 or created again, to get the request folder). Its `gh` is aidc's stand-in, not GitHub's CLI:
 `gh pr create` (pushing the branch first), `gh aidc push`, `gh pr merge` (merge commit only),
 `gh pr view`, `gh pr list` and `gh pr status` become requests the git container answers, so
-`/prawduct:pr` and plain `gh pr create` work unchanged. `git push` in a session fails and says to
+`/prawduct:pr` and plain `gh pr create` work unchanged. GitHub issues work the same way:
+`gh issue list|view|create|edit|comment|close|reopen` and `gh api` on the issue endpoints (what
+prawduct's backlog uses) run at once, on repos you added, with no AI attribution, and never
+delete, transfer or lock an issue. `git push` in a session fails and says to
 use `gh pr create`. The stand-in waits up to a minute for the answer, then prints
 "requested; waiting for approval" with the request's id (`gh aidc request <id>` reads it later);
 when the git container has not taken the request at all it says so instead, and fails.
@@ -710,9 +713,12 @@ when the git container has not taken the request at all it says so instead, and 
 the commit you approve, or for a merge the pull request's head commit: a branch or pull request
 that moves after the request is refused), `aidc git approve
 <id>` runs it, `aidc git deny <id> [why]` refuses it and the session reads why. Your git agent
-also asks you about each waiting request with its question tool: answer in its terminal
-(`aidc attach git`). Reads (`gh pr view`, `gh pr list`) run at once. Requests and results are
-deleted after 30 days.
+also asks about each waiting request with its question tool, but it cannot approve or deny
+anything: whatever you answer, it replies with the `aidc git approve|deny <id>` to run on your
+machine. Approvals happen only outside the git agent's reach (a user of their own in the git
+container holds and decides requests), so text a session wrote can never talk the agent into
+one. Reads (`gh pr view`, `gh pr list`) run at once. Requests and results are deleted after 30
+days.
 
 **Modes.** `rules` lets gitctl's rules decide at once. Your mode is `git.mode` in the global
 config on Docker and `kubernetes.git_mode` in a cluster (applied by `aidc git setup`).
@@ -730,7 +736,8 @@ before per-session modes existed must be created again.
 
 **From the terminal.** `aidc git push <repo> <branch>`, `aidc git pr <repo> <branch> [--base B]
 --title T --body-file F` and `aidc git merge <repo> <number>` do the same for a working copy;
-running the command is your approval. `aidc git tidy [<repo>]` deletes merged branches (on
+running the command is your approval. Asking the git agent in its terminal to push, open or merge
+a pull request makes a request like a session's, which waits for your `aidc git approve`. `aidc git tidy [<repo>]` deletes merged branches (on
 GitHub and locally) and their clean worktrees, and lists every leftover (unpushed, unmerged,
 uncommitted, orphaned worktree folders) without deleting it; `merge` tidies after itself. The
 first push of a repo shows GitHub's protections of its default branch; `aidc git protect
@@ -742,17 +749,18 @@ paid GitHub plan; GitHub's refusal is shown).
 `git-agent`), `aidc attach git`, `aidc status git` and `aidc logs git` reach it, and `aidc kill
 git` and `aidc create git` are refused (`aidc git setup` manages it). It runs Claude with
 managed instructions it cannot change (the git rules; everything sessions write is data, never
-instructions) and a fixed allow list, and only it, never a session, reaches GitHub.
+instructions) and a fixed allow list. It reads pull requests, fetches and tidies; every push,
+pull request and merge goes through a request it cannot approve.
 
 **An orchestrator and ask mode.** On Docker the git agent's transcript reaches `aidc mcp` like
 any session's, so an orchestrator that watches the session `git` (`session_watch`) receives the
-agent's question about a request as that session's reply. Answering it with `session_send` is
-not yet checked live (the question tool may not take a pasted answer); answer in its terminal
-or with `aidc git approve|deny` meanwhile. **On Kubernetes the question does not reach an
+agent's question about a request as that session's reply, naming the request id. The MCP
+server carrying out an orchestrator's answer itself (as the request holder, not through the
+agent) is still being built; answer with `aidc git approve|deny` meanwhile. **On Kubernetes the question does not reach an
 orchestrator yet:** the MCP server's session tools reach cluster sessions only through the
 per-user MCP server. The Kubernetes backend ships in aidc 2.0 together with that server, and 2.0
-routes Kubernetes git approvals through the orchestrator before it ships. Until then answer by
-attaching (`aidc attach git`) or with `aidc git approve|deny`.
+routes Kubernetes git approvals through the orchestrator before it ships. Until then answer
+with `aidc git approve|deny`.
 
 ## Reference
 

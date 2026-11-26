@@ -31,6 +31,33 @@ ruling 2026-11-26).
   descriptions exist twice for this one commit.
 - #76: `file_put` writes through a temporary file renamed over the target instead of `install -m
   MODE /dev/stdin PATH`, which the session image's uutils coreutils refuse on an existing file.
+- Chunk 13 (owner ruling 2026-11-26, git approvals out of the agent's reach): a user of its own
+  in the git container, `gitreq` (2003), holds and decides requests. The request folder, the
+  session modes (now `state/modes` in it) and every decision are its. The agent (git) reaches it
+  only through a sudo rule for list, show, prompt, handoff, handed and watch; approve, deny and
+  the mode and record verbs refuse git and anything reached through sudo. gitctl's GitHub writes
+  (push, pr-create, pr-comment, pr-merge, protect) run only for gitreq, checked on every side.
+  The user's `aidc git approve|deny|mode|push|pr|merge|protect` and aidc's session records run as
+  gitreq: `docker exec -u gitreq` on Docker, and on Kubernetes an exec into the git pod's new
+  `gitreq` container, which runs the watcher. The holder's mode and paths come from a read-only
+  settings file (Docker: `~/.config/aidc/git-settings`; Kubernetes: the `git-settings`
+  ConfigMap). The agent's `gh` is now the sessions' stand-in, so its own pushes and pull requests
+  are requests too (always ask). Waiting requests reach its Claude by the main process asking the
+  holder (handoff), not by the watcher typing in. The agent's question names the request id, and
+  it answers with the `aidc git approve|deny` to run. Setup gives the holder a request folder the
+  agent held, contents included.
+- Chunk 13, GIT-07 (owner rulings 2026-11-26): GitHub issues through the git container, as an
+  issue-scoped API passthrough. `gitctl api` passes on only the endpoints of one table
+  (`GITCTL_API_TABLE`, gitctl-rules.sh: the calls prawduct's backlog makes, and the `gh issue`
+  forms), each with its query and body keys, on added repos, with the attribution check and the
+  conditional read; writes run only for gitreq. The gh stand-in sends `gh api` and `gh issue`
+  as `api` requests; the holder runs them at once in every mode (Q-G1) and the caller gets
+  GitHub's stdout, messages and exit status.
+- Chunk 13, also: the holder wakes on a new request (inotify) and reads requests with one jq, so
+  an issue call takes about 0.3 s; `gitctl logout` is the holder's too; the mode left the
+  containers' environment; the git agent's managed settings run aidc's hook writer on
+  SessionStart, Stop, Notification and UserPromptSubmit, into its Docker mirror (MCP-46/47);
+  `tests/smoke/git-holder.sh` checks the users, sudo rules and process layout live on Docker.
 
 - Chunk 03: the local face is 3tears-mcp's `McpServer` (`server.py`), stateful Streamable HTTP on
   SSE responses, serving the TearsTools through the bridge under their 1.x names, with the
@@ -122,3 +149,16 @@ Chunks 03-04 change what a caller sees, and chunk 07 what an operator sees (aidc
 - aidc-mcp's state is `watcher-state/aidc-state.sqlite` rather than one JSON file per session;
   the first start reads 1.x's files in and keeps them in `watcher-state/migrated-1x/`; `python -m
   aidc_mcp.store` in the server's container prints it. Two servers cannot share a state dir.
+
+## Consumer note (chunk 13)
+- `aidc git setup` must run again on each backend (new image, the gitreq container on
+  Kubernetes, the settings file). Sessions must be created again: their gh stand-in checks the
+  request folder is gitreq's. Sessions' own modes start again from the user's mode.
+- Answering the git agent's question in its terminal no longer approves: run
+  `aidc git approve|deny <id>`. Asking the agent to push or open a pull request makes a request.
+- The MCP server's entry point for an orchestrator's answer is `git-requests approve|deny <id>`
+  by exec as gitreq (build plan chunk 13, notes).
+- A session's `gh api` (the issue endpoints) and `gh issue list|view|create|edit|comment|close|
+  reopen` work through the git container, so prawduct's backlog on GitHub issues works in a
+  session. Issue writes run at once in every mode, checked by gitreq; there is no delete,
+  transfer or lock.

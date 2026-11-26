@@ -52,12 +52,14 @@ case "$1 $2" in
     "auth status") cat "$d/authstatus.out" 2>/dev/null; exit "$(cat "$d/authstatus.rc" 2>/dev/null || echo 0)" ;;
     "auth login") exit "$(cat "$d/login.rc" 2>/dev/null || echo 0)" ;;
 esac
-# gh api <path>: the answer in api/<path, / as _>, or its .err text and a failure.
+# gh api <path>: the answer in api/<path, / as _>, or its .err text and a failure; with no
+# file for it, api.default when there is one (gh runs with a cleared environment).
 if [ "$1" = api ]; then
     shift
     while [ $# -gt 0 ]; do case "$1" in --method|-F|--input) shift 2 ;; -*) shift ;; *) break ;; esac; done
     f="$d/api/$(printf '%s' "$1" | tr / _)"
     [ -e "$f" ] && { cat "$f"; exit 0; }
+    [ ! -e "$f.err" ] && [ -e "$d/api.default" ] && { cat "$d/api.default"; exit 0; }
     cat "$f.err" 2>/dev/null || echo "gh: Not Found (HTTP 404)"
     exit 1
 fi
@@ -557,12 +559,17 @@ for f in gitctl-run.sh gitctl-cred.sh gitctl-agent.sh; do
     assert_has "the side it sources, ${f}, is installed beside it (root's, not executable)" "/opt/aidc/lib/gitctl/${f}" "$df"
     assert_has "..." "${f}" "$(grep '^COPY gitctl-rules.sh' "$GITCTL/Dockerfile")"
 done
-assert_has "plain gh points to gitctl (a gh login as the agent would be readable by it)" "ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh" "$df"
+assert_has "plain gh is the sessions' stand-in: it writes requests (a gh login as the agent would be readable by it)" \
+    "ln -s /opt/aidc/lib/gitctl/gh-standin.sh /opt/aidc/bin/gh" "$df"
+assert_eq "gitctl/gh-standin.sh is identical to .devcontainer/gh-standin.sh (the image's build folder is gitctl/)" "" \
+    "$(cmp "$GITCTL/gh-standin.sh" "$AIDC_ROOT/.devcontainer/gh-standin.sh" 2>&1)"
 assert_has "the sudo rules are root's, 0440" "chmod 0440 /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "and checked at build" "visudo -c -f /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "the managed settings are installed" "COPY managed-settings.json /etc/claude-code/managed-settings.json" "$df"
-assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker), gitrun to the credential helper, gitcred to gitrun's has-copy only" \
+assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker) and to the request holder's reading verbs, the holder to gitctl, gitrun to the credential helper, gitcred to gitrun's has-copy only" \
 "git ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+git ALL=(gitreq) NOPASSWD: /opt/aidc/lib/gitctl/git-requests.sh watch, /opt/aidc/lib/gitctl/git-requests.sh list, /opt/aidc/lib/gitctl/git-requests.sh show *, /opt/aidc/lib/gitctl/git-requests.sh prompt *, /opt/aidc/lib/gitctl/git-requests.sh handoff, /opt/aidc/lib/gitctl/git-requests.sh handed *
+gitreq ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitwc ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitrun ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
 gitcred ALL=(gitrun) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh has-copy *" \
@@ -1172,6 +1179,106 @@ assert_has "and the log still shows the last push" "push o/r feature $(git -C "$
 G -C "$W" switch -q main
 
 echo ""
+echo "=== only the request holder changes GitHub: the agent's gitctl, and its sudo, are refused ==="
+# owner ruling 2026-11-26: every push, pull request and merge is a request, decided out of the
+# agent's reach. AIDC_GITCTL_CALLER stands for who ran gitctl (on the agent's side) and for the
+# user sudo names (on gitrun's and gitcred's): the agent is git; on Docker gitwc is the agent's
+# hop to the user's uid. Each is refused every verb that changes GitHub, on every side.
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "Not by the agent"
+before=$(remote_sha feature)
+for who in git gitwc; do
+    AIDC_GITCTL_CALLER=$who ctl push "$W" feature; refused "${who}: push through gitctl is refused"
+    assert_eq "${who}: and nothing reached the forge" "$before" "$(remote_sha feature)"
+    G -C "$W" bundle create -q "$S/agent.bundle" "refs/heads/feature" 2>/dev/null
+    : > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r feature < "$S/agent.bundle" 2>&1); RC=$?; CALLS=""
+    refused "${who}: gitrun refuses push when sudo names ${who} as the caller"
+    assert_eq "${who}: and nothing reached the forge" "$before" "$(remote_sha feature)"
+    for v in "pr-create o/r feature main" "pr-merge o/r 5" "pr-comment o/r 5" "protect o/r" logout; do
+        # shellcheck disable=SC2086  # the verb and its arguments
+        AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=cred ctl_in "Text" $v
+        refused "${who}: gitcred refuses ${v%% *} when sudo names ${who}"
+    done
+    AIDC_GITCTL_CALLER=$who ctl pr-merge "$W" 5; refused "${who}: pr-merge through gitctl is refused"
+done
+assert_has "the refusal says how to ask instead" "gh pr create" "$OUT"
+AIDC_GITCTL_CALLER=git AIDC_GITCTL_ROLE=cred ctl pr-view o/r 5
+assert_eq "reads stay the agent's" "0|pr view 5 --repo o/r" "$RC|$(printf '%s' "$CALLS" | head -c 20)"
+ctl push "$W" feature
+assert_eq "gitreq pushes (for an approved request, or the user's aidc git push)" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+G -C "$W" switch -q main
+
+echo ""
+echo "=== api: GitHub issues, only the table's endpoints, on added repos (GIT-07) ==="
+# Every row of the table (gitctl-rules.sh, GITCTL_API_TABLE) passes, with a sample of each
+# placeholder and, for a write, a body of its first key; gh is given exactly that call. GitHub
+# answers {} (the stub's api.default) unless a test gives it a file.
+printf '{}\n' > "$S/bin/api.default"
+sample_body() { # KEY: a JSON body holding that key
+    case "$1" in
+        title|body|name|description) printf '{"%s":"Some text"}' "$1" ;;
+        color) printf '{"color":"ededed"}' ;;
+        labels|assignees) printf '{"%s":["x"]}' "$1" ;;
+        state) printf '{"state":"closed"}' ;;
+        state_reason) printf '{"state_reason":"completed"}' ;;
+        milestone|sub_issue_id|issue_id) printf '{"%s":1}' "$1" ;;
+    esac
+}
+rows=0
+while read -r m pat kind _ bkeys; do
+    [ -n "$m" ] || continue
+    rows=$((rows + 1))
+    p="${pat//'{n}'/12}"; p="${p//'{label}'/type%2Fbug}"; p="${p//'{id}'/123}"; p="${p//'{branch}'/feat/x}"
+    case "$p" in /*) p="${p#/}" ;; *) p="repos/o/r/${p}" ;; esac
+    body=""; [ "$bkeys" = - ] || body=$(sample_body "${bkeys%%,*}")
+    ctl_in "$body" api "$m" "$p"
+    if [ "$bkeys" = - ]; then want="api --method ${m} ${p} "; else want="api --method ${m} ${p} --input - "; fi
+    assert_eq "${kind}: ${m} ${pat} passes, as exactly that call" "0|${want}" "$RC|$CALLS"
+done <<<"$(sed -n "/^GITCTL_API_TABLE='/,/^'/p" "$GITCTL/gitctl-rules.sh" | sed '1d;$d')"
+assert_eq "every row was tried" yes "$([ "$rows" -ge 19 ] && echo yes || echo no)"
+ctl api GET "repos/o/r/issues?state=all&since=2026-11-01T00%3A00%3A00Z&sort=updated&direction=desc&per_page=1&page=1" \
+    --include --if-none-match '"abc123"'
+assert_eq "a conditional read: gh's -i and If-None-Match, nothing else" \
+    "0|api --method GET repos/o/r/issues\\?state=all\\&since=2026-11-01T00%3A00%3A00Z\\&sort=updated\\&direction=desc\\&per_page=1\\&page=1 -i -H If-None-Match:\\ \\\"abc123\\\" " "$RC|$CALLS"
+mkdir -p "$S/bin/api"; printf 'gh: Not Found (HTTP 404)\n' > "$S/bin/api/repos_o_r_issues_99.err"
+ctl api GET repos/o/r/issues/99
+assert_eq "GitHub's failure is the caller's: gh's exit status and message" "1|gh: Not Found (HTTP 404)" "$RC|$OUT"
+for c in "DELETE repos/o/r/issues/12" "POST repos/o/r/issues/12/lock" "PUT repos/o/r/issues/12/lock" \
+         "GET repos/o/r/pulls" "POST repos/o/r/transfer" "GET repos/o/r/issues/12/../../../pulls" \
+         "DELETE repos/o/r/issues/12/labels/..%2F..%2F.." "DELETE repos/o/r/issues/12/labels/%2e%2e" \
+         "GET repos/o/r/issues?evil=1" "GET repos/o/r/issues?state=open&state=closed" "GET repos/o/r/labels?per_page=x" \
+         "GET repos/o/r/issues/12?state=open" "GET repos/o/r/branches/-x" "GET user/repos" "GET repos/o/r"; do
+    # shellcheck disable=SC2086  # the method and path
+    ctl api $c; refused "not in the table, refused before gh runs: ${c}"
+done
+ctl api GET repos/o/other/issues; refused "an issue read on a repo the user did not add is refused"
+ctl_in '{"title":"T"}' api POST repos/o/other/issues; refused "and an issue write"
+AIDC_GITCTL_ROLE=cred ctl api GET repos/o/other/issues; refused "called as gitcred directly too"
+ctl_in '{"title":"T","x":1}' api POST repos/o/r/issues; refused "a body key the row does not take is refused"
+ctl_in '{"title":"T","body":"Fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"}' api POST repos/o/r/issues; refused "AI attribution in an issue is refused"
+ctl_in '{"body":"Generated with Claude Code"}' api POST repos/o/r/issues/12/comments; refused "and in a comment"
+ctl_in '{"name":"x","color":"ededed","description":"made by ChatGPT"}' api POST repos/o/r/labels
+assert_eq "a label's description is checked too" 1 "$RC"
+ctl_in '{"title":"T\u001b[31m"}' api POST repos/o/r/issues; refused "a control character in a title is refused"
+ctl_in '{"state":"deleted"}' api PATCH repos/o/r/issues/12; refused "a state but open or closed is refused"
+ctl_in '[1]' api POST repos/o/r/issues; refused "a body that is not an object is refused"
+ctl_in 'x' api DELETE repos/o/r/issues/12/labels/bug
+assert_eq "a call that takes no body passes none on (its stdin is not read)" "0|api --method DELETE repos/o/r/issues/12/labels/bug " "$RC|$CALLS"
+ctl api POST repos/o/r/issues --include; refused "only a GET is read with its headers"
+ctl api GET repos/o/r/issues --if-none-match 'x;rm'; refused "an ETag that is not one is refused"
+ctl_in '{"title":"T"}' api POST repos/o/r/issues --input /etc/passwd; refused "no option the caller writes is passed on"
+for who in git gitwc; do
+    AIDC_GITCTL_CALLER=$who ctl_in '{"title":"T"}' api POST repos/o/r/issues; refused "${who}: an issue write is refused (only the request holder)"
+    AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=cred ctl_in '{"title":"T"}' api POST repos/o/r/issues
+    refused "${who}: and gitcred refuses it when sudo names ${who}"
+done
+AIDC_GITCTL_CALLER=git ctl api GET repos/o/r/issues/12
+assert_eq "an issue read stays the agent's" "0|api --method GET repos/o/r/issues/12 " "$RC|$CALLS"
+ctl_in '{"title":"T"}' api POST repos/o/r/issues
+ctl log 1
+assert_has "an issue write is in gitcred's action log" "api o/r POST:issues - asked-by=direct caller=gitreq ok" "$OUT"
+rm -f "$S/bin/api.default"
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
 # gitctl.sh and the files it sources (each trust side's, and the shared rules).
 mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut"/gitctl*.sh; }
@@ -1265,6 +1372,26 @@ mut 's/            \[ $# = 2 \] || \[ "$head" = "$3" \] \\/            true \\/'
 : > "$S/bin/calls.log"
 bash "$S/mut/gitctl.sh" pr-merge "$H" 5 --expect-head "$(printf 'b%.0s' $(seq 40))" >/dev/null 2>&1
 assert_has "with the approved-head check removed, a moved PR is merged (so the head test would fail)" "pr merge 5" "$(cat "$S/bin/calls.log")"
+mut 's/^if \[ "$is_write" = 1 \] && \[ "$CALLER" != gitreq \]; then$/if false; then/'
+grep -q '^if false; then$' "$S/mut/gitctl.sh" || fail "the holder-only mutation did not apply"
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "By the agent"
+G -C "$W" bundle create -q "$S/agent.bundle" "refs/heads/feature" 2>/dev/null
+AIDC_GITCTL_CALLER=git AIDC_GITCTL_ROLE=run bash "$S/mut/gitctl.sh" push o/r feature < "$S/agent.bundle" >/dev/null 2>&1
+assert_eq "with the holder-only check removed, the agent pushes through sudo to gitrun (so the holder test would fail)" \
+    "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+G -C "$W" switch -q main
+mut 's/^        \[\[ "\$rest" =~ \^\${re}\$ \]\] || continue$/        :/'
+grep -q '^        :$' "$S/mut/gitctl-rules.sh" || fail "the api table mutation did not apply"
+: > "$S/bin/calls.log"
+bash "$S/mut/gitctl.sh" api DELETE repos/o/r/issues/12 >/dev/null 2>&1
+assert_has "with the table's path match removed, an issue delete reaches gh (so the table test would fail)" \
+    "api --method DELETE repos/o/r/issues/12" "$(cat "$S/bin/calls.log")"
+mut 's/^\[ "\$verb" = api \] && \[ "\${1:-}" != GET \] && is_write=1$/:/'
+grep -q '^\[ "$verb" = api \]' "$S/mut/gitctl.sh" && fail "the api write mutation did not apply"
+: > "$S/bin/calls.log"
+printf '{"title":"T"}' | AIDC_GITCTL_CALLER=git bash "$S/mut/gitctl.sh" api POST repos/o/r/issues >/dev/null 2>&1
+assert_has "with the api write check removed, the agent writes an issue (so the write test would fail)" \
+    "api --method POST repos/o/r/issues" "$(cat "$S/bin/calls.log")"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

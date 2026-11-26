@@ -74,7 +74,7 @@ dk_git_start
 # it was not running included), and the records of sessions that are gone are pruned. Only from
 # a list docker gave: a list it could not give prunes nothing.
 if sessions=$(gb_sessions); then
-    printf '%s\n' "$sessions" | dk_git_exec_in git-requests sync 2>&1 | aidc_printable >&2 \
+    printf '%s\n' "$sessions" | dk_git_exec_req_in git-requests sync 2>&1 | aidc_printable >&2 \
         || info "warning: the git container did not take the sessions' tokens; their requests wait for your approval"
 else
     info "warning: docker did not list the sessions; their git modes are left as they were"

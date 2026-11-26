@@ -441,6 +441,10 @@ k8s_repo_path_ok() {
 # `aidc repo add` gives it, before the folder goes to the session user.
 # shellcheck disable=SC2034  # read by manifests.sh
 K8S_GIT_AGENT_UID=2000
+# The request holder (gitctl/Dockerfile, gitreq): it owns the request folder and decides
+# requests, in the git pod's own gitreq container, out of the agent's reach.
+# shellcheck disable=SC2034  # read by manifests.sh
+K8S_GIT_HOLDER_UID=2003
 
 # The git agent's session name, reserved: the git container's Deployment carries it as its
 # aidc/session label, so `aidc list|attach|logs|status` find it like any session. No session may
@@ -584,7 +588,7 @@ k8s_git_repos_wait() {
 }
 
 # The request folder on the user's disk: sessions' gh stand-in drops push and pull request
-# requests in it for the git container (gitctl/git-requests.sh). The git container's own.
+# requests in it for the git container (gitctl/git-requests.sh). The request holder's own.
 k8s_git_requests_path() { printf '/home/%s/.aidc/git-requests' "$AIDC_K8S_USER"; }
 
 # k8s_git_target: the git container's namespace and running pod, in GIT_NS and GIT_POD; dies
@@ -622,6 +626,11 @@ gb_target() { k8s_git_target; }
 gb_exec() { k8s_git_exec "$@"; }
 gb_exec_in() { k8s_kubectl -n "$GIT_NS" exec -i "$GIT_POD" -c git -- "$@"; }
 gb_exec_tty() { k8s_kubectl -n "$GIT_NS" exec -it "$GIT_POD" -c git -- env TERM="${TERM:-xterm-256color}" "$@"; }
+# gb_exec_req ARGS / gb_exec_req_in ARGS: run as the request holder, in the pod's gitreq
+# container (kubectl exec cannot choose a user: a container of its own is how the user's machine
+# reaches gitreq while nothing in the agent's container can).
+gb_exec_req() { k8s_kubectl -n "$GIT_NS" exec "$GIT_POD" -c gitreq -- "$@" </dev/null; }
+gb_exec_req_in() { k8s_kubectl -n "$GIT_NS" exec -i "$GIT_POD" -c gitreq -- "$@"; }
 gb_repo_arg() { k8s_git_repo_arg "$1"; }
 # The GitHub working copies on the user's disk (aidc repo list's first column).
 gb_repos() { bash "$AIDC_SCRIPTS/k8s/repo-list.sh" | tail -n +2 | awk '{ print $1 }'; }

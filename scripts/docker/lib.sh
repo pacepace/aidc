@@ -103,6 +103,10 @@ dk_git_repos() {
 # the file, is mounted, so a list replaced here (a new file, renamed into place) is the one the
 # running container reads.
 dk_git_added_dir() { printf '%s/.config/aidc/git-added' "$(aidc_host_home)"; }
+# The request holder's settings (git-requests.sh: requests, disk, mode), written here at every
+# start and mounted read-only at /etc/aidc/git-settings: sudo drops the environment, and nothing
+# in the container may change the user's mode.
+dk_git_settings_dir() { printf '%s/.config/aidc/git-settings' "$(aidc_host_home)"; }
 dk_git_added() {
     local f
     f="$(dk_git_added_dir)/repos"
@@ -165,6 +169,12 @@ dk_git_target() {
 dk_git_exec() { docker exec -u git "$DK_GIT_CT" "$@" </dev/null; }
 # dk_git_exec_in <args...>: the same, stdin passed in.
 dk_git_exec_in() { docker exec -i -u git "$DK_GIT_CT" "$@"; }
+# dk_git_exec_req <args...> / dk_git_exec_req_in: run as gitreq, the request holder, which
+# decides requests and alone runs the verbs that change GitHub. Only from outside the container
+# (this machine's docker): nothing the agent runs inside can become gitreq for these. Its HOME
+# is its own (an exec keeps the container's, which is the agent's).
+dk_git_exec_req() { docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" "$@" </dev/null; }
+dk_git_exec_req_in() { docker exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" "$@"; }
 
 # dk_git_repo_arg <path>: the working copy (or a worktree inside one) the git container sees
 # at that path: one the user added, or a folder below one. Dies otherwise.
@@ -188,8 +198,10 @@ dk_git_transcripts_dir() {
 # The seed step, a one-shot root container from the gitctl image, with no network and only the
 # capabilities a copy and a chown need, as the git pod's seed-home init step: a new home starts
 # as a copy of the image's /home/git; the login's folder is gitcred's (0711), gitrun's store
-# gitrun's alone (0700); the request folder the agent's, setgid in the session group (2755).
-# A request folder that holds anything and is not the agent's is refused, not taken. Then, as
+# gitrun's alone (0700); the request folder the request holder's (gitreq, 2003), setgid in the
+# session group (2755). One the agent (2000) held, before requests moved out of its reach, is
+# given to the holder with what is in it (no symlink followed); one that holds anything and is
+# neither's is refused, not taken. Then, as
 # the git user with no capabilities, the home gets the image's Claude when it is older
 # (claude-refresh.sh, the refresh-claude init step).
 # shellcheck disable=SC2016  # run by the step's shell
@@ -198,10 +210,12 @@ DK_GIT_SEED_SCRIPT='set -eu
 chown 2000:2000 /seed && chmod 0700 /seed
 chown 2001:2001 /cred && chmod 0711 /cred
 chown 2002:2002 /run-store && chmod 0700 /run-store
-if [ "$(stat -c %u /requests)" != 2000 ]; then
-    if [ -n "$(ls -A /requests)" ]; then echo "refused: the request folder holds files and is not the git container'"'"'s" >&2; exit 3; fi
-    chown 2000:1000 /requests
-fi
+case "$(stat -c %u /requests)" in
+    2003) ;;
+    2000) chown -R -h 2003 /requests ;;
+    *) if [ -n "$(ls -A /requests)" ]; then echo "refused: the request folder holds files and is not the git container'"'"'s" >&2; exit 3; fi
+       chown 2003:1000 /requests ;;
+esac
 chmod 2755 /requests
 echo seeded'
 dk_git_seed() {
@@ -277,7 +291,7 @@ dk_git_check_mounts() {
 # it or on the way: dk_git_mount_ok), is left out with a warning (Docker would make an empty
 # root-owned folder in place of a gone one, and follow a symlink to another folder).
 dk_git_start() {
-    local disk transcripts token="" tokfile mounts=() mounted=() p bad added
+    local disk transcripts token="" tokfile mounts=() mounted=() p bad added settings
     dk_git_settings
     disk=$(dk_git_disk)
     transcripts=$(dk_git_transcripts_dir)
@@ -290,6 +304,10 @@ dk_git_start() {
     # a root-owned folder in its place; mounted read-only.
     added=$(dk_git_added_dir)
     { mkdir -p "$added" && { [ -f "$added/repos" ] || : > "$added/repos"; }; } || die "cannot make ${added}"
+    settings=$(dk_git_settings_dir)
+    { mkdir -p "$settings" \
+        && printf 'requests=%s\ndisk=%s\nmode=%s\n' "$DK_GIT_REQUESTS" "$disk" "$AIDC_DK_GIT_MODE" > "$settings/settings.tmp" \
+        && mv -f "$settings/settings.tmp" "$settings/settings"; } || die "cannot write ${settings}/settings"
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         if dk_git_mount_ok "$p"; then mounts+=(-v "${p}:${p}:rw"); mounted+=("$p")
@@ -302,8 +320,8 @@ dk_git_start() {
         --label "aidc.session=${DK_GIT_SESSION}" --label aidc.role=dev --label aidc.profile=git-agent \
         --label aidc.git=container \
         -e HOME=/home/git -e "AIDC_USER=$(id -un)" -e AIDC_SESSION="$DK_GIT_SESSION" -e AIDC_BACKEND=docker \
-        -e AIDC_GIT_REQUESTS="$DK_GIT_REQUESTS" -e "AIDC_GIT_MODE=${AIDC_DK_GIT_MODE}" \
-        -e AIDC_GIT_NOTIFY=/opt/aidc/lib/gitctl/git-notify.sh -e "AIDC_GIT_DISK=${disk}" \
+        -e AIDC_GIT_REQUESTS="$DK_GIT_REQUESTS" \
+        -e AIDC_GIT_WATCH_HERE=1 -e "AIDC_GIT_DISK=${disk}" \
         -e HTTPS_PROXY=http://aidc-proxy:3128 -e HTTP_PROXY=http://aidc-proxy:3128 \
         -e https_proxy=http://aidc-proxy:3128 -e http_proxy=http://aidc-proxy:3128 \
         -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1 \
@@ -311,6 +329,7 @@ dk_git_start() {
         -v aidc-git-home:/home/git -v aidc-git-cred:/var/lib/gitctl/gitcred \
         -v aidc-git-run:/var/lib/gitctl/gitrun -v "${DK_GIT_REQUESTS_VOLUME}:${DK_GIT_REQUESTS}" \
         -v "${transcripts}:/var/aidc/transcript-out:rw" -v "${added}:/etc/aidc/git-repos:ro" \
+        -v "${settings}:/etc/aidc/git-settings:ro" \
         ${mounts[@]+"${mounts[@]}"} \
         "aidc/gitctl:${AIDC_VERSION_TAG}" >/dev/null || die "could not start the git container"
     if ! bad=$(dk_git_check_mounts ${mounted[@]+"${mounted[@]}"}); then
@@ -333,6 +352,10 @@ gb_target() { dk_git_target; }
 gb_exec() { dk_git_exec "$@"; }
 gb_exec_in() { dk_git_exec_in "$@"; }
 gb_exec_tty() { docker exec -it -u git -e "TERM=${TERM:-xterm-256color}" "$DK_GIT_CT" "$@"; }
+# gb_exec_req ARGS / gb_exec_req_in ARGS: run as the request holder (gitreq): deciding requests,
+# the session records, and the verbs that change GitHub.
+gb_exec_req() { dk_git_exec_req "$@"; }
+gb_exec_req_in() { dk_git_exec_req_in "$@"; }
 # gb_repo_arg PATH: the working copy the git container sees for PATH, or dies.
 gb_repo_arg() { dk_git_repo_arg "$1"; }
 # gb_repos: every working copy the git container works on, one a line; gb_repo_ok PATH: a path

@@ -563,12 +563,12 @@ out=$(run create demo --backend kubernetes)
 tok2=$(yq -N ea 'select(.kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "dev") | .env[] | select(.name == "AIDC_GIT_TOKEN") | .value' "$K_APPLIED" | sort -u)
 assert_eq "and a new session a new one" yes "$([ -n "$tok2" ] && [ "$tok" != "$tok2" ] && echo yes || echo no)"
 assert_has "create registers the session's token with the git container, on stdin" \
-    "exec -i git-7d9f-abc -c git -- git-requests register demo" "$(cat "$K_LOG")"
+    "exec -i git-7d9f-abc -c gitreq -- git-requests register demo" "$(cat "$K_LOG")"
 assert_not_has "never on a command line" "$tok2" "$(cat "$K_LOG")"
 assert_has "and says so" "session demo registered" "$out"
 out=$(K_EXISTS=1 run kill demo --backend kubernetes)
 assert_has "kill has the git container forget the session (its token and mode)" \
-    "exec git-7d9f-abc -c git -- git-requests forget demo" "$(cat "$K_LOG")"
+    "exec git-7d9f-abc -c gitreq -- git-requests forget demo" "$(cat "$K_LOG")"
 
 echo "=== the session's git identity: the user's, as on Docker ==="
 # The commits the git container pushes for a session show as the user: create bridges this
@@ -630,7 +630,7 @@ assert_has "aidc attach git opens the git container's tmux as its own user" \
 K_GIT=1 run logs git >/dev/null
 assert_has "aidc logs git reads the git container's log" "logs deployment/git -c git" "$(cat "$K_LOG")"
 out=$(K_GIT=1 run logs git --component squid)
-assert_has "it has no proxy components" "has one component: git" "$out"
+assert_has "it has no proxy components: its own container, and the request holder's" "the git agent's components: git, gitreq" "$out"
 out=$(K_GIT=1 run status git)
 assert_has "aidc status git names it as the git agent" "session:  git (your git agent" "$out"
 

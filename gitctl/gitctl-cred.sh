@@ -124,16 +124,43 @@ cred_added() {
     die "$why"
 }
 
+# cred_api ARGS...: one issue call to GitHub's API (GIT-07): checked again here, as gitcred,
+# whoever called: the method and path a row of the table, the repo one the user added, a write's
+# body checked and passed on compact. gh's answer, its messages and its exit status are the
+# caller's (a conditional read GitHub answers 304 exits 1 with the headers on stdout, as gh
+# does). A write goes into the action log.
+cred_api() {
+    local body rc=0 ghargs
+    api_args "$@"
+    [ -z "$GITCTL_API_SLUG" ] || cred_added "$GITCTL_API_SLUG"
+    body=$(api_body) || exit 1
+    ghargs=(api --method "$API_METHOD" "$GITCTL_API_PATH")
+    [ "$GITCTL_API_BODY" = - ] || ghargs+=(--input -)
+    set -- ${API_OPTS[@]+"${API_OPTS[@]}"}
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --include) ghargs+=(-i); shift ;;
+            --if-none-match) ghargs+=(-H "If-None-Match: $2"); shift 2 ;;
+        esac
+    done
+    if [ "$GITCTL_API_KIND" != write ]; then gh_ "${ghargs[@]}" </dev/null; exit $?; fi
+    printf '%s' "$body" | gh_ "${ghargs[@]}" || rc=$?
+    action api "${GITCTL_API_SLUG:--}" "${API_METHOD}:${GITCTL_API_PATH#repos/"${GITCTL_API_SLUG}"/}" - "$([ "$rc" = 0 ] && echo ok || echo failed)"
+    exit "$rc"
+}
+
 run_cred() {
     # Every verb that names a repo reaches GitHub only for one the user added, checked here as
     # gitcred, whoever called.
     case "$verb" in
-        status|login|logout|log) ;;
+        # api names its repo in the path: checked there (cred_api).
+        status|login|logout|log|api) ;;
         *) [ $# -ge 1 ] || die "${verb} needs <owner/name>"
            gitctl_slug_ok "$1" || die "$GITCTL_REASON"
            cred_added "$1" ;;
     esac
     case "$verb" in
+        api) cred_api "$@" ;;
         log) nargs $# 0; print_actions ;;
         status)
             nargs $# 0

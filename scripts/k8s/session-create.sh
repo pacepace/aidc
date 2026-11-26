@@ -373,7 +373,7 @@ fi
 # The git container keys this session's git mode on its token (the user's mode until
 # aidc git mode gives it its own; a session made again under an old name starts afresh).
 if gpod=$(k8s_git_pod "$ns" 2>/dev/null) \
-        && printf '%s\n' "$AIDC_K8S_GIT_TOKEN" | k8s_kubectl -n "$ns" exec -i "$gpod" -c git -- git-requests register "$NAME" >/dev/null 2>&1; then
+        && printf '%s\n' "$AIDC_K8S_GIT_TOKEN" | k8s_kubectl -n "$ns" exec -i "$gpod" -c gitreq -- git-requests register "$NAME" >/dev/null 2>&1; then
     info "git container: session ${NAME} registered (your git mode applies to it)"
 else
     info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"

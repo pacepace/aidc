@@ -30,6 +30,10 @@
 #   gitctl pr-view <repo> <number> | pr-list <repo>
 #   gitctl pr-view-json <repo> <number|branch>           one PR as JSON (fixed fields)
 #   gitctl pr-list-json <repo> <open|closed|merged|all> [<head>]
+#   gitctl api <GET|POST|PATCH|DELETE> <path> [--include] [--if-none-match <etag>]
+#                                                        one issue call to GitHub's API (a write's
+#                                                        JSON body on stdin): only the endpoints
+#                                                        of GITCTL_API_TABLE (gitctl-rules.sh)
 #   gitctl protection <repo>                             what protects origin's default branch
 #   gitctl protect <repo>                                turn missing protections on (never off)
 #   gitctl status | login | logout                       the GitHub login (gitcred's)
@@ -99,8 +103,11 @@ if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
         printf 'gitctl: refused: gitwc works only in a Docker git container\n' >&2; exit 1
     fi
     AS_WC=0; [ "$(id -un)" = gitwc ] && AS_WC=1
-    # Who ran gitctl through sudo (sudo sets it; it is not the caller's to choose), for the log.
-    CALLER="${SUDO_USER:-$(id -un)}"
+    # Who ran gitctl: on gitrun's and gitcred's side the user sudo names (it sets SUDO_USER from
+    # the caller's real uid; it is not the caller's to choose), for the log and WRITE_VERBS; on
+    # the agent's side the user running it (a SUDO_USER there is only inherited: the request
+    # watcher on Docker is started through sudo by git, and runs gitctl as gitreq).
+    case "$ROLE" in run|cred) CALLER="${SUDO_USER:-$(id -un)}" ;; *) CALLER=$(id -un) ;; esac
     # What Docker mounted here (docker_wc_ok): the kernel's list, nothing the caller names.
     MOUNTINFO=/proc/self/mountinfo
     WC_UID=$(id -u gitwc 2>/dev/null || echo 1000)
@@ -126,7 +133,8 @@ else
     # AIDC_GITCTL_AS_WC=1 stands for running as gitwc (id -un), as AIDC_GITCTL_DOCKER stands for
     # /.dockerenv.
     AS_WC="${AIDC_GITCTL_AS_WC:-0}"
-    CALLER="${AIDC_GITCTL_CALLER:-$(id -un)}"
+    # The caller as sudo would name it: gitreq unless a test names another (WRITE_VERBS).
+    CALLER="${AIDC_GITCTL_CALLER:-gitreq}"
 fi
 ulimit -c 0 2>/dev/null || true
 
@@ -143,10 +151,31 @@ verb="${1:-}"
 [ $# -gt 0 ] && shift
 case "$verb" in
     clone|fetch|push|unpushed|tidy|delete-branch|storage|remove-copy|has-copy|add-copy|adopt|log) VERB_ROLE=run ;;
-    pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect) VERB_ROLE=cred ;;
+    pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect|api) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
 esac
+
+# The verbs that change GitHub (all but delete-branch, which only removes a branch GitHub has
+# merged, after a merge: tidy) run only for gitreq, the request holder, which runs them for a
+# request the user approved or the rules passed, or for the user's own `aidc git push|pr|merge|
+# protect` from their machine (owner ruling 2026-11-26). Checked on every side: as the agent's
+# side, where CALLER is the one who ran gitctl, and as gitrun's and gitcred's, where it is the
+# user sudo names (SUDO_USER, set from the caller's real uid: the agent, and gitwc, cannot be
+# gitreq there). So the agent (git) cannot push, open, comment on or merge a pull request,
+# change protections, write an issue (api with any method but GET), or log the container out
+# (the user's aidc git logout), by gitctl or by sudo; it asks with gh, which writes a request.
+WRITE_VERBS="push pr-create pr-comment pr-merge protect logout"
+is_write=0
+case " $WRITE_VERBS " in *" $verb "*) is_write=1 ;; esac
+[ "$verb" = api ] && [ "${1:-}" != GET ] && is_write=1
+if [ "$is_write" = 1 ] && [ "$CALLER" != gitreq ]; then
+    case "$verb" in
+        api) die "api ${1:-}: an issue write changes GitHub, so it runs only as a request (gh api, or gh issue, writes one)" ;;
+        logout) die "logout takes the git container off GitHub: only the user does that (aidc git logout, on their own machine)" ;;
+        *) die "${verb} changes GitHub, so it runs only as a request the user approves: in a working copy, gh pr create, gh pr merge or gh aidc push writes one (the user then runs aidc git approve <id>); or the user runs aidc git ${verb%%-*} from their own machine" ;;
+    esac
+fi
 
 # No verb takes a free-form option: anything that looks like one is refused, whatever it says.
 nargs() { [ "$1" = "$2" ] || die "${verb} takes ${2} argument(s), got ${1} (gitctl --help)"; }

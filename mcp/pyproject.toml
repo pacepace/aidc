@@ -79,7 +79,7 @@ constraint-dependencies = [
 # included, names the same rev; tests/test_dependencies.py fails when they differ. These move
 # to released versions before aidc 2.0 ships.
 [tool.uv.sources]
-3tears-mcp = { git = "https://github.com/pacepace/3tears", rev = "bbbf5ead8d8c4838d800f95e488a7fafd8c04d65", subdirectory = "packages/mcp" }
-3tears-tool-contract = { git = "https://github.com/pacepace/3tears", rev = "bbbf5ead8d8c4838d800f95e488a7fafd8c04d65", subdirectory = "packages/tool-contract" }
-3tears-tool-schema = { git = "https://github.com/pacepace/3tears", rev = "bbbf5ead8d8c4838d800f95e488a7fafd8c04d65", subdirectory = "packages/tool-schema" }
-3tears-observe = { git = "https://github.com/pacepace/3tears", rev = "bbbf5ead8d8c4838d800f95e488a7fafd8c04d65", subdirectory = "packages/observe" }
+3tears-mcp = { git = "https://github.com/pacepace/3tears", rev = "3d5dd9cf91be988dba56c72e39b0600bdabef8f7", subdirectory = "packages/mcp" }
+3tears-tool-contract = { git = "https://github.com/pacepace/3tears", rev = "3d5dd9cf91be988dba56c72e39b0600bdabef8f7", subdirectory = "packages/tool-contract" }
+3tears-tool-schema = { git = "https://github.com/pacepace/3tears", rev = "3d5dd9cf91be988dba56c72e39b0600bdabef8f7", subdirectory = "packages/tool-schema" }
+3tears-observe = { git = "https://github.com/pacepace/3tears", rev = "3d5dd9cf91be988dba56c72e39b0600bdabef8f7", subdirectory = "packages/observe" }

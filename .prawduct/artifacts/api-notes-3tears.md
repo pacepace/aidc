@@ -1,14 +1,14 @@
 ---
 artifact: api-notes
 scope: 3tears-adoption
-pinned_commit: bbbf5ead8d8c4838d800f95e488a7fafd8c04d65
+pinned_commit: 3d5dd9cf91be988dba56c72e39b0600bdabef8f7
 branch: feat/mcp-face (unreleased, github.com/pacepace/3tears)
 read: 2026-11-26
 ---
 
 # 3tears API notes (verify-api)
 
-Read from the 3tears source **at commit `bbbf5ead8d8c4838d800f95e488a7fafd8c04d65`** of the
+Read from the 3tears source **at commit `3d5dd9cf91be988dba56c72e39b0600bdabef8f7`** of the
 unreleased branch `feat/mcp-face`, the commit `mcp/pyproject.toml` pins. The branch is still under
 review, so these notes hold for that commit only. When the pin moves, re-read the surfaces below and
 record what changed under "Pin history".
@@ -146,7 +146,10 @@ a mapping rides as `structuredContent` plus its JSON text; a string is the text 
 
 `threetears.mcp.auth`:
 - `ToolCall(tool_name, arguments: Mapping, required_permission)` (arguments read-only).
-- `Refusal(code: ErrorCode | str, message, argument=None)`.
+- `Refusal(code: ErrorCode | str, message, argument=None, content=None)`. With `content` (a
+  mapping or text) a refused call answers that content as `tool_error` does (`isError`, the text
+  block, `structuredContent` for a mapping) with the code under `_meta`; aidc passes its envelope
+  so a refusal reads as 1.x's did (TRS-05).
 - `CallAuthorizer` protocol: `Authorizer` plus `async authorize_call(identity, call) -> bool |
   Refusal`. Detected by the authorizer's **class** defining `authorize_call`.
 - `ResourceRequest(uri, variables: Mapping, required_permission, action)` with `action` one of
@@ -215,4 +218,13 @@ parameter a handler takes the call context in, as `McpTool` finds it (the bridge
 
 ## Pin history
 
-- 2026-11-26: first pin, `bbbf5ead8d8c4838d800f95e488a7fafd8c04d65` (head of `feat/mcp-face`).
+- 2026-11-26: first pin, `b28bbebf4d662e5e6498b35a5c9af20955d108a6` (head of `feat/mcp-face`).
+- 2026-11-26: moved to `bbbf5ead8d8c4838d800f95e488a7fafd8c04d65`. What changed for aidc:
+  `McpServer` gained `version` and `instructions` (asked for by aidc); resources gained
+  `ResourceAuthorizer` / `ResourceRequest`; `context_parameter_of` is public and the bridge uses
+  it; the resource service's internal subscribe/unsubscribe were renamed watch/unwatch (not used by
+  aidc); log levels are now kept per SDK connection. No signature aidc already used changed.
+- 2026-11-26: moved to `3d5dd9cf91be988dba56c72e39b0600bdabef8f7`: `Refusal` gained `content`
+  (asked for by aidc). Nothing else changed in the packages aidc uses.
+- Open upstream ask (2026-11-26): cancelling a call whose client dropped its connection (TRS-09;
+  measured not cancelled at `bbbf5ead`).

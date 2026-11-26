@@ -19,7 +19,7 @@ constraints = [
 [[package]]
 name = "3tears-mcp"
 version = "0.95.0"
-source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65#bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" }
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7#3d5dd9cf91be988dba56c72e39b0600bdabef8f7" }
 dependencies = [
     { name = "3tears-observe" },
     { name = "httpx" },
@@ -32,12 +32,12 @@ dependencies = [
 [[package]]
 name = "3tears-observe"
 version = "0.95.0"
-source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65#bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" }
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7#3d5dd9cf91be988dba56c72e39b0600bdabef8f7" }
 
 [[package]]
 name = "3tears-tool-contract"
 version = "0.95.0"
-source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65#bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" }
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7#3d5dd9cf91be988dba56c72e39b0600bdabef8f7" }
 dependencies = [
     { name = "3tears-observe" },
     { name = "3tears-tool-schema" },
@@ -51,7 +51,7 @@ mcp = [
 [[package]]
 name = "3tears-tool-schema"
 version = "0.95.0"
-source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65#bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" }
+source = { git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7#3d5dd9cf91be988dba56c72e39b0600bdabef8f7" }
 
 [[package]]
 name = "aidc-mcp"
@@ -79,10 +79,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "3tears-mcp", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" },
-    { name = "3tears-observe", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" },
-    { name = "3tears-tool-contract", extras = ["mcp"], git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" },
-    { name = "3tears-tool-schema", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=bbbf5ead8d8c4838d800f95e488a7fafd8c04d65" },
+    { name = "3tears-mcp", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fmcp&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7" },
+    { name = "3tears-observe", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Fobserve&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7" },
+    { name = "3tears-tool-contract", extras = ["mcp"], git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-contract&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7" },
+    { name = "3tears-tool-schema", git = "https://github.com/pacepace/3tears?subdirectory=packages%2Ftool-schema&rev=3d5dd9cf91be988dba56c72e39b0600bdabef8f7" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },

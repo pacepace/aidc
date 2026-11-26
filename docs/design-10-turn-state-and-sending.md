@@ -287,7 +287,7 @@ missing a code or uses one outside the set:
 | `outside_repo` | `file_get`, `file_list`, `file_search`, `repo_diff`, `repo_log`: a path outside the session's repository, or a symlink in it that points out | fix the call | no |
 | `invoke_busy` | `session_invoke` / `session_invoke_async`: a headless run is already going in the session (one at a time per session, S6); `data.running` names it (`run_id`, `started_at`, `tool`, `prompt`, `pid`, `orphan`) | wait, stop it with `session_interrupt` `target: "headless"`, or use `session_send` | yes |
 | `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again (the git agent, which `aidc kill` refuses: `aidc rebuild`, then `aidc git setup`) | no |
-| `git_answer_unclear` | `session_send` to the git agent while its open question names a waiting git request: the answer is not plainly Approve (alone) or Deny (with its reason), or the question offers no such option; nothing was approved or sent (S10) | fix the call: "Approve", or "Deny: <why>" | no |
+| `git_answer_unclear` | `session_send` to the git agent while its open question names one git request (waiting or not: the answer is read before the waiting list): the answer is not plainly Approve (alone) or Deny (with its reason), or the question offers no such option; nothing was approved or sent (S10) | fix the call: "Approve", or "Deny: <why>" | no |
 | `git_request_ambiguous` | `session_send` to the git agent: its open question names several git requests; nothing was approved or sent; `data.request_ids` names them (S10) | tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
 | `git_requests_unreadable` | `session_send` to the git agent: the git container's waiting requests could not be read; nothing was approved or sent (S10) | retry | yes |
 
@@ -543,6 +543,9 @@ into the question:
   `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev`, as `aidc git approve`
   runs it; Kubernetes: the pod's gitreq container, plan chunk 14), which acts only on a request
   still waiting. One no longer waiting is decided by nothing.
+- **All or nothing.** When the git agent's send queue is full, the answer could not go into the
+  question afterwards, so it is refused (`queue_full`) before the request is decided: a decision
+  is never carried out by a `session_send` that fails.
 - **Reported.** The send goes on as any other (the answer reaches the question, so the agent's
   turn goes on), and its result carries `git_request`: `request_id`, `decision`, `done`, the
   holder's `exit` and `message`, or `code` `git_request_not_waiting` / `git_request_not_decided`.

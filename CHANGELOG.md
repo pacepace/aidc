@@ -34,7 +34,9 @@ What changes in use:
   "Approve"` (or `"Deny: <why>"`) decides the waiting request the question names, as `gitreq`,
   and the result's `git_request` says what happened. Any other answer to such a question is
   refused unsent (`git_answer_unclear`), as is one to a question naming several requests
-  (`git_request_ambiguous`). On Kubernetes this comes with the per-user MCP server.
+  (`git_request_ambiguous`). An answer sent while the git agent's queue is full is refused
+  (`queue_full`) before its request is decided. On Kubernetes this comes with the per-user MCP
+  server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a
   bare `docker build gitctl/`.

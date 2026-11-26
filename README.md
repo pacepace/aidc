@@ -891,7 +891,8 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   allow-network <user> <namespace>` (see "Admins and users").
 - `aidc clean-env <name> --backend kubernetes` removes what a session that is no longer running
   left behind (a create or kill that stopped half way), keeping its audit claim.
-- A tainted session is recorded and reported, not frozen yet.
+- A tainted session is frozen by your MCP server in the cluster (its way out cut, see "Taint"
+  below), or reported as pending while the server is not running.
 
 Inside a cluster session the lockdown is the Docker backend's, enforced by NetworkPolicy outside
 the pod: the dev pod reaches only its own Squid (plus the relays and namespaces you gave it) and

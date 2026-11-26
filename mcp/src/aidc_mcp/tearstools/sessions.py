@@ -237,6 +237,7 @@ class AuditGet(AidcTool):
     ) -> dict[str, Any]:
         """The session's policy events: every domain the proxy's policy flagged, and
         what it did (logged, tainted, suppressed). Newest 500 at most (cut says so).
-        Returns audit_dir (where the session's audit trail is on the host), events
+        Returns audit_dir (where the session's audit trail is on the host; on Kubernetes
+        `pvc:<namespace>/<claim>`, its volume claim), events
         (oldest first) and count (how many matched)."""
         return await ses.audit_get(name=name, since=since, kind=kind)

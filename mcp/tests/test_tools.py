@@ -501,15 +501,15 @@ class TestFilePut:
 # --- audit_get ---------------------------------------------------------------
 
 def _docker_answers(monkeypatch, answers):
-    """session_facts.run_docker answering by the docker subcommand's target."""
+    """session_facts.run_backend answering by the docker subcommand's target."""
     from aidc_mcp import session_facts
 
     async def run(*args, timeout=20.0):
         for key, result in answers.items():
             if key in args:
                 return result
-        return session_facts.DockerResult(1, b"", b"No such file or directory")
-    monkeypatch.setattr(session_facts, "run_docker", run)
+        return session_facts.BackendResult(1, b"", b"No such file or directory")
+    monkeypatch.setattr(session_facts, "run_backend", run)
 
 
 class TestAuditGet:
@@ -520,8 +520,8 @@ class TestAuditGet:
     def _events(self, monkeypatch, events=EVENTS):
         from aidc_mcp import session_facts as sf
         _docker_answers(monkeypatch, {
-            sf.POLICY_EVENTS_FILE: sf.DockerResult(0, events, b""),
-            "aidc-proj-audit": sf.DockerResult(0, b"/home/u/.local/state/aidc/audit/proj\n", b""),
+            sf.POLICY_EVENTS_FILE: sf.BackendResult(0, events, b""),
+            "aidc-proj-audit": sf.BackendResult(0, b"/home/u/.local/state/aidc/audit/proj\n", b""),
         })
 
     async def test_reads_the_policy_sidecars_events_and_the_typed_audit_dir(self, monkeypatch):
@@ -538,7 +538,7 @@ class TestAuditGet:
 
     async def test_no_such_session(self, monkeypatch):
         from aidc_mcp import session_facts as sf
-        _docker_answers(monkeypatch, {sf.POLICY_EVENTS_FILE: sf.DockerResult(
+        _docker_answers(monkeypatch, {sf.POLICY_EVENTS_FILE: sf.BackendResult(
             1, b"", b"Error response from daemon: No such container: aidc-ghost-policy")})
         res = await _tool("audit_get")(name="ghost")
         assert res["ok"] is False and res["error_code"] == "no_such_session"

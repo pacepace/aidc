@@ -127,11 +127,46 @@ ruling 2026-11-26).
   turns suite was rewritten from screen evidence to hook evidence, each scenario kept (Esc before
   output, a prompt put back in the box, Stop hook holds, a session created again, restarts).
 
-**Proof:** chunk 24: the delivery, turns, send and roundtrip suites pass with the screen rule removed (the roundtrip harness fires the events a real session's Claude does). The live checks wait on a logged-in Claude in the scratch session and on the orchestrator. Chunk 23: unit tests for the writer and the settings (`tests/unit/test-hook-event.sh`) and for the reader, run against the shipped writer (`tests/test_hook_events.py`). Live, on a scratch Docker session from test-tagged images: the managed settings hold the three hooks and the shared plugin, and the hook, run inside the container as the session's user, wrote an event the MCP read back from its state dir on the host. Claude itself firing each kind waits on a logged-in Claude in the scratch session (asked of the owner). Chunk 07: the built image, started on a state dir holding 1.x files (a webhook, a watermark, a ledger, a send dead letter), read them in and moved them aside, resumed the webhook, printed the store with `python -m aidc_mcp.store` while running, and after `docker kill` and a start resumed it again from the store. The restart and delivery suites pass on the store (assertions that read a state file read the store instead, same meaning); a write killed with SIGKILL right after it returned is found, for each kind (watermark, ledger, queue, webhook, send record, dead letter); a 1.x state dir is read in once, kept aside, not read twice after a restart, and finished after a start killed half way; a second process on the same state dir is refused; the local server in a fresh interpreter loads the SQLite L3 with no NATS client installed or imported and opens no connection. Chunk 05: the access-log tests pass unchanged; tests show one correlation id on every log line of a call and a fresh one per call, one span per call, no network connection and no exporter set up with export off, export to a configured endpoint, and metrics counted and served only when switched on. Chunk 04: `AIDC_SMOKE_GIT=0 make smoke` from a separate checkout with a test version tag: 122 of 123, the one failure the test-tag version line (the image reports the package's 1.9.10), as on the service split's run; its MCP part initializes, lists and calls through the new server. The MCP suite is green, with wire tests reading a progress notification and a log line before the result for both tools, and a real uvicorn server pushing `notifications/resources/updated` to a subscribed client's stream. Chunk 03: the built image (test tag, a test-only container with the token mounted as `aidc mcp start` mounts it) answered 401 without a token, the handshake with aidc's name, version and instructions, the tool list, a call failing with its code on the protocol result and the envelope as structured content, the resource list, and a token rotation refusing the old token at once and serving the new one, each request in the access log. The MCP suite is green, the wire suite against the new server included (cancel, DELETE and dropped connection each stop a blocking invoke; a rotated token refuses an open session; every aidc code rides the protocol result; local mode starts, lists and calls every tool in a fresh interpreter with no NATS, Postgres, LangGraph or 3tears core loaded). Chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
+- Chunk 13, the MCP side (Docker): `session_send` to the git agent whose open question names
+  one git request carries the orchestrator's answer out as the request holder
+  (`service/gitapprove.py`, design-10 S10): "Approve" or "Deny: <why>" runs `git-requests
+  approve|deny <id>` as gitreq, then the answer goes into the question; the result's
+  `data.git_request` says what happened. New codes: `git_answer_unclear` (not plainly Approve or
+  Deny), `git_request_ambiguous` (the question names several), `git_requests_unreadable`
+  (retryable). An answer into a full queue is refused before the request is decided.
+
+- Chunk 08 (K8S-01): `backend.py`'s Kubernetes half, chosen by the server's environment
+  (`AIDC_MCP_BACKEND`, `AIDC_K8S_NAMESPACE`): kubectl exec into the dev pod (the session user by
+  `sudo -E -H`), the proxy's policy and audit containers, the git pod (its gitreq container for
+  the holder); the instance id is the state claim's uid. The audit resources read the trail in
+  the audit sidecar on both backends (they never worked: they parsed an `audit:` line `aidc
+  status` does not print). The runners are `run_backend`/`BackendResult`/`BackendFailed`.
+
+- Chunk 09 (MCP-15 refined): cluster sessions' and the git agent's transcripts and hook events go
+  to a per-user claim, `transcripts`, each pod mounting only its own folder. The session's hook
+  writer keeps the newest 200 events, on both backends; the server only reads them.
+
+- Chunks 10-12 (K8S-07, MCP-02/03/05/06/10/11/13/38): `aidc mcp start|stop|status|logs|token
+  rotate|token show` on Kubernetes run the same server as one replica in the user's namespace
+  (`scripts/k8s/mcp.sh`): its state on `aidc-mcp-state`, the mirror read-only, the token a
+  Secret also copied to `~/.config/aidc/mcp-token`, root with only DAC_OVERRIDE. The image
+  carries the CLI, kubectl and yq. It is reached in the cluster by its Service (every namespace
+  but the user's own) and, with `mcp.kubernetes.expose: ingress`, at `mcp-<user>.<pages
+  domain>` (refused when that name resolves to a public address); it may reach only the API
+  server and the orchestrator's callback. `session_create` and `session_mcp_set` work through it;
+  a static test holds the CLI's cluster calls to the MCP's Role.
+
+- Chunks 15-16 (W-M4, W-K4, SEC-05 amended): the policy sidecar pokes the user's server on port
+  7879 (`{"session": <name>}`, never trusted); the server reads the flag and, with `freeze`,
+  empties every egress rule of the session's NetworkPolicies and marks `/var/state/frozen` (a
+  stalled freeze leaves `/var/state/freeze-trouble`), looking at every flag each minute too.
+  `aidc status` says FROZEN or PENDING; egress/network add refuse a tainted session.
+
+**Proof:** chunks 08-16: unit tests with kubectl stubs mirroring the Docker ones (`tests/test_backend.py`, `tests/test_taint_freeze.py`, `tests/unit/test-k8s-{session,git,mcp,net,rbac}.sh`, `tests/unit/test-policy-webhook.sh`), the MCP's Role checked against every cluster call its CLI reaches; the live cluster runs wait for the owner (listed in the plan). Chunk 24: the delivery, turns, send and roundtrip suites pass with the screen rule removed (the roundtrip harness fires the events a real session's Claude does). The live checks wait on a logged-in Claude in the scratch session and on the orchestrator. Chunk 23: unit tests for the writer and the settings (`tests/unit/test-hook-event.sh`) and for the reader, run against the shipped writer (`tests/test_hook_events.py`). Live, on a scratch Docker session from test-tagged images: the managed settings hold the three hooks and the shared plugin, and the hook, run inside the container as the session's user, wrote an event the MCP read back from its state dir on the host. Claude itself firing each kind waits on a logged-in Claude in the scratch session (asked of the owner). Chunk 07: the built image, started on a state dir holding 1.x files (a webhook, a watermark, a ledger, a send dead letter), read them in and moved them aside, resumed the webhook, printed the store with `python -m aidc_mcp.store` while running, and after `docker kill` and a start resumed it again from the store. The restart and delivery suites pass on the store (assertions that read a state file read the store instead, same meaning); a write killed with SIGKILL right after it returned is found, for each kind (watermark, ledger, queue, webhook, send record, dead letter); a 1.x state dir is read in once, kept aside, not read twice after a restart, and finished after a start killed half way; a second process on the same state dir is refused; the local server in a fresh interpreter loads the SQLite L3 with no NATS client installed or imported and opens no connection. Chunk 05: the access-log tests pass unchanged; tests show one correlation id on every log line of a call and a fresh one per call, one span per call, no network connection and no exporter set up with export off, export to a configured endpoint, and metrics counted and served only when switched on. Chunk 04: `AIDC_SMOKE_GIT=0 make smoke` from a separate checkout with a test version tag: 122 of 123, the one failure the test-tag version line (the image reports the package's 1.9.10), as on the service split's run; its MCP part initializes, lists and calls through the new server. The MCP suite is green, with wire tests reading a progress notification and a log line before the result for both tools, and a real uvicorn server pushing `notifications/resources/updated` to a subscribed client's stream. Chunk 03: the built image (test tag, a test-only container with the token mounted as `aidc mcp start` mounts it) answered 401 without a token, the handshake with aidc's name, version and instructions, the tool list, a call failing with its code on the protocol result and the envelope as structured content, the resource list, and a token rotation refusing the old token at once and serving the new one, each request in the access log. The MCP suite is green, the wire suite against the new server included (cancel, DELETE and dropped connection each stop a blocking invoke; a rotated token refuses an open session; every aidc code rides the protocol result; local mode starts, lists and calls every tool in a fresh interpreter with no NATS, Postgres, LangGraph or 3tears core loaded). Chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
 (`docker build`, test tag) and imports the server with no git left in it.
 
 ## Consumer note
-Chunks 03-04 change what a caller sees, and chunk 07 what an operator sees (aidc 2.0; the CHANGELOG's Unreleased upgrade notes):
+Chunks 03-04 change what a caller sees, chunk 07 what an operator sees, and chunks 08-16 what a cluster user gets (aidc 2.0; the CHANGELOG's Unreleased upgrade notes):
 - A failed call (`ok: false`) is now `isError: true`, its code also under
   `_meta["threetears.mcp/error"]` with `retryable`; the envelope text is unchanged.
 - Input schemas are self-contained: an optional parameter is `type: [type, "null"]` rather
@@ -149,6 +184,12 @@ Chunks 03-04 change what a caller sees, and chunk 07 what an operator sees (aidc
 - aidc-mcp's state is `watcher-state/aidc-state.sqlite` rather than one JSON file per session;
   the first start reads 1.x's files in and keeps them in `watcher-state/migrated-1x/`; `python -m
   aidc_mcp.store` in the server's container prints it. Two servers cannot share a state dir.
+
+- `audit_get`'s `audit_dir` is `pvc:<namespace>/<claim>` on a cluster server; the audit
+  resources answer for every session (they answered "audit dir not found" before).
+- On Kubernetes: `aidc user add <user>` again (the Role reads the MCP token's Secret), `aidc k8s
+  build` (the mcp image carries the CLI), then `aidc mcp start`; sessions created again get the
+  transcript mirror and the taint webhook; the session name `mcp` is reserved.
 
 ### Chunk 13
 - `aidc git setup` must run again on each backend (new image, the gitreq container on

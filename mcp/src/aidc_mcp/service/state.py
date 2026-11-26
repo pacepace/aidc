@@ -163,9 +163,10 @@ def forget_session_send_state(name: str) -> None:
             table.pop(name, None)
         else:
             table.discard(name)
-    lock = invoke_locks.get(name)
-    if lock is not None and not lock.locked():
-        del invoke_locks[name]
+    for locks in (invoke_locks, taint_locks):
+        lock = locks.get(name)
+        if lock is not None and not lock.locked():
+            del locks[name]
     for kind in (WORKING_SEEN_MARKER, REPORTED_INTERRUPT_MARKER):
         try:
             state_store.for_dir(WATCHER_STATE_DIR).delete("markers",
@@ -173,6 +174,16 @@ def forget_session_send_state(name: str) -> None:
         except Exception as exc:  # prawduct:allow prawduct/broad-except -- a marker only
             audit.log_event("session_state_forget_failed", session=name, marker=kind,
                       error_type=type(exc).__name__)
+
+
+# A tainted session's report (service/taint.py): the instance id its taint was reported for,
+# so a session created again under the name is reported anew (a fact about one instance is
+# never the next one's).
+taint_reported: dict[str, str] = {}
+# What last stopped a session's freeze, logged once until it changes.
+freeze_trouble: dict[str, str] = {}
+# One taint check per session at a time: a poke during a reconcile waits for it.
+taint_locks: dict[str, asyncio.Lock] = {}
 
 
 # Sessions whose persisted queue has been read into pending_sends by this
@@ -301,6 +312,8 @@ LIFETIMES: dict[str, tuple[str, str]] = {
     "reported_interrupts": (SESSION, ""),
     "session_instances": (SESSION, ""),
     "drainer_failures": (SESSION, ""),
+    "taint_reported": (SESSION, ""),
+    "freeze_trouble": (SESSION, ""),
     "settle_state": (WATCH, ""),
     "logged_withdrawn_drops": (WATCH, ""),
     "unanswered_polls": (WATCH, ""),
@@ -316,10 +329,27 @@ LIFETIMES: dict[str, tuple[str, str]] = {
     "session_send_locks": (KEPT, "may be held by a send in flight: dropping it would let a "
                                  "second send paste into the same window at once"),
     "invoke_locks": (KEPT, "dropped by forget_session_send_state only when no run holds it"),
+    "taint_locks": (KEPT, "dropped by forget_session_send_state only when no check holds it"),
     "queue_loaded": (KEPT, "a saved queue is read once per process; a session created again "
                            "has its old queue dropped (MCP-33) and its new one saved from "
                            "memory, never read back over it"),
     "session_change_listeners": (PROCESS, "the MCP face's, while it serves"),
+}
+
+
+#: The per-session (or per-run, per-file) tables kept by other modules, each with how long
+#: its entries live: the service's in-memory state is state.py's, and anything else is named
+#: here (tests/test_state_lifetimes.py scans every module of the package).
+ELSEWHERE: dict[str, tuple[str, str]] = {
+    "aidc_mcp.headless._runs": (TASK, "keyed by run id; a run's own task removes it when the "
+                                      "run ends"),
+    "aidc_mcp.store._stores": (PROCESS, "one store per state dir, opened once per process"),
+    "aidc_mcp.transcript._parsed": (PROCESS, "a parse cache keyed by transcript file and its "
+                                             "stamp: a new session writes new files"),
+    "aidc_mcp.transcript._newest_ts": (PROCESS, "keyed by transcript file and its stamp, as "
+                                                "_parsed"),
+    "aidc_mcp.transcript._kind_cache": (PROCESS, "keyed by transcript file and its stamp, as "
+                                                 "_parsed"),
 }
 
 

@@ -16,7 +16,9 @@ from starlette.testclient import TestClient
 from aidc_mcp import audit, backend, server
 from aidc_mcp import session_facts as sf
 from aidc_mcp.service import common as com
+from aidc_mcp.service import state as ss
 from aidc_mcp.service import taint as tnt
+from aidc_mcp.service import turns as tn
 
 TAINT = b'{"tainted_at":"2026-11-26T09:00:00Z","trigger":"malware_domains","domain":"evil.example"}\n'
 NS = "aidc-u-alice"
@@ -48,48 +50,62 @@ class Cluster:
         self.tainted, self.response, self.policies, self.frozen = tainted, response, policies, frozen
         self.patched: list[str] = []
         self.marks: list[dict] = []
-        self.flag_fails = self.patch_fails = False
+        self.troubles: list = []
+        self.flag_fails = self.patch_fails = self.response_fails = False
+        self.instance = "uid-1"
 
     async def run(self, *args, timeout=20.0):
         a = list(args)
         if "exec" in a and "cat" in a and sf.TAINT_FILE in a:
             if self.flag_fails:
-                return sf.DockerResult(1, b"", b"error: unable to upgrade connection")
-            return (sf.DockerResult(0, TAINT, b"") if self.tainted else
-                    sf.DockerResult(1, b"", b"cat: /var/state/tainted: No such file or directory"))
+                return sf.BackendResult(1, b"", b"error: unable to upgrade connection")
+            return (sf.BackendResult(0, TAINT, b"") if self.tainted else
+                    sf.BackendResult(1, b"", b"cat: /var/state/tainted: No such file or directory"))
         if "exec" in a and "cat" in a and sf.FROZEN_FILE in a:
-            return (sf.DockerResult(0, json.dumps(self.frozen).encode(), b"") if self.frozen else
-                    sf.DockerResult(1, b"", b"cat: /var/state/frozen: No such file or directory"))
+            return (sf.BackendResult(0, json.dumps(self.frozen).encode(), b"") if self.frozen else
+                    sf.BackendResult(1, b"", b"cat: /var/state/frozen: No such file or directory"))
+        if "exec" in a and "aidc-freeze-trouble" in a:
+            self.troubles.append(json.loads(a[a.index("aidc-freeze-trouble") + 1]))
+            return sf.BackendResult(0, b"", b"")
+        if "exec" in a and "rm" in a and sf.FREEZE_TROUBLE_FILE in a:
+            self.troubles.append(None)
+            return sf.BackendResult(0, b"", b"")
         if "exec" in a and "aidc-freeze" in a:
             self.frozen = json.loads(a[a.index("aidc-freeze") + 1])
             self.marks.append(self.frozen)
-            return sf.DockerResult(0, b"", b"")
+            return sf.BackendResult(0, b"", b"")
         if "get" in a and "deployment/demo-proxy" in a:
+            if self.response_fails:
+                return sf.BackendResult(1, b"", b"Error from server (Forbidden): deployments.apps is forbidden")
             env = [{"name": "AIDC_TAINT_RESPONSE", "value": self.response}]
             doc = {"spec": {"template": {"spec": {"containers": [{"name": "policy", "env": env}]}}}}
-            return sf.DockerResult(0, json.dumps(doc).encode(), b"")
+            return sf.BackendResult(0, json.dumps(doc).encode(), b"")
         if "get" in a and "networkpolicy" in a:
-            return sf.DockerResult(0, self.policies, b"")
+            return sf.BackendResult(0, self.policies, b"")
         if "patch" in a and "networkpolicy" in a:
             if self.patch_fails:
-                return sf.DockerResult(1, b"", b"forbidden")
+                return sf.BackendResult(1, b"", b"forbidden")
             name = a[a.index("networkpolicy") + 1]
             self.patched.append(name)
-            return sf.DockerResult(0, b"", b"")
+            return sf.BackendResult(0, b"", b"")
         if "statefulsets,deployments" in a:
-            return sf.DockerResult(0, json.dumps({"items": [
+            return sf.BackendResult(0, json.dumps({"items": [
                 {"metadata": {"labels": {"aidc/session": "demo", "app": "dev"}}, "status": {}},
                 {"metadata": {"labels": {"aidc/session": "git", "app": "git"}}, "status": {}},
             ]}).encode(), b"")
         raise AssertionError(f"unexpected: {a}")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_taint_state():
+    for table in (ss.taint_reported, ss.freeze_trouble, ss.taint_locks):
+        table.clear()
+
+
 @pytest.fixture
 def k8s(monkeypatch):
     monkeypatch.setenv(backend.KIND_ENV, "kubernetes")
     monkeypatch.setenv(backend.NAMESPACE_ENV, NS)
-    tnt._seen.clear()
-    tnt._locks.clear()
 
 
 @pytest.fixture
@@ -102,7 +118,11 @@ def events(monkeypatch):
 
 
 def _use(monkeypatch, cluster):
-    monkeypatch.setattr(sf, "run_docker", cluster.run)
+    monkeypatch.setattr(sf, "run_backend", cluster.run)
+
+    async def instance(name):
+        return tn.SESSION_EXISTS, cluster.instance
+    monkeypatch.setattr(tn, "session_instance", instance)
 
 
 async def test_a_tainted_session_whose_response_is_freeze_has_every_egress_rule_cut(
@@ -115,6 +135,8 @@ async def test_a_tainted_session_whose_response_is_freeze_has_every_egress_rule_
     assert c.marks[0]["by"] == "aidc-mcp" and c.marks[0]["frozen_at"].endswith("Z")
     kinds = [k for k, _ in events[0]]
     assert "session_tainted" in kinds and "session_frozen" in kinds
+    assert "session_refrozen" not in kinds          # a first freeze is not a re-freeze
+    assert c.troubles == [None]                     # a trouble left from before is removed
     assert events[1] == ["demo", "demo"]   # tainted, then frozen: subscribers told each time
 
 
@@ -165,16 +187,78 @@ async def test_a_cut_the_cluster_refuses_is_a_failed_freeze_and_not_marked(
     _use(monkeypatch, c)
     assert await tnt.check("demo") == "freeze_failed"
     assert c.marks == []
-    assert "session_freeze_failed" in [k for k, _ in events[0]]
+    assert "session_freeze_stalled" in [k for k, _ in events[0]]
+    assert c.troubles and c.troubles[-1]["step"] == "cut_egress"
 
 
 async def test_on_docker_the_server_leaves_the_freeze_to_the_sidecar(events, monkeypatch):
     """The Docker sidecar pauses the dev container itself; the server only reports."""
     c = Cluster()
     _use(monkeypatch, c)
-    tnt._seen.clear()
     assert await tnt.check("demo") == "tainted"
     assert c.patched == [] and c.marks == []
+
+
+async def test_a_stalled_freeze_is_logged_once_until_its_cause_changes_and_shown_to_status(
+        k8s, events, monkeypatch):
+    """The reconcile tries every minute: the log says what stops the freeze once, not every
+    minute, and the reason is left beside the flag for `aidc status`; once frozen it goes."""
+    c = Cluster()
+    c.response_fails = True
+    _use(monkeypatch, c)
+    for _ in range(3):
+        assert await tnt.check("demo") == "unknown"
+    stalls = [f for k, f in events[0] if k == "session_freeze_stalled"]
+    assert len(stalls) == 1 and stalls[0]["step"] == "read_response"
+    assert "Forbidden" in stalls[0]["error"]
+    assert len(c.troubles) == 1 and c.troubles[0]["step"] == "read_response"
+    c.response_fails, c.patch_fails = False, True
+    assert await tnt.check("demo") == "freeze_failed"
+    assert len([1 for k, _ in events[0] if k == "session_freeze_stalled"]) == 2
+    c.patch_fails = False
+    assert await tnt.check("demo") == "frozen"
+    assert c.troubles[-1] is None and "demo" not in ss.freeze_trouble
+    assert "session_refrozen" not in [k for k, _ in events[0]]
+
+
+async def test_a_refreeze_after_a_stall_is_logged_and_clears_the_trouble(k8s, events, monkeypatch):
+    """Already frozen, a rule opened again and the first cut refused: the second pass cuts it,
+    logs the re-freeze, and removes the trouble it left."""
+    c = Cluster(frozen={"frozen_at": "2026-11-26T09:00:05Z"},
+                policies=_policies(("demo-proxy-public-only", ["Egress"],
+                                    [{"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}])))
+    c.patch_fails = True
+    _use(monkeypatch, c)
+    assert await tnt.check("demo") == "freeze_failed"
+    c.patch_fails = False
+    assert await tnt.check("demo") == "frozen"
+    assert "session_refrozen" in [k for k, _ in events[0]]
+    assert c.troubles[-1] is None and c.marks == []
+
+
+async def test_a_session_created_again_and_tainted_again_is_reported_again(
+        k8s, events, monkeypatch):
+    """Reported once per instance: the report of one session is never the next one's, even
+    when the reconcile never saw it clean in between."""
+    c = Cluster(response="notify")
+    _use(monkeypatch, c)
+    await tnt.check("demo")
+    await tnt.check("demo")
+    assert [k for k, _ in events[0]].count("session_tainted") == 1
+    c.instance = "uid-2"
+    await tnt.check("demo")
+    assert [k for k, _ in events[0]].count("session_tainted") == 2
+    assert events[1] == ["demo", "demo"]
+
+
+async def test_the_taint_tables_are_the_service_states_and_forgotten_with_the_session(
+        k8s, events, monkeypatch):
+    c = Cluster(response="notify")
+    _use(monkeypatch, c)
+    await tnt.check("demo")
+    assert "demo" in ss.taint_reported and "demo" in ss.taint_locks
+    ss.forget_session_send_state("demo")
+    assert "demo" not in ss.taint_reported and "demo" not in ss.taint_locks
 
 
 async def test_reconcile_looks_at_every_session_but_the_git_agent(k8s, events, monkeypatch):

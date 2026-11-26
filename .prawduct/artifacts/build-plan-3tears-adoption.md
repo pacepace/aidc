@@ -104,6 +104,7 @@ one plan as asked.
 - 11 (main 2026-11-26, within the owner's Q-M1 ruling; the owner may overrule): VPN exposure is an Ingress `mcp-<user>.<pages domain>` on the pages' class and wildcard certificate, `mcp.kubernetes.expose: ingress`, off by default; the session name `mcp` is reserved on Kubernetes. The in-cluster Service is reachable from every namespace but the user's own (no session reaches it), behind the bearer. The live test goes through the Ingress (the owner's orchestrator may run outside the cluster).
 - 12: no new mechanism was needed: the server's pod (chunks 08-11) already runs the CLI's cluster create; this chunk proves it fits: a static check that every cluster call `aidc create|list|status` reach (minus page and tunnel paths) is in K8S_MCP_RULES (mutation-checked), a create run under the pod's conditions, the cluster create's progress phases and a 960 s timeout. Git identity is not bridged for a server-made session (no git in the image; same as Docker's aidc-mcp). session_mcp_set reaches the orchestrator only where the session's egress allows (security-model, unchanged).
 - 15/16 (built together: the server's one check both records a poke and freezes): the webhook is a poke naming only the session, on its own port (7879) and app, unauthenticated and never trusted (the server reads the flag by exec). The server's Service is made by the first create and kept by stop, so a session's webhook address (the proxy pod has no cluster DNS) stays good. Freeze per Q-K3, made complete: every egress rule of the session's NetworkPolicies (dev, proxy, relays, networks) is cut to [], since policies are additive and a deny-all policy alone cuts nothing; a frozen mark on the state claim; a reconcile pass at start and each minute (missed pokes, re-applied policies); egress/network add refuse a tainted session. Freeze needs the user's server running: status says PENDING otherwise.
+- Cumulative review rev-20261126T105056Z (0 blocking, 5 warnings, all fixed with its observations): audit_get's description extends 1.x's (test pins the one change, TRS-11); taint's tables moved into state.LIFETIMES, the report keyed by instance id, and every module's tables now declared (state.ELSEWHERE, the lifetimes test scans the package); a stalled freeze is logged once per cause and left as /var/state/freeze-trouble for `aidc status`; a git answer into a full queue is refused before its request is decided (D6 all-or-nothing); the backend runners renamed run_backend/BackendResult/BackendFailed (they run kubectl too; the decision to keep them separate stands).
 - 08: the image's kubectl and yq belong to chunk 10 (the in-cluster image); the live probe waits for the owner's go-ahead.
 
 **Level:** Medium — requirements written; four design-13 questions and two new ones are open
@@ -423,8 +424,10 @@ Order follows design-13 "Upstream work".
 
 ### Chunk 16: Taint freeze on Kubernetes (W-K4)
 
-- **Description:** On taint, `freeze` (the default) cuts the session's egress with a deny-all policy
-  on its proxy and marks it frozen; acted on by the per-user server (Q-K3, §5).
+- **Description:** On taint, `freeze` (the default) cuts the session's egress by emptying the egress
+  rules of every NetworkPolicy of the session (NetworkPolicies add up, so a deny-all policy beside
+  them would cut nothing), and marks it frozen; acted on by the per-user server (Q-K3, §5, as
+  built: decision 15/16).
 - **Depends on:** 15.
 - **Requirements:** SEC-05, SEC-06, SEC-08, K8S-13.
 - **Done when:** smoke: a blocklisted fetch freezes the session within the bound and `aidc status`

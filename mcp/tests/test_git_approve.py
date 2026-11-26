@@ -10,6 +10,7 @@ import pytest
 from aidc_mcp import backend
 from aidc_mcp.service import common as com
 from aidc_mcp.service import gitapprove as ga
+from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 from tests import toolcall
@@ -85,6 +86,19 @@ async def test_an_approve_runs_as_the_holder_and_the_answer_still_goes_in(git, m
     assert len(git.wiring.paste_calls) == 1          # the agent's question is answered too
     answered = [f for k, f in logged if k == "git_request_answered"]
     assert answered and answered[0]["request_id"] == A and answered[0]["decision"] == "approve"
+
+
+async def test_an_answer_that_cannot_be_queued_decides_nothing(git):
+    """session_send never succeeds in part (design-10 D6): with the git agent's queue full,
+    the answer is refused before its request is approved, not after."""
+    ss.pending_sends[backend.GIT_SESSION] = [object()] * snd.PENDING_MAX_DEPTH
+    try:
+        res = await _send("Approve")
+    finally:
+        ss.pending_sends.pop(backend.GIT_SESSION, None)
+    assert res["ok"] is False and res["error_code"] == "queue_full"
+    assert git.decisions == []
+    assert "was not decided" in res["error"]
 
 
 async def test_a_deny_carries_its_reason(git):

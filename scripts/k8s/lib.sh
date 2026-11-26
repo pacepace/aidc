@@ -333,9 +333,10 @@ k8s_session_taint() {
     fi
 }
 
-# k8s_session_frozen <namespace> <session>: "yes <mark json>", "no", or "unknown <why>": whether
-# the user's MCP server froze the session (cut its egress; the mark is on its state claim, beside
-# the taint flag). A sidecar that cannot be asked is unknown, never "not frozen".
+# k8s_session_frozen <namespace> <session>: "yes <mark json>", "stalled <why json>" (the server
+# tried and says what stops it), "no", or "unknown <why>": whether the user's MCP server froze the
+# session (cut its egress; its marks are on the state claim, beside the taint flag). A sidecar
+# that cannot be asked is unknown, never "not frozen".
 k8s_session_frozen() {
     local ns="$1" s="$2" proxy out
     proxy=$(k8s_get "$ns" pod -l "aidc/session=${s},app=proxy" -o name) \
@@ -343,7 +344,7 @@ k8s_session_frozen() {
     proxy=$(printf '%s\n' "$proxy" | head -n1)
     [ -n "$proxy" ] || { printf 'unknown (no proxy pod)\n'; return 0; }
     if out=$(k8s_kubectl -n "$ns" exec "$proxy" -c policy -- \
-            sh -c 'if [ -e /var/state/frozen ]; then printf "yes "; cat /var/state/frozen; else echo no; fi' \
+            sh -c 'if [ -e /var/state/frozen ]; then printf "yes "; cat /var/state/frozen; elif [ -e /var/state/freeze-trouble ]; then printf "stalled "; cat /var/state/freeze-trouble; else echo no; fi' \
             </dev/null 2>&1); then
         printf '%s\n' "$out"
     else

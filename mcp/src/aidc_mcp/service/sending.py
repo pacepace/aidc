@@ -804,6 +804,16 @@ async def send(
     answer = await gitapprove.answer_in(name, prompt)
     if answer.refusal is not None:
         return answer.refusal
+    if answer.decision and len(ss.pending_sends.get(name, [])) >= PENDING_MAX_DEPTH:
+        # The answer could not go into the question afterwards (the queue is full), so the
+        # decision is not carried out either: session_send never succeeds in part (D6).
+        audit.log_event("tool_call", tool="session_send_failed", session=name,
+                        prompt_len=len(prompt), reason="queue_full", depth=PENDING_MAX_DEPTH,
+                        git_request=answer.decision.request_id)
+        return com.envelope_err(
+            f"{PENDING_MAX_DEPTH} prompts are already queued for this session and none has "
+            "been injected yet, so this answer was not taken and its git request was not "
+            "decided. Stop sending and tell the user to check the session.", code="queue_full")
     decided = await gitapprove.carry_out(answer.decision) if answer.decision else None
     result = await _send_accepted(name, prompt, conversation_id, sent_by, sender_label,
                                   deliver, container, announce)

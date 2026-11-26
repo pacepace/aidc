@@ -116,7 +116,7 @@ async def interrupt_headless(name: str, container: str) -> dict[str, Any]:
                 pids += await headless.stop_tagged(container, rec["run_id"])
             elif rec["pid"] is not None:
                 pids += await headless.stop_tree(container, rec["pid"])
-        except headless.DockerFailed as exc:
+        except headless.BackendFailed as exc:
             failed.append(str(exc))
             audit.log_event("headless_stop_failed", session=name, run_id=rec["run_id"],
                       pid=rec["pid"], error=str(exc))
@@ -137,7 +137,7 @@ async def stop_headless(container: str, run: headless.Run, proc: Any, event: str
     ran_s = round(time.time() - run.started_at, 1)
     try:
         pids = await headless.stop(container, run)
-    except headless.DockerFailed as exc:
+    except headless.BackendFailed as exc:
         audit.log_event("headless_stop_failed", session=run.session, run_id=run.run_id,
                   reason=event, ran_s=ran_s, error=str(exc))
         return

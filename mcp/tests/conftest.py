@@ -9,18 +9,18 @@ from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
 
-async def no_docker(*args, timeout=20.0):
+async def no_backend(*args, timeout=20.0):
     """What docker says about a session that has nothing to tell: no taint flag, no
     events, no audit mount, no dev container. A test that needs a fact patches
-    session_facts.run_docker itself."""
-    return session_facts.DockerResult(1, b"", b"cat: No such file or directory")
+    session_facts.run_backend itself."""
+    return session_facts.BackendResult(1, b"", b"cat: No such file or directory")
 
 
 @pytest.fixture(autouse=True)
 def _no_real_docker_for_facts(monkeypatch):
     """session_facts asks docker for a session's taint, audit dir and repository on
     most calls. No test reaches a real docker through it."""
-    monkeypatch.setattr(session_facts, "run_docker", no_docker)
+    monkeypatch.setattr(session_facts, "run_backend", no_backend)
 
 
 async def no_headless_processes(container):

@@ -485,7 +485,7 @@ def test_a_kubernetes_server_creates_in_the_cluster_whatever_the_config_says(k8s
 
 from aidc_mcp import session_facts as _sf  # noqa: E402
 
-REAL_RUN = _sf.run_docker
+REAL_RUN = _sf.run_backend
 
 KUBECTL_STUB = r'''#!/usr/bin/env python3
 """A kubectl for tests: records its argv, answers from the canned replies file."""
@@ -517,7 +517,7 @@ def kubectl(k8s, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{d}:/usr/bin:/bin")
     monkeypatch.setenv("STUB_LOG", str(log))
     monkeypatch.setenv("STUB_REPLIES", str(replies))
-    monkeypatch.setattr(_sf, "run_docker", REAL_RUN)
+    monkeypatch.setattr(_sf, "run_backend", REAL_RUN)
 
     def reply(*rules):
         replies.write_text(json.dumps(list(rules)))
@@ -636,3 +636,12 @@ async def test_a_kubernetes_servers_cli_calls_go_to_the_cluster(k8s, monkeypatch
     assert seen.count(["status", "p", "--backend", "kubernetes"]) == 2
     monkeypatch.setenv(backend.KIND_ENV, "docker")
     assert backend.cli_backend_args() == []
+
+
+async def test_a_cluster_list_with_no_sessions_is_asked_once(kubectl):
+    """The by-name fallback is for Docker sessions made before the labels; on Kubernetes it
+    would be the same query again."""
+    reply, calls = kubectl
+    reply({"when": ["statefulsets,deployments"], "out": '{"items": []}'})
+    assert await _sf.dev_containers() == []
+    assert len([c for c in calls() if "statefulsets,deployments" in c]) == 1

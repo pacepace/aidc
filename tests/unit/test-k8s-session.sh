@@ -135,7 +135,9 @@ case "$*" in
     *"get pod -l"*"app=proxy"*) echo "pod/demo-proxy-abc" ;;
     *"exec pod/demo-proxy-abc -c policy -- sh -c"*"/var/state/frozen"*)
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
-        if [ "${K_FROZEN:-}" = 1 ]; then echo 'yes {"frozen_at":"2026-11-26T09:00:05Z","by":"aidc-mcp"}'; else echo no; fi ;;
+        if [ "${K_FROZEN:-}" = 1 ]; then echo 'yes {"frozen_at":"2026-11-26T09:00:05Z","by":"aidc-mcp"}'
+        elif [ "${K_FREEZE_STALLED:-}" = 1 ]; then echo 'stalled {"step":"read_response","error":"forbidden"}'
+        else echo no; fi ;;
     *"exec pod/demo-proxy-abc -c policy -- sh -c"*)
         [ "${K_POLICY_DOWN:-}" = 1 ] && { echo 'error: container not found' >&2; exit 1; }
         if [ "${K_TAINTED:-}" = 1 ]; then echo 'yes {"trigger":"malware_domains"}'; else echo no; fi ;;
@@ -758,6 +760,9 @@ assert_has "...and a freeze the MCP server has not made yet as pending, never do
 out=$(K_EXISTS=1 K_TAINTED=1 K_FROZEN=1 run status demo)
 assert_has "a frozen session says so, with when (SEC-05 on Kubernetes)" \
     'freeze:   FROZEN {"frozen_at":"2026-11-26T09:00:05Z","by":"aidc-mcp"} (its egress is cut)' "$out"
+out=$(K_EXISTS=1 K_TAINTED=1 K_FREEZE_STALLED=1 run status demo)
+assert_has "a freeze the server tried and could not finish says why, and where to look" \
+    'freeze:   PENDING: your MCP server could not freeze it yet: {"step":"read_response","error":"forbidden"} (aidc mcp logs)' "$out"
 out=$(K_EXISTS=1 K_TAINTED=1 K_RESPONSE=notify run status demo)
 assert_has "a session whose response is not freeze is not frozen, and says its response" \
     "freeze:   not frozen (taint response: notify)" "$out"

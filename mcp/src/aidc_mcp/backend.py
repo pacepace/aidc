@@ -375,9 +375,9 @@ def instance_argv(session: str) -> list[str]:
     has the same lifetime (_instance_claim). So the id tells a session killed and created
     again under the same name from the same session upgraded."""
     if _k8s():
-        return ["kubectl", "-n", namespace(), "get", "pvc", _instance_claim(session),
+        return [program(), "-n", namespace(), "get", "pvc", _instance_claim(session),
                 "-o", "jsonpath={.metadata.uid}", _K8S_READ_WAIT]
-    return ["docker", "inspect", "--type", "network", "--format", "{{.Id}}",
+    return [program(), "inspect", "--type", "network", "--format", "{{.Id}}",
             f"aidc-{session}-net"]
 
 

@@ -337,7 +337,7 @@ W-K7 ops (any time, owner) ; W-R release last
 ## 5. Decisions taken by the main agent (2026-11-24; technical calls, the owner may overrule)
 
 - Q-K2: yes. Each user's Claude `projects/` (history and memory) moves to the user's disk, shared by all their sessions, so one repo has one history and the broker, Syncthing and the MCP read one place.
-- Q-K3: "freeze" on Kubernetes cuts the session's egress (a deny-all policy on its proxy pod) and marks it frozen, like Docker's freeze keeps the container but stops it acting; the per-user MCP acts on the sidecar's webhook.
+- Q-K3: "freeze" on Kubernetes cuts the session's egress and marks it frozen, like Docker's freeze keeps the container but stops it acting; the per-user MCP acts on the sidecar's webhook. As built (2026-11-26, build-plan-3tears-adoption chunks 15/16): the cut empties the egress rules of every NetworkPolicy of the session, since NetworkPolicies add up and a deny-all policy beside them would cut nothing.
 - Q-K4: VS Code attaches to a per-user editor pod that mounts the user's disk (no API token, egress only through its own proxy).
 - Q-K6: `aidc user add` mints namespace-scoped credentials (Role/RoleBinding + a kubeconfig); a user may still bring their own.
 - Q-K8: yes, bind approvals in code. Refined by the owner ruling 2026-11-26: not by a one-time code but by who can decide: the request holder (gitreq), which only the user's machine and the MCP server (carrying out an orchestrator's answer) reach, and the agent cannot (W-M3-00).

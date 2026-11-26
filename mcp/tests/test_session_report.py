@@ -43,18 +43,18 @@ def facts(monkeypatch, tmp_path):
     async def run(*args, timeout=20.0):
         if sf.TAINT_FILE in args:
             if state["tainted"]:
-                return sf.DockerResult(0, b'{"tainted_at":"2026-10-14T09:00:00Z",'
+                return sf.BackendResult(0, b'{"tainted_at":"2026-10-14T09:00:00Z",'
                                           b'"trigger":"blocklist","domain":"evil.example"}', b"")
-            return sf.DockerResult(1, b"", b"cat: No such file or directory")
+            return sf.BackendResult(1, b"", b"cat: No such file or directory")
         if args[:2] == ("inspect", "aidc-proj-audit"):
-            return sf.DockerResult(0, b"/home/u/audit/proj\n", b"")
+            return sf.BackendResult(0, b"/home/u/audit/proj\n", b"")
         if args[:2] == ("inspect", "aidc-proj-dev"):
-            return sf.DockerResult(0, b"PATH=/bin\nAIDC_REPO_PATH=/home/u/code/proj\n\x1f/x\n", b"")
+            return sf.BackendResult(0, b"PATH=/bin\nAIDC_REPO_PATH=/home/u/code/proj\n\x1f/x\n", b"")
         if args[0] == "ps":
-            return sf.DockerResult(0, b"aidc-proj-dev\tUp 2 hours\tmulti\t2026-10-14 07:00:00\n"
+            return sf.BackendResult(0, b"aidc-proj-dev\tUp 2 hours\tmulti\t2026-10-14 07:00:00\n"
                                       b"aidc-other-dev\tExited (0)\tpython\t2026-10-13\n", b"")
-        return sf.DockerResult(1, b"", b"No such file or directory")
-    monkeypatch.setattr(sf, "run_docker", run)
+        return sf.BackendResult(1, b"", b"No such file or directory")
+    monkeypatch.setattr(sf, "run_backend", run)
 
     async def session_state(container, name):
         if name == "proj" and state["working"]:

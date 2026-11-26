@@ -57,13 +57,37 @@ that ships separately.
   Notification and Stop hooks from the managed settings, only for the Claude in tmux window
   `main:claude`, as the container's session user.
 - **Consumer**: aidc-mcp (`hook_events.py`, `service/turns.py`), reading
-  `<mirror>/<session>/hook-events/` on the host-mounted state dir.
+  `<mirror>/<session>/hook-events/`: on Docker the host-mounted state dir, on Kubernetes the
+  user's `transcripts` claim, mounted read-only (each session's pod mounts only its own folder).
 - **Contract**: one file per event, `<epoch-ns>-<pid>.json`, written temp-then-rename; the hook's
   JSON input with `event` and `at` (UTC, milliseconds) added; names sort in time order. The folder
-  starts empty with each session instance (`aidc create`; the git container's main process).
+  starts empty with each session instance (`aidc create`; the git container's main process; on
+  Kubernetes the dev pod's mirror step). Retention is the writer's: it keeps the newest 200 event
+  files; the reader never removes one.
 - **Rule**: the writer never fails or prints (a Stop hook's output is read as a decision); a
   writer that cannot write shows as `hook_events_missing`, never as silence. A new Claude Code
   hook field the reader depends on is measured against a real session first.
+
+### A session's policy sidecar ↔ the user's MCP server: the taint webhook (Kubernetes)
+- **Producer**: `proxy/policy/policy.sh`, on a session's first taint, when `AIDC_TAINT_WEBHOOK`
+  is set (session-create renders it from the server's Service address).
+- **Consumer**: aidc-mcp's taint listener (`server.build_taint_app`, `AIDC_MCP_TAINT_PORT` 7879)
+  and `service/taint.py`.
+- **Contract**: `POST /taint` with `{"session": "<name>"}`, nothing else; 202 for a session
+  name, 400 otherwise, every request in the access log. The NetworkPolicies let the user's proxy
+  pods reach that port only.
+- **Rule**: a poke is never trusted: the server reads the taint flag itself, and also looks at
+  every session's flag on its own, so a lost poke costs at most a minute.
+
+### The user's MCP server ↔ `aidc status`: the frozen mark (Kubernetes)
+- **Producer**: `service/taint.py` (session_facts.mark_frozen, mark_freeze_trouble), by exec into
+  the session's policy sidecar.
+- **Consumer**: `scripts/k8s/lib.sh` k8s_session_frozen, printed by `session-status.sh`.
+- **Contract**: `/var/state/frozen` (JSON: `frozen_at`, `by`, `egress_cut`, `trigger`, `domain`)
+  once the egress is cut; `/var/state/freeze-trouble` (JSON: `at`, `step`, `error`) while a
+  freeze cannot go on, removed once frozen. The reader prints the JSON after `yes ` / `stalled `.
+- **Rule**: the frozen mark is written only after every egress rule is cut; a sidecar that cannot
+  be read is "unknown", never "not frozen".
 
 ### The MCP server ↔ the git container's request holder
 - **Producer**: aidc-mcp's `service/gitapprove.py`, carrying out an orchestrator's answer to the

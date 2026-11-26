@@ -24,6 +24,8 @@ from typing import Any
 from aidc_mcp import audit, backend
 from aidc_mcp import session_facts as sf
 from aidc_mcp.service import common as com
+from aidc_mcp.service import state as ss
+from aidc_mcp.service import turns as tn
 
 #: How often every session's flag is looked at, for a poke that never came.
 RECONCILE_S = 60.0
@@ -31,10 +33,6 @@ RECONCILE_S = 60.0
 #: A session name as aidc makes them (validate_session_name; DNS-label shaped on Kubernetes).
 _SESSION = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
-#: Sessions whose taint this process has seen (reported once each).
-_seen: set[str] = set()
-#: One check per session at a time: a poke during a reconcile waits for it.
-_locks: dict[str, asyncio.Lock] = {}
 
 
 def valid_session(name: Any) -> bool:
@@ -45,47 +43,67 @@ async def check(name: str) -> str:
     """Look at session `name`'s taint and act on it. Returns what was found: "clean",
     "tainted" (its response is not freeze), "frozen" (cut now or before), "freeze_failed",
     or "unknown" (the flag could not be read)."""
-    lock = _locks.setdefault(name, asyncio.Lock())
+    lock = ss.taint_locks.setdefault(name, asyncio.Lock())
     async with lock:
         try:
             taint = await sf.read_taint(name)
         except sf.TaintUnknown as exc:
-            audit.log_event("taint_check_unknown", session=name, error=str(exc)[:300])
+            await _trouble(name, "read_flag", str(exc), mark=False)
             return "unknown"
         if taint is None:
-            _seen.discard(name)   # a session made again under the name starts clean
+            ss.taint_reported.pop(name, None)
+            ss.freeze_trouble.pop(name, None)
             return "clean"
-        if name not in _seen:
-            _seen.add(name)
+        # Reported once per instance of the session: one killed and created again under
+        # the name, and tainted again, is a new taint (state.LIFETIMES).
+        _, instance = await tn.session_instance(name)
+        if ss.taint_reported.get(name) != instance:
+            ss.taint_reported[name] = instance
             audit.log_event("session_tainted", session=name, trigger=taint["trigger"],
                             domain=taint["domain"], at=taint["at"])
             com.session_changed(name)
         if not backend.server_freezes():
             return "tainted"
-        response = await sf.taint_response(name)
+        response, why = await sf.taint_response(name)
+        if response is None:
+            await _trouble(name, "read_response", why)
+            return "unknown"
         if response != "freeze":
-            return "tainted" if response is not None else "unknown"
+            return "tainted"
         return await _freeze(name, taint)
+
+
+async def _trouble(name: str, step: str, why: str, *, mark: bool = True) -> None:
+    """A freeze that cannot go on: logged once until what stops it changes (the reconcile
+    tries every minute), and left beside the flag for `aidc status` (when the sidecar can be
+    reached at all)."""
+    said = f"{step}: {why[:300]}"
+    if ss.freeze_trouble.get(name) == said:
+        return
+    ss.freeze_trouble[name] = said
+    audit.log_event("session_freeze_stalled", session=name, step=step, error=why[:300])
+    if mark:
+        await sf.mark_freeze_trouble(name, {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "step": step,
+            "error": why[:300]})
 
 
 async def _freeze(name: str, taint: dict[str, str]) -> str:
     """Cut every egress rule the session's policies still have, then mark it frozen (once).
     Idempotent: a session already cut is left as it is; one a later apply opened again is
     cut again."""
-    res = await sf.run_docker(*backend.session_policies_args(name))
+    res = await sf.run_backend(*backend.session_policies_args(name))
     open_ = backend.egress_to_cut(res.stdout) if res.returncode == 0 else None
     if open_ is None:
-        audit.log_event("session_freeze_failed", session=name, step="read_policies",
-                        error=res.err.strip()[:300])
+        await _trouble(name, "read_policies", res.err.strip() or "unreadable listing")
         return "freeze_failed"
     failed = []
     for policy in open_:
-        cut = await sf.run_docker(*backend.cut_egress_args(policy))
+        cut = await sf.run_backend(*backend.cut_egress_args(policy))
         if cut.returncode != 0:
-            failed.append(policy)
-            audit.log_event("session_freeze_failed", session=name, step="cut_egress",
-                            policy=policy, error=cut.err.strip()[:300])
+            failed.append(f"{policy}: {cut.err.strip()[:200]}")
     if failed:
+        await _trouble(name, "cut_egress", "; ".join(failed))
         return "freeze_failed"
     try:
         marked = await sf.read_frozen(name)
@@ -96,12 +114,19 @@ async def _freeze(name: str, taint: dict[str, str]) -> str:
                 "by": "aidc-mcp", "egress_cut": open_, "trigger": taint["trigger"],
                 "domain": taint["domain"]}
         if not await sf.mark_frozen(name, mark):
-            audit.log_event("session_freeze_failed", session=name, step="mark")
+            await _trouble(name, "mark", "the policy sidecar did not take the frozen mark")
             return "freeze_failed"
         audit.log_event("session_frozen", session=name, egress_cut=open_)
         com.session_changed(name)
-    elif open_:
-        audit.log_event("session_refrozen", session=name, egress_cut=open_)
+        # Frozen now: a trouble left from before (by this process or one before a restart)
+        # is stale.
+        await sf.mark_freeze_trouble(name, None)
+        ss.freeze_trouble.pop(name, None)
+    else:
+        if open_:
+            audit.log_event("session_refrozen", session=name, egress_cut=open_)
+        if ss.freeze_trouble.pop(name, None) is not None:
+            await sf.mark_freeze_trouble(name, None)
     return "frozen"
 
 

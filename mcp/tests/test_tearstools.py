@@ -69,10 +69,25 @@ def test_each_tool_declares_the_mcp_face():
 
 # --- descriptions and schemas carried over (TRS-11, MCP-22) -------------------------
 
+# The descriptions 2.0 extends, each with the one change made to 1.x's words and why: an
+# orchestrator reads a field the description names, and on a new backend the field took a new
+# form. Every other word stays 1.x's (TRS-11), held exactly.
+EXTENDED_IN_2_0 = {
+    "audit_get": ("audit_dir (where the session's audit trail is on the host)",
+                  "audit_dir (where the session's audit trail is on the host; on Kubernetes\n"
+                  "`pvc:<namespace>/<claim>`, its volume claim)"),
+}
+
+
 @pytest.mark.parametrize("name", sorted(V1_BY_NAME))
 def test_the_description_is_the_1x_description_word_for_word(name):
     # with no session watched, as the 1.x list was generated
-    assert _tool(name).mcp_schema().description == V1_BY_NAME[name]["description"]
+    expected = V1_BY_NAME[name]["description"]
+    if name in EXTENDED_IN_2_0:
+        old, new = EXTENDED_IN_2_0[name]
+        assert expected.count(old) == 1
+        expected = expected.replace(old, new)
+    assert _tool(name).mcp_schema().description == expected
 
 
 @pytest.mark.parametrize("name", sorted(V1_BY_NAME))

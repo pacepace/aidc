@@ -51,9 +51,9 @@ def reached(monkeypatch):
 def tainted(monkeypatch):
     async def run(*args, timeout=20.0):
         if args[:2] == ("exec", "aidc-proj-policy") and sf.TAINT_FILE in args:
-            return sf.DockerResult(0, TAINT, b"")
-        return sf.DockerResult(1, b"", b"No such file or directory")
-    monkeypatch.setattr(sf, "run_docker", run)
+            return sf.BackendResult(0, TAINT, b"")
+        return sf.BackendResult(1, b"", b"No such file or directory")
+    monkeypatch.setattr(sf, "run_backend", run)
 
 
 @pytest.fixture
@@ -105,8 +105,8 @@ async def test_an_unreadable_flag_lets_the_call_through(monkeypatch, nothing_run
     """Fail open: a policy sidecar docker cannot reach is logged, and does not stop
     every send."""
     async def run(*args, timeout=20.0):
-        return sf.DockerResult(-1, b"", b"Cannot connect to the Docker daemon")
-    monkeypatch.setattr(sf, "run_docker", run)
+        return sf.BackendResult(-1, b"", b"Cannot connect to the Docker daemon")
+    monkeypatch.setattr(sf, "run_backend", run)
     res = await toolcall.call("session_exec", name="proj", cmd="id")
     assert res["data"] == {"reached": "session_exec"}
 
@@ -119,7 +119,7 @@ async def test_an_out_of_scope_tainted_call_is_refused_as_out_of_scope_without_a
 
     async def must_not_run(*args, timeout=20.0):
         raise AssertionError(f"docker asked about an out-of-scope session: {args}")
-    monkeypatch.setattr(sf, "run_docker", must_not_run)
+    monkeypatch.setattr(sf, "run_backend", must_not_run)
     res = await toolcall.call("session_exec", name="proj", cmd="id")
     assert res["error_code"] == "out_of_scope"
 
@@ -133,19 +133,19 @@ async def test_reading_stopping_and_cancelling_are_not_guarded(tool, tainted, re
 
 async def test_read_taint_tells_clean_from_unknown(monkeypatch):
     async def missing(*args, timeout=20.0):
-        return sf.DockerResult(1, b"", b"cat: /var/state/tainted: No such file or directory")
-    monkeypatch.setattr(sf, "run_docker", missing)
+        return sf.BackendResult(1, b"", b"cat: /var/state/tainted: No such file or directory")
+    monkeypatch.setattr(sf, "run_backend", missing)
     assert await sf.read_taint("proj") is None
 
     async def gone(*args, timeout=20.0):
-        return sf.DockerResult(1, b"", b"Error: No such container: aidc-proj-policy")
-    monkeypatch.setattr(sf, "run_docker", gone)
+        return sf.BackendResult(1, b"", b"Error: No such container: aidc-proj-policy")
+    monkeypatch.setattr(sf, "run_backend", gone)
     with pytest.raises(sf.TaintUnknown):
         await sf.read_taint("proj")
 
     async def garbled(*args, timeout=20.0):
-        return sf.DockerResult(0, b"not json", b"")
-    monkeypatch.setattr(sf, "run_docker", garbled)
+        return sf.BackendResult(0, b"not json", b"")
+    monkeypatch.setattr(sf, "run_backend", garbled)
     assert (await sf.read_taint("proj"))["trigger"] == "unknown"  # a flag is a taint
 
 
@@ -154,7 +154,7 @@ async def test_the_git_agent_has_no_sandbox_to_taint(monkeypatch):
     docker call is made to ask (one would fail and be logged on every list)."""
     async def must_not_run(*args, timeout=20.0):
         raise AssertionError(f"docker called: {args}")
-    monkeypatch.setattr(sf, "run_docker", must_not_run)
+    monkeypatch.setattr(sf, "run_backend", must_not_run)
     assert await sf.read_taint("git") is None
     assert await sf.policy_events("git") == []
 

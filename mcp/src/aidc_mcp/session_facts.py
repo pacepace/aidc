@@ -6,7 +6,7 @@ printed and failed every call. Each fact here comes from the container that hold
 it: the taint flag from the policy sidecar, the audit dir from the audit sidecar's
 mount, the repository from the dev container's environment.
 
-Every call goes through :func:`run_docker`, the one seam tests replace; the commands come
+Every call goes through :func:`run_backend`, the one seam tests replace; the commands come
 from :mod:`aidc_mcp.backend`.
 """
 
@@ -23,16 +23,18 @@ from aidc_mcp import audit, backend
 TAINT_FILE = "/var/state/tainted"
 # Where the user's server marks a session it froze (Kubernetes), beside the taint flag.
 FROZEN_FILE = "/var/state/frozen"
+# What last stopped the server from freezing it, while it is not frozen.
+FREEZE_TROUBLE_FILE = "/var/state/freeze-trouble"
 # Where the policy sidecar appends one JSON event per line.
 POLICY_EVENTS_FILE = "/var/log/aidc/policy-events.log"
 # Where the audit sidecar has the session's audit dir mounted.
 AUDIT_MOUNT = "/var/aidc/audit"
 
-_DOCKER_TIMEOUT_S = 20.0
+_BACKEND_TIMEOUT_S = 20.0
 
 
 @dataclass(frozen=True)
-class DockerResult:
+class BackendResult:
     returncode: int
     stdout: bytes
     stderr: bytes
@@ -42,9 +44,9 @@ class DockerResult:
         return self.stderr.decode("utf-8", errors="replace")
 
 
-async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerResult:
-    """Run the backend's program (`docker`) with `args` and return its exit, stdout and
-    stderr. One that cannot be started, or does not answer in time, is a failed call
+async def run_backend(*args: str, timeout: float = _BACKEND_TIMEOUT_S) -> BackendResult:
+    """Run the backend's program (`docker` or `kubectl`) with `args` and return its exit,
+    stdout and stderr. One that cannot be started, or does not answer in time, is a failed call
     (exit -1), never a raise."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -53,15 +55,15 @@ async def run_docker(*args: str, timeout: float = _DOCKER_TIMEOUT_S) -> DockerRe
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        return DockerResult(-1, b"", str(exc).encode())
+        return BackendResult(-1, b"", str(exc).encode())
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         proc.kill()
         await proc.wait()
         said = f"{backend.program()} {args[0]} timed out after {timeout}s"
-        return DockerResult(-1, b"", said.encode())
-    return DockerResult(proc.returncode if proc.returncode is not None else -1, out, err)
+        return BackendResult(-1, b"", said.encode())
+    return BackendResult(proc.returncode if proc.returncode is not None else -1, out, err)
 
 
 def _missing_file(err: str) -> bool:
@@ -81,7 +83,7 @@ async def read_taint(name: str) -> dict[str, str] | None:
     if backend.is_git_session(name):
         # The git agent has no sandbox to taint: no proxy sidecar, no policy (it is trusted).
         return None
-    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+    res = await run_backend(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
                                               ["cat", TAINT_FILE]))
     if res.returncode != 0:
         if _missing_file(res.err):
@@ -108,7 +110,7 @@ async def read_frozen(name: str) -> dict[str, Any] | None:
 
     :raises TaintUnknown: when the policy sidecar could not be asked
     """
-    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+    res = await run_backend(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
                                               ["cat", FROZEN_FILE]))
     if res.returncode != 0:
         if _missing_file(res.err):
@@ -124,22 +126,35 @@ async def read_frozen(name: str) -> dict[str, Any] | None:
 async def mark_frozen(name: str, mark: dict[str, Any]) -> bool:
     """Write the frozen mark into the session's policy sidecar (whole, by rename)."""
     script = 'printf "%s\\n" "$1" > "$2.new" && mv -f "$2.new" "$2"'
-    res = await run_docker(*backend.exec_args(
+    res = await run_backend(*backend.exec_args(
         backend.target(name, backend.ROLE_POLICY),
         ["sh", "-c", script, "aidc-freeze", json.dumps(mark, separators=(",", ":")),
          FROZEN_FILE]))
     return res.returncode == 0
 
 
-async def taint_response(name: str) -> str | None:
+async def taint_response(name: str) -> tuple[str | None, str]:
     """The session's taint response (log, notify or freeze; SEC-05) as its policy sidecar runs
-    with it, or None when it cannot be read."""
+    with it, and "" ; or None and why it could not be read."""
     tgt = backend.target(name, backend.ROLE_POLICY)
-    res = await run_docker(*backend.env_workdir_args(tgt))
+    res = await run_backend(*backend.env_workdir_args(tgt))
     if res.returncode != 0:
-        return None
+        return None, res.err.strip()[:300] or f"{backend.program()} exited {res.returncode}"
     env, _ = backend.env_and_workdir(res.stdout, tgt)
-    return env.get("AIDC_TAINT_RESPONSE", "").strip() or "notify"
+    return env.get("AIDC_TAINT_RESPONSE", "").strip() or "notify", ""
+
+
+async def mark_freeze_trouble(name: str, trouble: dict[str, Any] | None) -> bool:
+    """Leave what stops the session's freeze beside its taint flag, where `aidc status` reads
+    it (FREEZE_TROUBLE_FILE), or remove it (None) once frozen."""
+    if trouble is None:
+        argv = ["rm", "-f", FREEZE_TROUBLE_FILE]
+    else:
+        argv = ["sh", "-c", 'printf "%s\\n" "$1" > "$2.new" && mv -f "$2.new" "$2"',
+                "aidc-freeze-trouble", json.dumps(trouble, separators=(",", ":")),
+                FREEZE_TROUBLE_FILE]
+    res = await run_backend(*backend.exec_args(backend.target(name, backend.ROLE_POLICY), argv))
+    return res.returncode == 0
 
 
 async def taint_or_none(name: str) -> dict[str, str] | None:
@@ -152,9 +167,10 @@ async def taint_or_none(name: str) -> dict[str, str] | None:
 
 
 async def audit_dir(name: str) -> str | None:
-    """The session's audit dir on the HOST: the source of the audit sidecar's mount."""
+    """Where the session's audit trail is: on Docker the host folder the audit sidecar mounts;
+    on Kubernetes `pvc:<namespace>/<claim>`, the volume claim it mounts."""
     tgt = backend.target(name, backend.ROLE_AUDIT)
-    res = await run_docker(*backend.mount_source_args(tgt, AUDIT_MOUNT))
+    res = await run_backend(*backend.mount_source_args(tgt, AUDIT_MOUNT))
     return backend.mount_source(res.stdout, tgt, AUDIT_MOUNT) if res.returncode == 0 else None
 
 
@@ -162,7 +178,7 @@ async def repo_path(name: str) -> str | None:
     """The repository the session's dev container works in: AIDC_REPO_PATH, else its
     working dir (compose sets both to the mounted repo)."""
     tgt = backend.target(name)
-    res = await run_docker(*backend.env_workdir_args(tgt))
+    res = await run_backend(*backend.env_workdir_args(tgt))
     if res.returncode != 0:
         return None
     env, workdir = backend.env_and_workdir(res.stdout, tgt)
@@ -176,7 +192,7 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
     """
     if backend.is_git_session(name):
         return []
-    res = await run_docker(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
+    res = await run_backend(*backend.exec_args(backend.target(name, backend.ROLE_POLICY),
                                               ["cat", POLICY_EVENTS_FILE]))
     if res.returncode != 0:
         if _missing_file(res.err):
@@ -196,13 +212,13 @@ async def policy_events(name: str) -> list[dict[str, Any]]:
 async def dev_containers() -> list[dict[str, str]] | None:
     """Every session by its dev container: name, status, profile, started. None when
     docker did not answer."""
-    res = await run_docker(*backend.dev_list_args())
+    res = await run_backend(*backend.dev_list_args())
     if res.returncode != 0:
         return None
     rows = backend.dev_rows(res.stdout)
-    if not rows:
-        # Sessions made before the labels: their names say what they are.
-        res = await run_docker(*backend.dev_list_args(by_name=True))
+    if not rows and backend.dev_list_args(by_name=True) != backend.dev_list_args():
+        # Sessions made before the labels (Docker): their names say what they are.
+        res = await run_backend(*backend.dev_list_args(by_name=True))
         if res.returncode != 0:
             return None
         rows = backend.dev_rows(res.stdout)

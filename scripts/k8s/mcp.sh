@@ -197,8 +197,9 @@ mcp_expose_check() {
     fi
 }
 
-# mcp_private_ipv4 <ipv4>: 0 when the address is one a session's proxy refuses (private, shared
-# CGNAT, loopback, link-local), as squid's aidc_not_public and the proxy's NetworkPolicy do.
+# mcp_private_ipv4 <ipv4>: 0 when the address is in the ranges the session proxy's NetworkPolicy
+# keeps it from (private, shared CGNAT, loopback, link-local: manifests.sh, its egress except
+# list). Squid refuses more than these, so a name here is out of every session's reach.
 mcp_private_ipv4() {
     local a b
     IFS=. read -r a b _ <<<"$1"

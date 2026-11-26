@@ -52,6 +52,8 @@ if [ "${taint%% *}" = yes ]; then
         || response="unknown"
     case "$frozen" in
         yes*) printf 'freeze:   FROZEN %s (its egress is cut)\n' "${frozen#yes }" ;;
+        stalled*) printf 'freeze:   PENDING: your MCP server could not freeze it yet: %s (aidc mcp logs)\n' \
+                      "$(printf '%s' "${frozen#stalled }" | aidc_printable)" ;;
         no) if [ "$response" = freeze ]; then
                 printf 'freeze:   PENDING: your MCP server cuts its egress when it runs (aidc mcp status)\n'
             else

@@ -1,6 +1,6 @@
 [
   {
-    "description": "The session's policy events: every domain the proxy's policy flagged, and\nwhat it did (logged, tainted, suppressed). Newest 500 at most (cut says so).\nReturns audit_dir (where the session's audit trail is on the host), events\n(oldest first) and count (how many matched).",
+    "description": "The session's policy events: every domain the proxy's policy flagged, and\nwhat it did (logged, tainted, suppressed). Newest 500 at most (cut says so).\nReturns audit_dir (where the session's audit trail is on the host; on Kubernetes\n`pvc:<namespace>/<claim>`, its volume claim), events\n(oldest first) and count (how many matched).",
     "input_schema": {
       "properties": {
         "kind": {

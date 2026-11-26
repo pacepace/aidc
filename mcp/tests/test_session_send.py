@@ -907,11 +907,11 @@ def _taint_switch(monkeypatch):
 
     async def run(*args, timeout=20.0):
         if sf.TAINT_FILE in args and state["tainted"]:
-            return sf.DockerResult(
+            return sf.BackendResult(
                 0, b'{"tainted_at":"2026-10-14T09:00:00Z","trigger":"blocklist",'
                    b'"domain":"evil.example","squid_log_line":"x"}', b"")
-        return sf.DockerResult(1, b"", b"cat: No such file or directory")
-    monkeypatch.setattr(sf, "run_docker", run)
+        return sf.BackendResult(1, b"", b"cat: No such file or directory")
+    monkeypatch.setattr(sf, "run_backend", run)
     return state
 
 

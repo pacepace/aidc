@@ -20,6 +20,31 @@ def _tables():
             and name != "LIFETIMES"}
 
 
+def test_no_module_keeps_a_table_the_lifetimes_do_not_name():
+    """A table kept outside state.py is the one a session created again inherits without
+    anyone noticing: every module of the package is read, and each of its tables must be
+    state.py's or named in state.ELSEWHERE with its lifetime and why."""
+    import importlib
+    import pkgutil
+
+    import aidc_mcp
+
+    found = set()
+    for info in pkgutil.walk_packages(aidc_mcp.__path__, "aidc_mcp."):
+        if info.name in ("aidc_mcp.__main__", "aidc_mcp.service.state"):
+            continue
+        mod = importlib.import_module(info.name)
+        for name, value in vars(mod).items():
+            if (isinstance(value, (MutableMapping, MutableSet, MutableSequence))
+                    and not name.isupper() and not name.startswith("__")
+                    and getattr(value, "__module__", None) != "typing"):
+                found.add(f"{info.name}.{name}")
+    assert sorted(found - set(ss.ELSEWHERE)) == [], "declare these in state.ELSEWHERE"
+    assert sorted(set(ss.ELSEWHERE) - found) == []
+    for name, (kind, why) in ss.ELSEWHERE.items():
+        assert kind in (ss.TASK, ss.KEPT, ss.PROCESS, ss.SESSION, ss.WATCH) and why, name
+
+
 def test_every_table_declares_its_lifetime():
     undeclared = sorted(set(_tables()) - set(ss.LIFETIMES))
     assert undeclared == [], f"declare a lifetime in state.LIFETIMES for: {undeclared}"

@@ -454,15 +454,15 @@ def test_the_descriptions_lead_with_the_rule():
 
 
 async def test_docker_failing_is_an_error_not_an_empty_answer(monkeypatch):
-    async def no_docker(*args, **kwargs):
+    async def no_backend(*args, **kwargs):
         raise FileNotFoundError("docker")
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_docker)
-    with pytest.raises(headless.DockerFailed):
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_backend)
+    with pytest.raises(headless.BackendFailed):
         await headless.stop_tagged("aidc-proj-dev", "session_invoke-aa")
-    with pytest.raises(headless.DockerFailed):
+    with pytest.raises(headless.BackendFailed):
         await headless.stop_tree("aidc-proj-dev", 77)
     run = headless.new_run("proj", "session_invoke", "q")
-    with pytest.raises(headless.DockerFailed):
+    with pytest.raises(headless.BackendFailed):
         await headless.stop("aidc-proj-dev", run)
     assert run.stopped   # so a run not started yet never starts
 
@@ -471,8 +471,8 @@ async def test_a_paused_or_gone_container_lists_as_unknown_not_as_empty(monkeypa
     """A tainted session's container is paused: nothing can be listed in it, which is
     not the same as nothing running."""
     async def failing(*args, **kwargs):
-        raise headless.DockerFailed("docker exited 1: container is paused")
-    monkeypatch.setattr(headless, "_docker", failing)
+        raise headless.BackendFailed("docker exited 1: container is paused")
+    monkeypatch.setattr(headless, "_backend", failing)
     assert await _REAL_CONTAINER_RUNS("aidc-proj-dev") is None
 
 
@@ -482,7 +482,7 @@ async def test_an_interrupt_whose_stop_fails_says_it_did_not_interrupt(docker, m
     monkeypatch.setattr(rps, "tree", tree)
 
     async def failing(container, run_id):
-        raise headless.DockerFailed("docker exited 1: container is paused")
+        raise headless.BackendFailed("docker exited 1: container is paused")
     monkeypatch.setattr(headless, "stop_tagged", failing)
     docker["found"] = [{"pid": 77, "started_at": 1.0, "run_id": "session_invoke-aa",
                         "prompt": "x"}]
@@ -506,7 +506,7 @@ async def test_an_interrupt_that_cannot_read_the_container_says_so(docker, monke
 
 async def test_a_cancelled_invoke_whose_stop_fails_is_logged_as_failed(docker, monkeypatch):
     async def failing(container, run):
-        raise headless.DockerFailed("docker did not answer within 23 s")
+        raise headless.BackendFailed("docker did not answer within 23 s")
     monkeypatch.setattr(headless, "stop", failing)
     docker["release_now"] = False
     task = asyncio.create_task(_tool("session_invoke")(name="proj", prompt="edit"))

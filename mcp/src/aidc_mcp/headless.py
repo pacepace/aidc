@@ -164,28 +164,29 @@ kill -0 "$1" 2>/dev/null || exit 0
 ''' + _TERM_THEN_KILL
 
 
-class DockerFailed(RuntimeError):
-    """docker could not run the command in the container: it could not be started,
-    did not answer in time, or exited non-zero. The message says which."""
+class BackendFailed(RuntimeError):
+    """The backend's program (docker or kubectl) could not run the command in the container:
+    it could not be started, did not answer in time, or exited non-zero. The message says
+    which."""
 
 
-async def _docker(*args: str, timeout: float = 20.0) -> bytes:
-    """The command's stdout. :raises DockerFailed: on any failure, with its stderr."""
+async def _backend(*args: str, timeout: float = 20.0) -> bytes:
+    """The command's stdout. :raises BackendFailed: on any failure, with its stderr."""
     try:
         proc = await asyncio.create_subprocess_exec(
             backend.program(), *args, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
-        raise DockerFailed(f"{backend.program()} could not be started: {exc}") from exc
+        raise BackendFailed(f"{backend.program()} could not be started: {exc}") from exc
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError as exc:
         proc.kill()
         await proc.wait()
-        raise DockerFailed(f"{backend.program()} did not answer within {timeout:.0f} s") from exc
+        raise BackendFailed(f"{backend.program()} did not answer within {timeout:.0f} s") from exc
     if proc.returncode:
         said = err.decode("utf-8", errors="replace").strip()[:300]
-        raise DockerFailed(f"{backend.program()} exited {proc.returncode}: {said or 'no message'}")
+        raise BackendFailed(f"{backend.program()} exited {proc.returncode}: {said or 'no message'}")
     return out
 
 
@@ -210,9 +211,9 @@ async def container_runs(container: str) -> list[dict[str, Any]] | None:
     """Every headless claude process in the container, or None when docker could not
     say (the container is down, paused, or docker did not answer)."""
     try:
-        out = await _docker(*backend.exec_args(container, ["bash", "-c", _LIST_SCRIPT],
+        out = await _backend(*backend.exec_args(container, ["bash", "-c", _LIST_SCRIPT],
                                                user="vscode", env={"RUN_ENV": RUN_ENV}))
-    except DockerFailed:
+    except BackendFailed:
         return None
     return parse_listing(out, time.time())
 
@@ -239,15 +240,15 @@ def merge(session: str, found: list[dict[str, Any]] | None) -> list[dict[str, An
 async def stop(container: str, run: Run) -> list[int]:
     """Stop every process of `run` in the container, and mark it stopped so a run not
     started yet never starts. The pids signalled; [] when none was found (it had ended,
-    or had not started). :raises DockerFailed: when the stop could not be carried out."""
+    or had not started). :raises BackendFailed: when the stop could not be carried out."""
     run.stopped = True
     return await stop_tagged(container, run.run_id)
 
 
 async def stop_tagged(container: str, run_id: str) -> list[int]:
     """Stop every process in the container carrying RUN_ENV=run_id.
-    :raises DockerFailed:"""
-    out = await _docker(*backend.exec_args(
+    :raises BackendFailed:"""
+    out = await _backend(*backend.exec_args(
         container, ["bash", "-c", _KILL_SCRIPT, "kill-run", run_id, str(_TERM_GRACE_S)],
         user="vscode", env={"RUN_ENV": RUN_ENV}), timeout=_TERM_GRACE_S + 20.0)
     return _pids(out)
@@ -255,8 +256,8 @@ async def stop_tagged(container: str, run_id: str) -> list[int]:
 
 async def stop_tree(container: str, pid: int) -> list[int]:
     """Stop the process `pid` in the container and everything below it.
-    :raises DockerFailed:"""
-    out = await _docker(*backend.exec_args(
+    :raises BackendFailed:"""
+    out = await _backend(*backend.exec_args(
         container, ["bash", "-c", _KILL_TREE_SCRIPT, "kill-tree", str(pid), str(_TERM_GRACE_S)],
         user="vscode"), timeout=_TERM_GRACE_S + 20.0)
     return _pids(out)

@@ -248,7 +248,7 @@ mcp_add_endpoints() {
 }
 
 mcp_start() {
-    local sel tok rc=0 eps state incluster="" known have expose
+    local sel tok rc=0 eps state incluster="" known expose
     # A token first: the pod mounts it, and a cluster that does not say whether there is one
     # must not get a second.
     tok=$(mcp_token_read) || rc=$?
@@ -280,11 +280,12 @@ mcp_start() {
     fi
     sel=$(k8s_node_selector) || exit 1
     k8s_ensure_transcripts "$ns" || exit 1
-    have=$(k8s_get "$ns" pvc "$K8S_MCP_STATE_CLAIM" -o name) \
-        || die "cannot read the MCP server's state claim in ${ns}: the cluster did not answer (${have})"
-    if [ -z "$have" ]; then
-        k8s_render_mcp_state | k8s_kubectl apply -f - >/dev/null || die "could not make the MCP server's state claim"
-    fi
+    rc=0
+    _k8s_claim_missing "$ns" "$K8S_MCP_STATE_CLAIM" "MCP server's state" || rc=$?
+    case "$rc" in
+        0) k8s_render_mcp_state | k8s_kubectl apply -f - >/dev/null || die "could not make the MCP server's state claim" ;;
+        2) exit 1 ;;
+    esac
     k8s_render_mcp_config | k8s_kubectl apply -f - >/dev/null || die "could not write the MCP server's config"
     mcp_load_settings
     if [ "${AIDC_MCP_SESSION_CREATE:-}" = true ]; then

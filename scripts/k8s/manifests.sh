@@ -282,16 +282,12 @@ EOF
 # (never applied over one that is: a changed size would be refused as a resize). Returns 1,
 # saying why on stderr, when the cluster cannot be asked or does not take it.
 k8s_ensure_transcripts() {
-    local have
-    if ! have=$(k8s_get "$1" pvc "$K8S_TRANSCRIPTS_CLAIM" -o name); then
-        printf '[aidc] error: cannot read the transcript mirror claim in %s: the cluster did not answer (%s)\n' "$1" "$have" >&2
-        return 1
-    fi
-    [ -z "$have" ] || return 0
-    if ! k8s_render_transcripts | k8s_kubectl apply -f - >/dev/null; then
-        printf '[aidc] error: could not make the transcript mirror claim in %s\n' "$1" >&2
-        return 1
-    fi
+    local rc=0
+    _k8s_claim_missing "$1" "$K8S_TRANSCRIPTS_CLAIM" "transcript mirror" || rc=$?
+    case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
+    k8s_render_transcripts | k8s_kubectl apply -f - >/dev/null && return 0
+    printf '[aidc] error: could not make the transcript mirror claim in %s\n' "$1" >&2
+    return 1
 }
 
 # _k8s_mirror_dir_cmd <folder> <uid>: the root init step that readies a pod's own folder of the

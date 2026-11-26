@@ -496,6 +496,16 @@ out=$(K_EXISTS=1 run egress demo ls)
 assert_has "ls lists it" "aidc-demo-egress-192-168-5-21:22" "$out"
 out=$(K_EXISTS=1 run egress demo add 192.168.5.21:2222)
 assert_has "a second port on the same host re-makes its relay with both" "aidc/egress-ports: \"22 2222\"" "$(cat "$K_APPLIED")"
+k8s_render_relay demo 192.168.5.21 192.168.5.21 live a "$SEL" 22 2222 \
+    | yq -N ea 'select(.kind == "Deployment")' -o=json - | jq -s '{items: [.[] | .status = {readyReplicas: 1}]}' > "$K_STATE/relays.json"
+: > "$K_APPLIED"
+out=$(K_EXISTS=1 K_TAINTED=1 run egress demo rm 192.168.5.21:22)
+assert_has "on a tainted session, rm of one of two ports removes the whole relay (re-making it would undo the freeze)" \
+    "the whole relay for 192.168.5.21 is removed, not re-made with port(s) 2222" "$out"
+assert_eq "  (nothing re-applied)" "" "$(cat "$K_APPLIED")"
+assert_has "  (the relay deleted)" "delete deployment/demo-egress-192-168-5-21" "$(cat "$K_LOG")"
+k8s_render_relay demo 192.168.5.21 192.168.5.21 live a "$SEL" 22 \
+    | yq -N ea 'select(.kind == "Deployment")' -o=json - | jq -s '{items: [.[] | .status = {readyReplicas: 1}]}' > "$K_STATE/relays.json"
 out=$(K_EXISTS=1 run egress demo rm 192.168.5.21:22)
 assert_has "rm of its only port removes the relay" "delete deployment/demo-egress-192-168-5-21 service/demo-egress-192-168-5-21 networkpolicy/demo-egress-192-168-5-21 networkpolicy/demo-egress-192-168-5-21-dev" "$(cat "$K_LOG")"
 assert_has "  and writes the names again" "exec -i pod/demo-proxy-abc -c names" "$(cat "$K_LOG")"

@@ -259,3 +259,61 @@ def test_a_cluster_server_watches_every_sessions_flag_from_its_start(k8s, monkey
     with TestClient(server.build_app()):
         pass
     assert started == [True]
+
+
+def _free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_the_server_answers_on_both_ports_and_stops_cleanly_on_sigterm(tmp_path):
+    """main() with a taint port: the MCP port keeps its bearer gate, the webhook port has only
+    the poke, and one SIGTERM stops both and the process returns 0."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    mcp_port, taint_port = _free_port(), _free_port()
+    (tmp_path / "mcp-token").write_text("t0ken\n", encoding="utf-8")
+    env = {**os.environ, "AIDC_MCP_PORT": str(mcp_port), "AIDC_MCP_TAINT_PORT": str(taint_port),
+           "AIDC_MCP_TOKEN_FILE": str(tmp_path / "mcp-token"),
+           "AIDC_MCP_AUDIT_LOG": str(tmp_path / "access.log"),
+           "AIDC_MCP_WATCHER_STATE": str(tmp_path / "state"),
+           "AIDC_MCP_TRANSCRIPTS": str(tmp_path / "transcripts")}
+    env.pop(backend.KIND_ENV, None)
+    proc = subprocess.Popen([sys.executable, "-m", "aidc_mcp"], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        def status(port, path, data=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
+                                         headers={"content-type": "application/json"})
+            try:
+                return urllib.request.urlopen(req, timeout=2).status
+            except urllib.error.HTTPError as exc:
+                return exc.code
+
+        deadline = time.time() + 30
+        while True:
+            try:
+                status(taint_port, "/taint", b"{}")
+                status(mcp_port, "/mcp", b"{}")
+                break
+            except OSError:
+                assert time.time() < deadline, "the server did not come up on both ports"
+                time.sleep(0.3)
+        assert status(mcp_port, "/mcp", b"{}") == 401          # the bearer gate, unchanged
+        assert status(taint_port, "/taint", b'{"session": 1}') == 400
+        assert status(taint_port, "/mcp", b"{}") in (404, 405)  # only the poke here
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=20) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert "taint_webhook_refused" in (tmp_path / "access.log").read_text(encoding="utf-8")

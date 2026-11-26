@@ -122,6 +122,12 @@ do_rm() {
         if [ "$port" = "$want" ]; then found=1; else left="${left:+${left} }${port}"; fi
     done
     [ "$found" = 1 ] || { info "${host}:${want} is not relayed (already gone?)"; return 0; }
+    # A tainted session gets no way out back (SEC-06): re-making its relay with the ports left
+    # would undo the freeze that cut it, so the whole relay goes.
+    if [ -n "$left" ] && ! k8s_untainted "$ns" "$NAME" 2>/dev/null; then
+        info "${NAME} is tainted (or its taint cannot be read): the whole relay for ${host} is removed, not re-made with port(s) ${left}"
+        left=""
+    fi
     if [ -n "$left" ]; then
         info "keeping ${host} port(s) ${left}: the relay restarts and its open connections will drop"
         # shellcheck disable=SC2086  # one port per word

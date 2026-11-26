@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import sys
 from collections.abc import AsyncIterator
 from typing import Any
@@ -212,7 +213,11 @@ async def _taint_poke(request: Request) -> Response:
     """POST /taint {"session": <name>} from a session's policy sidecar (Kubernetes, W-M4). It
     carries no token: the proxy pods are aidc's own, and nothing else reaches the port. A
     poke is never trusted: it only says which session's flag to read (service/taint.py)."""
-    body = await request.body()
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _TAINT_BODY_MAX:
+            break   # not a poke: read no further
     client = request.client.host if request.client else ""
     name: Any = None
     if len(body) <= _TAINT_BODY_MAX:
@@ -286,12 +291,22 @@ def main() -> int:
                                              port=int(taint_port), log_level="info",
                                              lifespan="off"))]
 
-    async def serve_both() -> None:
-        # A signal reaches one server's handler; when either stops, both stop.
-        tasks = [asyncio.ensure_future(srv.serve()) for srv in servers]
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    def stop_all() -> None:
         for srv in servers:
             srv.should_exit = True
+
+    async def serve_both() -> None:
+        # One set of signal handlers for both servers: each would install its own and, on its
+        # way out, raise the signal again under the one before it, so the process would end
+        # killed by its own SIGTERM rather than return. Either server stopping stops both.
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_all)
+        for srv in servers:
+            srv.capture_signals = contextlib.nullcontext  # type: ignore[method-assign,assignment]
+        tasks = [asyncio.ensure_future(srv.serve()) for srv in servers]
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        stop_all()
         await asyncio.gather(*tasks, return_exceptions=True)
     asyncio.run(serve_both())
     return 0

@@ -99,8 +99,11 @@ if [ "$GITCTL_LIB" = /opt/aidc/lib/gitctl ]; then
         printf 'gitctl: refused: gitwc works only in a Docker git container\n' >&2; exit 1
     fi
     AS_WC=0; [ "$(id -un)" = gitwc ] && AS_WC=1
-    # Who ran gitctl through sudo (sudo sets it; it is not the caller's to choose), for the log.
-    CALLER="${SUDO_USER:-$(id -un)}"
+    # Who ran gitctl: on gitrun's and gitcred's side the user sudo names (it sets SUDO_USER from
+    # the caller's real uid; it is not the caller's to choose), for the log and WRITE_VERBS; on
+    # the agent's side the user running it (a SUDO_USER there is only inherited: the request
+    # watcher on Docker is started through sudo by git, and runs gitctl as gitreq).
+    case "$ROLE" in run|cred) CALLER="${SUDO_USER:-$(id -un)}" ;; *) CALLER=$(id -un) ;; esac
     # What Docker mounted here (docker_wc_ok): the kernel's list, nothing the caller names.
     MOUNTINFO=/proc/self/mountinfo
     WC_UID=$(id -u gitwc 2>/dev/null || echo 1000)
@@ -126,7 +129,8 @@ else
     # AIDC_GITCTL_AS_WC=1 stands for running as gitwc (id -un), as AIDC_GITCTL_DOCKER stands for
     # /.dockerenv.
     AS_WC="${AIDC_GITCTL_AS_WC:-0}"
-    CALLER="${AIDC_GITCTL_CALLER:-$(id -un)}"
+    # The caller as sudo would name it: gitreq unless a test names another (WRITE_VERBS).
+    CALLER="${AIDC_GITCTL_CALLER:-gitreq}"
 fi
 ulimit -c 0 2>/dev/null || true
 
@@ -146,6 +150,20 @@ case "$verb" in
     pr-create|pr-comment|pr-merge|pr-view|pr-list|pr-view-json|pr-list-json|status|login|logout|protection|protect) VERB_ROLE=cred ;;
     ""|-h|--help|help) usage; exit 0 ;;
     *) die "${verb}: not a gitctl verb (gitctl --help)" ;;
+esac
+
+# The verbs that change GitHub (all but delete-branch, which only removes a branch GitHub has
+# merged, after a merge: tidy) run only for gitreq, the request holder, which runs them for a
+# request the user approved or the rules passed, or for the user's own `aidc git push|pr|merge|
+# protect` from their machine (owner ruling 2026-11-26). Checked on every side: as the agent's
+# side, where CALLER is the one who ran gitctl, and as gitrun's and gitcred's, where it is the
+# user sudo names (SUDO_USER, set from the caller's real uid: the agent, and gitwc, cannot be
+# gitreq there). So the agent (git) cannot push, open, comment on or merge a pull request, or
+# change protections, by gitctl or by sudo; it asks with gh, which writes a request.
+WRITE_VERBS="push pr-create pr-comment pr-merge protect"
+case " $WRITE_VERBS " in
+    *" $verb "*)
+        [ "$CALLER" = gitreq ] || die "${verb} changes GitHub, so it runs only as a request the user approves: in a working copy, gh pr create, gh pr merge or gh aidc push writes one (the user then runs aidc git approve <id>); or the user runs aidc git ${verb%%-*} from their own machine" ;;
 esac
 
 # No verb takes a free-form option: anything that looks like one is refused, whatever it says.

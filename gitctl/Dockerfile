@@ -71,8 +71,9 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 #   gitcred (2001) runs gh and git's credential helper; the only user that can read the
 #                  GitHub login, in its home on the git-cred claim (/var/lib/gitctl/gitcred).
 # git reaches the other two only through gitctl (gitctl/sudoers), a set of fixed verbs that
-# build their own command lines. /opt/aidc/bin, first on PATH, holds gitctl and a gh that
-# points there.
+# build their own command lines. /opt/aidc/bin, first on PATH, holds gitctl and gh: the same
+# stand-in as a session's (gh-standin.sh), which hands a push, pull request or merge to the
+# request holder (gitreq, below) as a request.
 RUN groupadd -g 2001 gitcred \
     && useradd -M -u 2001 -g 2001 -d /var/lib/gitctl/gitcred -s /usr/sbin/nologin gitcred \
     && groupadd -g 2002 gitrun \
@@ -87,10 +88,20 @@ RUN groupadd -g 2001 gitcred \
 # folder's mount point is the agent's, setgid in the session group, so a new aidc-git-requests
 # volume starts that way.
 RUN useradd -M -u 1000 -g 1000 -d /home/gitwc -s /usr/sbin/nologin gitwc \
-    && install -d -o gitwc -g session -m 0700 /home/gitwc \
-    && install -d -o root -g root -m 0755 /var/aidc \
-    && install -d -o git -g session -m 2755 /var/aidc/git-requests
-COPY gitctl-rules.sh gitctl.sh gitctl-run.sh gitctl-cred.sh gitctl-agent.sh git-requests.sh gh-shim.sh cred-helper.sh claude-hook.sh \
+    && install -d -o gitwc -g session -m 0700 /home/gitwc
+# gitreq (2003) holds the sessions' requests and decides them (git-requests.sh, owner ruling
+# 2026-11-26): the request folder, the session modes and the decisions are its, and gitctl runs
+# the verbs that change GitHub only for it. The agent (git) reaches it only through the sudo rule
+# naming the verbs that read requests; approvals come from outside the container (the user's
+# aidc, or the MCP server, exec as gitreq). In the session group, as the request folder's
+# requests/ and results/ are. Its home holds only its bundles. The request folder's mount point
+# is its, setgid in the session group, so a new aidc-git-requests volume starts that way.
+RUN groupadd -g 2003 gitreq \
+    && useradd -M -u 2003 -g 2003 -G session -d /var/lib/gitctl/gitreq -s /usr/sbin/nologin gitreq \
+    && install -d -o gitreq -g gitreq -m 0700 /var/lib/gitctl/gitreq \
+    && install -d -o root -g root -m 0755 /var/aidc /etc/aidc \
+    && install -d -o gitreq -g session -m 2755 /var/aidc/git-requests
+COPY gitctl-rules.sh gitctl.sh gitctl-run.sh gitctl-cred.sh gitctl-agent.sh git-requests.sh gh-standin.sh cred-helper.sh claude-hook.sh \
      git-claude.sh git-notify.sh transcript-mirror.sh claude-refresh.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
@@ -103,7 +114,7 @@ RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/
     && chmod 0755 /opt/aidc /opt/aidc/lib /opt/aidc/lib/gitctl /etc/claude-code \
     && chmod 0644 /opt/aidc/lib/gitctl/gitctl-rules.sh /opt/aidc/lib/gitctl/transcript-mirror.sh /etc/gitconfig /etc/claude-code/managed-settings.json \
                   /etc/claude-code/CLAUDE.md \
-    && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/lib/gitctl/gh-shim.sh \
+    && chmod 0755 /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/lib/gitctl/gh-standin.sh \
                   /opt/aidc/lib/gitctl/cred-helper.sh /opt/aidc/lib/gitctl/claude-hook.sh \
                   /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/lib/gitctl/git-notify.sh \
                   /opt/aidc/lib/gitctl/claude-refresh.sh \
@@ -112,7 +123,7 @@ RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/
     && visudo -c -f /etc/sudoers.d/aidc-gitctl \
     && install -d -m 0755 /opt/aidc/bin \
     && ln -s /opt/aidc/lib/gitctl/gitctl.sh /opt/aidc/bin/gitctl \
-    && ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh \
+    && ln -s /opt/aidc/lib/gitctl/gh-standin.sh /opt/aidc/bin/gh \
     && ln -s /opt/aidc/lib/gitctl/git-requests.sh /opt/aidc/bin/git-requests \
     && ln -s /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/bin/git-claude \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/aidc/bin:*) ;; *) PATH="/opt/aidc/bin:$PATH" ;; esac' \

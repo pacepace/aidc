@@ -956,6 +956,19 @@ spec:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
 ---
+# The request holder's settings (gitctl/git-requests.sh): where the request folder is, the
+# user's disk, and the user's git mode. Mounted read-only in both of the pod's containers: the
+# holder reads its mode from here (sudo drops the environment), and nothing in the pod holds an
+# API token, so nothing in it can change the mode.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: git-settings, namespace: ${ns}, labels: {${labels}, app: git}}
+data:
+  settings: |
+    requests=$(k8s_git_requests_path)
+    disk=/home/${AIDC_K8S_USER}
+    mode=${AIDC_K8S_GIT_MODE:-ask}
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: git-home, namespace: ${ns}, labels: {${labels}, app: git}}
@@ -1044,9 +1057,6 @@ spec:
             - {name: AIDC_USER, value: "${AIDC_K8S_USER}"}
             - {name: AIDC_GIT_REQUESTS, value: "$(k8s_git_requests_path)"}
             - {name: AIDC_GIT_MODE, value: "${AIDC_K8S_GIT_MODE:-ask}"}
-            # In ask mode a waiting request is handed to the git agent's Claude, which asks the
-            # user with its question tool (the approval path every session's question takes).
-            - {name: AIDC_GIT_NOTIFY, value: /opt/aidc/lib/gitctl/git-notify.sh}
             - {name: AIDC_SESSION, value: "${K8S_GIT_SESSION}"}
           securityContext:
             runAsUser: 2000
@@ -1065,12 +1075,42 @@ spec:
             # The repos the user added (aidc repo add, from the laptop): read-only, and the pod
             # holds no API token, so nothing in it can add one (gitctl, ADDED_LIST).
             - {name: repos, mountPath: /etc/aidc/git-repos, readOnly: true}
+            - {name: settings, mountPath: /etc/aidc/git-settings, readOnly: true}
+        # The request holder (gitreq): takes the sessions' requests, holds them in ask mode,
+        # and alone runs the gitctl verbs that change GitHub, out of the agent's reach (owner
+        # ruling 2026-11-26). A container of its own: kubectl exec cannot choose a user, so the
+        # user's aidc git approve|deny|mode (and the MCP server carrying out an orchestrator's
+        # answer) reach gitreq by exec into this container, which nothing in the agent's can.
+        # The agent's container reaches it only through the sudo rule naming the reading verbs.
+        - name: gitreq
+          image: ${img}
+          imagePullPolicy: Always
+          command: [/opt/aidc/lib/gitctl/git-requests.sh, watch]
+          workingDir: /var/lib/gitctl/gitreq
+          env:
+            - {name: HOME, value: /var/lib/gitctl/gitreq}
+          securityContext:
+            runAsUser: ${K8S_GIT_HOLDER_UID}
+            runAsGroup: ${K8S_GIT_HOLDER_UID}
+            runAsNonRoot: true
+            privileged: false
+            # sudo, to gitrun and gitcred for gitctl's verbs (gitctl/sudoers).
+            allowPrivilegeEscalation: true
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, AUDIT_WRITE]}
+          resources: {requests: {cpu: 50m, memory: 128Mi}}
+          volumeMounts:
+            - {name: disk, mountPath: "/home/${AIDC_K8S_USER}"}
+            - {name: cred, mountPath: /var/lib/gitctl/gitcred}
+            - {name: run-store, mountPath: /var/lib/gitctl/gitrun}
+            - {name: repos, mountPath: /etc/aidc/git-repos, readOnly: true}
+            - {name: settings, mountPath: /etc/aidc/git-settings, readOnly: true}
       volumes:
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: home, persistentVolumeClaim: {claimName: git-home}}
         - {name: cred, persistentVolumeClaim: {claimName: git-cred}}
         - {name: run-store, persistentVolumeClaim: {claimName: git-run}}
         - {name: repos, configMap: {name: git-repos, defaultMode: 292}}  # 0444
+        - {name: settings, configMap: {name: git-settings, defaultMode: 292}}  # 0444
 EOF2
 }
 
@@ -1108,7 +1148,7 @@ k8s_render_git_repos() {
 #           check gets an error, not that folder deleted by root.
 # shellcheck disable=SC2016  # run by the pod's shell
 K8S_REPO_DIR_SCRIPT='set -eu
-p="$1" top="$2" mode="$3" agent="$4"
+p="$1" top="$2" mode="$3" agent="$4" holder="${5:-}"
 cd -P "$top"
 rest="${p#"$top"/}" here="$top"
 while [ -n "$rest" ]; do
@@ -1131,9 +1171,12 @@ case "$mode" in
         chown "$agent:1000" . && chmod 0755 .
         echo "ready: $p" ;;
     requests)
-        if [ "$(stat -c %u .)" != "$agent" ]; then
+        # Given to the request holder. One the agent held, before requests moved out of its
+        # reach, is given to the holder with what is in it (no symlink followed).
+        if [ "$(stat -c %u .)" = "$agent" ]; then chown -R -h "$holder" .
+        elif [ "$(stat -c %u .)" != "$holder" ]; then
             if [ -n "$(ls -A .)" ]; then echo "refused: $p holds files and does not belong to the git container: move it aside" >&2; exit 3; fi
-            chown "$agent:1000" .
+            chown "$holder:1000" .
         fi
         chmod 2755 .
         echo "ready: $p" ;;
@@ -1173,7 +1216,7 @@ spec:
   containers:
     - name: repo-dir
       image: ${K8S_INIT_IMAGE}
-      command: [sh, -c, $(printf '%s' "$K8S_REPO_DIR_SCRIPT" | jq -Rs .), repo-dir, "${path}", "/home/${AIDC_K8S_USER}", "${mode}", "${K8S_GIT_AGENT_UID}"]
+      command: [sh, -c, $(printf '%s' "$K8S_REPO_DIR_SCRIPT" | jq -Rs .), repo-dir, "${path}", "/home/${AIDC_K8S_USER}", "${mode}", "${K8S_GIT_AGENT_UID}", "${K8S_GIT_HOLDER_UID}"]
       securityContext:
         runAsUser: 0
         runAsGroup: 0

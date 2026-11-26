@@ -31,6 +31,30 @@ ruling 2026-11-26).
   descriptions exist twice for this one commit.
 - #76: `file_put` writes through a temporary file renamed over the target instead of `install -m
   MODE /dev/stdin PATH`, which the session image's uutils coreutils refuse on an existing file.
+- Chunk 13 (owner ruling 2026-11-26, git approvals out of the agent's reach): a user of its own
+  in the git container, `gitreq` (2003), holds and decides requests. The request folder, the
+  session modes (now `state/modes` in it) and every decision are its. The agent (git) reaches it
+  only through a sudo rule for list, show, prompt, handoff, handed and watch; approve, deny and
+  the mode and record verbs refuse git and anything reached through sudo. gitctl's GitHub writes
+  (push, pr-create, pr-comment, pr-merge, protect) run only for gitreq, checked on every side.
+  The user's `aidc git approve|deny|mode|push|pr|merge|protect` and aidc's session records run as
+  gitreq: `docker exec -u gitreq` on Docker, and on Kubernetes an exec into the git pod's new
+  `gitreq` container, which runs the watcher. The holder's mode and paths come from a read-only
+  settings file (Docker: `~/.config/aidc/git-settings`; Kubernetes: the `git-settings`
+  ConfigMap). The agent's `gh` is now the sessions' stand-in, so its own pushes and pull requests
+  are requests too (always ask). Waiting requests reach its Claude by the main process asking the
+  holder (handoff), not by the watcher typing in. The agent's question names the request id, and
+  it answers with the `aidc git approve|deny` to run. Setup gives the holder a request folder the
+  agent held, contents included.
+
+## Consumer note (chunk 13)
+- `aidc git setup` must run again on each backend (new image, the gitreq container on
+  Kubernetes, the settings file). Sessions must be created again: their gh stand-in checks the
+  request folder is gitreq's. Sessions' own modes start again from the user's mode.
+- Answering the git agent's question in its terminal no longer approves: run
+  `aidc git approve|deny <id>`. Asking the agent to push or open a pull request makes a request.
+- The MCP server's entry point for an orchestrator's answer is `git-requests approve|deny <id>`
+  by exec as gitreq (build plan chunk 13, notes).
 
 **Proof:** chunk 02: the MCP suite is green; #76 reproduced in `ubuntu:26.04` (uutils 0.10.0: `install` exits 1 on an existing file) and the new write checked there (overwrite, mode applied, no temporary file left, a missing directory fails). Chunk 01: the MCP suite is green on the new lock; the image builds from it
 (`docker build`, test tag) and imports the server with no git left in it.

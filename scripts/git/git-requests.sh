@@ -11,8 +11,8 @@ if [ $# = 1 ]; then printf '%s' "$1" | grep -Eq '^[0-9a-f]{32}$' || die "${1}: n
 gb_require
 gb_target
 if [ $# = 1 ]; then
-    gb_exec git-requests show "$1" 2>&1 | aidc_printable
+    gb_exec_req git-requests show "$1" 2>&1 | aidc_printable
 else
-    gb_exec git-requests list 2>&1 | aidc_printable
+    gb_exec_req git-requests list 2>&1 | aidc_printable
 fi
 exit "${PIPESTATUS[0]}"

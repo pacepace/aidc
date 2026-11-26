@@ -9,5 +9,5 @@ set -euo pipefail
 printf '%s' "$1" | grep -Eq '^[0-9a-f]{32}$' || die "${1}: not a request id"
 gb_require
 gb_target
-gb_exec git-requests deny "$1" "${2:-}" 2>&1 | aidc_printable
+gb_exec_req git-requests deny "$1" "${2:-}" 2>&1 | aidc_printable
 exit "${PIPESTATUS[0]}"

@@ -23,6 +23,6 @@ case "$ans" in
     y|Y|yes|YES|Yes) ;;
     *) info "left as it is"; exit 0 ;;
 esac
-report=$(gb_exec gitctl protect "$repo" 2>&1 | aidc_printable || true)
+report=$(gb_exec_req gitctl protect "$repo" 2>&1 | aidc_printable || true)
 [ "$(printf '%s\n' "$report" | tail -n1)" = end ] || die "GitHub did not take it: $(printf '%s\n' "$report" | grep -v '^$' | tail -n1)"
 printf '%s\n' "$report" | aidc_git_print_protection || info "some protections are still off (see above)"

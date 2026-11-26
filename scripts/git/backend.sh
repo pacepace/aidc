@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Sourced by every scripts/git/git-<verb>.sh: the backend's library, which defines the small
 # interface each verb reaches the git container through (gb_require, gb_target, gb_exec,
+# gb_exec_req, gb_exec_req_in (as the request holder, gitreq: deciding, and changing GitHub),
 # gb_exec_in, gb_exec_tty, gb_repo_arg, gb_repos, gb_repo_ok, gb_settings, gb_session_token,
 # gb_sessions, gb_status_head, gb_status_tail; scripts/docker/lib.sh and scripts/k8s/lib.sh).
 # The backend is AIDC_GIT_BACKEND (cmd-git.sh sets it), else the default every command uses.

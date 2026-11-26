@@ -17,12 +17,13 @@
 #   gh aidc push [<branch>]                                           push only
 #   gh aidc request <id> | gh aidc requests                           a request's result; the list
 #
-# The request folder belongs to the git container (uid 2000): a session can drop a request into
+# The request folder belongs to the git container's request holder (gitreq, uid 2003): a session
+# (or the git agent, whose gh is this same stand-in) can drop a request into
 # requests/ and read a result by its id, nothing else. Ids are random, so one session cannot
 # guess another's.
 set -u
 
-AGENT_UID="${AIDC_GIT_AGENT_UID:-2000}"
+HOLDER_UID="${AIDC_GIT_HOLDER_UID:-2003}"
 WAIT="${AIDC_GH_WAIT:-60}"
 REQ="${AIDC_GIT_REQUESTS:-}"
 STATE="${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/aidc-gh"
@@ -42,7 +43,7 @@ need_folder() {
     if [ -z "$REQ" ]; then
         die "no git container is set up for this session, so nothing here can push or reach GitHub. On the Docker backend, push and open pull requests from your own machine, or have the user run aidc git setup and create this session again."
     fi
-    { [ -d "$REQ/requests" ] && [ "$(stat -c %u "$REQ" 2>/dev/null)" = "$AGENT_UID" ]; } \
+    { [ -d "$REQ/requests" ] && [ "$(stat -c %u "$REQ" 2>/dev/null)" = "$HOLDER_UID" ]; } \
         || die "the git container's request folder (${REQ}) is not set up, or is not the git container's: ask the user to run aidc git setup"
 }
 
@@ -138,7 +139,7 @@ finish() {
             die "no answer from the git container yet (request ${id}${state:+, $state}); try again, or: gh aidc request ${id}"
         fi
         case "$state" in
-            pending) echo "requested; waiting for approval (request ${id}). Check it with: gh aidc request ${id}  (or gh pr status)" ;;
+            pending) echo "requested; waiting for approval (request ${id}): the user approves it with aidc git approve ${id} on their own machine. Check it with: gh aidc request ${id}  (or gh pr status)" ;;
             running) echo "requested; the git container is running it (request ${id}). Check it with: gh aidc request ${id}" ;;
             *) echo "requested; the git container took it and has not answered yet (request ${id}). Check it with: gh aidc request ${id}" ;;
         esac

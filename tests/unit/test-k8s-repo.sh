@@ -150,7 +150,7 @@ assert_eq "no API token, no service links, never restarted" '[false,false,"Never
 assert_eq "it mounts only the user's disk, at /home/<user>" \
     '[[{"name":"disk","mountPath":"/home/alice"}],[{"name":"disk","persistentVolumeClaim":{"claimName":"disk"}}]]' \
     "$(pod '[.containers[0].volumeMounts, .volumes]')"
-assert_eq "its arguments are the folder, the disk, the mode and the agent's uid" '["repo-dir","/home/alice/hello","/home/alice","make","2000"]' \
+assert_eq "its arguments are the folder, the disk, the mode, the agent's uid and the request holder's" '["repo-dir","/home/alice/hello","/home/alice","make","2000","2003"]' \
     "$(pod '.containers[0].command[3:]')"
 assert_eq "it lands where sessions land" '[{"kubernetes.io/hostname":"n1"},[{"key":"role","operator":"Equal","value":"dev","effect":"NoSchedule"}]]' \
     "$(pod '[.nodeSelector, .tolerations]')"
@@ -375,6 +375,23 @@ RD_SCRIPT=$(bash -c '. "$AIDC_SCRIPTS/k8s/lib.sh"; . "$AIDC_SCRIPTS/k8s/manifest
 assert_eq "the rendered folder pod runs exactly this script" "$RD_SCRIPT" "$(run repo add octo/hello >/dev/null; q 'select(.kind == "Pod") | .spec.containers[0].command[2]' | head -1 | jq -r .)"
 rd() { : > "$SCRATCH/owner.log"; ROUT=$(PATH="$SCRATCH/rbin:$PATH" sh -c "$RD_SCRIPT" repo-dir "$1" "$SCRATCH/rdisk" "$2" 2000 2>&1); RRC=$?; OWN=$(cat "$SCRATCH/owner.log"); }
 D="$SCRATCH/rdisk"
+# The request folder (mode requests): the request holder's. The folder here is the tester's, so
+# the tester's uid stands for whichever owner a case needs (the agent's, or the holder's).
+me=$(id -u)
+rq() { : > "$SCRATCH/owner.log"; ROUT=$(PATH="$SCRATCH/rbin:$PATH" sh -c "$RD_SCRIPT" repo-dir "$D/.aidc/git-requests" "$D" requests "$1" "$2" 2>&1); RRC=$?; OWN=$(cat "$SCRATCH/owner.log"); }
+rq 2000 2003
+assert_eq "a new request folder is made and given to the request holder, setgid" \
+    "0|chown 2003:1000 . in $D/.aidc/git-requests|chmod 2755 . in $D/.aidc/git-requests" \
+    "$RRC|$(printf '%s\n' "$OWN" | grep -F " in $D/.aidc/git-requests" | paste -sd'|')"
+touch "$D/.aidc/git-requests/kept"
+rq "$me" 2003
+assert_eq "one the agent held (before requests moved out of its reach) is given over with its contents, no symlink followed" \
+    "0|chown -R -h 2003 . in $D/.aidc/git-requests" "$RRC|$(printf '%s\n' "$OWN" | grep chown | paste -sd'|')"
+rq 2000 "$me"
+assert_eq "one the holder has is left as it is" "0|" "$RRC|$(printf '%s\n' "$OWN" | grep chown | paste -sd'|')"
+rq 2000 2003
+assert_eq "one that holds files and is neither's is refused" "3|" "$RRC|$(printf '%s\n' "$OWN" | grep chown | paste -sd'|')"
+rm -rf "$D/.aidc"
 rd "$D/a/b/proj" make
 assert_eq "a new repo folder is made, with the folders on the way" "0 yes" "$RRC $([ -d "$D/a/b/proj" ] && echo yes)"
 assert_eq "the folders on the way go to the session user; the repo folder to the agent, writable by it alone" \

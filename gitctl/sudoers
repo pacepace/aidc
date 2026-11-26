@@ -15,9 +15,19 @@
 # laptop), mounted read-only at /etc/aidc/git-repos: the agent and gitwc can reach gitrun's
 # add-copy (as gitctl clone and adopt do), but gitrun makes a copy of, and has-copy answers yes
 # for, only a repo on that list.
-Defaults:git,gitrun,gitcred,gitwc env_reset, !lecture, !use_pty
-Defaults:git,gitrun,gitcred,gitwc secure_path="/usr/bin:/bin"
+#
+# gitreq (2003) holds the sessions' requests and decides them (git-requests.sh; owner ruling
+# 2026-11-26): it is the only caller gitrun and gitcred run a verb that changes GitHub for
+# (push, pull requests, merges, issue writes), each for a request the user approved or the
+# rules passed. git reaches gitreq only for the verbs that read requests, hand one to the agent,
+# or start the one watcher; never to approve, deny or set a mode, which only gitreq reached
+# directly runs (the user's aidc, or the MCP server, from outside the container). No rule leads
+# from gitreq, gitrun, gitcred or gitwc to git or gitreq.
+Defaults:git,gitrun,gitcred,gitwc,gitreq env_reset, !lecture, !use_pty
+Defaults:git,gitrun,gitcred,gitwc,gitreq secure_path="/usr/bin:/bin"
 git     ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+git     ALL=(gitreq) NOPASSWD: /opt/aidc/lib/gitctl/git-requests.sh watch, /opt/aidc/lib/gitctl/git-requests.sh list, /opt/aidc/lib/gitctl/git-requests.sh show *, /opt/aidc/lib/gitctl/git-requests.sh prompt *, /opt/aidc/lib/gitctl/git-requests.sh handoff, /opt/aidc/lib/gitctl/git-requests.sh handed *
+gitreq  ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitwc   ALL=(gitrun,gitcred)       NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitrun  ALL=(gitcred)              NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
 gitcred ALL=(gitrun)               NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh has-copy *

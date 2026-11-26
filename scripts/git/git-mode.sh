@@ -13,15 +13,15 @@ set -euo pipefail
 gb_require
 if [ $# = 0 ]; then
     gb_target
-    gb_exec git-requests modes 2>&1 | aidc_printable
+    gb_exec_req git-requests modes 2>&1 | aidc_printable
     exit "${PIPESTATUS[0]}"
 fi
 [ $# = 2 ] || die "usage: aidc git mode [<session> <rules|ask|default>]"
 NAME="$1" MODE="$2"
 validate_session_name "$NAME"
-! aidc_is_git_session "$NAME" || die "the git agent sends no requests; its mode is the user's"
+! aidc_is_git_session "$NAME" || die "the git agent has no mode: its own requests carry no session token, so they always wait for your approval"
 case "$MODE" in rules|ask|default) ;; *) die "${MODE}: not rules, ask or default" ;; esac
 gb_target
 token=$(gb_session_token "$NAME") || exit 1
-printf '%s\n' "$token" | gb_exec_in git-requests mode "$NAME" "$MODE" 2>&1 | aidc_printable
+printf '%s\n' "$token" | gb_exec_req_in git-requests mode "$NAME" "$MODE" 2>&1 | aidc_printable
 exit "${PIPESTATUS[1]}"

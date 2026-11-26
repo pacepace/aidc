@@ -52,6 +52,8 @@ cat > "$SCRATCH/bin/docker" <<'STUB'
 printf '%s\n' "$*" >> "$D_LOG"
 [ "${D_DOWN:-}" = 1 ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2; exit 1; }
 a="$*"
+# The request holder's execs carry its own HOME; the patterns below name only the user.
+a="${a//-u gitreq -e HOME=\/var\/lib\/gitctl\/gitreq/-u gitreq}"
 case "$a" in
     info*) exit 0 ;;
     "image inspect "*) exit 0 ;;
@@ -91,20 +93,20 @@ case "$a" in
     "exec -u git aidc-git-dev gitctl adopt "*) cp "$HOME/.config/aidc/git-added/repos" "$D_LOG.list" 2>/dev/null
         [ "${D_ADOPT_RC:-0}" = 0 ] && { echo "added o/r (${a##* })"; exit 0; }
         echo "gitctl: refused: cannot fetch https://github.com/o/r" >&2; exit 1 ;;
-    "exec -u git aidc-git-dev gitctl protection "*|"exec -u git aidc-git-dev gitctl protect "*)
+    "exec -u git aidc-git-dev gitctl protection "*|"exec -u gitreq aidc-git-dev gitctl protect "*)
         printf 'repo o/r\ndefault main\nforce-push blocked\ndeletion blocked\nmerge-commit allowed\nend\n'; exit 0 ;;
     "exec -u git aidc-git-dev gitctl tidy "*) printf 'deleted-remote feat\nunpushed 2 other\nend\n'; exit 0 ;;
-    "exec -u git aidc-git-dev gitctl push "*) echo "pushed ${a##* } 0123456789abcdef"; exit 0 ;;
-    "exec -u git aidc-git-dev gitctl "*) exit 0 ;;
-    "exec -u git aidc-git-dev git-requests list") printf 'ID  RECEIVED\nabc\033[31m  x\n'; exit 0 ;;
-    "exec -u git aidc-git-dev git-requests first-use "*) exit 0 ;;
-    "exec -u git aidc-git-dev git-requests pr-base "*)
+    "exec -u gitreq aidc-git-dev gitctl push "*) echo "pushed ${a##* } 0123456789abcdef"; exit 0 ;;
+    "exec -u git aidc-git-dev gitctl "*|"exec -u gitreq aidc-git-dev gitctl "*) exit 0 ;;
+    "exec -u gitreq aidc-git-dev git-requests list") printf 'ID  RECEIVED\nabc\033[31m  x\n'; exit 0 ;;
+    "exec -u gitreq aidc-git-dev git-requests first-use "*) exit 0 ;;
+    "exec -u gitreq aidc-git-dev git-requests pr-base "*)
         [ "${D_NO_BASE:-}" = 1 ] && { echo "git-requests: no base branch given and origin has no default" >&2; exit 1; }
         set -- $a; [ $# = 8 ] && echo "$8" || echo main; exit 0 ;;
-    "exec -u git aidc-git-dev git-requests "*) echo "ok"; exit 0 ;;
-    "exec -i -u git aidc-git-dev git-requests mode "*) cat > "$D_STDIN"; echo "mode set"; exit 0 ;;
-    "exec -i -u git aidc-git-dev git-requests sync") cat > "$D_STDIN"; echo "sessions: 1 registered, 0 gone pruned"; exit 0 ;;
-    "exec -i -u git aidc-git-dev bash -c "*) cat > "$D_STDIN"; echo "https://github.com/o/r/pull/7"; exit 0 ;;
+    "exec -u gitreq aidc-git-dev git-requests "*) echo "ok"; exit 0 ;;
+    "exec -i -u gitreq aidc-git-dev git-requests mode "*) cat > "$D_STDIN"; echo "mode set"; exit 0 ;;
+    "exec -i -u gitreq aidc-git-dev git-requests sync") cat > "$D_STDIN"; echo "sessions: 1 registered, 0 gone pruned"; exit 0 ;;
+    "exec -i -u gitreq aidc-git-dev bash -c "*) cat > "$D_STDIN"; echo "https://github.com/o/r/pull/7"; exit 0 ;;
     "exec -it "*) exit 0 ;;
 esac
 # D_LENIENT=1: any other call succeeds silently (aidc kill's many teardown steps).
@@ -158,7 +160,8 @@ done
 seed=$(calls)
 assert_has "the seed step runs as root with no network" "--network none --user 0:0 --cap-drop ALL" "$seed"
 assert_has "holding only a copy's and a chown's capabilities" "--cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges" "$seed"
-assert_has "it gives the request folder to the agent, setgid in the session group" "chown 2000:1000 /requests" "$seed"
+assert_has "it gives the request folder to the request holder (gitreq), setgid in the session group" "chown 2003:1000 /requests" "$seed"
+assert_has "one the agent held is given to the holder, contents too, no symlink followed" "2000) chown -R -h 2003 /requests" "$seed"
 assert_has "the login's volume is gitcred's (0711)" "chown 2001:2001 /cred && chmod 0711 /cred" "$seed"
 assert_has "gitrun's store is its alone (0700)" "chown 2002:2002 /run-store && chmod 0700 /run-store" "$seed"
 assert_has "a home made earlier gets the image's Claude, as the git user with no capabilities" \
@@ -180,7 +183,10 @@ assert_has "it is the dev container of the session named git (aidc list, attach 
 assert_has "its request folder is the shared volume" "-e AIDC_GIT_REQUESTS=/var/aidc/git-requests" "$git_run"
 assert_has "mounted at that path" "-v aidc-git-requests:/var/aidc/git-requests" "$git_run"
 assert_has "the git mode is the user's (default ask)" "-e AIDC_GIT_MODE=ask" "$git_run"
-assert_has "waiting requests are handed to the git agent's Claude" "-e AIDC_GIT_NOTIFY=/opt/aidc/lib/gitctl/git-notify.sh" "$git_run"
+assert_has "the request watcher runs here, as gitreq (started through its sudo rule)" "-e AIDC_GIT_WATCH_HERE=1" "$git_run"
+assert_has "the holder's settings are mounted read-only" "-v ${HOMEP}/.config/aidc/git-settings:/etc/aidc/git-settings:ro" "$git_run"
+assert_eq "and name the request folder, the disk and the user's mode" "requests=/var/aidc/git-requests|disk=${HOMEP}|mode=ask" \
+    "$(paste -sd'|' "$HOMEP/.config/aidc/git-settings/settings")"
 assert_has "the user's disk is their home here" "-e AIDC_GIT_DISK=${HOMEP} " "$git_run"
 assert_has "its Claude goes out through the proxy" "-e HTTPS_PROXY=http://aidc-proxy:3128" "$git_run"
 assert_has "the agent's home, login and private copies are volumes" \
@@ -305,7 +311,8 @@ out=$(run git push "$HOMEP/notarepo" feat)
 assert_has "a path that is not an added working copy is refused" "aidc repo add <working copy> first" "$out"
 assert_not_has "before the git container is asked" "gitctl" "$(calls)"
 out=$(run git push "$WC" feat)
-assert_has "push runs gitctl push in the git container, as the agent" "exec -u git aidc-git-dev gitctl push ${WC} feat" "$(calls)"
+assert_has "push runs gitctl push in the git container, as the request holder (the agent cannot)" \
+    "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev gitctl push ${WC} feat" "$(calls)"
 assert_has "and says what was pushed" "pushed feat" "$out"
 mkdir -p "$WC/wt"
 out=$(run git push "$WC/wt" feat)
@@ -314,7 +321,8 @@ printf 'The body\n' > "$SCRATCH/body"
 out=$(run git pr "$WC" feat --title "Add it" --body-file "$SCRATCH/body")
 assert_has "pr pushes, then opens the pull request with the body on stdin" "https://github.com/o/r/pull/7" "$out"
 assert_eq "the body went in on stdin" "The body" "$(cat "$D_STDIN")"
-assert_has "the base is settled before the push" "exec -u git aidc-git-dev git-requests pr-base ${WC}" "$(calls | grep -E 'pr-base|gitctl push' | head -n1)"
+assert_has "the base is settled before the push" "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests pr-base ${WC}" "$(calls | grep -E 'pr-base|gitctl push' | head -n1)"
+assert_has "and the pull request is opened as the holder" "exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev bash -c" "$(calls)"
 assert_has "and handed to pr-create: origin's default" "bash ${WC} feat main Add it" "$(calls)"
 : > "$D_LOG"
 out=$(run git pr "$WC" feat --base release --title "Add it" --body-file "$SCRATCH/body")
@@ -327,7 +335,7 @@ assert_has "..." "exit=1" "$out"
 assert_not_has "and nothing is pushed" "gitctl push" "$(calls)"
 assert_not_has "nor a pull request asked for" "bash -c" "$(calls)"
 out=$(run git merge "$WC" 7)
-assert_has "merge merges, then tidies" "gitctl pr-merge ${WC} 7" "$(calls)"
+assert_has "merge merges as the holder, then tidies" "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev gitctl pr-merge ${WC} 7" "$(calls)"
 assert_has "and reports what is left" "unpushed: other (2 commit(s) on no GitHub branch)" "$out"
 out=$(run git tidy)
 assert_has "tidy with no repo tidies every working copy added" "gitctl tidy ${WC}" "$(calls)"
@@ -336,23 +344,26 @@ assert_has "protect shows the protections" "force pushes:   blocked" "$out"
 out=$(run git requests)
 assert_not_has "control characters from sessions never reach the terminal" $'\033' "$out"
 out=$(run git approve 0123456789abcdef0123456789abcdef)
-assert_has "approve runs git-requests approve" "git-requests approve 0123456789abcdef0123456789abcdef" "$(calls)"
+assert_has "approve runs git-requests approve as the request holder, from outside the container" \
+    "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests approve 0123456789abcdef0123456789abcdef" "$(calls)"
+out=$(run git deny 0123456789abcdef0123456789abcdef "not now")
+assert_has "deny too" "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests deny 0123456789abcdef0123456789abcdef not now" "$(calls)"
 out=$(run git approve nope)
 assert_has "an id that is not one is refused" "not a request id" "$out"
 
 echo "=== aidc git mode: a session's own mode, by its token ==="
 out=$(D_SESSIONS=s1 D_TOKEN="$(printf 'a%.0s' $(seq 64))" run git mode s1 rules)
-assert_has "the session's token is read from its dev container and handed over on stdin" "exec -i -u git aidc-git-dev git-requests mode s1 rules" "$(calls)"
+assert_has "the session's token is read from its dev container and handed over on stdin" "exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests mode s1 rules" "$(calls)"
 assert_eq "the token itself, never on a command line" "$(printf 'a%.0s' $(seq 64))" "$(cat "$D_STDIN")"
 assert_not_has "not in any docker argument" "$(printf 'a%.0s' $(seq 64))" "$(calls)"
 out=$(D_SESSIONS=s1 D_TOKEN="" run git mode s1 rules)
 assert_has "a session made before sessions had tokens is told to be made again" "create it again" "$out"
 out=$(run git mode git rules)
-assert_has "the git agent has no mode of its own" "the git agent sends no requests" "$out"
+assert_has "the git agent has no mode of its own: its requests always wait" "the git agent has no mode" "$out"
 for m in ask default; do
     : > "$D_STDIN"
     out=$(D_SESSIONS=s1 D_TOKEN="$(printf 'a%.0s' $(seq 64))" run git mode s1 "$m")
-    assert_has "${m}, too, is keyed on the session's token, on stdin" "exec -i -u git aidc-git-dev git-requests mode s1 ${m}" "$(calls)"
+    assert_has "${m}, too, is keyed on the session's token, on stdin" "exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests mode s1 ${m}" "$(calls)"
     assert_eq "..." "$(printf 'a%.0s' $(seq 64))" "$(cat "$D_STDIN")"
 done
 out=$(D_SESSIONS="" run git mode s9 ask)
@@ -361,15 +372,15 @@ assert_has "a session that does not exist is refused" "no session 's9'" "$out"
 echo "=== setup registers every session's token; kill forgets the session ==="
 : > "$D_STDIN"
 out=$(D_TOKEN="$(printf 'c%.0s' $(seq 64))" run git setup)
-assert_has "setup hands the git container every session's token (sync), on stdin" "exec -i -u git aidc-git-dev git-requests sync" "$(calls)"
+assert_has "setup hands the git container every session's token (sync), on stdin" "exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests sync" "$(calls)"
 assert_eq "the git agent's own container is not a session there" "s1 $(printf 'c%.0s' $(seq 64))" "$(cat "$D_STDIN")"
 assert_not_has "no token on a command line" "$(printf 'c%.0s' $(seq 64))" "$(calls)"
 out=$(D_LENIENT=1 D_SESSIONS=s1 run kill s1)
-assert_has "aidc kill has the git container forget the session (its token and mode)" "exec -u git aidc-git-dev git-requests forget s1" "$(calls)"
+assert_has "aidc kill has the git container forget the session (its token and mode)" "exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev git-requests forget s1" "$(calls)"
 out=$(D_LENIENT=1 D_SESSIONS=s1 D_STATE=absent run kill s1)
 assert_not_has "with no git container running, kill asks nothing of it" "git-requests forget" "$(calls)"
 cc=$(cat "$AIDC_ROOT/scripts/cmd-create.sh")
-assert_has "aidc create registers the new session's token, on stdin" '| docker exec -i -u git "$DK_GIT_CT" git-requests register "$NAME"' "$cc"
+assert_has "aidc create registers the new session's token, on stdin" '| docker exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" git-requests register "$NAME"' "$cc"
 
 echo "=== aidc git log ==="
 out=$(run git log)

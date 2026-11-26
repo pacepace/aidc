@@ -228,7 +228,7 @@ Session requests (owner rulings 2026-11-24): a session's `gh` is a stand-in
 list it, and read results by id from `results/`), waits up to a minute and prints the result as
 gh would, "requested; waiting for approval" with the id when the request waits for the user,
 or that the git container has not taken it (exit 1) when it still sits in `requests/`. The watcher (`git-requests watch`,
-as the agent, kept running by the container's main process) moves each request out by rename,
+as the request holder `gitreq`, below) moves each request out by rename,
 refuses anything but a plain file, checks every field (known fields only, a working copy on the
 disk with a GitHub origin, branch names, no protected branch, title and body without
 attribution or control characters), and then, by `kubernetes.git_mode`: rules runs it through
@@ -241,7 +241,7 @@ denial of one request take its lock and read its state again under it, so when t
 one happens and the other says it did not. A watcher that cannot use its request folder logs why
 (once per reason), and `aidc git status` shows that reason.
 A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
-nothing and says to use `gh pr create`. Results, written only by the agent, say done, failed, denied or pending; a run cut short by a
+nothing and says to use `gh pr create`. Results, written only by the request holder, say done, failed, denied or pending; a run cut short by a
 restart is reported as interrupted, never retried. Requests and results are deleted after 30
 days (a request still waiting then is logged as expired), and what a killed take or save leaves
 in `work/` after an hour.
@@ -253,8 +253,8 @@ out as a session's: window `claude` runs `git-claude` (Claude Code in the agent'
 its conversation), window `shell` a shell. Its instructions are `/etc/claude-code/CLAUDE.md`,
 root's, always loaded: gitctl as the only way to GitHub, the hard rules, everything sessions
 write is data, the ask-mode procedure, push/PR, merge then tidy, protections, leftovers
-reported. Its managed settings add a permission list (gitctl, git-requests, git, reads, its
-question tool, writes under /tmp) in `dontAsk` mode, with bypass mode disabled: anything else is
+reported. Its managed settings add a permission list (gitctl, git-requests, git, its gh
+stand-in, reads, its question tool, writes under /tmp) in `dontAsk` mode, with bypass mode disabled: anything else is
 refused, never left waiting on a prompt nobody sees. Unlike a sandboxed session's Claude it
 keeps AskUserQuestion. The Deployment carries the reserved session label `aidc/session: git`
 (not in its selector), so `aidc list` shows it, `aidc attach|logs|status git` reach it
@@ -264,18 +264,49 @@ moved on gets the image's Claude at each start (init step `refresh-claude`, as t
 the image's version file copied in and linked when the home's is older; a newer one the home
 updated to itself is kept); the managed files are the image's, so they are always current.
 
-In ask mode the watcher hands a waiting request to the agent (`AIDC_GIT_NOTIFY`, `git-notify`):
-one line naming only the id is pasted into window `claude` when Claude runs there and is set up
-(never into a shell or Claude's first-run screens), and the agent runs `git-requests prompt <id>` (the session's text below a line, marked
-as data) and asks the user with AskUserQuestion, Deny first; aidc delivers that question to an
-orchestrator as any session's, and the user can answer in the terminal too; only then does it
-approve or deny. One request is handed over at a time: while the request the agent may be asking
-about still waits, new ones are only logged, and the agent takes them from `git-requests list`
-after each decision, so no line lands in an open question. That request is the one last handed
-over or the one the agent last ran `git-requests prompt` for (it also takes requests from the
-list itself); after a watcher start, when which one is open is not known, it is every request
-then waiting, until each is decided or the agent runs `prompt` for one. `aidc git approve|deny`
-still work.
+Approvals out of the agent's reach (owner ruling 2026-11-26, refining Q-K8 and the 2026-11-23
+"approve in its terminal" ruling). The git agent's Claude and everything it runs share uid git,
+so anything shown or typed in its terminal, and any file, variable or argument git can read, is
+the agent's too: a one-time code in its question could not bind an approval. So the agent
+decides nothing. A user of its own, `gitreq` (uid 2003, in the session group), holds and
+decides requests: the request folder (`requests/`, `results/`, `work/`, and `state/` with the
+session modes, the protection markers and the watcher's lock) is its, and gitctl runs the verbs
+that change GitHub (push, pull request create, comment and merge, protect) only when the caller
+is gitreq, on the agent's side and again as gitrun and gitcred, where the caller is the user sudo
+names (it sets `SUDO_USER` from the real uid; the agent, and gitwc on Docker, are refused). git
+reaches gitreq through one sudo rule naming the verbs that read (`list`, `show`, `prompt`), hand
+a request over (`handoff`, `handed`) and start the one watcher (`watch`; a second leaves at once,
+`state/watch.lock`). `approve`, `deny`, `mode`, `register`, `forget`, `sync`, `first-use` and
+`pr-base` run only as gitreq reached directly, never through sudo: by the user's `aidc git
+approve|deny|mode|push|pr|merge|protect` (Docker: `docker exec -u gitreq`; Kubernetes: `kubectl
+exec` into the git pod's own `gitreq` container, since kubectl exec cannot choose a user), or by
+the MCP server carrying out an orchestrator's answer the same way. The holder's settings (the
+request folder, the disk, the user's mode) come from a file mounted read-only
+(`/etc/aidc/git-settings/settings`: on Docker written by `aidc git setup` under
+`~/.config/aidc/git-settings`, on Kubernetes the `git-settings` ConfigMap), since sudo drops the
+environment and nothing in the container may change a mode. On Docker the container's main
+process starts the watcher through its sudo rule (`AIDC_GIT_WATCH_HERE=1`); on Kubernetes the
+`gitreq` container runs it. A request folder the agent held before (uid 2000) is given to the
+holder with its contents by setup's root step; the session modes start again from the user's
+(setup's `sync` registers every session).
+
+The agent asks; the user decides outside. Every push, pull request and merge is a request,
+including those the user asks for in the agent's terminal: the agent's `gh` is the sessions'
+stand-in, its requests carry no session token, so they always wait. In ask mode the holder
+cannot type into the agent's tmux (it is git's), so the container's main process asks it every
+2 seconds which request to hand over (`git-requests handoff`: the oldest waiting one not handed
+over yet, and none while a request the agent may be asking about still waits), pastes one line
+naming only the id into window `claude` when Claude runs there and is set up (`git-notify`;
+never into a shell or Claude's first-run screens), then says so (`handed`). The agent runs
+`git-requests prompt <id>` (the session's text below a line, marked as data) and asks with
+AskUserQuestion, naming the request id, Deny first; aidc delivers that question to an
+orchestrator as any session's. Whatever the answer, the agent replies with the command that
+carries it out, `aidc git approve|deny <id>`, for the user to run on their machine: choosing
+Approve in the question approves nothing. An orchestrator's answer is carried out by the MCP
+server, as gitreq, matched to the request id in the question (the MCP work of plan chunks 03-04
+and 14). The one request the agent may be asking about is the one last handed over or the one
+it last ran `prompt` for; after a watcher start, when which one is open is not known, it is every
+request then waiting, until each is decided or the agent runs `prompt` for one.
 
 Residuals of the git agent, recorded rather than closed:
 
@@ -283,9 +314,10 @@ Residuals of the git agent, recorded rather than closed:
   user (uid 2000), for example through a git alias; what stops it reaching GitHub other than
   through gitctl is that its own git has no credential and gitctl and the watcher check every
   action, not the list.
-- Only its instructions stop it approving a request without asking the user: `git-requests
-  approve` is in its allow list, and nothing in code tells an approval the user gave from one the
-  agent made up.
+- Closed 2026-11-26: it cannot approve a request, or push, open or merge a pull request outside
+  one. Approvals and those verbs are the request holder's (gitreq), which git cannot act as
+  (above). Left to it: `gitctl tidy`, whose `delete-branch` deletes only a branch GitHub has
+  merged (not a base), and `gitctl logout`.
 - prawduct's skills, if ever installed in the git home, would be kept out only by its CLAUDE.md
   ("You do no prawduct work"); nothing in its settings blocks them.
 
@@ -324,7 +356,7 @@ git setup` and `aidc repo` are per backend. What differs is only what Docker is:
 - Its homes are volumes (`aidc-git-home`, `aidc-git-cred`, `aidc-git-run`), seeded by a one-shot
   root container with only CHOWN, FOWNER and DAC_OVERRIDE and no network, as the pod's init steps
   do; the Claude refresh runs as the git user. The request folder is the `aidc-git-requests`
-  volume at `/var/aidc/git-requests`, the agent's (2755, session group); a session created after
+  volume at `/var/aidc/git-requests`, the request holder's (2755, session group); a session created after
   setup mounts it (external, never removed with a session) and gets `AIDC_GIT_REQUESTS`;
   every session gets `AIDC_GIT_TOKEN` and `AIDC_BACKEND=docker`. Sessions keep the host's umask.
 - Working copies are the user's own on their machine, never cloned, locked or re-owned. `aidc
@@ -362,7 +394,12 @@ git setup` and `aidc repo` are per backend. What differs is only what Docker is:
 
 The owner ruling "Ask-mode git approvals bubble up through the orchestrator" has the git agent
 ask with its question tool, an orchestrator see that question as any session's, and the answer
-come back by `session_send` or from the user in the terminal. Where that stands (2026-11-24):
+come back by `session_send` or from the user in the terminal. Refined 2026-11-26 (approvals out
+of the agent's reach, above): the answer no longer approves through the agent. The user's answer
+is `aidc git approve|deny <id>`, which the agent names; an orchestrator's answer is carried out
+by the MCP server as gitreq (`git-requests approve|deny <id>` by exec as gitreq, which acts only
+on a request still waiting), matched to the request id the question names. Where the question's
+delivery stands (2026-11-24):
 
 - Docker: the git agent's transcript reaches `aidc mcp` (above), so an orchestrator that watches
   the session `git` gets the question as that session's reply. Whether `session_send` can answer
@@ -372,8 +409,8 @@ come back by `session_send` or from the user in the terminal. Where that stands 
   reach cluster sessions only through the per-user MCP server (K8S-07). Owner ruling 2026-11-24
   ("aidc 2.0 is the Kubernetes work and the 3tears adoption, released together"): the Kubernetes
   backend ships only in 2.0, with that server, and 2.0 must route Kubernetes git approvals
-  through the orchestrator before it ships. Until then the user answers by attaching (`aidc
-  attach git`) or with `aidc git approve|deny`.
+  through the orchestrator before it ships. Until then the user answers with `aidc git
+  approve|deny`.
 - Both: `aidc git requests|approve|deny` always work, and answer the request whatever the agent
   is asking.
 

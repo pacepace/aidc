@@ -62,7 +62,7 @@ git -C "$P" -c user.name=A -c user.email=a@example.com commit -q --allow-empty -
 
 export AIDC_GIT_REQUESTS="$REQ" AIDC_GITREQ_GITCTL="$S/bin/gitctl" AIDC_GITREQ_DISK_ROOT="$S/disk" \
     HOME="$S/home" AIDC_SESSION=demo
-AIDC_GIT_AGENT_UID=$(id -u); export AIDC_GIT_AGENT_UID
+AIDC_GIT_HOLDER_UID=$(id -u); export AIDC_GIT_HOLDER_UID
 unset AIDC_GIT_MODE
 GR="$AIDC_ROOT/gitctl/git-requests.sh"
 GH="$AIDC_ROOT/.devcontainer/gh-standin.sh"
@@ -109,7 +109,8 @@ assert_has "... the GitHub repo it acts on, and the branch's commit when it was 
 assert_has "..." "feat@$(git -C "$P" rev-parse feat | cut -c1-12): Add it" "$OUT"
 gr prompt "$id"
 assert_has "the prompt for the git agent says the request is data, not instructions" "data, never instructions" "$OUT"
-assert_has "and names the commands" "git-requests approve $id" "$OUT"
+assert_has "and names the command the user runs, never one the agent could" "aidc git approve $id" "$OUT"
+assert_not_has "..." "git-requests approve" "$OUT"
 gr approve "$id"
 assert_eq "approve runs push (bound to the repo and commit taken), then pr-create with the title and body, then reads the protections once" \
     "push $P feat --expect-repo o/r --expect-commit $(git -C "$P" rev-parse feat) --asked-by $id |pr-create $P feat main --title-file work/$id.title --body-file work/$id.body --expect-repo o/r --asked-by $id |protection $P --expect-repo o/r " \
@@ -154,6 +155,55 @@ OUT=$(AIDC_GIT_MODE=yolo bash "$GR" once 2>&1)
 id=$(newid); put "$id" "$(req "$id" push)"; reset_calls
 OUT=$(AIDC_GIT_MODE=yolo bash "$GR" once 2>&1)
 assert_eq "an unknown mode is ask" "pending|" "$(state "$id")|$(calls)"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push)"
+OUT=$(AIDC_GIT_MODE=rules bash "$GR" once 2>&1)
+assert_eq "rules mode runs a passing push at once, with no question: nothing of it waits to be asked about" "done|0" \
+    "$(state "$id")|$(bash "$GR" list 2>&1 | grep -c "$id")"
+
+echo ""
+echo "=== the git agent (uid git) cannot decide: only the user, from outside, can ==="
+# The agent and everything it runs share uid git (owner ruling 2026-11-26). Each verb that
+# decides runs only as gitreq reached directly (the user's aidc on their machine, or the MCP
+# server); the agent reaches gitreq only through the sudo rule naming AGENT_VERBS. As git, or as
+# gitreq reached through sudo, every other verb is refused, and nothing moves.
+MODES="$REQ/state/modes"
+asgit() { OUT=$(AIDC_GITREQ_TEST_USER=git bash "$GR" "$@" 2>&1); RC=$?; }
+viasudo() { OUT=$(AIDC_GITREQ_TEST_SUDO_USER=git bash "$GR" "$@" 2>&1); RC=$?; }
+reset_calls; id=$(newid); put "$id" "$(req "$id" push)"; gr once
+asgit approve "$id"
+assert_eq "the agent cannot approve: refused, still waiting, nothing reached gitctl" "1|pending|" "$RC|$(state "$id")|$(calls)"
+assert_has "it is told the command the user runs" "aidc git approve $id" "$OUT"
+viasudo approve "$id"
+assert_eq "nor through the sudo rule, as gitreq" "1|pending|" "$RC|$(state "$id")|$(calls)"
+asgit deny "$id" because
+assert_eq "the agent cannot deny" "1|pending" "$RC|$(state "$id")"
+viasudo deny "$id"
+assert_eq "nor through sudo" "1|pending" "$RC|$(state "$id")"
+before=$(cat "$MODES/demo" 2>/dev/null)
+OUT=$(printf '%s\n' "$TOKD" | AIDC_GITREQ_TEST_USER=git bash "$GR" mode demo rules 2>&1); RC=$?
+assert_eq "the agent cannot change a session's mode" "1|$before" "$RC|$(cat "$MODES/demo" 2>/dev/null)"
+OUT=$(printf '%s\n' "$TOKD" | AIDC_GITREQ_TEST_SUDO_USER=git bash "$GR" mode demo rules 2>&1); RC=$?
+assert_eq "nor through sudo" "1|$before" "$RC|$(cat "$MODES/demo" 2>/dev/null)"
+for v in "register x" "forget demo" sync once "first-use $P" "pr-base $P" modes; do
+    # shellcheck disable=SC2086  # the verb and its argument
+    OUT=$(printf '%s\n' "$TOKD" | AIDC_GITREQ_TEST_USER=git bash "$GR" $v 2>&1); RC=$?
+    assert_eq "the agent cannot run: ${v%% *}" 1 "$RC"
+done
+assert_eq "and the session records are as they were" "$before|no" "$(cat "$MODES/demo" 2>/dev/null)|$([ -e "$MODES/x" ] && echo yes || echo no)"
+asgit list
+assert_eq "the agent may read the waiting requests (through the sudo rule)" "0" "$RC"
+assert_has "..." "$id" "$OUT"
+asgit show "$id"; assert_eq "and one of them" 0 "$RC"
+asgit prompt "$id"; assert_eq "and its prompt" 0 "$RC"
+gr approve "$id"
+assert_eq "the user's approval (gitreq, reached directly) runs it" "0|done" "$RC|$(state "$id")"
+# The sudo rule git -> gitreq names exactly the agent's verbs, as the script lists them.
+rule=$(grep -E '^git[[:space:]]+ALL=\(gitreq\)' "$AIDC_ROOT/gitctl/sudoers")
+verbs=$(printf '%s\n' "$rule" | grep -oE 'git-requests\.sh [a-z-]+' | awk '{print $2}' | sort | paste -sd' ')
+want=$(sed -n 's/^AGENT_VERBS="\(.*\)"$/\1/p' "$GR" | tr ' ' '\n' | sort | paste -sd' ')
+assert_eq "the sudo rule from git to gitreq names exactly the agent's verbs" "$want" "$verbs"
+assert_not_has "and none that decides" "approve" "$rule"
+assert_eq "gitreq has no rule back to git (nothing it runs becomes the agent)" "" "$(grep -E '^gitreq[[:space:]]+ALL=\([^)]*\bgit\b' "$AIDC_ROOT/gitctl/sudoers")"
 
 echo ""
 echo "=== a session's own mode, both ways, by its token ==="
@@ -162,7 +212,6 @@ echo "=== a session's own mode, both ways, by its token ==="
 # session naming it, or a request with no token, stays ask. With the user's mode rules, a session
 # held to ask waits for the user, with or without its token.
 TOK=$(printf 'a%.0s' $(seq 64)) OTHER=$(printf 'b%.0s' $(seq 64))
-MODES="$S/home/.local/state/gitctl/modes"
 printf '%s\n' "$TOK" | bash "$GR" mode demo rules >/dev/null 2>&1
 gr modes
 assert_eq "modes lists the user's mode and the session's own" "default ask|demo rules" "$(printf '%s\n' "$OUT" | paste -sd'|' -)"
@@ -232,62 +281,77 @@ rm -f "$MODES/fresh"
 
 echo ""
 echo "=== ask mode hands a waiting request to the git agent's Claude, one at a time ==="
+# The holder cannot type into the agent's terminal: the git container's main process asks it
+# which request to hand over (handoff), types it in (git-notify, the stub here), then says so
+# (handed). handover is that loop's one step, as gitctl-main.sh runs it, with the script to ask.
 cat > "$S/bin/notify" <<'STUB'
 #!/usr/bin/env bash
 [ "${N_FAIL:-}" = 1 ] && exit 1
 echo "$1" >> "$(dirname "$0")/notify.log"
 STUB
 chmod +x "$S/bin/notify"
-export AIDC_GIT_NOTIFY="$S/bin/notify"
+handover() {
+    local id
+    id=$(AIDC_GITREQ_TEST_USER=git bash "${1:-$GR}" handoff 2>/dev/null) || return 0
+    [ -n "$id" ] || return 0
+    "$S/bin/notify" "$id" && AIDC_GITREQ_TEST_USER=git bash "${1:-$GR}" handed "$id" >/dev/null 2>&1
+    return 0
+}
+# Requests left waiting by the sections above are decided first: handoff hands the oldest.
+gr list; for w in $(printf '%s\n' "$OUT" | awk 'NR > 1 {print $1}'); do gr deny "$w"; done
 : > "$S/bin/notify.log"
-a=$(newid); put "$a" "$(req "$a" push)"; gr once
+a=$(newid); put "$a" "$(req "$a" push)"; gr once; handover
 assert_eq "a waiting request is handed over by its id" "$a" "$(cat "$S/bin/notify.log")"
-b=$(newid); put "$b" "$(req "$b" push)"; gr once
+b=$(newid); put "$b" "$(req "$b" push)"; gr once; handover
 assert_eq "a second one is not typed in while the first still waits (it may be mid-question)" "$a" "$(cat "$S/bin/notify.log")"
-assert_has "it is logged as waiting behind it" "$b waits behind $a" "$(cat "$REQ/work/requests.log")"
+handover
+assert_eq "nor on the next look" "$a" "$(cat "$S/bin/notify.log")"
 gr deny "$a"
-c=$(newid); put "$c" "$(req "$c" push)"; gr once
-assert_eq "once the first is decided, the next new one is handed over" "$a|$c" "$(paste -sd'|' "$S/bin/notify.log")"
-gr deny "$b"; gr deny "$c"
-d=$(newid); put "$d" "$(req "$d" push)"; N_FAIL=1 gr once
-assert_has "Claude not running: logged, the request stays in the list" "$d not handed to the git agent" "$(cat "$REQ/work/requests.log")"
-e=$(newid); put "$e" "$(req "$e" push)"; gr once
-assert_eq "and the next one is handed over (nothing marked as handed)" "$e" "$(tail -n1 "$S/bin/notify.log")"
+c=$(newid); put "$c" "$(req "$c" push)"; gr once; handover
+assert_eq "once the first is decided, the next waiting one is handed over, oldest first" "$a|$b" "$(paste -sd'|' "$S/bin/notify.log")"
+gr deny "$b"; handover
+assert_eq "then the one after it" "$a|$b|$c" "$(paste -sd'|' "$S/bin/notify.log")"
+gr deny "$c"
+d=$(newid); put "$d" "$(req "$d" push)"; gr once; N_FAIL=1 handover
+assert_eq "Claude not running: nothing is marked as handed, the request stays in the list" "no" \
+    "$([ -e "$REQ/work/$d.handed" ] && echo yes || echo no)"
+e=$(newid); put "$e" "$(req "$e" push)"; gr once; handover
+assert_eq "and it is handed over on the next look, before a newer one" "$d" "$(tail -n1 "$S/bin/notify.log")"
 gr deny "$d"; gr deny "$e"
 # Requests left waiting by the sections above are decided, so only this section's count.
 gr list; for w in $(printf '%s\n' "$OUT" | awk 'NR > 1 {print $1}'); do gr deny "$w"; done
-# The agent also takes requests from the list (after each decision, and when it starts): the one
+# The agent also takes requests from the list (after each question, and when it starts): the one
 # it runs `prompt` for is the one it is asking about, so nothing is typed in until it is decided.
 : > "$S/bin/notify.log"
-a=$(newid); put "$a" "$(req "$a" push)"; gr once
+a=$(newid); put "$a" "$(req "$a" push)"; gr once; handover
 b=$(newid); put "$b" "$(req "$b" push)"; gr once
 gr deny "$a"; gr prompt "$b"
 assert_eq "prompt marks the request the agent is asking about" "$b" "$(cat "$REQ/work/notified")"
-c=$(newid); put "$c" "$(req "$c" push)"; gr once
+c=$(newid); put "$c" "$(req "$c" push)"; gr once; handover
 assert_eq "a request taken from the list and prompted holds the next one back (its Enter would answer the question)" \
     "$a" "$(paste -sd'|' "$S/bin/notify.log")"
-assert_has "which is logged as waiting behind it" "$c waits behind $b" "$(cat "$REQ/work/requests.log")"
 gr prompt "$(newid)"
 assert_eq "prompt for a request that is not there marks nothing" "$b" "$(cat "$REQ/work/notified")"
-gr deny "$b"
+gr deny "$b"; handover
+assert_eq "once that one is decided, the next one is handed over" "$a|$c" "$(paste -sd'|' "$S/bin/notify.log")"
+gr deny "$c"
 f=$(newid); put "$f" "$(req "$f" push)"; gr once
-assert_eq "once that one is decided, the next new one is handed over" "$a|$f" "$(paste -sd'|' "$S/bin/notify.log")"
+c=$(newid); put "$c" "$(req "$c" push)"; gr once
 # A restart cannot know which waiting request, if any, Claude is asking about: all of them count.
 : > "$S/bin/notify.log"; rm -f "$REQ/work/notified"
 ( cd "$REQ" && timeout 3 bash "$GR" watch >/dev/null 2>&1 ) || true
 assert_eq "a restart marks every waiting request as possibly asked about" "$(printf '%s\n' "$c" "$f" | sort | paste -sd' ')" \
     "$(sort "$REQ/work/notified" | paste -sd' ')"
-g=$(newid); put "$g" "$(req "$g" push)"; gr once
+g=$(newid); put "$g" "$(req "$g" push)"; gr once; handover
 assert_eq "after a restart, a new request is not typed into a question that may be open" "" "$(cat "$S/bin/notify.log")"
-gr deny "$c"; h=$(newid); put "$h" "$(req "$h" push)"; gr once
+gr deny "$c"; handover
 assert_eq "nor while any request waiting at the restart still waits" "" "$(cat "$S/bin/notify.log")"
-gr deny "$f"; gr deny "$g"; gr deny "$h"
-i=$(newid); put "$i" "$(req "$i" push)"; gr once
+gr deny "$f"; gr deny "$g"
+i=$(newid); put "$i" "$(req "$i" push)"; gr once; handover
 assert_eq "once those are decided, new requests are handed over again" "$i" "$(cat "$S/bin/notify.log")"
 gr deny "$i"
 ( cd "$REQ" && timeout 3 bash "$GR" watch >/dev/null 2>&1 ) || true
 assert_eq "a restart with nothing waiting clears the marker" no "$([ -e "$REQ/work/notified" ] && echo yes || echo no)"
-unset AIDC_GIT_NOTIFY
 
 echo ""
 echo "=== an approval acts on the repo and commit the user saw ==="
@@ -455,7 +519,7 @@ ghs() { OUT=$(bash "$GH" "$@" 2>&1); RC=$?; }
 OUT=$(env -u AIDC_GIT_REQUESTS bash "$GH" pr create --title T --body B 2>&1); RC=$?
 assert_eq "on Docker (no request folder) it says no git container is set up, and fails" 1 "$RC"
 assert_has "..." "no git container is set up" "$OUT"
-OUT=$(AIDC_GIT_AGENT_UID=4242 bash "$GH" pr create --title T --body B 2>&1); RC=$?
+OUT=$(AIDC_GIT_HOLDER_UID=4242 bash "$GH" pr create --title T --body B 2>&1); RC=$?
 assert_eq "a request folder that is not the git container's is not used" 1 "$RC"
 assert_has "..." "is not the git container's" "$OUT"
 ls "$REQ/requests" > "$S/before"
@@ -650,31 +714,38 @@ assert_has "with the watcher's run-time binding check removed, the approval reac
 cp "$GR" "$S/mut.sh"
 sed -i 's/if waiting "\$1"; then mark_open "\$1"; fi/:/' "$S/mut.sh"
 grep -q 'if waiting "$1"; then mark_open "$1"; fi' "$S/mut.sh" && fail "mutation did not apply (prompt's marker)"
-export AIDC_GIT_NOTIFY="$S/bin/notify"; : > "$S/bin/notify.log"; rm -f "$REQ/work/notified"
-a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+gr list; for w in $(printf '%s\n' "$OUT" | awk 'NR > 1 {print $1}'); do gr deny "$w"; done
+: > "$S/bin/notify.log"; rm -f "$REQ/work/notified"
+a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1; handover "$S/mut.sh"
 b=$(newid); put "$b" "$(req "$b" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
 bash "$S/mut.sh" deny "$a" >/dev/null 2>&1; bash "$S/mut.sh" prompt "$b" >/dev/null 2>&1
-c=$(newid); put "$c" "$(req "$c" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+c=$(newid); put "$c" "$(req "$c" push)"; bash "$S/mut.sh" once >/dev/null 2>&1; handover "$S/mut.sh"
 assert_eq "with prompt's marker removed, a request is typed into the open question (so the prompt test would fail)" \
-    "$a|$c" "$(paste -sd'|' "$S/bin/notify.log")"
+    "$a|$b" "$(paste -sd'|' "$S/bin/notify.log")"
 bash "$GR" deny "$b" >/dev/null 2>&1; bash "$GR" deny "$c" >/dev/null 2>&1
 cp "$GR" "$S/mut.sh"
 sed -i 's/if \[ "\${#waits\[@\]}" -gt 0 \]; then mark_open "\${waits\[@\]}"; else rm -f work\/notified; fi/rm -f work\/notified/' "$S/mut.sh"
 grep -q 'mark_open "${waits' "$S/mut.sh" && fail "mutation did not apply (restart's marker)"
 : > "$S/bin/notify.log"
-a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+a=$(newid); put "$a" "$(req "$a" push)"; bash "$S/mut.sh" once >/dev/null 2>&1; handover "$S/mut.sh"
 ( cd "$REQ" && timeout 3 bash "$S/mut.sh" watch >/dev/null 2>&1 ) || true
-b=$(newid); put "$b" "$(req "$b" push)"; bash "$S/mut.sh" once >/dev/null 2>&1
+b=$(newid); put "$b" "$(req "$b" push)"; bash "$S/mut.sh" once >/dev/null 2>&1; handover "$S/mut.sh"
 assert_eq "with the restart's marker removed, a new request is typed in after a restart (so the restart test would fail)" \
     "$a|$b" "$(paste -sd'|' "$S/bin/notify.log")"
 bash "$GR" deny "$a" >/dev/null 2>&1; bash "$GR" deny "$b" >/dev/null 2>&1
-unset AIDC_GIT_NOTIFY
 
 cp "$GR" "$S/mut.sh"; sed -i 's/    if \[ "\$now_state" != "\$want" \]; then/    if false; then/' "$S/mut.sh"
 grep -q 'if false; then' "$S/mut.sh" || fail "mutation did not apply (state re-check)"
 reset_calls; id=$(newid); put "$id" "$(req "$id" push)"; gr once
 AIDC_GITREQ_TEST_BEFORE_LOCK="$S/bin/deny-now" bash "$S/mut.sh" approve "$id" >/dev/null 2>&1
 assert_has "with the state re-check under the lock removed, a denied request is pushed (so the race test would fail)" "push $P feat" "$(calls)"
+
+cp "$GR" "$S/mut.sh"; sed -i 's/^    \*) holder_only "\$@" ;;$/    *) ;;/' "$S/mut.sh"
+grep -q 'holder_only "$@" ;;' "$S/mut.sh" && fail "mutation did not apply (holder only)"
+reset_calls; id=$(newid); put "$id" "$(req "$id" push)"; gr once
+AIDC_GITREQ_TEST_USER=git bash "$S/mut.sh" approve "$id" >/dev/null 2>&1
+assert_eq "with the holder-only check removed, the agent approves its own request (so the agent test would fail)" \
+    "done" "$(state "$id")"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

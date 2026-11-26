@@ -1119,7 +1119,7 @@ aidc_fix_host_owner "$AUDIT_DIR"
 # until aidc git setup registers it.
 if [ -n "$GIT_REQUESTS_PATH" ]; then
     if [ "$(docker inspect -f '{{.State.Running}}' "$DK_GIT_CT" 2>/dev/null)" = true ] \
-            && printf '%s\n' "$GIT_TOKEN" | docker exec -i -u git "$DK_GIT_CT" git-requests register "$NAME" >/dev/null 2>&1; then
+            && printf '%s\n' "$GIT_TOKEN" | docker exec -i -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" git-requests register "$NAME" >/dev/null 2>&1; then
         info "git container: session ${NAME} registered (your git mode applies to it)"
     else
         info "git container: not running, so ${NAME} is not registered yet: its requests wait for your approval until aidc git setup"

@@ -31,9 +31,11 @@ as_cred() {
 # request watcher so both read working copies the same way.
 ag() { gitctl_agent_git "$REAL_GIT" "$@"; }
 
-# The agent's bundles, in its own folder; each is deleted when the verb ends, whatever the
-# outcome, and any older than BUNDLE_MAX_AGE_MIN (a verb that was killed) at the next verb.
-if [ "$INSTALLED" = 1 ]; then BUNDLE_DIR="${HOME:-/home/git}/.cache/gitctl"
+# The caller's bundles (the agent's, or the request holder's), in a folder of its own home as
+# the user database names it: an exec into the container keeps the container's HOME, which is
+# the agent's. Each is deleted when the verb ends, whatever the outcome, and any older than
+# BUNDLE_MAX_AGE_MIN (a verb that was killed) at the next verb.
+if [ "$INSTALLED" = 1 ]; then BUNDLE_DIR="$(getent passwd "$(id -u)" | cut -d: -f6)/.cache/gitctl"
 else BUNDLE_DIR="${AIDC_GITCTL_BUNDLE_DIR:-${TMPDIR:-/tmp}/gitctl-bundles-$(id -u)}"; fi
 BUNDLE=""
 new_bundle() {

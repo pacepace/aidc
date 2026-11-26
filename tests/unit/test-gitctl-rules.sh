@@ -557,12 +557,17 @@ for f in gitctl-run.sh gitctl-cred.sh gitctl-agent.sh; do
     assert_has "the side it sources, ${f}, is installed beside it (root's, not executable)" "/opt/aidc/lib/gitctl/${f}" "$df"
     assert_has "..." "${f}" "$(grep '^COPY gitctl-rules.sh' "$GITCTL/Dockerfile")"
 done
-assert_has "plain gh points to gitctl (a gh login as the agent would be readable by it)" "ln -s /opt/aidc/lib/gitctl/gh-shim.sh /opt/aidc/bin/gh" "$df"
+assert_has "plain gh is the sessions' stand-in: it writes requests (a gh login as the agent would be readable by it)" \
+    "ln -s /opt/aidc/lib/gitctl/gh-standin.sh /opt/aidc/bin/gh" "$df"
+assert_eq "gitctl/gh-standin.sh is identical to .devcontainer/gh-standin.sh (the image's build folder is gitctl/)" "" \
+    "$(cmp "$GITCTL/gh-standin.sh" "$AIDC_ROOT/.devcontainer/gh-standin.sh" 2>&1)"
 assert_has "the sudo rules are root's, 0440" "chmod 0440 /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "and checked at build" "visudo -c -f /etc/sudoers.d/aidc-gitctl" "$df"
 assert_has "the managed settings are installed" "COPY managed-settings.json /etc/claude-code/managed-settings.json" "$df"
-assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker), gitrun to the credential helper, gitcred to gitrun's has-copy only" \
+assert_eq "the sudo rules are exactly: the agent to gitctl (gitwc for working-copy writes on Docker) and to the request holder's reading verbs, the holder to gitctl, gitrun to the credential helper, gitcred to gitrun's has-copy only" \
 "git ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
+git ALL=(gitreq) NOPASSWD: /opt/aidc/lib/gitctl/git-requests.sh watch, /opt/aidc/lib/gitctl/git-requests.sh list, /opt/aidc/lib/gitctl/git-requests.sh show *, /opt/aidc/lib/gitctl/git-requests.sh prompt *, /opt/aidc/lib/gitctl/git-requests.sh handoff, /opt/aidc/lib/gitctl/git-requests.sh handed *
+gitreq ALL=(gitrun,gitcred,gitwc) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitwc ALL=(gitrun,gitcred) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh
 gitrun ALL=(gitcred) NOPASSWD: /opt/aidc/lib/gitctl/cred-helper.sh
 gitcred ALL=(gitrun) NOPASSWD: /opt/aidc/lib/gitctl/gitctl.sh has-copy *" \
@@ -1172,6 +1177,35 @@ assert_has "and the log still shows the last push" "push o/r feature $(git -C "$
 G -C "$W" switch -q main
 
 echo ""
+echo "=== only the request holder changes GitHub: the agent's gitctl, and its sudo, are refused ==="
+# owner ruling 2026-11-26: every push, pull request and merge is a request, decided out of the
+# agent's reach. AIDC_GITCTL_CALLER stands for who ran gitctl (on the agent's side) and for the
+# user sudo names (on gitrun's and gitcred's): the agent is git; on Docker gitwc is the agent's
+# hop to the user's uid. Each is refused every verb that changes GitHub, on every side.
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "Not by the agent"
+before=$(remote_sha feature)
+for who in git gitwc; do
+    AIDC_GITCTL_CALLER=$who ctl push "$W" feature; refused "${who}: push through gitctl is refused"
+    assert_eq "${who}: and nothing reached the forge" "$before" "$(remote_sha feature)"
+    G -C "$W" bundle create -q "$S/agent.bundle" "refs/heads/feature" 2>/dev/null
+    : > "$S/bin/calls.log"; OUT=$(AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=run bash "$GITCTL/gitctl.sh" push o/r feature < "$S/agent.bundle" 2>&1); RC=$?; CALLS=""
+    refused "${who}: gitrun refuses push when sudo names ${who} as the caller"
+    assert_eq "${who}: and nothing reached the forge" "$before" "$(remote_sha feature)"
+    for v in "pr-create o/r feature main" "pr-merge o/r 5" "pr-comment o/r 5" "protect o/r"; do
+        # shellcheck disable=SC2086  # the verb and its arguments
+        AIDC_GITCTL_CALLER=$who AIDC_GITCTL_ROLE=cred ctl_in "Text" $v
+        refused "${who}: gitcred refuses ${v%% *} when sudo names ${who}"
+    done
+    AIDC_GITCTL_CALLER=$who ctl pr-merge "$W" 5; refused "${who}: pr-merge through gitctl is refused"
+done
+assert_has "the refusal says how to ask instead" "gh pr create" "$OUT"
+AIDC_GITCTL_CALLER=git AIDC_GITCTL_ROLE=cred ctl pr-view o/r 5
+assert_eq "reads stay the agent's" "0|pr view 5 --repo o/r" "$RC|$(printf '%s' "$CALLS" | head -c 20)"
+ctl push "$W" feature
+assert_eq "gitreq pushes (for an approved request, or the user's aidc git push)" "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+G -C "$W" switch -q main
+
+echo ""
 echo "=== removing a guard is caught (these tests are not vacuous) ==="
 # gitctl.sh and the files it sources (each trust side's, and the shared rules).
 mut() { rm -rf "$S/mut"; cp -r "$GITCTL" "$S/mut"; sed -i "$1" "$S/mut"/gitctl*.sh; }
@@ -1265,6 +1299,14 @@ mut 's/            \[ $# = 2 \] || \[ "$head" = "$3" \] \\/            true \\/'
 : > "$S/bin/calls.log"
 bash "$S/mut/gitctl.sh" pr-merge "$H" 5 --expect-head "$(printf 'b%.0s' $(seq 40))" >/dev/null 2>&1
 assert_has "with the approved-head check removed, a moved PR is merged (so the head test would fail)" "pr merge 5" "$(cat "$S/bin/calls.log")"
+mut 's/        \[ "$CALLER" = gitreq \] || die "${verb} changes GitHub/        : || die "${verb} changes GitHub/'
+grep -q '\[ "$CALLER" = gitreq \] || die' "$S/mut/gitctl.sh" && fail "the holder-only mutation did not apply"
+G -C "$W" switch -q feature; G -C "$W" commit -q --allow-empty -m "By the agent"
+G -C "$W" bundle create -q "$S/agent.bundle" "refs/heads/feature" 2>/dev/null
+AIDC_GITCTL_CALLER=git AIDC_GITCTL_ROLE=run bash "$S/mut/gitctl.sh" push o/r feature < "$S/agent.bundle" >/dev/null 2>&1
+assert_eq "with the holder-only check removed, the agent pushes through sudo to gitrun (so the holder test would fail)" \
+    "$(git -C "$W" rev-parse feature)" "$(remote_sha feature)"
+G -C "$W" switch -q main
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

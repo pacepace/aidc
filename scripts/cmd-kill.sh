@@ -119,7 +119,7 @@ aidc_remove_session_compose "$NAME" >/dev/null
 # outlives the session it was given to. Best effort: a git container that is not running prunes
 # it at the next aidc git setup.
 if [ "$(docker inspect -f '{{.State.Running}}' "$DK_GIT_CT" 2>/dev/null)" = true ]; then
-    docker exec -u git "$DK_GIT_CT" git-requests forget "$NAME" >/dev/null 2>&1 \
+    docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" git-requests forget "$NAME" >/dev/null 2>&1 \
         || info "the git container did not forget ${NAME}'s git mode; aidc git setup prunes it"
 fi
 

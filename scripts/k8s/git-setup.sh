@@ -58,7 +58,7 @@ k8s_repo_dir_step "$ns" "$req" requests "$sel" >/dev/null \
 # sessions that are gone are pruned. Only from a list the cluster gave.
 k8s_git_target
 if sessions=$(gb_sessions); then
-    printf '%s\n' "$sessions" | gb_exec_in git-requests sync 2>&1 | aidc_printable >&2 \
+    printf '%s\n' "$sessions" | gb_exec_req_in git-requests sync 2>&1 | aidc_printable >&2 \
         || info "warning: the git container did not take the sessions' tokens; their requests wait for your approval"
 else
     info "warning: the cluster did not list the sessions; their git modes are left as they were"

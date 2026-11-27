@@ -134,7 +134,12 @@ DECLARED = {
     ("k8s/session-logs.sh", 'logs ${FOLLOW[@]+"${FOLLOW[@]}"} "$target"'): [("pods", "get"), ("pods/log", "get")],
 }
 # The wrappers' own bodies: their callers are read instead.
-WRAPPER_BODIES = [("k8s/lib.sh", 'k8s_kubectl -n "$ns" get "$@"'), ("k8s/session-create.sh", 'k8s_get "$ns" "$@"')]
+WRAPPER_BODIES = [("k8s/lib.sh", 'k8s_kubectl -n "$ns" get "$@"'), ("k8s/session-create.sh", 'k8s_get "$ns" "$@"'),
+                  ("k8s/manifests.sh", '"$4" | k8s_kubectl apply -f -')]
+# k8s_ensure_claim <namespace> <claim> <what> <render-function> applies what its last word
+# renders: each call is read as an apply of that function, which must render claims only.
+ENSURE_CLAIM = re.compile(r'\bk8s_ensure_claim\s+("[^"]*"|\S+)\s+("[^"]*"|\S+)\s+("[^"]*"|\S+)\s+(\w+)')
+ensure_calls = 0
 # Wrapper -> how many words come before the `kubectl get` arguments (the namespace; k8s_read's
 # description).
 WRAPPERS = {"k8s_get": 1, "k8s_read": 1}
@@ -285,6 +290,14 @@ for root, _, files in os.walk(scripts):
             direct = re.search(r"(^\s*|\$\(\s*|[|;&]\s*|\b(then|do|else|if|!)\s+)kubectl\s", code)
             if direct and rel != "k8s/lib.sh" and code[:direct.start()].count('"') % 2 == 0:
                 problems.append(f"{rel}: kubectl called directly (use k8s_kubectl): {line.strip()}")
+            for em in ENSURE_CLAIM.finditer(code):
+                fn, where, other = em.group(4), f"{rel}: {line.strip()[:110]}", False
+                ensure_calls += 1; calls += 1
+                if fn not in renders:
+                    problems.append(f"k8s_ensure_claim with no known render function: {where}"); continue
+                if renders[fn] != ["PersistentVolumeClaim"]:
+                    problems.append(f"k8s_ensure_claim applies {fn}, which renders {renders[fn]}, not one claim: {where}"); continue
+                for v in ("get", "create", "patch"): need(where, "persistentvolumeclaims", v)
             for m in re.finditer(r"\b(k8s_kubectl|k8s_get|k8s_read)\b", code):
                 fn, rest = m.group(1), code[m.end():]
                 if rest.startswith("()"): continue        # the definition
@@ -431,6 +444,8 @@ if len(mcp_needs) < 10: problems.append(f"only {len(mcp_needs)} needs read for t
 extra = (rules["mcp"] - granted_ns) | (rules["mcp-cluster"] - granted_cl)
 if extra: problems.append(f"the MCP's rules grant what the user's do not: {sorted(extra)}")
 else: print("  PASS: the MCP's rules are within the user's")
+if ensure_calls < 5: problems.append(f"only {ensure_calls} k8s_ensure_claim calls read (the transcripts, Claude config and accounts, MCP state and Syncthing claims): the reader is skipping some")
+else: print(f"  PASS: {ensure_calls} k8s_ensure_claim calls read, each applying one claim")
 if calls < 60: problems.append(f"only {calls} kubectl calls read: the reader is skipping some")
 else: print(f"  PASS: {calls} kubectl calls read")
 for p in problems: print(f"  FAIL: {p}")

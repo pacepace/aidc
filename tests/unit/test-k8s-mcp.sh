@@ -53,6 +53,9 @@ assert_not_has() {
 #   get deployment aidc-mcp   "aidc-mcp|1" when K_RUNNING=1, "aidc-mcp|" when K_STARTING=1
 #   exec ... printenv         the API server's in-cluster Service address, 10.43.0.1 / 443
 #   exec ... tail             the access log's last line
+#   get nodes -l ...control-plane  the control-plane nodes' InternalIPs: $K_CP_NODES, one a line
+#   exec ... kubectl --server https://<ep>  the pod asking the API server there: fails for each
+#                             <ep> in $K_UNREACHABLE (space-separated)
 cat > "$SCRATCH/bin/kubectl" <<'STUB_K8S_MCP_x41'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -76,6 +79,11 @@ case "$*" in
     *"exec deployment/aidc-mcp -c mcp -- printenv"*)
         [ "${K_PRINTENV_FAIL:-}" = 1 ] && { echo 'error: unable to upgrade connection: container not found ("mcp")' >&2; exit 1; }
         printf '%s\n%s\n' "${K_SVC_HOST:-10.43.0.1}" "${K_SVC_PORT:-443}" ;;
+    *"get nodes -l node-role.kubernetes.io/control-plane"*) [ -z "${K_CP_NODES:-}" ] || printf '%s\n' $K_CP_NODES ;;
+    *"exec deployment/aidc-mcp -c mcp -- kubectl --server"*)
+        for u in ${K_UNREACHABLE:-}; do
+            case "$*" in *"--server https://$u "*) echo "Unable to connect to the server: dial tcp $u: i/o timeout" >&2; exit 1 ;; esac
+        done ;;
     *"exec deployment/aidc-mcp -c mcp -- tail"*) echo '{"event": "tool_call", "tool": "session_list"}' ;;
     *"exec deployment/aidc-mcp -c mcp -- df"*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 5000 4000 1000 %s%% /var/lib/aidc-mcp\n' "${K_DF:-12}" ;;
     *"get networkpolicy aidc-mcp"*)
@@ -363,6 +371,25 @@ assert_has "a name with no address is refused, saying what to set" "set kubernet
 out=$(K_SERVER='https://[2001:db8::1]:6443' run start)
 assert_has "an IPv6 address is refused (the policy here takes IPv4)" "is an IPv6 address" "$out"
 assert_eq "...before anything is applied" "" "$(q 'select(.kind == "Deployment") | .metadata.name')"
+out=$(K_CP_NODES='192.0.2.11 192.0.2.10 192.0.2.12' run start)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "a kubeconfig at a control-plane node's address: every control-plane node is allowed, at its port, the kubeconfig's first" \
+    '["192.0.2.10/32","192.0.2.11/32","192.0.2.12/32","10.43.0.1/32"]' "$(pols | tail -1)"
+assert_has "the pod is asked, with its own kubectl, whether it reaches the first" \
+    "exec deployment/aidc-mcp -c mcp -- kubectl --server https://192.0.2.10:6443 --tls-server-name kubernetes.default.svc --request-timeout=5s get --raw /readyz" "$(cat "$K_LOG")"
+assert_not_has "...and, as it does, no other is asked and the server is not restarted" "rollout restart" "$(cat "$K_LOG")"
+out=$(K_CP_NODES='192.0.2.11 192.0.2.10 192.0.2.12' K_UNREACHABLE='192.0.2.10:6443' run start)
+assert_has "a first address the pod does not reach is said" "does not reach the API server at 192.0.2.10:6443: it uses 192.0.2.11:6443" "$out"
+assert_eq "...and its kubeconfig is rewritten to the next one it does reach" '"https://192.0.2.11:6443"' \
+    "$(q 'select(.kind == "ConfigMap" and .metadata.name == "aidc-mcp-config") | .data.kubeconfig' | tail -1 | jq -r . | yq -o=json '.clusters[0].cluster.server')"
+assert_has "...and the server restarted onto it" "rollout restart deployment/aidc-mcp" "$(cat "$K_LOG")"
+out=$(K_CP_NODES='198.51.100.1 198.51.100.2' run start)
+assert_eq "a kubeconfig address that is no control-plane node's (a load balancer, a tunnel): that address only" \
+    '["192.0.2.10/32","10.43.0.1/32"]' "$(pols | tail -1)"
+out=$(K_UNREACHABLE='192.0.2.10:6443' run start)
+assert_has "an address the laptop resolved but the pod cannot reach is refused, saying what to set" \
+    "your MCP server's pod reaches the API server at none of 192.0.2.10:6443: set kubernetes.api_endpoints" "$out"
+assert_has "...exit 1" "exit=1" "$out"
 yq -i '.kubernetes.mcp_state_size = "20Gi"' "$CFG"
 out=$(K_NO_STATE=1 run start)
 assert_eq "kubernetes.mcp_state_size sets the state claim's size" '"20Gi"' \

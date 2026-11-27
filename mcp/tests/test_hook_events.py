@@ -78,3 +78,23 @@ def test_a_field_a_newer_claude_code_adds_is_kept_and_a_wrong_type_is_empty():
          "new_field": {"a": 1}}))
     assert e is not None and e.data["new_field"] == {"a": 1}
     assert e.session_id == "" and e.last_assistant_message == ""
+
+
+def test_the_newest_event_is_found_reading_from_the_newest_back_only(tmp_path, monkeypatch):
+    d = he.events_dir(tmp_path / "proj")
+    d.mkdir(parents=True)
+    for i in range(50):
+        (d / f"17000000000000{i:05d}-1.json").write_text('{"event": "Stop", "at": "t"}')
+    (d / "1700000000000099998-1.json").write_text("{damaged")
+    (d / ".1700000000000099999-1.tmp").write_text('{"event": "Stop"}')   # mid-write
+    parsed = []
+    real = he.parse_event
+    monkeypatch.setattr(he, "parse_event", lambda n, t: parsed.append(n) or real(n, t))
+    assert he.newest_event_name(tmp_path / "proj") == "1700000000000000049-1.json"
+    assert parsed == ["1700000000000099998-1.json", "1700000000000000049-1.json"]
+
+
+def test_a_session_without_events_has_no_newest(tmp_path):
+    assert he.newest_event_name(tmp_path / "never-mirrored") == ""
+    he.events_dir(tmp_path / "empty").mkdir(parents=True)
+    assert he.newest_event_name(tmp_path / "empty") == ""

@@ -96,7 +96,7 @@ k8s_claude_token_secret() {
 # folder is reused by a later session of the same name).
 k8s_claude_session_forget() {
     local ns="$1" session="$2" state rc=0 sel pod="${2}-claude-forget"
-    _k8s_claim_missing "$ns" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" 2>/dev/null && return 0
+    k8s_claim_missing "$ns" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" 2>/dev/null && return 0
     state=$(k8s_broker_state "$ns") || rc=$?
     if [ "$rc" = 0 ] && [ "$state" = RUNNING ] && k8s_broker_exec "$ns" forget "$session" >/dev/null 2>&1; then
         return 0

@@ -104,8 +104,13 @@ hooks_silent_since: dict[str, float] = {}
 hooks_silence_logged: set[str] = set()
 # A cluster session whose conversation lease refused a pasted prompt (another of the user's
 # machines holds it): when its queue may try again (this process's clock), and who held it.
-held_retry_at: dict[str, float] = {}
-held_by: dict[str, str] = {}
+# One entry for the one condition, removed whole when the wait is over or a prompt goes through.
+class Held(NamedTuple):
+    retry_at: float
+    holder: str
+
+
+lease_held: dict[str, Held] = {}
 
 
 # session -> uuid of the latest prompt the watcher reported as interrupted before Claude
@@ -308,8 +313,7 @@ LIFETIMES: dict[str, tuple[str, str]] = {
     "hooks_installed": (SESSION, ""),
     "hooks_silent_since": (SESSION, ""),
     "hooks_silence_logged": (SESSION, ""),
-    "held_retry_at": (SESSION, ""),
-    "held_by": (SESSION, ""),
+    "lease_held": (SESSION, ""),
     "sent_awaiting_echo": (SESSION, ""),
     "unsubmitted_paste": (SESSION, ""),
     "last_free_verdict": (SESSION, ""),

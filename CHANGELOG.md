@@ -117,7 +117,10 @@ and the envelope are unchanged; what an MCP caller sees differently:
   read your MCP token's Secret, by name), and `aidc k8s build` builds the `aidc/mcp` image, which
   now carries the aidc CLI, kubectl and yq. Your token is kept in that Secret and copied to
   `~/.config/aidc/mcp-token`. New settings: `kubernetes.mcp_state_size` and
-  `kubernetes.api_endpoints` (README, Kubernetes backend).
+  `kubernetes.api_endpoints` (README, Kubernetes backend). Start asks the running server's
+  pod which allowed API server address it reaches (your kubeconfig's, and every control-plane
+  node's when that is one of them) and uses that one; when it reaches none, start says to set
+  `kubernetes.api_endpoints`. With that control-plane node down, run `aidc mcp start` again.
 - **Reaching it:** in the cluster at `http://aidc-mcp.aidc-u-<user>.svc:7878/mcp`, from any
   namespace but yours; on your network with `mcp.kubernetes.expose: ingress` at
   `https://mcp-<user>.<kubernetes.ingress.domain>/mcp`, on your pages' class and certificate,
@@ -166,8 +169,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   as `CLAUDE_CODE_OAUTH_TOKEN`, from a Secret of its own, when no broker runs.
 - **One Claude history per repo across the cluster and your machines** (`aidc sync`): a
   Syncthing pod in your namespace (`aidc sync start|stop|status|logs`, image
-  `docker.io/syncthing/syncthing`, pinned) syncs your disk's `.claude` with each machine's
-  `~/.claude`, reaching only the machines under `sync.peers`, over your LAN or VPN; `aidc sync
+  `docker.io/syncthing/syncthing`, pinned) syncs your disk's `.claude/projects` with each
+  machine's `~/.claude/projects` both ways (`aidc-claude-projects`), and takes each machine's
+  shared Claude files from `~/.claude` one way (`aidc-claude-shared`), reaching only the machines under `sync.peers`, over your LAN or VPN; `aidc sync
   setup --hooks` on each machine (ignore list, the conversation lease hooks, a Mac's alias
   folders), `aidc sync reconcile`, `aidc sync push-settings`. Cluster sessions link the synced
   `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `commands/` and `keybindings.json`, take a

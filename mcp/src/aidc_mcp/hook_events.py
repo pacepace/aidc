@@ -112,3 +112,22 @@ def read_events(session_mirror_dir: Path, after: str = "") -> list[HookEvent]:
         if parsed is not None:
             out.append(parsed)
     return out
+
+
+def newest_event_name(session_mirror_dir: Path) -> str:
+    """The name of the session's newest event ("" for none): the names are listed and read
+    from the newest back until one is an event, so the cost is one read, not the whole
+    stream (a session's events are never pruned while it lives)."""
+    try:
+        names = sorted((p.name for p in events_dir(session_mirror_dir).iterdir()
+                        if _NAME.fullmatch(p.name)), reverse=True)
+    except OSError:
+        return ""
+    for name in names:
+        try:
+            text = (events_dir(session_mirror_dir) / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if parse_event(name, text) is not None:
+            return name
+    return ""

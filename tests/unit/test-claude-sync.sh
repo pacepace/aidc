@@ -183,6 +183,54 @@ assert_has "a settings file that is not JSON is left alone, and said" "nothing c
 assert_eq "...failing" "|1" "${out##*$'\n'}"
 assert_eq "...unchanged" "not json" "$(cat "$S")"
 
+echo "== the lease's events are the same on a machine and in a cluster session"
+S2="$SCRATCH/home/.claude/settings-fresh.json"
+aidc_sync_install_hooks "$S2" lease
+machine_events=$(jq -c '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command == "aidc sync lease-hook")) | .key] | sort' "$S2")
+cluster_events=$( (. "$AIDC_ROOT/.devcontainer/managed-settings.sh"
+    aidc_managed_settings "$SCRATCH/no-registry" false cluster) \
+    | jq -c --arg l /usr/local/bin/aidc-claude-lease '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command | startswith($l + " hook"))) | .key] | sort')
+assert_eq "machine (claude-sync.sh) and cluster (managed-settings.sh) run the lease at the same events" "$cluster_events" "$machine_events"
+assert_eq "...which are these" '["PostToolUse","SessionEnd","SessionStart","Stop","UserPromptSubmit"]' "$machine_events"
+
+echo "== the hook as Claude Code runs it on a machine: aidc sync lease-hook, through the aidc CLI"
+DH="$SCRATCH/dhome"; mkdir -p "$DH/.config/aidc" "$SCRATCH/dbin"
+printf 'backend: kubernetes\nkubernetes:\n  user: alice\n' > "$DH/.config/aidc/config.yaml"
+printf '#!/bin/sh\necho "$*" >> "%s/kubectl-called"\nexit 1\n' "$SCRATCH" > "$SCRATCH/dbin/kubectl"
+chmod +x "$SCRATCH/dbin/kubectl"
+rm -f "$P"/*.aidc-lease "$SCRATCH/kubectl-called"
+viaaidc() { jq -n -c --arg e "$1" --arg s "$SID" --arg t "$T" '{hook_event_name: $e, session_id: $s, transcript_path: $t}' \
+    | HOME="$DH" PATH="$SCRATCH/dbin:$PATH" AIDC_LEASE_MACHINE="$2" "${3:-$AIDC_ROOT/scripts/aidc}" sync lease-hook; }
+out=$(viaaidc SessionStart mac 2>&1; echo "|$?")
+assert_eq "a session start takes the lease, exit 0, nothing said" "|0" "$out"
+assert_eq "...for its machine" "mac" "$(jq -r .machine "$P/$SID.aidc-lease")"
+out=$(viaaidc UserPromptSubmit cluster/s1 2>&1; echo "|$?")
+assert_has "a prompt to a conversation held elsewhere is refused: exit 2" "|2" "$out"
+assert_has "...saying where it is open" "open on mac right now" "$out"
+out=$(viaaidc UserPromptSubmit mac 2>&1; echo "|$?")
+assert_eq "the holder's own prompt goes through: exit 0" "|0" "$out"
+out=$(viaaidc PostToolUse mac 2>&1; echo "|$?"); assert_eq "a tool call: exit 0" "|0" "$out"
+out=$(viaaidc Stop mac 2>&1; echo "|$?"); assert_eq "a turn end: exit 0 (a Stop is never blocked)" "|0" "$out"
+out=$(printf '{}' | HOME="$DH" PATH="$SCRATCH/dbin:$PATH" "$AIDC_ROOT/scripts/aidc" sync reconcile --hook 2>&1; echo "|$?")
+assert_eq "the reconciler hook: exit 0, nothing said" "|0" "$out"
+assert_eq "with backend: kubernetes configured, no hook calls the cluster (no audit check, nothing)" "no" \
+    "$([ -e "$SCRATCH/kubectl-called" ] && echo yes || echo no)"
+# An install whose lease script fails, with no VERSION file (the dispatcher would exit 2 on it):
+# the hook says 1, an error Claude shows and moves past, never 2, which would refuse the prompt.
+BR="$SCRATCH/broken-aidc"; mkdir -p "$BR/scripts" "$BR/.devcontainer"
+cp "$AIDC_ROOT/scripts/aidc" "$BR/scripts/aidc"
+printf '#!/bin/sh\necho "lease script broke" >&2\nexit 2\n' > "$BR/.devcontainer/claude-lease.sh.real"
+printf 'exec sh "$(dirname "$0")/claude-lease.sh.real"; exit 7\n' > "$BR/.devcontainer/claude-lease.sh"
+out=$(viaaidc UserPromptSubmit mac "$BR/scripts/aidc" 2>&1; echo "|$?")
+assert_has "a lease script that exits 2 is the lease's refusal: kept" "|2" "$out"
+printf 'exit 5\n' > "$BR/.devcontainer/claude-lease.sh"
+out=$(viaaidc UserPromptSubmit mac "$BR/scripts/aidc" 2>&1; echo "|$?")
+assert_has "any other failure of the hook is exit 1, never 2 (no VERSION file there either)" "|1" "$out"
+rm -f "$BR/.devcontainer/claude-lease.sh"
+out=$(viaaidc Stop mac "$BR/scripts/aidc" 2>&1; echo "|$?")
+assert_has "...a missing lease script too" "|1" "$out"
+rm -f "$P"/*.aidc-lease
+
 echo
 echo "claude-sync: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

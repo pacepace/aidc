@@ -53,6 +53,16 @@ echo "secretcorp" > "$R/old.txt"; git -C "$R" add old.txt; git -C "$R" commit -q
 printf 'secretcorp\nmore\n' > "$R/old.txt"; git -C "$R" add old.txt
 assert_eq "a line already there is not this commit's" "|0" "$(run | tail -1)"
 
+echo "== a list with a pattern that is not a valid regular expression"
+BAD="$SCRATCH/private-names-bad"
+printf 'secretcorp\nunclosed-(group\n' > "$BAD"
+echo "nothing here either" > "$R/c.txt"; git -C "$R" add c.txt
+out=$(cd "$R" && AIDC_PRIVATE_NAMES="$BAD" bash "$HOOK" 2>&1; echo "|$?")
+assert_eq "the commit is refused, not let through unchecked" "|1" "$(printf '%s' "$out" | tail -1)"
+assert_has "...saying the list has a bad pattern" "not a valid extended regular expression" "$out"
+assert_eq "...without printing the list" "0" "$(printf '%s' "$out" | grep -c 'unclosed\|secretcorp')"
+git -C "$R" rm -q --cached c.txt
+
 echo "== with no list"
 out=$(cd "$R" && AIDC_PRIVATE_NAMES="$SCRATCH/none" bash "$HOOK" 2>&1; echo "|$?")
 assert_eq "it lets the commit through" "|0" "$(printf '%s' "$out" | tail -1)"

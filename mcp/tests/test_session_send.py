@@ -1390,8 +1390,7 @@ def _event(d, ns, event, **fields):
 @pytest.fixture
 def cluster(monkeypatch):
     monkeypatch.setattr(be, "kind", lambda: be.KUBERNETES)
-    ss.held_retry_at.clear()
-    ss.held_by.clear()
+    ss.lease_held.clear()
 
 
 async def test_a_prompt_the_lease_refuses_is_not_recorded_and_stays_held(wiring, tmp_path,

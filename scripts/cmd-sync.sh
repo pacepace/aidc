@@ -39,10 +39,22 @@ On this machine:
   reconcile          On a Mac: each history folder under its Linux name gets a /Users alias, and
                      one Claude made here under the /Users name moves to the Linux name
 
-In the cluster (your Syncthing pod; see aidc sync help --backend kubernetes):
-  start | stop | status | logs | push-settings
+In the cluster (your Syncthing pod in your namespace; the other end of both folders):
+  start              Start it, or apply changed peers (sync.peers in your config)
+  stop               Stop it (its identity and your history are kept)
+  status             Running state, its device ID (pair your machines with it), each peer
+                     connected or not, each folder's state
+  logs [--follow]    Its log
+  push-settings      Copy this machine's Claude settings.json (as the template new sessions
+                     start from) and its status line script to the cluster: laptop to cluster
+                     only, never synced back
 
   lease-hook         The lease hook itself (what setup --hooks adds; Claude Code runs it)
+
+Config:
+  sync:
+    peers:                       # your machines; the pod dials each one, nothing else
+      - {name: mac, device_id: ABCDEFG-..., address: 192.168.1.20}   # port 22000 unless given
 USAGE
 }
 
@@ -101,7 +113,8 @@ case "$VERB" in
     ""|help|-h|--help) usage ;;
     setup) do_setup "$@" ;;
     reconcile) do_reconcile "$@" ;;
-    lease-hook) exec bash "${AIDC_ROOT}/.devcontainer/claude-lease.sh" hook "$@" ;;
+    # lease-hook and reconcile --hook, the hooks Claude Code runs, never reach here: scripts/aidc
+    # sends them to their scripts ahead of its own checks.
     start|stop|status|logs|push-settings) exec bash "$AIDC_SCRIPTS/k8s/sync.sh" "$VERB" "$@" ;;
     *) err "unknown 'aidc sync' verb: ${VERB} (try: aidc sync help)"; exit 2 ;;
 esac

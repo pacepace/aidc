@@ -1252,9 +1252,12 @@ your disk's class; `kubernetes.mcp_state_size`, default 5Gi) and its config (you
 cluster), then the server: one replica of the `aidc/mcp` image from the cluster's registry
 (`aidc k8s build`), under the `aidc-mcp` ServiceAccount `aidc user add` made. It reads every
 session's transcripts from your mirror claim, and may reach only the API server: where your
-kubeconfig names it, and its in-cluster address. When your kubeconfig names it by an address
-the cluster does not see (a load balancer, 127.0.0.1 on the node), set
-`kubernetes.api_endpoints: ["<ipv4>:<port>", ...]`. `stop` keeps its state and token;
+kubeconfig names it (with every control-plane node, when that is one of them), and its
+in-cluster address. Start asks the running pod which of them it reaches and uses that one;
+when it reaches none (your kubeconfig names an address the cluster does not see: a load
+balancer, a tunnel, 127.0.0.1 on the node), start says so: set
+`kubernetes.api_endpoints: ["<ipv4>:<port>", ...]`. With that control-plane node down, run
+`aidc mcp start` again to move the server to one that answers. `stop` keeps its state and token;
 `token rotate` restarts it; `token show` reads the Secret. A user added before 2.0 needs
 `aidc user add <name>` run again by an admin, which lets them read that one Secret.
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# aidc sync start|stop|status|logs|push-settings, on Kubernetes: the user's Syncthing pod, which
-# keeps their disk's .claude (every session's conversations and memory, and the shared Claude
-# files) in sync with their own machines over the LAN or VPN (K8S-18, Q-K11). cmd-sync.sh sends
-# these verbs here; `aidc sync setup` and `aidc sync reconcile` are the machine's own side.
+# aidc sync start|stop|status|logs|push-settings, on Kubernetes: the user's Syncthing pod, the
+# cluster's end of the two folders it shares with their own machines over the LAN or VPN
+# (K8S-18, Q-K11): aidc-claude-projects (the disk's .claude/projects, every session's
+# conversations and memory, both ways) and aidc-claude-shared (the disk's .claude-shared,
+# CLAUDE.md, rules, skills and the like, from the machines only). cmd-sync.sh sends these verbs
+# here and answers `aidc sync help` itself; `aidc sync setup` and `aidc sync reconcile` are the
+# machine's own side.
 
 set -euo pipefail
 
@@ -18,31 +21,6 @@ set -euo pipefail
 # shellcheck source=../lib/claude-sync.sh
 . "$AIDC_SCRIPTS/lib/claude-sync.sh"
 
-usage() {
-    cat <<'USAGE'
-aidc sync <verb> --backend kubernetes
-
-Your Claude history in the cluster (your disk's .claude: every session's conversations and
-memory, CLAUDE.md, rules, skills, agents, commands, keybindings), kept in sync with your own
-machines by a Syncthing pod in your namespace, over your LAN or VPN only.
-
-  start            Start it, or apply changed peers (sync.peers in your config)
-  stop             Stop it (its identity and your history are kept)
-  status           Running state, its device ID (pair your machines with it), the peers
-  logs [--follow]  Its log
-  push-settings    Copy this machine's Claude settings.json (as the template new sessions
-                   start from) and its status line script to the cluster: laptop to cluster
-                   only, never synced back
-
-Config:
-  sync:
-    peers:                       # your machines; the pod dials each one, nothing else
-      - {name: mac, device_id: ABCDEFG-..., address: 192.168.1.20}   # port 22000 unless given
-
-On each machine: Syncthing, with a folder of id aidc-claude at ~/.claude, shared with the
-pod's device ID (aidc sync status); `aidc sync setup` writes the folder's ignore list there.
-USAGE
-}
 
 # sync_peers: the configured peers, "<name> <device-id> <ipv4> <port>" a line; dies on one that
 # cannot be used, saying why. A name is resolved here, as a relay's is (NET-15).
@@ -97,15 +75,10 @@ sync_device_id() {
 }
 
 sync_start() {
-    local peers sel rc
+    local peers sel
     peers=$(sync_peers)
     [ -n "$peers" ] || info "no sync.peers in your config: the pod starts, reaching no machine until you add one (then aidc sync start again)"
-    rc=0
-    _k8s_claim_missing "$ns" "$K8S_SYNC_CLAIM" "Syncthing" || rc=$?
-    case "$rc" in
-        0) k8s_render_sync_claim | k8s_kubectl apply -f - >/dev/null || die "could not make the Syncthing claim" ;;
-        2) exit 1 ;;
-    esac
+    k8s_ensure_claim "$ns" "$K8S_SYNC_CLAIM" "Syncthing" k8s_render_sync_claim || exit 1
     k8s_render_sync_config "$peers" | k8s_kubectl apply -f - >/dev/null || die "could not write Syncthing's settings"
     sel=$(k8s_node_selector) || exit 1
     k8s_render_sync "$sel" "$peers" | k8s_kubectl apply -f - >&2 || die "could not apply the Syncthing pod"
@@ -167,19 +140,17 @@ sync_push_settings() {
     local src="${HOME}/.claude" cmd script tmpl
     [ "$(sync_state 2>/dev/null || true)" = RUNNING ] || die "Syncthing is not running in ${ns}: aidc sync start"
     [ -f "${src}/settings.json" ] || { info "no ${src}/settings.json here: nothing pushed (new cluster sessions keep the template they have, if any)"; return 0; }
-    if [ -f "${src}/settings.json" ]; then
-        # Without the hooks `aidc sync setup --hooks` added here: they name this machine's
-        # paths, and a cluster session runs its own from its managed settings.
-        tmpl=$(jq --arg mark "$AIDC_SYNC_HOOK_MARK" 'if (.hooks | type) == "object" then
-                       .hooks |= (with_entries(.value |= map(select(any(.hooks[]?; (.command // "") | test($mark)) | not)))
-                                  | with_entries(select(.value | length > 0)))
-                       | if .hooks == {} then del(.hooks) else . end
-                   else . end' "${src}/settings.json") || die "${src}/settings.json is not JSON"
-        printf '%s\n' "$tmpl" | k8s_kubectl -n "$ns" exec -i "deployment/${K8S_SYNC_NAME}" -c syncthing -- \
-            sh -c 'umask 022 && t=$(mktemp /var/syncthing/shared/.settings.template.XXXXXX) && cat > "$t" && mv -f "$t" /var/syncthing/shared/settings.template.json' \
-            || die "could not copy settings.json"
-        info "settings.json: the template new cluster sessions start from"
-    fi
+    # Without the hooks `aidc sync setup --hooks` added here: they name this machine's
+    # paths, and a cluster session runs its own from its managed settings.
+    tmpl=$(jq --arg mark "$AIDC_SYNC_HOOK_MARK" 'if (.hooks | type) == "object" then
+                   .hooks |= (with_entries(.value |= map(select(any(.hooks[]?; (.command // "") | test($mark)) | not)))
+                              | with_entries(select(.value | length > 0)))
+                   | if .hooks == {} then del(.hooks) else . end
+               else . end' "${src}/settings.json") || die "${src}/settings.json is not JSON"
+    printf '%s\n' "$tmpl" | k8s_kubectl -n "$ns" exec -i "deployment/${K8S_SYNC_NAME}" -c syncthing -- \
+        sh -c 'umask 022 && t=$(mktemp /var/syncthing/shared/.settings.template.XXXXXX) && cat > "$t" && mv -f "$t" /var/syncthing/shared/settings.template.json' \
+        || die "could not copy settings.json"
+    info "settings.json: the template new cluster sessions start from"
     cmd=$(jq -r '.statusLine.command // empty' "${src}/settings.json" 2>/dev/null || true)
     script=""
     # shellcheck disable=SC2088  # the literal ~ a settings file holds
@@ -198,7 +169,7 @@ sync_push_settings() {
 
 VERB="${1:-}"
 shift || true
-case "$VERB" in ""|help|-h|--help) usage; exit 0 ;; esac
+case "$VERB" in ""|help|-h|--help) exec bash "$AIDC_SCRIPTS/cmd-sync.sh" help ;; esac
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 case "$VERB" in

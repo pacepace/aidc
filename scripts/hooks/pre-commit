@@ -7,7 +7,8 @@
 #   ${AIDC_PRIVATE_NAMES:-~/.config/aidc/private-names}
 #
 # The list is never committed: it would publish what it guards. Without it the hook says so
-# and lets the commit through. Install for this clone: git config core.hooksPath scripts/hooks
+# and lets the commit through; with a line in it that is not a valid pattern, it refuses.
+# Install for this clone: git config core.hooksPath scripts/hooks
 set -u
 
 list="${AIDC_PRIVATE_NAMES:-${HOME}/.config/aidc/private-names}"
@@ -22,7 +23,15 @@ patterns=$(grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' "$list")
 # Only what this commit adds: the staged diff's added lines, and the names of added files.
 added=$( { git diff --cached --no-color -U0 --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+ '
            git diff --cached --name-only --diff-filter=ACMR; } 2>/dev/null)
-hits=$(printf '%s\n' "$added" | grep -i -n -E -f <(printf '%s\n' "$patterns") || true)
+# grep: 0 a match, 1 none, 2 an error (a pattern on the list that is not a valid regular
+# expression makes it match nothing at all): an error refuses the commit, never passes it
+# unchecked. Its own message is not shown, so no part of the list is printed.
+rc=0
+hits=$(printf '%s\n' "$added" | grep -i -n -E -f <(printf '%s\n' "$patterns") 2>/dev/null) || rc=$?
+if [ "$rc" -gt 1 ]; then
+    printf 'pre-commit: the private-names list (%s) has a line that is not a valid extended regular expression, so nothing was checked: fix that line (grep -E -f on the list says which), then commit again\n' "$list" >&2
+    exit 1
+fi
 if [ -n "$hits" ]; then
     printf 'pre-commit: the staged changes name something on your private-names list (%s):\n' "$list" >&2
     # The matching lines, not the patterns: the list itself is never printed.

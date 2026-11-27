@@ -79,11 +79,14 @@ mcp_token_read() {
     printf '%s' "$b64" | base64 -d
 }
 
-# mcp_api_endpoints: the API server's addresses the server may reach, "<ipv4>:<port>" a line:
-# kubernetes.api_endpoints when the config names them, else the server of the kubeconfig in use,
-# resolved here. A loopback or unresolvable one is refused: the pod could not reach it.
+# mcp_api_endpoints: the API server's addresses the server may reach, "<ipv4>:<port>" a line,
+# the one its kubectl tries first first: kubernetes.api_endpoints when the config names them,
+# else the server of the kubeconfig in use, resolved here, and, when that is a control-plane
+# node's own address, every control-plane node's at the same port (so the pod has another to
+# turn to). A loopback or unresolvable one is refused: the pod could not reach it. Which of them
+# the pod does reach is asked from inside it once it runs (mcp_reachable_endpoint).
 mcp_api_endpoints() {
-    local listed ep server hostport host port ip
+    local listed ep server hostport host port ip cps
     listed=$(_k8s_cfg_json '.kubernetes.api_endpoints' '[]' | yq -p=json '.[]' 2>/dev/null || true)
     if [ -n "$listed" ]; then
         while IFS= read -r ep; do
@@ -109,6 +112,37 @@ mcp_api_endpoints() {
         127.*) err "your kubeconfig reaches the API server at ${ip}, which the server's pod cannot: set kubernetes.api_endpoints to the API server's <ipv4>:<port> as the cluster sees it"; return 1 ;;
     esac
     printf '%s:%s\n' "$ip" "$port"
+    cps=$(mcp_control_plane_ips)
+    if printf '%s\n' "$cps" | grep -qxF "$ip"; then
+        printf '%s\n' "$cps" | grep -vxF "$ip" | sed "s/\$/:${port}/"
+    fi
+    return 0
+}
+
+# mcp_control_plane_ips: the InternalIP of each control-plane node, one a line, as the cluster
+# itself reports them (the addresses its API Service balances over); "" when it has none to
+# show (a managed control plane) or does not answer.
+mcp_control_plane_ips() {
+    k8s_kubectl get nodes -l node-role.kubernetes.io/control-plane \
+        -o 'jsonpath={range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null \
+        | while IFS= read -r a; do aidc_egress_is_ipv4 "$a" && printf '%s\n' "$a"; done
+    return 0
+}
+
+# mcp_reachable_endpoint <ipv4>:<port>...: the first of them the running server's pod reaches
+# the API server at, asked from inside the pod with its own kubectl (the address the pod's
+# kubeconfig will name, checked where it is used, not where it was resolved); returns 1 when it
+# reaches none. /readyz is readable by any client, so no grant is needed for the question.
+mcp_reachable_endpoint() {
+    local ep
+    for ep in "$@"; do
+        if k8s_kubectl -n "$ns" exec "deployment/${K8S_MCP_NAME}" -c mcp -- kubectl --server "https://${ep}" \
+            --tls-server-name kubernetes.default.svc --request-timeout=5s get --raw /readyz </dev/null >/dev/null 2>&1; then
+            printf '%s' "$ep"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # mcp_callback: K8S_MCP_CALLBACK_IP, _PORT and _HOST, where the server posts finished turns
@@ -248,12 +282,13 @@ mcp_add_endpoints() {
 }
 
 mcp_start() {
-    local sel tok rc=0 eps state incluster="" known expose
+    local sel tok rc=0 eps api_eps first reach state incluster="" known expose
     # A token first: the pod mounts it, and a cluster that does not say whether there is one
     # must not get a second.
     tok=$(mcp_token_read) || rc=$?
     [ "$rc" = 0 ] || die "cannot read your MCP token in ${ns}: the cluster did not answer"
     eps=$(mcp_api_endpoints) || exit 1
+    api_eps="$eps" first=$(printf '%s\n' "$eps" | head -n1)
     mcp_callback || exit 1
     expose=$(mcp_expose_mode) || exit 1
     [ "$expose" != ingress ] || mcp_expose_check || exit 1
@@ -280,14 +315,10 @@ mcp_start() {
     fi
     sel=$(k8s_node_selector) || exit 1
     k8s_ensure_transcripts "$ns" || exit 1
-    rc=0
-    _k8s_claim_missing "$ns" "$K8S_MCP_STATE_CLAIM" "MCP server's state" || rc=$?
-    case "$rc" in
-        0) k8s_render_mcp_state | k8s_kubectl apply -f - >/dev/null || die "could not make the MCP server's state claim" ;;
-        2) exit 1 ;;
-    esac
-    # The pod's kubectl goes to the first configured (or the kubeconfig's) API server address.
-    k8s_render_mcp_config "$(printf '%s\n' "$eps" | head -n1)" | k8s_kubectl apply -f - >/dev/null \
+    k8s_ensure_claim "$ns" "$K8S_MCP_STATE_CLAIM" "MCP server's state" k8s_render_mcp_state || exit 1
+    # The pod's kubectl goes to one API server address (docs/design-12-kubernetes.md, the MCP
+    # server's "API server reach"): the first, until the pod says it reaches another only (below).
+    k8s_render_mcp_config "$first" | k8s_kubectl apply -f - >/dev/null \
         || die "could not write the MCP server's config"
     mcp_load_settings
     if [ "${AIDC_MCP_SESSION_CREATE:-}" = true ]; then
@@ -309,6 +340,18 @@ mcp_start() {
             k8s_render_mcp "$sel" $eps | k8s_kubectl apply -f - >/dev/null \
                 || die "could not let the MCP server reach the API server at ${incluster}"
         fi
+    fi
+    # shellcheck disable=SC2086  # one endpoint per word
+    reach=$(mcp_reachable_endpoint $api_eps) \
+        || die "your MCP server's pod reaches the API server at none of $(printf '%s' "$api_eps" | paste -sd' ' -): set kubernetes.api_endpoints to the API server's <ipv4>:<port> as pods in the cluster reach it, then aidc mcp start again"
+    if [ "$reach" != "$first" ]; then
+        info "your MCP server's pod does not reach the API server at ${first}: it uses ${reach}"
+        k8s_render_mcp_config "$reach" | k8s_kubectl apply -f - >/dev/null \
+            || die "could not write the MCP server's config"
+        k8s_kubectl -n "$ns" rollout restart "deployment/${K8S_MCP_NAME}" >/dev/null \
+            || die "could not restart the MCP server onto ${reach}"
+        k8s_kubectl -n "$ns" rollout status "deployment/${K8S_MCP_NAME}" --timeout=300s >&2 \
+            || die "the MCP server did not become ready; see: kubectl -n ${ns} describe pod -l app=${K8S_MCP_NAME}"
     fi
     # A callback no longer configured keeps no way out.
     if [ -z "${K8S_MCP_CALLBACK_IP:-}" ]; then

@@ -38,9 +38,12 @@ aidc_managed_settings() {
                  | if $cluster then
                        reduce ("SessionStart", "PostToolUse", "Stop", "SessionEnd") as $e (.;
                            .[$e] = ((.[$e] // []) + [{hooks: [{type: "command", command: ($lease + " hook")}]}]))
-                       # A prompt goes through the lease first, which hands on only one it lets
-                       # through to the event writer: a refused prompt opens no turn, and an
-                       # event of it would leave aidc-mcp waiting on one.
+                       # A prompt goes through the lease first, which hands it on to the event
+                       # writer: an accepted one as itself (UserPromptSubmit), a refused one as
+                       # a PromptRefused event naming the holder, which opens no turn
+                       # (claude-lease.sh). The lease runs at the same events on a machine
+                       # (scripts/lib/claude-sync.sh); tests/unit/test-claude-sync.sh holds
+                       # the two lists equal.
                        | .UserPromptSubmit = [{hooks: [{type: "command", command: ($lease + " hook --then " + $cmd)}]}]
                    else . end)}
         + (if $cluster then {statusLine: {type: "command", command: ($usage + " statusline")}} else {} end)

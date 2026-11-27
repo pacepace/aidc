@@ -317,14 +317,14 @@ async def inject(container: str, text: str, window: str, *, session: str,
                       waited_s=_PASTE_CONFIRM_POLLS * _PASTE_CONFIRM_POLL_S)
             return False
     ss.unsubmitted_paste.pop(session, None)
-    watermark = (_newest_event_name(Path(ss.TRANSCRIPTS_BASE) / session)
+    watermark = (he.newest_event_name(Path(ss.TRANSCRIPTS_BASE) / session)
                  if backend.kind() == backend.KUBERNETES else "")
     await tmx.tmux_exec(container, ["send-keys", "-t", f"main:{window}", "Enter"])
     if await _refused_by_lease(session, watermark):
         # Claude Code erased the prompt: no turn, nothing recorded. The caller keeps it
         # queued, and the free check holds it a while before asking again.
         audit.log_event("session_send_refused_held_elsewhere", session=session,
-                  prompt_len=len(text), holder=ss.held_by.get(session, ""))
+                  prompt_len=len(text), holder=_holder(session))
         return False
     batch = ({"pasted_at": ts.now_iso(),
               "prompts": [q.batch_entry() for q in prompts]}
@@ -355,24 +355,22 @@ _REFUSAL_POLL_S = 0.2
 HELD_RETRY_S = 60.0
 
 
-def _newest_event_name(mirror: Path) -> str:
-    """The newest hook event's file name in the session's mirror ("" for none): a watermark
-    in the session pod's own sequence."""
-    events = he.read_events(mirror)
-    return events[-1].name if events else ""
-
-
 def held_elsewhere(name: str, now: float | None = None) -> dict[str, Any] | None:
     """Who holds session `name`'s conversation, while its queue waits on that ({holder}), or
     None: the newest prompt event is not a refusal, or the wait after it (HELD_RETRY_S, from
     when this server saw it) is over, so the next paste asks again."""
-    retry_at = ss.held_retry_at.get(name)
-    if retry_at is None:
+    held = ss.lease_held.get(name)
+    if held is None:
         return None
-    if retry_at <= (time.time() if now is None else now):
-        ss.held_retry_at.pop(name, None)
+    if held.retry_at <= (time.time() if now is None else now):
+        ss.lease_held.pop(name, None)
         return None
-    return {"holder": ss.held_by.get(name, "")}
+    return {"holder": held.holder}
+
+
+def _holder(name: str) -> str:
+    held = ss.lease_held.get(name)
+    return held.holder if held is not None else ""
 
 
 async def _refused_by_lease(session: str, watermark: str) -> bool:
@@ -387,12 +385,12 @@ async def _refused_by_lease(session: str, watermark: str) -> bool:
     for _ in range(max(1, int(_REFUSAL_WAIT_S / _REFUSAL_POLL_S))):
         for event in he.read_events(mirror, after=watermark):
             if event.event == he.PROMPT_REFUSED:
-                ss.held_retry_at[session] = time.time() + HELD_RETRY_S
                 holder = event.data.get("holder")
-                ss.held_by[session] = holder if isinstance(holder, str) else ""
+                ss.lease_held[session] = ss.Held(time.time() + HELD_RETRY_S,
+                                                     holder if isinstance(holder, str) else "")
                 return True
             if event.event == he.USER_PROMPT_SUBMIT:
-                ss.held_retry_at.pop(session, None)
+                ss.lease_held.pop(session, None)
                 return False
         await asyncio.sleep(_REFUSAL_POLL_S)
     audit.log_event("session_send_prompt_event_not_seen", session=session,

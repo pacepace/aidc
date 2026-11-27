@@ -282,12 +282,7 @@ EOF
 # (never applied over one that is: a changed size would be refused as a resize). Returns 1,
 # saying why on stderr, when the cluster cannot be asked or does not take it.
 k8s_ensure_transcripts() {
-    local rc=0
-    _k8s_claim_missing "$1" "$K8S_TRANSCRIPTS_CLAIM" "transcript mirror" || rc=$?
-    case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
-    k8s_render_transcripts | k8s_kubectl apply -f - >/dev/null && return 0
-    printf '[aidc] error: could not make the transcript mirror claim in %s\n' "$1" >&2
-    return 1
+    k8s_ensure_claim "$1" "$K8S_TRANSCRIPTS_CLAIM" "transcript mirror" k8s_render_transcripts
 }
 
 # _k8s_mirror_dir_cmd <folder> <uid>: the root init step that readies a pod's own folder of the
@@ -360,10 +355,10 @@ spec:
 EOF
 }
 
-# _k8s_claim_missing <namespace> <claim> <what>: 0 when the claim is not there yet, 1 when it
+# k8s_claim_missing <namespace> <claim> <what>: 0 when the claim is not there yet, 1 when it
 # is; 2, saying why on stderr, when the cluster cannot be asked. A claim is made once and never
 # applied over (a changed size would be refused as a resize).
-_k8s_claim_missing() {
+k8s_claim_missing() {
     local have
     if ! have=$(k8s_get "$1" pvc "$2" -o name); then
         printf '[aidc] error: cannot read the %s claim in %s: the cluster did not answer (%s)\n' "$3" "$1" "$have" >&2
@@ -375,22 +370,25 @@ _k8s_claim_missing() {
 # k8s_ensure_claude_config <namespace> / k8s_ensure_claude_accounts <namespace>: the claim, made
 # when missing. Return 1, saying why on stderr, when the cluster cannot be asked or does not
 # take it.
-k8s_ensure_claude_config() {
+# k8s_ensure_claim <namespace> <claim> <what> <render-function>: the claim, made from what
+# <render-function> prints when it is not there yet, and never applied over one that is. Every
+# per-user claim aidc makes goes through here. Returns 1, saying why on stderr, when the cluster
+# cannot be asked or does not take it.
+k8s_ensure_claim() {
     local rc=0
-    _k8s_claim_missing "$1" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" || rc=$?
+    k8s_claim_missing "$1" "$2" "$3" || rc=$?
     case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
-    k8s_render_claude_config | k8s_kubectl apply -f - >/dev/null && return 0
-    printf '[aidc] error: could not make the Claude config claim in %s\n' "$1" >&2
+    "$4" | k8s_kubectl apply -f - >/dev/null && return 0
+    printf '[aidc] error: could not make the %s claim in %s\n' "$3" "$1" >&2
     return 1
 }
 
+k8s_ensure_claude_config() {
+    k8s_ensure_claim "$1" "$K8S_CLAUDE_CONFIG_CLAIM" "Claude config" k8s_render_claude_config
+}
+
 k8s_ensure_claude_accounts() {
-    local rc=0
-    _k8s_claim_missing "$1" "$K8S_CLAUDE_ACCOUNTS_CLAIM" "Claude accounts" || rc=$?
-    case "$rc" in 1) return 0 ;; 2) return 1 ;; esac
-    k8s_render_claude_accounts | k8s_kubectl apply -f - >/dev/null && return 0
-    printf '[aidc] error: could not make the Claude accounts claim in %s\n' "$1" >&2
-    return 1
+    k8s_ensure_claim "$1" "$K8S_CLAUDE_ACCOUNTS_CLAIM" "Claude accounts" k8s_render_claude_accounts
 }
 
 # _k8s_claude_dir_cmd <folder> <uid> <gid> <mode>: the root init step that readies a pod's own
@@ -1891,7 +1889,10 @@ k8s_mcp_config() {
 # (half or more of the calls were refused on a three-node control plane); and kubectl drops the
 # in-cluster default when any flag such as --request-timeout is given, then tries
 # localhost:8080. The certificate is checked for the Service's name, which every API server's
-# certificate carries, so the address need not be in it.
+# certificate carries, so the address need not be in it. One address, since a kubeconfig cluster
+# has one server: aidc mcp start picks the first its policy allows that the pod itself reaches
+# (mcp.sh, mcp_reachable_endpoint), and a start again moves it off a node that went down
+# (docs/design-12-kubernetes.md, the MCP server's "API server reach").
 K8S_MCP_KUBECONFIG=/aidc-config/kubeconfig
 k8s_mcp_kubeconfig() {
     local sa=/var/run/secrets/kubernetes.io/serviceaccount

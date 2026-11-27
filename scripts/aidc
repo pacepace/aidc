@@ -21,6 +21,27 @@ export AIDC_ROOT
 AIDC_SCRIPTS="$AIDC_ROOT/scripts"
 export AIDC_SCRIPTS
 
+# The hooks `aidc sync setup --hooks` puts in a machine's own Claude settings run here on every
+# session start, prompt, tool call and turn end, so they go straight to their script, ahead of
+# everything below (the VERSION check, the audit warnings and their cluster call). For a Claude
+# Code hook, exit 2 is a decision (a prompt refused, a Stop blocked): only the lease's own
+# refusal may give it, and any other failure becomes 1, which Claude shows and moves past.
+if [ "${1:-}" = sync ]; then
+    case "${2:-}" in
+        lease-hook)
+            rc=0
+            bash "$AIDC_ROOT/.devcontainer/claude-lease.sh" hook "${@:3}" || rc=$?
+            case "$rc" in 0|2) exit "$rc" ;; *) exit 1 ;; esac ;;
+        reconcile)
+            if [ "${3:-}" = --hook ]; then
+                rc=0
+                bash "$AIDC_SCRIPTS/cmd-sync.sh" reconcile --hook || rc=$?
+                [ "$rc" = 0 ] || exit 1
+                exit 0
+            fi ;;
+    esac
+fi
+
 # Source common library (provides err/die/info, validation, etc.).
 # shellcheck source=lib/common.sh
 . "$AIDC_SCRIPTS/lib/common.sh"

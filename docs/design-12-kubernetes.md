@@ -48,7 +48,7 @@ cluster (the session node)
     ├─ claude-broker (Deployment) + claude-accounts (PVC)  the user's Claude accounts ("Claude")
     ├─ git (Deployment)                     the git container: gitctl, the GitHub login (K8S-04..06; "Git")
     ├─ aidc-mcp (Deployment) + aidc-mcp-state (PVC)  the user's MCP server (K8S-07; "Control plane")
-    └─ syncthing (Deployment) + syncthing (PVC)  the disk's .claude <-> the user's machines (K8S-18)
+    └─ syncthing (Deployment) + syncthing (PVC)  the disk's .claude/projects <-> the user's machines, .claude-shared <- them (K8S-18)
 ```
 
 The transcript mirror (MCP-15, Q-M3): each session's dev pod copies its Claude transcripts, and
@@ -1270,13 +1270,36 @@ namespace (TRS-23, MCP-02/03 as amended):
   start reads back from the `aidc-mcp` policy); the name goes in the pod's hosts file, since the
   pod has no DNS. No callback URL: no callback egress (its policy removed), and start says so.
 - **Network:** a NetworkPolicy on top of the namespace's default-deny: ingress as above, egress
-  to the callback and to the API server only, at the address the user's kubeconfig names (resolved on their
-  machine, refused when it is loopback; `kubernetes.api_endpoints` overrides) and at its
-  in-cluster Service address, as the server's own pod reports it. Both, because a network
+  to the callback and to the API server only, at the addresses of "API server reach" below
+  (the user's kubeconfig's, resolved on their machine and refused when it is loopback, with the
+  other control-plane nodes'; or `kubernetes.api_endpoints`) and at its in-cluster Service
+  address, as the server's own pod reports it. Both, because a network
   policy may see a connection before or after the Service's address is translated, depending
   on the CNI. Over a running server the in-cluster address is read first and the policy applied
   once, so it is never narrowed under the server (a server that does not answer keeps what
   its policy allows); a new server's is read once it runs and added.
+- **API server reach (2026-11-27):** the server's kubectl, and the aidc CLI it runs, use a
+  kubeconfig of aidc's (`k8s_mcp_kubeconfig`, in the server's ConfigMap): the pod's
+  ServiceAccount token and CA, the certificate checked for `kubernetes.default.svc` (every API
+  server's certificate carries that name, so the address need not be in it), and one API server
+  address. Not kubectl's in-cluster default, for two reasons found on a live cluster: the API
+  Service balances over every control-plane node, and a policy judged after the Service's
+  translation lets through only the node addresses it names (half or more of the calls were
+  refused on a three-node control plane); and kubectl drops the in-cluster default whenever a
+  flag such as `--request-timeout` is given, then tries `localhost:8080`. The addresses are
+  `kubernetes.api_endpoints` when configured; otherwise the kubeconfig's server as the user's
+  machine resolves it and, when that is a control-plane node's own address, every control-plane
+  node's (their InternalIPs, as the cluster reports them, at the same port), so the policy
+  allows each. Which one the kubeconfig names is not taken on the machine's word: once the pod
+  runs, start asks from inside it (its own kubectl, `get --raw /readyz`, which any client may
+  read) and uses the first it reaches, rewriting the kubeconfig and restarting the server when
+  that is not the first; when the pod reaches none (a VPN, tunnel or load-balancer address
+  only the machine can route), start refuses, saying to set `kubernetes.api_endpoints`.
+  Trade-off, taken knowingly: no failover while the server runs. A kubeconfig cluster has one
+  server; the server and the CLI call kubectl directly in many places; and a retrying wrapper
+  would have to replay a command's stdin, which a streaming exec (attach, send) cannot. So
+  with that control-plane node down every cluster call from the server fails until
+  `aidc mcp start` is run again, which asks the pod afresh and moves it to a node that answers.
 - **Creating sessions (MCP-38/39, TRS-23):** with `mcp.session_create: true` the server's
   `session_create` runs `aidc create --backend kubernetes` in its pod, under its ServiceAccount:
   no repo or workspace (refused), the session starting at `/home/<user>` (the pod's home and

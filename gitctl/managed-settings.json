@@ -14,7 +14,7 @@
       "Grep",
       "Glob",
       "AskUserQuestion",
-      "Write(//tmp/**)"
+      "Edit(//tmp/**)"
     ]
   },
   "hooks": {

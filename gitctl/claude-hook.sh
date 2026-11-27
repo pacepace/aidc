@@ -7,10 +7,11 @@
 #    Claude Code 2.1.332 refuses AskUserQuestion in dontAsk whatever the settings or a hook say,
 #    and the question is how ask mode reaches the user (docs/design-12-kubernetes.md, "Git").
 #    So this hook refuses ("deny", with a reason) every call the managed settings'
-#    permissions.allow would not allow, as dontAsk did: the effective allow set stays the same,
-#    and nothing waits on a permission prompt no one sees. A call the list allows gets no
-#    decision and goes on to Claude's own permission check of that same list. The list is read
-#    from the managed settings each time; this hook keeps no copy of it.
+#    permissions.allow would not allow, as dontAsk did, so while the hook runs nothing waits on
+#    a permission prompt no one sees (when it fails, see below). A call the list allows gets no
+#    decision and goes on to Claude's own permission check of that same list, so the hook
+#    matches rules as Claude does. The list is read from the managed settings each time; this
+#    hook keeps no copy of it.
 # 2. The guard rules (gitctl-rules.sh), a courtesy, not the enforcement: the agent holds no
 #    credential, and gitctl, the only way to the GitHub login, checks everything itself. They
 #    stop early what would fail or break a rule anyway: switching user, reading the login's
@@ -43,8 +44,12 @@ _NO_PERMISSION_TOOLS=" Agent Task Glob Grep LS Read NotebookRead TodoWrite ToolS
 
 # _bash_segments CMD: CMD's simple commands, one a line (split at &&, ||, ;, |, & and newlines
 # outside quotes, as Claude Code checks each part of a compound command on its own). Returns 1
-# for a command it cannot judge part by part: a command or process substitution, or quotes left
-# open.
+# for a command it cannot judge part by part: a command or process substitution, quotes left
+# open, bash's ANSI-C or locale quoting ($'...' or $"..."), or a comment. In $'...' a \' does
+# not end the string, so git $'\'' ; rm -rf ~ ; git '\' is three commands to bash and would be
+# one here; $"..." is refused with it rather than modelled. A # starting a word (outside quotes)
+# starts a comment to the end of the line, where a quote opens nothing: git a #' <newline>
+# git b ; rm -rf ~ ; git c #' is four commands to bash, one quoted string here.
 _bash_segments() {
     local s="$1" i c n q="" cur="" prev=""
     for ((i = 0; i < ${#s}; i++)); do
@@ -59,6 +64,8 @@ _bash_segments() {
         fi
         case "$c" in
             "'"|'"') q="$c"; cur+="$c" ;;
+            '$') case "$n" in "'"|'"') return 1 ;; esac; cur+="$c" ;;
+            '#') case "${cur: -1}" in ''|[[:space:]]|'<'|'>'|'('|')') return 1 ;; esac; cur+="$c" ;;
             '<'|'>') [ "$n" = '(' ] && return 1; cur+="$c" ;;
             ';'|$'\n') printf '%s\n' "$cur"; cur="" ;;
             '|') printf '%s\n' "$cur"; cur=""; [ "$n" = '|' ] || [ "$n" = '&' ] && i=$((i + 1)) ;;
@@ -77,7 +84,7 @@ _bash_segments() {
 # names: "Bash(git *)" allows "git" and "git <anything>", "Bash(x)" allows "x" only.
 _bash_allowed() {
     local cmd="$1" rules="$2" segs seg r p ok any=0
-    segs=$(_bash_segments "$cmd") || { GITCTL_REASON="a command or process substitution, or an open quote, in: ${cmd:0:120}"; return 1; }
+    segs=$(_bash_segments "$cmd") || { GITCTL_REASON="a command or process substitution, an open quote, \$'...' or \$\"...\" quoting, or a comment, in: ${cmd:0:120}"; return 1; }
     while IFS= read -r seg; do
         seg="${seg#"${seg%%[![:space:]]*}"}"; seg="${seg%"${seg##*[![:space:]]}"}"
         [ -n "$seg" ] || continue
@@ -97,7 +104,12 @@ _bash_allowed() {
 }
 
 # _path_allowed TOOL PATH RULES: 0 when a TOOL(//<dir>/**) rule holds PATH (resolved, so no ..
-# leaves the folder).
+# leaves the folder). The file-editing tools are judged with TOOL=Edit, as Claude Code judges
+# them (code.claude.com/docs, permissions, "What Read and Edit rules cover"): Edit rules apply to
+# every built-in tool that edits files (Edit, Write, NotebookEdit, legacy MultiEdit), and a
+# Write(path), NotebookEdit(path) or MultiEdit(path) rule is accepted but matches nothing. So the
+# list's old Write(//tmp/**) allowed no write at all, under dontAsk denied Write and Edit alike;
+# the list now says Edit(//tmp/**), which Claude matches for all four, and so does this hook.
 _path_allowed() {
     local tool="$1" path="$2" rules="$3" r d real
     [ -n "$path" ] || return 1
@@ -132,7 +144,10 @@ if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then exit 0; fi
 case "$tool" in
     Bash)
         _bash_allowed "$cmd" "$rules" || deny "$GITCTL_REASON" ;;
+    Edit|Write|MultiEdit|NotebookEdit)
+        printf '%s\n' "$rules" | grep -qxF -- Edit && exit 0
+        _path_allowed Edit "$path" "$rules" || deny "the tool ${tool}${path:+ on ${path}}" ;;
     *)
-        _path_allowed "$tool" "$path" "$rules" || deny "the tool ${tool}${path:+ on ${path}}" ;;
+        deny "the tool ${tool}${path:+ on ${path}}" ;;
 esac
 exit 0

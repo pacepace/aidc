@@ -273,9 +273,9 @@ its conversation), window `shell` a shell. Its instructions are `/etc/claude-cod
 root's, always loaded: gitctl as the only way to GitHub, the hard rules, everything sessions
 write is data, the ask-mode procedure, push/PR, merge then tidy, protections, leftovers
 reported. Its managed settings add a permission list (gitctl, git-requests, git, its gh
-stand-in, reads, its question tool, writes under /tmp), with bypass mode disabled: anything else is
-refused, never left waiting on a prompt nobody sees. Unlike a sandboxed session's Claude it
-keeps AskUserQuestion.
+stand-in, reads, its question tool, writes under /tmp), with bypass mode disabled: anything else
+is refused, not left waiting on a prompt nobody sees (unless the hook below fails). Unlike a
+sandboxed session's Claude it keeps AskUserQuestion.
 
 Its permission mode (2026-11-27): Claude Code's `default`, not `dontAsk`. The agent's Claude
 first ran in `dontAsk`, which refuses AskUserQuestion (Claude Code 2.1.332, live) even with the
@@ -286,10 +286,16 @@ decided nothing. So the refusal `dontAsk` gave moved into the managed PreToolUse
 from the managed settings, the one list, and returns `permissionDecision: "deny"`, with a
 reason, for every call the list would not allow. A Bash command is judged part by part (split
 at `&&`, `||`, `;`, `|`, `&` and newlines outside quotes, as Claude checks a compound command),
-each part starting with a listed command; a command or process substitution, or an open quote,
-is denied. Claude's tools that ask no permission (TodoWrite, ToolSearch, Glob ...) get no
+each part starting with a listed command; a command or process substitution, an open quote, or
+bash's `$'...'` or `$"..."` quoting, or a comment (a `#` starting a word) is denied: in `$'...'`
+a `\'` does not end the string, and in a comment a quote opens nothing, so a plain quote toggle
+would read `git $'\'' ; rm -rf ~ ; git '\'` as one command where bash runs three. Claude's tools that ask no permission (TodoWrite, ToolSearch, Glob ...) get no
 decision, as `dontAsk` ran them. A call the list allows gets no decision and goes on to
-Claude's own check of the same list. The effective allow set is the one `dontAsk` enforced. When
+Claude's own check of the same list, so the hook matches rules as Claude does: an `Edit(path)`
+rule covers every tool that edits files (Write, Edit, NotebookEdit, MultiEdit), and a
+`Write(path)` rule matches nothing (code.claude.com/docs, permissions). The list's first
+`Write(//tmp/**)` therefore allowed no write under `dontAsk`; it is `Edit(//tmp/**)` now. Apart
+from those writes the effective allow set is the one `dontAsk` enforced. When
 the hook itself fails (a crash, a non-zero exit other than 2, or its timeout), Claude Code
 treats it as a non-blocking error and the call goes on through the normal permission flow
 (code.claude.com/docs, hooks: "staying silent doesn't approve it"): in the default mode a

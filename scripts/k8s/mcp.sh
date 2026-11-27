@@ -131,13 +131,13 @@ mcp_control_plane_ips() {
 
 # mcp_reachable_endpoint <ipv4>:<port>...: the first of them the running server's pod reaches
 # the API server at, asked from inside the pod with its own kubectl (the address the pod's
-# kubeconfig will name, checked where it is used, not where it was resolved). When it reaches
-# none, prints the last attempt's error instead (a refused connection, or an exec that failed
-# for its own reason: the two read differently) and returns 1. /readyz is readable by any
-# client, so no grant is needed for the question.
+# kubeconfig will name, checked where it is used, not where it was resolved), on stdout. When
+# it reaches none, prints the last attempt's error on stderr instead (a refused connection, or
+# an exec that failed for its own reason: the two read differently) and returns 1. /readyz is
+# readable by any client, so no grant is needed for the question.
 mcp_reachable_endpoint() {
     local ep errf why=""
-    errf=$(mktemp) || { printf 'cannot make a temporary file'; return 1; }
+    errf=$(mktemp) || { printf 'cannot make a temporary file\n' >&2; return 1; }
     for ep in "$@"; do
         if k8s_kubectl -n "$ns" exec "deployment/${K8S_MCP_NAME}" -c mcp -- kubectl --server "https://${ep}" \
             --tls-server-name kubernetes.default.svc --request-timeout=5s get --raw /readyz </dev/null >/dev/null 2>"$errf"; then
@@ -148,7 +148,7 @@ mcp_reachable_endpoint() {
         why=$(grep -v '^[[:space:]]*$' "$errf" | tail -n1)
     done
     rm -f "$errf"
-    printf '%s' "${why:-no answer}"
+    printf '%s\n' "${why:-no answer}" >&2
     return 1
 }
 
@@ -332,7 +332,8 @@ mcp_start() {
     if [ "$state" != "NOT RUNNING" ]; then
         held=$(mcp_config_endpoint)
         # shellcheck disable=SC2086  # one endpoint per word
-        if reach=$(mcp_reachable_endpoint $api_eps); then target="$reach"; fi
+        # (Its error is not one here: the check below asks again and shows that one.)
+        if reach=$(mcp_reachable_endpoint $api_eps 2>/dev/null); then target="$reach"; fi
     fi
     if [ -z "$tok" ]; then
         tok=$(mcp_token_new)
@@ -368,9 +369,11 @@ mcp_start() {
                 || die "could not let the MCP server reach the API server at ${incluster}"
         fi
     fi
+    reach_err=$(mktemp) || die "cannot make a temporary file"
     # shellcheck disable=SC2086  # one endpoint per word
-    reach=$(mcp_reachable_endpoint $api_eps) \
-        || die "your MCP server's pod reaches the API server at none of $(printf '%s' "$api_eps" | paste -sd' ' -) (${reach}): set kubernetes.api_endpoints to the API server's <ipv4>:<port> as pods in the cluster reach it, then aidc mcp start again"
+    reach=$(mcp_reachable_endpoint $api_eps 2>"$reach_err") \
+        || die "your MCP server's pod reaches the API server at none of $(printf '%s' "$api_eps" | paste -sd' ' -) ($(cat "$reach_err"; rm -f "$reach_err")): set kubernetes.api_endpoints to the API server's <ipv4>:<port> as pods in the cluster reach it, then aidc mcp start again"
+    rm -f "$reach_err"
     [ "$reach" = "$first" ] || info "your MCP server's pod does not reach the API server at ${first}: it uses ${reach}"
     if [ "$reach" != "$target" ]; then
         k8s_render_mcp_config "$reach" | k8s_kubectl apply -f - >/dev/null \

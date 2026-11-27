@@ -328,6 +328,18 @@ K8S_DISK_SHARED=.claude-shared
 # which the dev pod's claude-seed step mounts at K8S_CLAUDE_STATE_SEED_DIR.
 K8S_CLAUDE_STATE_SEED=claude-state-seed.json
 K8S_CLAUDE_STATE_SEED_DIR=/claude-state-seed
+# The audit record's first files (k8s/session-create.sh writes them), the audit-seed ConfigMap's
+# other keys: the one list session-create's ConfigMap, the proxy pod's audit-seed volume and its
+# seed-audit step all read.
+K8S_AUDIT_SEED_FILES="meta.json config-snapshot.yaml"
+
+# k8s_audit_seed_items: the audit-seed volume's items, one per K8S_AUDIT_SEED_FILES key (the
+# ConfigMap's Claude state seed is no part of the audit record).
+k8s_audit_seed_items() {
+    local f out=""
+    for f in $K8S_AUDIT_SEED_FILES; do out+="${out:+, }{key: ${f}, path: ${f}}"; done
+    printf '[%s]' "$out"
+}
 
 k8s_render_claude_config() {
     cat <<EOF
@@ -1267,13 +1279,13 @@ spec:
           volumeMounts: [{name: disk, mountPath: /disk}]
         # The audit record's first files, as aidc create writes them on Docker: meta.json (the
         # audit sidecar stamps tainted_at and killed_at into it) and the config snapshot. Only
-        # when absent: a restarted proxy pod must not reset them. Its volume holds those two keys
-        # only: the ConfigMap also carries the session's Claude state seed, which is no part of
-        # the audit record.
+        # when absent: a restarted proxy pod must not reset them. Its volume holds those keys
+        # only (K8S_AUDIT_SEED_FILES): the ConfigMap also carries the session's Claude state
+        # seed, which is no part of the audit record.
         - name: seed-audit
           image: ${img}/audit:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
-          command: [sh, -c, 'for f in meta.json config-snapshot.yaml; do [ -e "/var/aidc/audit/\$f" ] || cp "/seed/\$f" "/var/aidc/audit/\$f"; done']
+          command: [sh, -c, 'for f in ${K8S_AUDIT_SEED_FILES}; do [ -e "/var/aidc/audit/\$f" ] || cp "/seed/\$f" "/var/aidc/audit/\$f"; done']
           volumeMounts:
             - {name: audit, mountPath: /var/aidc/audit}
             - {name: audit-seed, mountPath: /seed}
@@ -1357,7 +1369,7 @@ spec:
         - {name: state, persistentVolumeClaim: {claimName: ${session}-state}}
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
         - {name: audit, persistentVolumeClaim: {claimName: ${audit}}}
-        - {name: audit-seed, configMap: {name: ${session}-audit-seed, items: [{key: meta.json, path: meta.json}, {key: config-snapshot.yaml, path: config-snapshot.yaml}]}}
+        - {name: audit-seed, configMap: {name: ${session}-audit-seed, items: $(k8s_audit_seed_items)}}
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}

@@ -3,8 +3,9 @@
 # session's Claude runs in its own (docs/design-12-kubernetes.md, "Git").
 #
 # Its instructions are the managed /etc/claude-code/CLAUDE.md and its permissions the managed
-# settings beside it: only the git verbs, reads and its question tool run; anything else is
-# refused without a prompt, so nothing waits on a permission no one sees. The default
+# settings beside it: only the git verbs, reads, its question tool and writes under /tmp run;
+# anything else is refused without a prompt, so nothing waits on a permission no one sees
+# unless the hook itself fails (then a call can wait, as waiting_on_permission). The default
 # permission mode, not dontAsk: Claude Code refuses AskUserQuestion in dontAsk, whatever the
 # settings or a hook allow. The managed PreToolUse hook (claude-hook.sh) refuses what the
 # allow list does not allow, as dontAsk did. Unlike a sandboxed session's Claude it keeps its

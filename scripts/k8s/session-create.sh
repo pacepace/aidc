@@ -285,14 +285,20 @@ jq -n --arg session "$NAME" --arg profile "$PROFILE" --arg repo "$REPO_PATH" \
 # straight to the prompt. The dev pod's claude-seed step installs it while the session's
 # Claude config dir has no .claude.json yet. This machine's file names the project by the path
 # here (the $PWD REPO_PATH was made from: /Users/<name>/x on a Mac), the session's Claude by
-# REPO_PATH: the project's entry is picked by the one and moved to the other.
+# REPO_PATH: the project's entry is picked by the one and moved to the other. Claude keys a
+# project by the path it runs in, resolved (process.cwd(), no symlinks): the entry is looked up
+# by that path, and by the logical $PWD too when a symlink makes them differ (the resolved
+# path's entry wins where both have one).
 host_state="$(aidc_host_home)/.claude.json"
-host_repo="${PWD%/}"
+host_repo=$(pwd -P) host_logical="${PWD%/}"
+_state_seed_for() { aidc_claude_state_seed "$host_state" "$1" "$1" | aidc_claude_state_rekey "$1" "$REPO_PATH"; }
 state_seed='{}'
 if [ -f "$host_state" ]; then
-    if state_seed=$(aidc_claude_state_seed "$host_state" "$host_repo" "$host_repo" \
-            | aidc_claude_state_rekey "$host_repo" "$REPO_PATH") \
-            && [ -n "$state_seed" ]; then
+    if state_seed=$(_state_seed_for "$host_repo") && [ -n "$state_seed" ] \
+            && { [ "$host_logical" = "$host_repo" ] \
+                || { logical_seed=$(_state_seed_for "$host_logical") && [ -n "$logical_seed" ] \
+                    && state_seed=$(jq -c -n --argjson l "$logical_seed" --argjson r "$state_seed" \
+                        '$r + {projects: (($l.projects // {}) + ($r.projects // {}))}'); }; }; then
         info "state: seeded from this machine's ~/.claude.json (onboarding; no account)"
     else
         state_seed='{}'
@@ -301,8 +307,9 @@ if [ -f "$host_state" ]; then
 fi
 ( umask 0077; printf '%s' "$state_seed" | aidc_claude_state_ready "$REPO_PATH" > "${seed}/${K8S_CLAUDE_STATE_SEED}" ) \
     || die "cannot write the session's Claude state seed"
-k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/meta.json" \
-    --from-file="${seed}/config-snapshot.yaml" --from-file="${seed}/${K8S_CLAUDE_STATE_SEED}" \
+seed_files=()
+for f in $K8S_AUDIT_SEED_FILES "$K8S_CLAUDE_STATE_SEED"; do seed_files+=(--from-file="${seed}/${f}"); done
+k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" "${seed_files[@]}" \
     --dry-run=client -o yaml \
     | yq '.metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/session": "'"${NAME}"'"}' \
     | k8s_kubectl apply -f - >&2

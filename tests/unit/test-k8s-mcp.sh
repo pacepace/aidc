@@ -406,6 +406,12 @@ out=$(K_UNREACHABLE='192.0.2.10:6443' run start)
 assert_has "an address the laptop resolved but the pod cannot reach is refused, saying what to set" \
     "your MCP server's pod reaches the API server at none of 192.0.2.10:6443 (Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout): set kubernetes.api_endpoints" "$out"
 assert_has "...exit 1" "exit=1" "$out"
+# The error comes on stderr, never as an address: a running server's first ask, which reached
+# none, shows nothing; the check after it shows its error once, in the refusal.
+out=$(K_RUNNING=1 K_TOKEN=kept-token K_HELD=192.0.2.10:6443 K_UNREACHABLE='192.0.2.10:6443' run start)
+assert_eq "a running server that reaches none: the error is shown once, in the refusal" "1 1" \
+    "$(printf '%s\n' "$out" | grep -c 'i/o timeout') $(printf '%s\n' "$out" | grep -c "reaches the API server at none of 192.0.2.10:6443 (Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout)")"
+assert_not_has "...and its kubeconfig is never written with the error for an address" "Unable to connect" "$(cms)"
 out=$(K_EXEC_FAIL=1 run start)
 assert_has "an exec that fails for its own reason says so, not as an unreached address" \
     'reaches the API server at none of 192.0.2.10:6443 (error: unable to upgrade connection: container not found ("mcp"))' "$out"

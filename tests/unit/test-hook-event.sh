@@ -170,6 +170,27 @@ check "...nor a Docker session (the cluster's unattended first launch only)" \
     "$([ "$(jq -c 'has("skipDangerousModePermissionPrompt")' "$ms")" = false ] && echo yes || echo no)"
 check "bypass is yolo (also the default when unset) and bypassPermissions, no other mode" \
     "$([ "$(for m in yolo "" bypassPermissions safe default acceptEdits auto dontAsk plan; do printf '%s,' "$(aidc_managed_bypass "$m")"; done)" = 'bypass,bypass,bypass,,,,,,,' ] && echo yes || echo no)"
+# One source of truth: aidc-claude's own mode case decides how Claude is launched, so the bypass
+# set is derived from it. Each mode aidc-claude accepts is run (a stub claude prints its flags);
+# a launch with --dangerously-skip-permissions or --permission-mode bypassPermissions must be
+# exactly where aidc_managed_bypass says bypass.
+_ac="$S/aidc-claude" _ah="$S/ac-home"
+# The script's text: from its #! line (after the RUN line and its "&& chmod" continuation) to EOF.
+sed -n "/^RUN cat > \/usr\/local\/bin\/aidc-claude <<'EOF'/,/^EOF\$/p" "$AIDC_ROOT/.devcontainer/Dockerfile" \
+    | sed -n '/^#!/,$p' | sed '$d' > "$_ac"
+mkdir -p "$_ah/.local/bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@"\n' > "$_ah/.local/bin/claude"; chmod +x "$_ah/.local/bin/claude"
+_modes=$(sed -n 's/.*unknown AIDC_CLAUDE_MODE=%s (expected \([a-zA-Z|]*\)).*/\1/p' "$_ac" | tr '|' ' ')
+_agree=yes
+for m in $_modes; do
+    _flags=$(HOME="$_ah" AIDC_CLAUDE_MODE="$m" AIDC_CLAUDE_RESUME=false bash "$_ac" 2>&1 | paste -sd' ' -)
+    case " $_flags " in *' --disallowedTools '*) ;; *) _agree="no ($m did not launch: '${_flags}')"; continue ;; esac
+    case " $_flags " in *' --dangerously-skip-permissions '*|*' --permission-mode bypassPermissions '*) _want=bypass ;; *) _want= ;; esac
+    [ "$(aidc_managed_bypass "$m")" = "$_want" ] || _agree="no ($m launches '${_flags}')"
+done
+[ "$_agree" = yes ] || echo "  (${_agree})" >&2
+check "aidc_managed_bypass agrees with aidc-claude's launch flags for every mode it accepts ($(printf '%s' "$_modes" | wc -w) modes)" \
+    "$([ -n "$_modes" ] && echo "$_agree" || echo "no (no modes read from the Dockerfile)")"
 check "the entrypoint passes the session's claude_mode through it" \
     "$(grep -q '_managed_bypass=$(aidc_managed_bypass "${AIDC_CLAUDE_MODE:-yolo}")' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && grep -q '"$_managed_cluster" "$_managed_bypass"; then' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 check "the entrypoint asks for the cluster form on Kubernetes only" \

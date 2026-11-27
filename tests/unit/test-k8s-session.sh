@@ -154,6 +154,7 @@ case "$*" in
         printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
     *"create configmap"*)
         for a in "$@"; do case "$a" in --from-file=*claude-state-seed.json) cp "${a#--from-file=}" "$K_STATE_SEED" ;; esac; done
+        for a in "$@"; do case "$a" in --from-file=*) printf '%s ' "${a##*/}" ;; esac; done > "${K_STATE_SEED}.keys"
         printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed, namespace: aidc-u-alice}\ndata: {meta.json: "{}"}\n' ;;
 esac
 exit 0
@@ -254,7 +255,18 @@ assert_has "...with one, the seed is Docker's filtered copy (no account, key, se
     '{"theme":"light","numStartups":40,"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"hasTrustDialogAccepted":true},"/home/alice/code/proj/sub":{"ignorePatterns":["x"]}},"hasCompletedOnboarding":true}' \
     "$(jq -c . "$K_STATE_SEED")"
 assert_has "...and says so" "state: seeded from this machine's ~/.claude.json" "$out"
-rm -f "$HOME/.claude.json"
+# Reached through a symlink: Claude keyed the project by the resolved path (process.cwd()), so
+# the entry is found there, and by the logical path too; the resolved one wins where both are.
+ln -s "$HOME/code/proj" "$HOME/code/via-link"
+jq -n -c --arg r "$HOME/code/proj" --arg l "$HOME/code/via-link" '{"projects":{
+    ($r):{"allowedTools":["Bash"]},($l):{"allowedTools":["Edit"]},($l + "/sub"):{"ignorePatterns":["x"]}}}' > "$HOME/.claude.json"
+# (its own applied manifests, kubectl log and seed file: the checks below read the first create's)
+out=$(export K_APPLIED="$SCRATCH/applied-link.yaml" K_LOG="$SCRATCH/kubectl-link.log" K_STATE_SEED="$SCRATCH/state-seed-link.json"
+    : > "$K_APPLIED"; : > "$K_LOG"; cd "$HOME/code/via-link" && "$AIDC_ROOT/scripts/aidc" create demo --backend kubernetes 2>&1 </dev/null; echo "exit=$?")
+assert_eq "a repo reached through a symlink: its entry is found by the resolved path, and the logical one's too (the resolved wins)" \
+    '{"/home/alice/code/via-link":{"allowedTools":["Bash"],"hasTrustDialogAccepted":true},"/home/alice/code/via-link/sub":{"ignorePatterns":["x"]}}' \
+    "$(jq -c .projects "$SCRATCH/state-seed-link.json")"
+rm -f "$HOME/.claude.json" "$HOME/code/via-link"
 assert_has "the session's name in its conversations' leases, and the shared Claude folder" \
     '{"name":"AIDC_LEASE_MACHINE","value":"cluster/demo"},{"name":"AIDC_SHARED_CLAUDE","value":"/home/alice/.claude-shared"}' \
     "$(dev '.spec.template.spec.containers[0].env')"
@@ -263,6 +275,12 @@ assert_eq "the proxy pod's first steps make the session's Claude config dir (roo
     '[["claude-dirs","d=/claude-config/demo && mkdir -p \"$d\" && chown 1000:1000 \"$d\" && chmod 0700 \"$d\"","root"],["claude-projects","umask 002 && mkdir -p \"/disk/.claude/projects\" \"/disk/.claude-shared\"",{"runAsUser":1000,"runAsGroup":1000}]]' \
     "$(proxyq '[.spec.template.spec.initContainers[] | select(.name == "claude-dirs" or .name == "claude-projects") | [.name, .command[2], (.securityContext // "root")]]')"
 assert_eq "...ahead of the rest" '["claude-dirs","claude-projects"]' "$(proxyq '[.spec.template.spec.initContainers[0:2][].name]')"
+# One key list (manifests.sh's K8S_AUDIT_SEED_FILES): the ConfigMap's keys, the volume's items and
+# the seed-audit step's copies agree.
+assert_eq "the audit-seed ConfigMap holds the audit record's first files and the Claude state seed" \
+    'meta.json config-snapshot.yaml claude-state-seed.json ' "$(cat "${K_STATE_SEED}.keys")"
+assert_has "...and the seed-audit step copies those first files" "for f in meta.json config-snapshot.yaml; do" \
+    "$(proxyq '.spec.template.spec.initContainers[] | select(.name == "seed-audit") | .command[2]')"
 assert_eq "the proxy pod's seed-audit step sees the audit record's two first files only, never the Claude state seed beside them" \
     '{"name":"audit-seed","configMap":{"name":"demo-audit-seed","items":[{"key":"meta.json","path":"meta.json"},{"key":"config-snapshot.yaml","path":"config-snapshot.yaml"}]}}' \
     "$(proxyq '.spec.template.spec.volumes[] | select(.name == "audit-seed")')"

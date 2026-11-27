@@ -86,15 +86,39 @@ denied "...or as a prefix that only looks like one (gitx is not git)" "$(decide 
 denied "a command substitution is denied (it cannot be judged part by part)" "$(decide "$(bash_call 'git commit -m "$(cat /etc/shadow)"')")"
 denied "...and backticks" "$(decide "$(bash_call 'git log `id`')")"
 denied "...and an open quote" "$(decide "$(bash_call 'git commit -m "x')")"
+# Bash's ANSI-C quoting: in $'...' a \' does not end the string, so bash reads this as three
+# commands (git, rm -rf ~, git) where a plain quote toggle would see one starting with git.
+denied "ANSI-C quoting is denied: git \$'\\'' ; rm -rf ~ ; git '\\' is three commands to bash" \
+    "$(decide "$(bash_call "git \$'\\'' ; rm -rf ~ ; git '\\'")")"
+assert_has "...naming the quoting" "quoting" "$(decide "$(bash_call "git \$'\\'' ; rm -rf ~ ; git '\\'")")"
+denied "...and any \$'...' outside quotes" "$(decide "$(bash_call "git commit -m \$'a\\nb'")")"
+denied "...and locale quoting \$\"...\"" "$(decide "$(bash_call 'git commit -m $"a; b"')")"
+assert_eq "a \$' inside double quotes is plain text (no decision)" none "$(decide "$(bash_call "git commit -m \"cost \$'5\"")")"
+assert_eq "...and an escaped \\\$' too" none "$(decide "$(bash_call "git commit -m \\\$'x'")")"
+# A # starting a word begins a comment in bash, where a quote opens nothing: bash runs four
+# commands here (git a; git b; rm -rf ~; git c) where a quote toggle would see one quoted
+# string, whose lines both start with git.
+denied "a comment is denied: git a #' / git b ; rm -rf ~ ; git c #' is four commands to bash" \
+    "$(decide "$(bash_call "git a #'"$'\n'"git b ; rm -rf ~ ; git c #'")")"
+denied "...also after a separator" "$(decide "$(bash_call "git status;#'"$'\n'"rm -rf ~")")"
+denied "...or a redirect" "$(decide "$(bash_call "git log >#x")")"
+assert_eq "a # inside a word, or quoted, is plain text (no decision)" none \
+    "$(decide "$(bash_call "git log --format=x#y && git commit -m '#1' -m \"#2\" && git show \\#3")")"
 denied "an empty command is denied" "$(decide "$(bash_call '')")"
 assert_eq "AskUserQuestion gets no decision (the list allows it)" none \
     "$(decide '{"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Approve git request r1?", "options": [{"label": "Deny"}, {"label": "Approve"}]}]}}')"
 assert_eq "a listed tool (Read) gets no decision" none "$(decide '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}')"
-assert_eq "a Write under /tmp (the list's Write(//tmp/**)) gets no decision" none \
+assert_eq "a Write under /tmp (the list's Edit(//tmp/**)) gets no decision" none \
     "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/pr-body.md", "content": "x"}}')"
+# Claude applies Edit rules to every tool that edits files, so the hook does too.
+assert_eq "...nor an Edit there" none \
+    "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/tmp/pr-body.md", "old_string": "a", "new_string": "b"}}')"
+assert_eq "...nor a MultiEdit" none "$(decide '{"tool_name": "MultiEdit", "tool_input": {"file_path": "/tmp/pr-body.md", "edits": []}}')"
+assert_eq "...nor a NotebookEdit" none "$(decide '{"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb", "new_source": "x"}}')"
 denied "a Write elsewhere is denied" "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/.bashrc", "content": "x"}}')"
 denied "...and a Write that leaves /tmp by .." "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/../home/git/.bashrc", "content": "x"}}')"
-denied "an unlisted tool is denied (Edit)" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/home/git/x", "old_string": "a", "new_string": "b"}}')"
+denied "an Edit outside /tmp is denied" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/home/git/x", "old_string": "a", "new_string": "b"}}')"
+denied "...and a MultiEdit" "$(decide '{"tool_name": "MultiEdit", "tool_input": {"file_path": "/home/git/x", "edits": []}}')"
 denied "...and WebFetch" "$(decide '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}')"
 assert_eq "Claude's tools that ask no permission get none (dontAsk ran them too): TodoWrite" none \
     "$(decide '{"tool_name": "TodoWrite", "tool_input": {"todos": []}}')"
@@ -107,7 +131,7 @@ for a in $(jq -r '.permissions.allow[] | @base64' "$G/managed-settings.json"); d
     a=$(printf '%s' "$a" | base64 -d)
     case "$a" in
         'Bash('*' *)') c="${a#Bash(}"; c="${c% \*)} x"; got=$(decide "$(bash_call "$c")") ;;
-        'Write(//'*'/**)') d="${a#Write(/}"; d="${d%/\*\*)}"; got=$(decide "$(jq -n -c --arg p "$d/f" '{tool_name: "Write", tool_input: {file_path: $p}}')") ;;
+        'Edit(//'*'/**)') d="${a#Edit(/}"; d="${d%/\*\*)}"; got=$(decide "$(jq -n -c --arg p "$d/f" '{tool_name: "Write", tool_input: {file_path: $p}}')") ;;
         *'('*) got="a form the test does not know" ;;
         *) got=$(decide "$(jq -n -c --arg t "$a" '{tool_name: $t, tool_input: {}}')") ;;
     esac
@@ -125,7 +149,9 @@ for a in 'Bash(gitctl *)' 'Bash(git-requests *)' 'Bash(gh *)' 'AskUserQuestion' 
     assert_eq "allowed: $a" yes "$(printf '%s\n' "$allow" | grep -qxF "$a" && echo yes || echo no)"
 done
 assert_eq "no blanket Bash, no sudo" no "$(printf '%s\n' "$allow" | grep -qE '^Bash(\(\*\))?$|sudo' && echo yes || echo no)"
-assert_eq "writes only under /tmp (the PR texts), not its own settings" 'Write(//tmp/**)' \
+# An Edit rule: Claude matches Write, Edit, NotebookEdit and MultiEdit against Edit(path) rules,
+# and a Write(path) rule against nothing (code.claude.com/docs, permissions).
+assert_eq "writes only under /tmp (the PR texts), not its own settings" 'Edit(//tmp/**)' \
     "$(printf '%s\n' "$allow" | grep -E '^(Write|Edit)' | paste -sd' ' -)"
 assert_eq "the hook and managed-hooks-only stay" "true /opt/aidc/lib/gitctl/claude-hook.sh" \
     "$(jq -r '"\(.allowManagedHooksOnly) \(.hooks.PreToolUse[0].hooks[0].command)"' "$ms")"

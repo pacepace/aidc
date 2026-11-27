@@ -213,7 +213,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   Its Claude ran in `dontAsk`, which refuses AskUserQuestion, so the question came out as plain
   text and an orchestrator's Approve or Deny decided nothing. It now runs in the default mode,
   and its managed PreToolUse hook denies whatever the managed allow list does not allow, so
-  it may do exactly what it could before. Rebuild the gitctl image.
+  it may do what it could before, plus one thing the list always meant to allow: writing its
+  pull request texts under `/tmp`. The list said `Write(//tmp/**)`, a rule Claude Code accepts
+  but matches nothing against, so every write there was refused; it now says `Edit(//tmp/**)`,
+  which covers Write, Edit and NotebookEdit. A Bash command using `$'...'` or `$"..."` quoting,
+  or a `#` comment, is refused, as a command substitution is. Rebuild the gitctl image.
 - **A prompt is no longer held behind Claude's startup hint.** With the cursor drawn over the
   hint's first letter (Claude Code 2.1.332), the MCP server read the hint as unsent text and held
   every prompt to a new session as `input_has_text`.

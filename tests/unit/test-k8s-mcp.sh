@@ -157,6 +157,11 @@ assert_eq "the server's config is the user's, on the cluster backend, for this u
     "$(printf '%s' "$cfg" | yq -o=json -I=0 '[.backend, .kubernetes.user, .kubernetes.storage_class, .orchestrator.callback_url]')"
 assert_eq "without this machine's kubeconfig and context (the pod uses its ServiceAccount) or tunnels" '[null,null,null]' \
     "$(printf '%s' "$cfg" | yq -o=json -I=0 '[.kubernetes.kubeconfig, .kubernetes.context, .ports]')"
+kc=$(q 'select(.kind == "ConfigMap" and .metadata.name == "aidc-mcp-config") | .data.kubeconfig' | jq -r .)
+assert_eq "the pod's kubectl goes to the API server address its policy allows (not the API Service, which balances over every control-plane node), with its ServiceAccount's token file and CA, checked for the Service's name" \
+    '["https://192.0.2.10:6443","/var/run/secrets/kubernetes.io/serviceaccount/ca.crt","kubernetes.default.svc","/var/run/secrets/kubernetes.io/serviceaccount/token","aidc-u-alice","in-cluster"]' \
+    "$(printf '%s' "$kc" | yq -o=json -I=0 '[.clusters[0].cluster.server, .clusters[0].cluster.certificate-authority, .clusters[0].cluster.tls-server-name, .users[0].user.tokenFile, .contexts[0].context.namespace, .current-context]')"
+assert_not_has "...and holds no token itself" "token:" "$kc"
 assert_eq "the state claim is made, on the user's retained class, 5Gi unless configured" 'shared-disk 5Gi' \
     "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "aidc-mcp-state") | .spec.storageClassName + " " + .spec.resources.requests.storage' | tr -d '"')"
 assert_has "it waits for the server to be ready" "rollout status deployment/aidc-mcp" "$(cat "$K_LOG")"
@@ -183,6 +188,8 @@ assert_eq "it serves the cluster backend in the user's namespace, on its port" \
 assert_eq "its token is read from the projected Secret, its store and access log are on its claim, the mirror where it reads transcripts" \
     '["/aidc-config/mcp-token","/var/lib/aidc-mcp/access.log","/var/lib/aidc-mcp/watcher-state","/var/lib/aidc-mcp/transcripts"]' \
     "$(printf '%s' "$envs" | jq -c '[.AIDC_MCP_TOKEN_FILE, .AIDC_MCP_AUDIT_LOG, .AIDC_MCP_WATCHER_STATE, .AIDC_MCP_TRANSCRIPTS]')"
+assert_eq "kubectl in the pod (the server's and its CLI's) reads that kubeconfig, from the projected config folder" \
+    '"/aidc-config/kubeconfig"' "$(printf '%s' "$envs" | jq -c '.KUBECONFIG')"
 assert_eq "the CLI it runs starts a session at /home/<user> (its home and working dir)" \
     '["/home/alice","/home/alice"]' "$(printf '%s' "$envs" | jq -c --argjson w "$(pod '.containers[0].workingDir')" '[.HOME, $w]')"
 assert_eq "session_create is off unless mcp.session_create says so (MCP-38)" '"false"' \
@@ -191,7 +198,7 @@ assert_eq "the mirror is mounted whole and read-only; config read-only; the stat
     '[["config",true],["state",null],["transcripts",true],["home",null],["tmp",null]]' \
     "$(pod '[.containers[0].volumeMounts[] | [.name, .readOnly]]')"
 assert_eq "the volumes: the token Secret (0400) and the config in one projected folder, the state and mirror claims" \
-    '[{"secret":{"name":"aidc-mcp-token","items":[{"key":"token","path":"mcp-token","mode":256}]}},{"configMap":{"name":"aidc-mcp-config","items":[{"key":"config.yaml","path":"config.yaml"}]}}] aidc-mcp-state transcripts' \
+    '[{"secret":{"name":"aidc-mcp-token","items":[{"key":"token","path":"mcp-token","mode":256}]}},{"configMap":{"name":"aidc-mcp-config","items":[{"key":"config.yaml","path":"config.yaml"},{"key":"kubeconfig","path":"kubeconfig"}]}}] aidc-mcp-state transcripts' \
     "$(pod '.volumes[] | select(.name == "config") | .projected.sources') $(pod '.volumes[] | select(.name == "state") | .persistentVolumeClaim.claimName' | tr -d '"') $(pod '.volumes[] | select(.name == "transcripts") | .persistentVolumeClaim.claimName' | tr -d '"')"
 assert_eq "no container is privileged" "[]" "$(pod '[.containers[] | select(.securityContext.privileged == true)]')"
 
@@ -304,7 +311,7 @@ assert_eq "its ConfigMap carries the server's labels and namespace" \
 assert_not_has "...made by the render, not by kubectl create --dry-run" "create configmap" "$(cat "$K_LOG")"
 odd=$(HOME="$HOME" AIDC_SCRIPTS="$AIDC_ROOT/scripts" bash -c '. "$1/scripts/k8s/lib.sh"; . "$1/scripts/k8s/manifests.sh"; k8s_load_settings
     yq -i ".orchestrator.callback_url = \"https://x.example.org/\\\" | .kind = \\\"Secret\"" "$HOME/.config/aidc/config.yaml"
-    k8s_render_mcp_config' _ "$AIDC_ROOT")
+    k8s_render_mcp_config 192.0.2.10:6443' _ "$AIDC_ROOT")
 assert_eq "a config value that looks like yq or YAML is data, not part of the program or the document" \
     'ConfigMap https://x.example.org/" | .kind = "Secret' \
     "$(printf '%s' "$odd" | yq -r '.kind + " " + (.data["config.yaml"] | from_yaml | .orchestrator.callback_url)')"
@@ -377,11 +384,13 @@ assert_has "a server that does not become ready says where to look" \
 
 echo "=== kubernetes.api_endpoints and mcp.session_create ==="
 write_config "$(printf 'mcp:\n  session_create: true\n')"
-yq -i '.kubernetes.api_endpoints = ["198.51.100.7:6443"]' "$CFG"
+yq -i '.kubernetes.api_endpoints = ["198.51.100.7:6443", "198.51.100.8:6443"]' "$CFG"
 out=$(K_NO_STATE=1 run start)
 assert_has "exit 0" "exit=0" "$out"
 assert_eq "the configured API endpoints are used, not the kubeconfig's" \
-    '["198.51.100.7/32","10.43.0.1/32"]' "$(pol | jq -c '[.egress[].to[0].ipBlock.cidr]')"
+    '["198.51.100.7/32","198.51.100.8/32","10.43.0.1/32"]' "$(pol | jq -c '[.egress[].to[0].ipBlock.cidr]')"
+assert_eq "...and the pod's kubectl goes to the first of them" '"https://198.51.100.7:6443"' \
+    "$(q 'select(.kind == "ConfigMap" and .metadata.name == "aidc-mcp-config") | .data.kubeconfig' | jq -r . | yq -o=json '.clusters[0].cluster.server')"
 assert_not_has "...and the kubeconfig is not asked" "config view" "$(cat "$K_LOG")"
 assert_eq "session_create is offered when mcp.session_create is true" '"true"' \
     "$(pod '.containers[0].env[] | select(.name == "AIDC_MCP_SESSION_CREATE") | .value')"

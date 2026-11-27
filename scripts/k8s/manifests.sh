@@ -1884,18 +1884,49 @@ k8s_mcp_config() {
         || { printf '[aidc] error: cannot read %s\n' "$cfg" >&2; return 1; }
 }
 
-# k8s_render_mcp_config: the server's config (k8s_mcp_config) as its ConfigMap. Every value goes
-# to yq as an environment string (strenv), never spliced into its program. Returns 1, saying
-# why, when the config cannot be read.
+# k8s_mcp_kubeconfig <ip>:<port> <namespace>: the kubeconfig kubectl uses in the server's pod:
+# its ServiceAccount's token and CA, at that API server address, which the server's policy
+# allows. Not the in-cluster default: the API Service balances over every control-plane node,
+# and a policy judged after the Service's translation lets through only the addresses it names
+# (half or more of the calls were refused on a three-node control plane); and kubectl drops the
+# in-cluster default when any flag such as --request-timeout is given, then tries
+# localhost:8080. The certificate is checked for the Service's name, which every API server's
+# certificate carries, so the address need not be in it.
+K8S_MCP_KUBECONFIG=/aidc-config/kubeconfig
+k8s_mcp_kubeconfig() {
+    local sa=/var/run/secrets/kubernetes.io/serviceaccount
+    cat <<EOF_MCP_KUBECONFIG
+apiVersion: v1
+kind: Config
+clusters:
+  - name: in-cluster
+    cluster: {server: "https://${1}", certificate-authority: ${sa}/ca.crt, tls-server-name: kubernetes.default.svc}
+users:
+  - name: aidc-mcp
+    user: {tokenFile: ${sa}/token}
+contexts:
+  - name: in-cluster
+    context: {cluster: in-cluster, user: aidc-mcp, namespace: ${2}}
+current-context: in-cluster
+EOF_MCP_KUBECONFIG
+}
+
+# k8s_render_mcp_config <ip>:<port>: the server's config (k8s_mcp_config) and its pod's
+# kubeconfig (k8s_mcp_kubeconfig, at that API server address) as its ConfigMap. Every value
+# goes to yq as an environment string (strenv), never spliced into its program. Returns 1,
+# saying why, when the config cannot be read.
 k8s_render_mcp_config() {
-    local cfg
+    local cfg ns
     cfg=$(k8s_mcp_config) || return 1
-    AIDC_MCP_CFG="$cfg" AIDC_MCP_CM="$K8S_MCP_CONFIG" AIDC_MCP_NS="$(k8s_user_ns "$AIDC_K8S_USER")" \
+    ns=$(k8s_user_ns "$AIDC_K8S_USER")
+    AIDC_MCP_CFG="$cfg" AIDC_MCP_CM="$K8S_MCP_CONFIG" AIDC_MCP_NS="$ns" \
+        AIDC_MCP_KC="$(k8s_mcp_kubeconfig "${1:?an API server address}" "$ns")" \
         AIDC_MCP_USER="$AIDC_K8S_USER" AIDC_MCP_APP="$K8S_MCP_NAME" yq -n '
         .apiVersion = "v1" | .kind = "ConfigMap"
         | .metadata.name = strenv(AIDC_MCP_CM) | .metadata.namespace = strenv(AIDC_MCP_NS)
         | .metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/user": strenv(AIDC_MCP_USER), "app": strenv(AIDC_MCP_APP)}
-        | .data."config.yaml" = strenv(AIDC_MCP_CFG)'
+        | .data."config.yaml" = strenv(AIDC_MCP_CFG)
+        | .data.kubeconfig = strenv(AIDC_MCP_KC)'
 }
 
 # k8s_render_mcp_token <token>: the token's Secret. Applied from stdin (`kubectl create -f -`),
@@ -2021,6 +2052,7 @@ spec:
             - {name: AIDC_MCP_TRANSCRIPTS, value: ${K8S_MCP_STATE_DIR}/transcripts}
             - {name: AIDC_MCP_SESSION_CREATE, value: "${session_create}"}
             - {name: AIDC_MCP_TAINT_PORT, value: "${K8S_MCP_TAINT_PORT}"}
+            - {name: KUBECONFIG, value: ${K8S_MCP_KUBECONFIG}}
           ports:
             - {name: mcp, containerPort: ${K8S_MCP_PORT}, protocol: TCP}
             - {name: taint, containerPort: ${K8S_MCP_TAINT_PORT}, protocol: TCP}
@@ -2047,7 +2079,7 @@ spec:
           projected:
             sources:
               - secret: {name: ${K8S_MCP_TOKEN_SECRET}, items: [{key: token, path: mcp-token, mode: 256}]}  # 0400
-              - configMap: {name: ${K8S_MCP_CONFIG}, items: [{key: config.yaml, path: config.yaml}]}
+              - configMap: {name: ${K8S_MCP_CONFIG}, items: [{key: config.yaml, path: config.yaml}, {key: kubeconfig, path: kubeconfig}]}
         - {name: state, persistentVolumeClaim: {claimName: ${K8S_MCP_STATE_CLAIM}}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
         - {name: home, emptyDir: {}}

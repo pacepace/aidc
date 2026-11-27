@@ -286,7 +286,9 @@ mcp_start() {
         0) k8s_render_mcp_state | k8s_kubectl apply -f - >/dev/null || die "could not make the MCP server's state claim" ;;
         2) exit 1 ;;
     esac
-    k8s_render_mcp_config | k8s_kubectl apply -f - >/dev/null || die "could not write the MCP server's config"
+    # The pod's kubectl goes to the first configured (or the kubeconfig's) API server address.
+    k8s_render_mcp_config "$(printf '%s\n' "$eps" | head -n1)" | k8s_kubectl apply -f - >/dev/null \
+        || die "could not write the MCP server's config"
     mcp_load_settings
     if [ "${AIDC_MCP_SESSION_CREATE:-}" = true ]; then
         info "session_create: offered (mcp.session_create; sessions are made in ${ns}, without a repo)"

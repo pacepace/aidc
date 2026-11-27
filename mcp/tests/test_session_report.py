@@ -165,6 +165,8 @@ async def test_status_names_a_first_launch_screen_claude_waits_at(facts):
     d = (await _tool("session_status")(name="proj"))["data"]
     assert d["working"] is False and d["turn"] == "idle"
     assert d["why"] == "claude_not_at_prompt" and d["dialog"] == "trust_prompt"
+    facts["dialog"] = "add_dir_prompt"
+    assert (await _tool("session_status")(name="proj"))["data"]["dialog"] == "add_dir_prompt"
 
 
 async def test_status_says_when_the_sessions_claude_account_needs_the_person(facts, tmp_path):

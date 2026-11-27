@@ -6,15 +6,21 @@
 # 1. The allow list. The git agent's Claude runs in the default permission mode, not dontAsk:
 #    Claude Code 2.1.332 refuses AskUserQuestion in dontAsk whatever the settings or a hook say,
 #    and the question is how ask mode reaches the user (docs/design-12-kubernetes.md, "Git").
-#    So this hook is the one authority over the agent's tools, with dontAsk's effective set: it
-#    refuses ("deny", with a reason) every call the managed settings' permissions.allow would
-#    not allow, and allows ("allow", with a reason) every call the list allows and it has
-#    checked. The explicit allow is needed: a call left without a decision goes on to Claude's
-#    own check, which in the default mode still asks about some listed calls (a cd before git;
-#    a git -C read of a working copy outside its working folder; three live instances, the last
-#    a plain "Do you want to proceed?"), and that prompt waits with no one there. Claude's safety
-#    shapes (a cd, an unquoted glob, a redirect it cannot pre-approve, a protected path) are
-#    still denied, with what to write instead, not allowed past the prompt. No decision is given
+#    So this hook is the one authority over the agent's tools: it refuses ("deny", with a
+#    reason) every call the managed settings' permissions.allow would not allow, and allows
+#    ("allow", with a reason) every call the list allows and it has checked. The explicit allow
+#    is needed: a call left without a decision goes on to Claude's own check, which in the
+#    default mode still asks about some listed calls (a cd before git; a git -C read of a
+#    working copy outside its working folder; three live instances, the last a plain "Do you
+#    want to proceed?"), and that prompt waits with no one there. Claude's safety shapes that
+#    this hook models (a cd, an unquoted glob, a redirect it cannot pre-approve, a protected
+#    path, a command it cannot parse) are denied, with what to write instead, not allowed past
+#    the prompt. That is not dontAsk's set: dontAsk refused every listed call Claude would have
+#    asked about, and an "allow" skips Claude's prompt. So the effective set is the allow list
+#    minus the shapes modeled here, wider than dontAsk's by any shape Claude prompts on that
+#    this hook does not model, including shapes a later Claude Code adds: such a call now runs
+#    where dontAsk refused it, and nothing waits to show it. Every allow is therefore logged
+#    (ALLOW_LOG below) for the check on each Claude Code upgrade. No decision is given
 #    only to Claude's tools that ask no permission (TodoWrite, ToolSearch, ...) and to
 #    AskUserQuestion, whose "permission" is the question itself: an "allow" would answer it
 #    with nothing, and no decision opens the real question. The hook matches rules as Claude
@@ -29,6 +35,10 @@
 #    home, changing the guard files, a gh login in the agent's own home, and attribution in a
 #    git or gitctl command. Exit 2 blocks the call, with the reason on stderr.
 #
+# Security does not rest on the list: Bash(git *) already runs any command (git -c
+# core.fsmonitor=..., an alias with !, core.hooksPath), as it did under dontAsk. It rests on
+# the agent holding no credential and on gitctl checking every request (docs/design-12, "Git").
+#
 # Input it cannot read is blocked (exit 2). If the hook itself fails (a crash, a timeout), Claude
 # Code lets the call go on to its own permission check: a listed call runs or asks, any other
 # one asks, and the session shows waiting_on_permission. It never runs a call the list does not
@@ -42,15 +52,49 @@ self=$(readlink -f "${BASH_SOURCE[0]}")
 . "$(dirname "$self")/gitctl-rules.sh"
 settings="${1:-/etc/claude-code/managed-settings.json}"
 
+# The Claude Code version the modeled safety shapes (_seg_prompts, _claude_prompts,
+# _protected_path) were last checked against, in its documentation and live. On every upgrade
+# of the image's Claude: re-read the cited documentation, compare with these shapes, read the
+# allow log (ALLOW_LOG) for calls Claude would have asked about, and update this version.
+SHAPES_CHECKED_ON=2.1.332
+# The allow log: one line per "allow" (UTC time, the tool, the rule that matched, the call cut
+# to 200 characters, SHAPES_CHECKED_ON), in the agent's ~/.cache/gitctl beside the request
+# watcher's requests.log; past 1 MiB it becomes hook-allow.log.1 (one older file kept). Only
+# the installed hook writes it; a test names its own with AIDC_GIT_HOOK_ALLOW_LOG. It is the
+# agent's own file, an aid for the upgrade check, not a tamper-proof audit (gitctl's action
+# log is that). A log that cannot be written never changes the decision.
+if [ "$self" = /opt/aidc/lib/gitctl/claude-hook.sh ]; then
+    ALLOW_LOG="${HOME:-/home/git}/.cache/gitctl/hook-allow.log"
+else
+    ALLOW_LOG="${AIDC_GIT_HOOK_ALLOW_LOG:-}"
+fi
+ALLOW_LOG_BYTES=1048576
+# _log_allow RULE: one line in ALLOW_LOG for the call being allowed.
+_log_allow() {
+    [ -n "$ALLOW_LOG" ] || return 0
+    local what="${cmd:-$path}" size
+    what="${what//$'\n'/\\n}"; what="${what//$'\t'/ }"
+    {
+        mkdir -p -- "$(dirname -- "$ALLOW_LOG")" || return 0
+        size=$(stat -c %s -- "$ALLOW_LOG" 2>/dev/null || echo 0)
+        [ "$size" -lt "$ALLOW_LOG_BYTES" ] || mv -f -- "$ALLOW_LOG" "${ALLOW_LOG}.1" || true
+        printf '%s allow tool=%s rule=%s shapes=%s call=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$tool" "$1" "$SHAPES_CHECKED_ON" "${what:0:200}" >> "$ALLOW_LOG"
+    } 2>/dev/null || true
+    return 0
+}
+
 block() { printf 'aidc gitctl: refused: %s\n' "$1" >&2; exit 2; }
 deny() {
     jq -n -c --arg r "aidc gitctl: not allowed for the git agent: $1" \
         '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
     exit 0
 }
-# allow WHAT: the call is on the allow list and passed every check here; Claude's own prompt,
-# which no one would answer, is skipped. Only ever reached after the list matched.
+# allow WHAT RULE: the call is on the allow list (RULE, the rule or rules that matched) and
+# passed every check here; Claude's own prompt, which no one would answer, is skipped. Only ever
+# reached after the list matched. Logged (_log_allow).
 allow() {
+    _log_allow "$2"
     jq -n -c --arg r "aidc gitctl: on the git agent's allow list (${1}), checked by its hook" \
         '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: $r}}'
     exit 0
@@ -102,9 +146,11 @@ _bash_segments() {
 }
 
 # _bash_allowed CMD RULES: 0 when every part of CMD starts with a command a Bash(...) rule
-# names: "Bash(git *)" allows "git" and "git <anything>", "Bash(x)" allows "x" only.
+# names: "Bash(git *)" allows "git" and "git <anything>", "Bash(x)" allows "x" only. The rules
+# that matched are left in GITCTL_MATCHED, comma-separated, for the allow log.
 _bash_allowed() {
     local cmd="$1" rules="$2" segs seg r p ok any=0
+    GITCTL_MATCHED=""
     segs=$(_bash_segments "$cmd") || { GITCTL_REASON="a command or process substitution, an open quote, \$'...' or \$\"...\" quoting, or a comment, in: ${cmd:0:120}"; return 1; }
     while IFS= read -r seg; do
         seg="${seg#"${seg%%[![:space:]]*}"}"; seg="${seg%"${seg##*[![:space:]]}"}"
@@ -119,6 +165,7 @@ _bash_allowed() {
             esac
         done <<<"$rules"
         [ "$ok" = 1 ] || { GITCTL_REASON="the command ${seg%% *} (Bash: ${seg:0:120})"; return 1; }
+        case ",${GITCTL_MATCHED}," in *",${r},"*) ;; *) GITCTL_MATCHED="${GITCTL_MATCHED:+${GITCTL_MATCHED},}${r}" ;; esac
     done <<<"$segs"
     [ "$any" = 1 ] || { GITCTL_REASON="an empty command"; return 1; }
     return 0
@@ -250,7 +297,7 @@ _path_allowed() {
     while IFS= read -r r; do
         case "$r" in
             "${tool}(//"*'/**)') d="${r#"${tool}(/"}"; d="${d%/\*\*)}"
-                case "$real" in "$d"/?*) return 0 ;; esac ;;
+                case "$real" in "$d"/?*) GITCTL_MATCHED="$r"; return 0 ;; esac ;;
         esac
     done <<<"$rules"
     return 1
@@ -269,6 +316,14 @@ _unmodeled_rule() {
         esac
     done <<<"$2"
     return 1
+}
+
+# _deny_protected: deny an edit tool's call on a protected path (Claude asks before writing one
+# whatever the list says); nothing when the path is not one.
+_deny_protected() {
+    if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
+        deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
+    fi
 }
 
 input=$(cat)
@@ -292,25 +347,20 @@ if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then
         # No decision (see 1. above): the list names it, so Claude opens the real question.
         AskUserQuestion) exit 0 ;;
         Bash) _claude_prompts "$cmd" || deny "$GITCTL_REASON" ;;
-        Edit|Write|MultiEdit|NotebookEdit)
-            if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
-                deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
-            fi ;;
+        Edit|Write|MultiEdit|NotebookEdit) _deny_protected ;;
     esac
-    allow "the tool ${tool}"
+    allow "the tool ${tool}" "$tool"
 fi
 case "$_NO_PERMISSION_TOOLS" in *" ${tool} "*) exit 0 ;; esac
 case "$tool" in
     Bash)
         _claude_prompts "$cmd" || deny "$GITCTL_REASON"
-        _bash_allowed "$cmd" "$rules" && allow "Bash: every part of the command"
+        _bash_allowed "$cmd" "$rules" && allow "Bash: every part of the command" "$GITCTL_MATCHED"
         deny "$GITCTL_REASON" ;;
     Edit|Write|MultiEdit|NotebookEdit)
-        if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
-            deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
-        fi
-        printf '%s\n' "$rules" | grep -qxF -- Edit && allow "the tool ${tool}: the list's Edit"
-        _path_allowed Edit "$path" "$rules" && allow "the tool ${tool} on ${path}" ;;
+        _deny_protected
+        printf '%s\n' "$rules" | grep -qxF -- Edit && allow "the tool ${tool}: the list's Edit" Edit
+        _path_allowed Edit "$path" "$rules" && allow "the tool ${tool} on ${path}" "$GITCTL_MATCHED" ;;
     *) ;;
 esac
 scope=Edit

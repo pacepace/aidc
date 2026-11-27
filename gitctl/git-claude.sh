@@ -12,8 +12,10 @@
 # question tool (AskUserQuestion): in ask mode that is how it asks the user about a request,
 # and aidc delivers a session's question to an orchestrator the same way. The plan-mode tools are off, as in sessions: nothing would approve
 # a plan. It resumes its conversation when it has one, as aidc-claude does in a session. The
-# hook allows explicitly each call it has checked (Claude's own prompts would wait with no one
-# there), and the user's disk is one of Claude's working folders (--add-dir, below).
+# hook allows explicitly each call it has checked, reads outside its working folder too
+# (Claude's own prompts would wait with no one there). No --add-dir: Claude Code 2.1.332 asks
+# about a folder added that way that it has not worked in ("Adding a new directory"), and that
+# prompt stopped the agent before it started, with no one there to answer it.
 #
 # It runs in its own working folder, ~/work, not the home: Claude Code trusts a home folder for
 # one run only ("This is your home folder, so Yes lasts for this session only", 2.1.332), so a
@@ -62,18 +64,6 @@ claude_state_ready() {
 }
 claude_state_ready
 args=(--disallowedTools EnterPlanMode --disallowedTools ExitPlanMode --permission-mode default)
-# The user's disk, where the working copies are, as one of Claude's working folders (--add-dir,
-# the flag form of permissions.additionalDirectories): /home/<user> on Kubernetes, the user's
-# home on their machine on Docker, as the request holder's settings name it (disk=, written by
-# aidc for each backend). Claude Code asks before reading outside its working folders, and no
-# one answers here; the hook allows each checked call explicitly, and this is the defence in
-# depth if Claude ever asks regardless. Not in the managed settings: that file is fixed in the
-# image, and this path is the user's. A path that is not plain, or not a folder, is left out.
-git_settings="${AIDC_GIT_CLAUDE_SETTINGS:-/etc/aidc/git-settings/settings}"
-disk=$(sed -n 's/^disk=//p' "$git_settings" 2>/dev/null | head -n1)
-if [[ "$disk" =~ ^(/[A-Za-z0-9._-]+)+$ ]] && [[ "/${disk}/" != */../* && "/${disk}/" != */./* ]] && [ -d "$disk" ]; then
-    args+=(--add-dir "$disk")
-fi
 # Claude Code's project folder for this directory, and whether it holds a conversation (a
 # message, not only a transcript file): the same tests as the dev image's
 # aidc_claude_project_name and aidc_has_resumable_conversation.

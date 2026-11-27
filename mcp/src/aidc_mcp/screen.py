@@ -40,19 +40,28 @@ _WORKING_TEXT = "esc to interrupt"
 # 2.1.270). A screen without the input box that shows one of these is a dialog waiting
 # for a person; one that shows neither is a layout this module does not know.
 _DIALOG_HINTS = ("Enter to confirm", "Esc to cancel")
-# The one first-launch screen named: Claude Code's folder-trust prompt, which a fresh Claude
-# shows before its input box ever appears and cannot get past without a person (or a seeded
-# ~/.claude.json). It is named in session_status so an orchestrator sees why such a session
-# is stuck, which the bare "not at prompt" does not say. It is recognised by its own
-# structure, never by its text anywhere on screen (a diff or a reply can quote that text):
-# the dialog's rows run from the last full-width rule down to its hint row, which is the
-# last row on screen; the first of them is the title, and one of them is the option. Both
-# are measured on 2.1.270 and 2.1.332 (where a home folder adds "This is your home folder,
-# so Yes lasts for this session only").
+# The first-launch screens named: dialogs a starting Claude shows before its input box ever
+# appears and cannot get past without a person. They are named in session_status so an
+# orchestrator sees why such a session is stuck, which the bare "not at prompt" does not say.
+# Each is recognised by its own structure, never by its text anywhere on screen (a diff or a
+# reply can quote that text): the dialog's rows run from the last full-width rule down to its
+# hint row, which is the last row on screen; the first of them is the title, and one of them
+# is the option.
+#   TRUST_PROMPT    the folder-trust prompt (no seeded ~/.claude.json), measured on 2.1.270
+#                   and 2.1.332 (where a home folder adds "This is your home folder, so Yes
+#                   lasts for this session only").
+#   ADD_DIR_PROMPT  the prompt for a folder passed with --add-dir that this Claude has not
+#                   worked in ("Adding a new directory:", options "No, exit" and "Yes, add
+#                   it"), measured on 2.1.332 (the git agent, live 2026-11-27).
 TRUST_PROMPT = "trust_prompt"
-FIRST_LAUNCH_DIALOGS = frozenset({TRUST_PROMPT})
-_TRUST_TITLE = "Accessing workspace:"
-_TRUST_OPTION_RE = re.compile(r"(?:❯\s+)?(?:\d+\.\s+)?Yes, I trust this folder")
+ADD_DIR_PROMPT = "add_dir_prompt"
+_FIRST_LAUNCH_ROWS = (
+    (TRUST_PROMPT, "Accessing workspace:",
+     re.compile(r"(?:❯\s+)?(?:\d+\.\s+)?Yes, I trust this folder")),
+    (ADD_DIR_PROMPT, "Adding a new directory:",
+     re.compile(r"(?:❯\s+)?(?:\d+\.\s+)?Yes, add it")),
+)
+FIRST_LAUNCH_DIALOGS = frozenset(name for name, _, _ in _FIRST_LAUNCH_ROWS)
 # The live box's second rule is the last rule on screen, with only the status row(s)
 # below it. More trailing rows than this means the rules belong to something else.
 _MAX_ROWS_BELOW_BOX = 4
@@ -176,14 +185,15 @@ def _agent_list_start(plain: list[str]) -> int:
 
 
 def _first_launch_dialog(plain: list[str], rules: list[int]) -> str:
-    """The first-launch screen a screen without the input box shows (TRUST_PROMPT), read
-    from the dialog's own rows only, or "" for any other dialog (a permission or question
-    menu, which may quote the trust text in a preview)."""
+    """The first-launch screen a screen without the input box shows (one of
+    FIRST_LAUNCH_DIALOGS), read from the dialog's own rows only, or "" for any other dialog
+    (a permission or question menu, which may quote a first-launch text in a preview)."""
     if not plain or not rules or not any(hint in plain[-1] for hint in _DIALOG_HINTS):
         return ""
     body = [text.strip() for text in plain[rules[-1] + 1:-1] if text.strip()]
-    if body and body[0] == _TRUST_TITLE and any(_TRUST_OPTION_RE.fullmatch(t) for t in body):
-        return TRUST_PROMPT
+    for name, title, option in _FIRST_LAUNCH_ROWS:
+        if body and body[0] == title and any(option.fullmatch(t) for t in body):
+            return name
     return ""
 
 

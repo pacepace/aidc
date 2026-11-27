@@ -130,7 +130,8 @@ async def session_report(name: str) -> dict[str, Any]:
         "working": working,
         "turn": state.turn,
         "why": state.why,
-        # The first-launch screen Claude shows instead of its input box (trust_prompt), only
+        # The first-launch screen Claude shows instead of its input box (trust_prompt,
+        # add_dir_prompt), only
         # while it shows one: it waits for a person, and the bare why does not say which.
         **({"dialog": state.screen.dialog}
            if state.screen is not None and state.screen.dialog else {}),

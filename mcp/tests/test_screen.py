@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aidc_mcp.screen import (
+    ADD_DIR_PROMPT,
     EMPTY,
     FIRST_LAUNCH_DIALOGS,
     HAS_TEXT,
@@ -58,6 +59,15 @@ def test_the_folder_trust_prompt_is_named(fixture):
     assert TRUST_PROMPT in FIRST_LAUNCH_DIALOGS
 
 
+def test_the_added_folder_prompt_is_named():
+    """Claude Code 2.1.332 asks about a folder passed with --add-dir that it has not worked
+    in, before its input box appears (the git agent, live 2026-11-27: it never started, and
+    session_status said running, "starting"). A plain capture (no -e), home path replaced."""
+    state = classify((SCREENS / "claude-2.1.332-add-dir-new-directory.ansi").read_text())
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == ADD_DIR_PROMPT
+    assert ADD_DIR_PROMPT in FIRST_LAUNCH_DIALOGS
+
+
 RULE = "─" * 80
 # A permission menu inside a turn, whose diff preview (above the menu's own rule) quotes the
 # trust prompt: a session working on this very module shows one.
@@ -80,6 +90,21 @@ QUOTING_PREVIEW = "\n".join([
     + "\n Do you want to proceed?\n ❯ 1. Yes\n\n Enter to confirm · Esc to cancel\n",
 ])
 def test_a_dialog_quoting_the_trust_text_is_not_the_trust_prompt(text):
+    state = classify(text)
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == ""
+
+
+@pytest.mark.parametrize("text", [
+    # A permission menu whose preview quotes the added-folder prompt.
+    RULE + "\n Edit file\n 1 + Adding a new directory:\n 2 + ❯ No, exit\n 3 +   Yes, add it\n"
+    " Do you want to make this edit?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n",
+    # Its rows above the dialog's own rule are another screen's.
+    " Adding a new directory:\n   Yes, add it\n" + RULE
+    + "\n Do you want to proceed?\n ❯ 1. Yes\n\n Enter to confirm · Esc to cancel\n",
+    # The title without its option is not the dialog.
+    RULE + "\n Adding a new directory:\n\n /home/alice\n\n ❯ 1. Yes\n\n Enter to confirm\n",
+])
+def test_a_dialog_quoting_the_added_folder_text_is_not_that_prompt(text):
     state = classify(text)
     assert state.input_box == NOT_AT_PROMPT and state.dialog == ""
 

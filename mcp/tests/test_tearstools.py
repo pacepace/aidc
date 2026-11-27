@@ -69,20 +69,30 @@ def test_each_tool_declares_the_mcp_face():
 
 # --- descriptions and schemas carried over (TRS-11, MCP-22) -------------------------
 
-# The descriptions 2.0 extends, each with the one change made to 1.x's words and why: an
+# The descriptions 2.0 extends, each with the changes made to 1.x's words and why: an
 # orchestrator reads a field the description names, and on a new backend the field took a new
 # form. Every other word stays 1.x's (TRS-11), held exactly.
 EXTENDED_IN_2_0 = {
-    "audit_get": ("audit_dir (where the session's audit trail is on the host)",
-                  "audit_dir (where the session's audit trail is on the host; on Kubernetes\n"
-                  "`pvc:<namespace>/<claim>`, its volume claim)"),
-    # a cluster session's Claude account (K8S-16/17): an orchestrator must see that no account
-    # can be used rather than a session that silently stops answering (main, 2026-11-26)
-    "session_status": ("watched_conversation_id (where its replies are delivered),\n",
-                       "watched_conversation_id (where its replies are delivered),\n"
-                       "claude_account (a cluster session whose Claude login is your account broker's:\n"
-                       "{account, notice, at}; notice says what needs you, e.g. that no account can be\n"
-                       "used; null otherwise),\n"),
+    "audit_get": [("audit_dir (where the session's audit trail is on the host)",
+                   "audit_dir (where the session's audit trail is on the host; on Kubernetes\n"
+                   "`pvc:<namespace>/<claim>`, its volume claim)")],
+    "session_status": [
+        # a cluster session's Claude account (K8S-16/17): an orchestrator must see that no
+        # account can be used rather than a session that silently stops answering (main,
+        # 2026-11-26)
+        ("watched_conversation_id (where its replies are delivered),\n",
+         "watched_conversation_id (where its replies are delivered),\n"
+         "claude_account (a cluster session whose Claude login is your account broker's:\n"
+         "{account, notice, at}; notice says what needs you, e.g. that no account can be\n"
+         "used; null otherwise),\n"),
+        # the first-launch screen a Claude waits at (live, 2026-11-27): an orchestrator must
+        # see why a session is stuck rather than "starting"
+        ("evidence), claude_running,",
+         "evidence), dialog (\"trust_prompt\" while Claude shows its folder-trust screen,\n"
+         "\"add_dir_prompt\" while it asks about a folder added with --add-dir; only a person\n"
+         "at the session can answer either, with why \"claude_not_at_prompt\"; absent\n"
+         "otherwise), claude_running,"),
+    ],
 }
 
 
@@ -90,8 +100,7 @@ EXTENDED_IN_2_0 = {
 def test_the_description_is_the_1x_description_word_for_word(name):
     # with no session watched, as the 1.x list was generated
     expected = V1_BY_NAME[name]["description"]
-    if name in EXTENDED_IN_2_0:
-        old, new = EXTENDED_IN_2_0[name]
+    for old, new in EXTENDED_IN_2_0.get(name, []):
         assert expected.count(old) == 1
         expected = expected.replace(old, new)
     assert _tool(name).mcp_schema().description == expected

@@ -342,10 +342,10 @@ async def session_state(container: str, name: str) -> SessionState:
     first_launch = screen.input_box == scr.NOT_AT_PROMPT \
         and screen.dialog in scr.FIRST_LAUNCH_DIALOGS
     if first_launch and not any_events:
-        # A first-launch screen (folder trust) before any hook event: Claude waits there for
-        # a person, before any turn and before it runs a hook, so it is not working and not
-        # "starting" either. Named, so an orchestrator sees why it is stuck (screen.dialog).
-        # The silence clock starts again once it is past it.
+        # A first-launch screen (folder trust, an added folder) before any hook event: Claude
+        # waits there for a person, before any turn and before it runs a hook, so it is not
+        # working and not "starting" either. Named, so an orchestrator sees why it is stuck
+        # (screen.dialog). The silence clock starts again once it is past it.
         ss.hooks_silent_since.pop(name, None)
         return SessionState(True, screen, TURN_IDLE, WHY_NOT_AT_PROMPT)
     turn, why = turn_from_hooks(name, objs if status == "ok" else [], mtime,

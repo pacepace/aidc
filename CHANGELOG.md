@@ -60,10 +60,14 @@ What changes in use:
   allows, such as `git -C <worktree> log` reading a working copy outside its own folder. Its
   hook now allows explicitly each call that is on the list and passes its checks, instead of
   leaving it to Claude Code's own check, which asked with nobody there (three times in live
-  runs). Calls off the list and Claude's safety shapes are still refused, so the agent can do
-  nothing it could not do before; its question tool is left alone, so the question still opens.
-  The agent's Claude also counts the user's disk (`/home/<user>` on Kubernetes, your home on
-  Docker) as one of its working folders.
+  runs). Calls off the list are still refused, and so are the safety shapes the hook knows; its
+  question tool is left alone, so the question still opens. This is wider than before: a listed
+  call that trips a Claude Code safety prompt the hook does not know (one a later Claude Code
+  adds, say) now runs, where it used to be refused. So the hook logs every call it allows, with
+  the rule that matched, to `~/.cache/gitctl/hook-allow.log` in the git container, and records
+  the Claude Code version its known shapes were checked against (2.1.332), to check again on
+  each upgrade. The agent's security does not rest on the list (`git` alone can run any
+  command): it holds no credential, and gitctl checks every request.
 - `session_exec` answers `timeout` when a command that left a child running in the background
   times out, instead of failing with `PermissionError` from killing it; the failed kill is
   logged.
@@ -75,8 +79,9 @@ What changes in use:
   The first start after the upgrade begins a new conversation (the old one stays in the home's
   project folder); restarts after that resume it as before.
 - `session_status` no longer calls a session's Claude `starting` while it waits at the
-  folder-trust prompt: it shows `turn: "idle"`, `why: "claude_not_at_prompt"`, and the new
-  `dialog` field is `trust_prompt` (it is absent otherwise). A hook that says a turn is running
+  folder-trust prompt or at the prompt for a folder added with `--add-dir` ("Adding a new
+  directory"): it shows `turn: "idle"`, `why: "claude_not_at_prompt"`, and the new `dialog`
+  field is `trust_prompt` or `add_dir_prompt` (it is absent otherwise). A hook that says a turn is running
   still decides. `session_interrupt` no longer sends Esc to that screen, which would exit Claude.
 
 ### Upgrading: the MCP server on 3tears (aidc 2.0)

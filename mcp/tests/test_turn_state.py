@@ -214,6 +214,32 @@ class TestCheckFree:
         assert (state.turn, state.why) == (tn.TURN_IDLE, "claude_not_at_prompt")
         assert state.screen.dialog == "trust_prompt"
 
+    async def test_the_added_folder_prompt_before_any_hook_event_is_not_starting(self, session):
+        """The git agent started with --add-dir stopped at "Adding a new directory" (2.1.332),
+        which fires no hook, with its hook-events emptied at the container's start: it was
+        reported running, "starting" (live, 2026-11-27). It is the dialog, named."""
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        session.screen = (SCREENS / "claude-2.1.332-add-dir-new-directory.ansi").read_text()
+        assert await session.check() == "claude_not_at_prompt"
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_IDLE, "claude_not_at_prompt")
+        assert state.screen.dialog == "add_dir_prompt"
+
+    async def test_a_restart_reported_by_session_start_reads_as_the_dialog(self, session):
+        """A Claude that died mid-turn left a prompt submitted as the latest hook event; its
+        new process's SessionStart supersedes it, so a dialog after that start reads as the
+        dialog, not as the old turn still running."""
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.screen = (SCREENS / "claude-2.1.332-add-dir-new-directory.ansi").read_text()
+        assert (await tn.session_state("aidc-proj-dev", "proj")).turn == tn.TURN_RUNNING
+        session.hook(hk.he.SESSION_START, source="resume")
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_IDLE, "claude_not_at_prompt")
+        assert state.screen.dialog == "add_dir_prompt"
+
     async def test_an_interrupt_sends_no_esc_to_the_trust_screen(self, session, monkeypatch):
         """An Esc at the folder-trust prompt answers it "No, exit": Claude would quit."""
         from aidc_mcp.service import repos as rps
@@ -1319,6 +1345,7 @@ class TestSendDeliverJoin:
     @pytest.mark.parametrize("screen,why", [
         ("claude-2.1.27x-trust-folder.ansi", "claude_not_at_prompt"),
         ("claude-2.1.332-trust-home-folder.ansi", "claude_not_at_prompt"),
+        ("claude-2.1.332-add-dir-new-directory.ansi", "claude_not_at_prompt"),
         ("claude-2.1.27x-shell-after-exit.ansi", "screen_unrecognized"),
         ("claude-2.1.30x-idle-agent-list-selected.ansi", "agent_list_selected"),
     ])

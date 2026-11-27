@@ -304,8 +304,8 @@ bash's `$'...'` or `$"..."` quoting, or a comment (a `#` starting a word) is den
 a `\'` does not end the string, and in a comment a quote opens nothing, so a plain quote toggle
 would read `git $'\'' ; rm -rf ~ ; git '\'` as one command where bash runs three. A call the
 list allows and every check passes gets `permissionDecision: "allow"`, with a reason, so the
-hook is the one authority over the agent's tools, with `dontAsk`'s effective set (2026-11-27,
-below). Claude's tools that ask no permission and the list does not name (TodoWrite,
+hook is the one authority over the agent's tools (2026-11-27, below; its set is not
+`dontAsk`'s). Claude's tools that ask no permission and the list does not name (TodoWrite,
 ToolSearch ...) get no decision, as `dontAsk` ran them; Read, Grep and Glob are named, and get
 the allow. AskUserQuestion gets no decision either: its permission step is the question itself,
 so an allow would answer it with nothing, while no decision on a listed AskUserQuestion opens
@@ -330,22 +330,39 @@ to Claude's own check of the same list, and that check still asked about listed 
 nobody there, three times live (Claude Code 2.1.332): the cd before git above; and
 `git -C <worktree> log ...; git -C <worktree> diff --stat ...; gitctl protection <repo>`, a plain
 "Do you want to proceed?" offering "allow reading from <worktree> from this project", since
-Claude asks before reads outside its working folder. Under `dontAsk` none of these asked. The
-safety shapes are still denied, not allowed past their prompt, and a call off the list is still
-denied, so the allow set does not widen (`tests/unit/test-git-agent.sh`: with an empty list the
-hook allows nothing, and each call it allows stops being allowed when the one rule that carries
-it is taken off the list). As defence in depth, in case Claude asks about a read of a working
-copy regardless, the user's disk is one of Claude's working folders: `git-claude` passes
-`--add-dir <disk>` (the flag form of `permissions.additionalDirectories`), the disk named by
-the holder's settings (`disk=`): `/home/<user>` on Kubernetes, the user's home on their machine
-on Docker, where the added working copies are mounted at their own paths. It is not in the
-managed settings because that file is fixed in the image and the path is the user's. The shapes it models come from the Claude Code documentation it cites
-(permissions: "Read-only commands", "Compound commands", "Redirections"; permission modes:
-"Protected paths") and change with Claude Code, so they are checked again on each upgrade of the
-image's Claude; a shape it misses shows up as the git agent at `waiting_on_permission`. So the
-effective allow set is narrower than the one `dontAsk` enforced: `Bash(cd *)` was in it and has
-left the list, and must not return (the git agent never changes folder; `gitctl/CLAUDE.md` says
-so, and the hook refuses one). When
+Claude asks before reads outside its working folder. Under `dontAsk` none of these asked: it
+refused them. A call off the list is still denied (`tests/unit/test-git-agent.sh`: with an
+empty list the hook allows nothing, and each call it allows stops being allowed when the one
+rule that carries it is taken off the list), and the safety shapes the hook models are denied,
+not allowed past their prompt. But the allow set is not `dontAsk`'s. `dontAsk` refused every
+listed call Claude would have asked about; the hook's allow skips Claude's prompt, so the
+effective set is the allow list minus the shapes the hook models. A shape Claude prompts on
+that the hook does not model, including one a later Claude Code adds, now runs where `dontAsk`
+refused it, and nothing waits at `waiting_on_permission` to show it. The shapes it models come
+from the Claude Code documentation it cites (permissions: "Read-only commands", "Compound
+commands", "Redirections"; permission modes: "Protected paths") and change with Claude Code, so
+they are checked again on each upgrade of the image's Claude: the hook records the version they
+were last checked against (`SHAPES_CHECKED_ON`, 2.1.332), and logs every allow, one line each
+(UTC time, the tool, the rule or rules that matched, the call cut to 200 characters, that
+version), to `~/.cache/gitctl/hook-allow.log` in the git container (the agent's home, beside
+the request watcher's `requests.log`; past 1 MiB kept as `hook-allow.log.1`, one older file).
+The operator reads it from the container's shell window (`aidc git attach`) or by exec, and on an
+upgrade checks it for calls the new Claude would have asked about. It is the agent's own file,
+an aid for that check, not a tamper-proof audit (gitctl's action log is that). The set is also
+narrower than `dontAsk`'s in one place: `Bash(cd *)` was on the list and has left it, and must
+not return (the git agent never changes folder; `gitctl/CLAUDE.md` says so, and the hook
+refuses one). None of this is the git agent's security. `Bash(git *)` already runs any command
+as the agent (`git -c core.fsmonitor=<cmd> status`, an alias with `!`, `core.hooksPath` pointed
+at a file written under `/tmp`), as it did under `dontAsk`, and the user's disk is writable to
+it. The agent's security rests on two things only: it holds no credential, and gitctl, the one
+way to the GitHub login, checks every request itself (the request holder deciding, out of the
+agent's reach). The allow list, the hook and the instructions are courtesies that keep the agent
+from stalling or erring, not a boundary. The git agent's Claude is given no `--add-dir`:
+Claude Code 2.1.332 asks about a folder added that way that it has not worked in ("Adding a new
+directory: ... Is this a directory you created or one you trust?"), and that prompt stopped the
+agent before it started, with no one there (live, 2026-11-27); the hook's explicit allow already
+covers reads outside its working folder (Read, Grep, Glob and checked Bash). The MCP names that
+screen as the first-launch dialog `add_dir_prompt` (design-10), should a Claude show it. When
 the hook itself fails (a crash, a non-zero exit other than 2, or its timeout), Claude Code
 treats it as a non-blocking error and the call goes on through the normal permission flow
 (code.claude.com/docs, hooks: "staying silent doesn't approve it"): in the default mode a

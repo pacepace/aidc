@@ -256,6 +256,34 @@ assert_eq "...for the 12 calls of the corpus the list allows" 12 "$n_allowed"
 assert_eq "AskUserQuestion taken off the list is denied, not left to Claude" deny \
     "$(jq '.permissions.allow -= ["AskUserQuestion"]' "$G/managed-settings.json" > "$S/no-ask.json"; decide_with "$S/no-ask.json" '{"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}')"
 
+# Every "allow" is logged, for the check on each Claude Code upgrade: an allow skips Claude's own
+# prompt, so a shape the hook does not model runs rather than waits, and only this log shows it.
+AL="$S/allow-log/hook-allow.log"
+logged() { printf '%s' "$1" | AIDC_GIT_HOOK_ALLOW_LOG="$AL" bash "$G/claude-hook.sh" "$G/managed-settings.json" >/dev/null 2>&1; }
+logged "$(bash_call 'git -C /home/alice/proj log --oneline -3 | git-requests list')"
+logged '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/pr-body.md", "content": "x"}}'
+logged "$(bash_call 'cat /etc/passwd')"
+logged '{"tool_name": "ToolSearch", "tool_input": {"query": "x"}}'
+al=$(cat "$AL" 2>/dev/null)
+assert_eq "each allow is one line of the allow log; a deny or no decision writes none" 2 "$(printf '%s\n' "$al" | grep -c ' allow tool=')"
+assert_has "...naming the tool, the rules that matched, the shapes' version and the call" \
+    "allow tool=Bash rule=Bash(git *),Bash(git-requests *) shapes=2.1.332 call=git -C /home/alice/proj log --oneline -3 | git-requests list" "$al"
+assert_has "...a path rule for a write" "allow tool=Write rule=Edit(//tmp/**) shapes=2.1.332 call=/tmp/pr-body.md" "$al"
+logged "$(bash_call "$(printf 'git status\ngit log')")"
+assert_has "...a call over several lines stays on one" 'call=git status\ngit log' "$(cat "$AL")"
+head -c 1100000 /dev/zero | tr '\0' 'x' > "$AL"
+logged "$(bash_call 'git status')"
+assert_eq "past 1 MiB the log is kept as .1 and a new one begun" "yes 1" \
+    "$([ -s "$AL.1" ] && echo yes) $(wc -l < "$AL")"
+mkdir -p "$S/ro-log"; chmod 0500 "$S/ro-log"
+assert_eq "a log that cannot be written never changes the decision" allow \
+    "$(printf '%s' "$(bash_call 'git status')" | AIDC_GIT_HOOK_ALLOW_LOG="$S/ro-log/x/hook-allow.log" bash "$G/claude-hook.sh" "$G/managed-settings.json" 2>/dev/null | jq -r .hookSpecificOutput.permissionDecision)"
+chmod 0700 "$S/ro-log"
+assert_has "the installed hook logs in the agent's ~/.cache/gitctl" 'ALLOW_LOG="${HOME:-/home/git}/.cache/gitctl/hook-allow.log"' "$(cat "$G/claude-hook.sh")"
+assert_eq "the hook records the Claude Code version its shapes were checked against" 1 \
+    "$(grep -cE '^SHAPES_CHECKED_ON=[0-9]+\.[0-9]+\.[0-9]+$' "$G/claude-hook.sh")"
+assert_has "...and says to check them again on an upgrade" "On every upgrade" "$(cat "$G/claude-hook.sh")"
+
 echo "=== the managed settings: the git verbs, reads and the question tool; nothing waits on a prompt ==="
 ms="$G/managed-settings.json"
 assert_eq "the default mode, not dontAsk (Claude refuses AskUserQuestion there); the hook refuses the rest" '"default"' "$(jq -c '.permissions.defaultMode' "$ms")"
@@ -401,19 +429,12 @@ assert_not_has "a transcript with no message is not resumed" "--continue" "$(cat
 printf '{"type":"user","message":{}}\n' >> "$proj/a.jsonl"
 HOME="$H" bash "$G/git-claude.sh"
 assert_has "a conversation is resumed after a restart" "--continue" "$(cat "$H/claude.args")"
-# The user's disk (the holder's settings' disk=: /home/<user> on Kubernetes, the user's home on
-# Docker) is one of Claude's working folders, so its reads of working copies never ask.
-DK="$S/disk/alice"; mkdir -p "$DK"
-gcs() { printf 'requests=/x\ndisk=%s\nmode=ask\n' "$1" > "$S/git-settings"; AIDC_GIT_CLAUDE_SETTINGS="$S/git-settings" HOME="$H" bash "$G/git-claude.sh"; cat "$H/claude.args"; }
-assert_has "the user's disk from the settings is added as a working folder" "--add-dir
-${DK}" "$(gcs "$DK")"
-assert_not_has "...not when the folder is missing" "--add-dir" "$(gcs "$S/disk/nobody")"
-assert_not_has "...nor a path that is not plain" "--add-dir" "$(gcs "$S/disk/../disk/alice")"
-assert_not_has "...nor a relative one" "--add-dir" "$(gcs "disk")"
-assert_not_has "...nor with no settings file" "--add-dir" \
-    "$(AIDC_GIT_CLAUDE_SETTINGS="$S/no-such-settings" HOME="$H" bash "$G/git-claude.sh"; cat "$H/claude.args")"
-assert_eq "the cluster's settings name /home/<user> as the disk" 1 "$(grep -c 'disk=/home/\${AIDC_K8S_USER}' "$AIDC_ROOT/scripts/k8s/manifests.sh")"
-assert_has "Docker's name the user's home" "disk=%s" "$(cat "$AIDC_ROOT/scripts/docker/lib.sh")"
+# No --add-dir: Claude Code 2.1.332 asks about a folder added that way ("Adding a new
+# directory"), and that prompt stopped the git agent before it started (live, 2026-11-27).
+printf 'requests=/x\ndisk=%s\nmode=ask\n' "$S" > "$S/git-settings"
+assert_not_has "Claude is never given an added working folder (its prompt waits with no one there)" "--add-dir" \
+    "$(AIDC_GIT_CLAUDE_SETTINGS="$S/git-settings" HOME="$H" bash "$G/git-claude.sh"; cat "$H/claude.args")"
+assert_not_has "...nor does git-claude read the holder's settings for one" "git-settings" "$(cat "$G/git-claude.sh")"
 assert_has "the image puts git-claude on PATH" "ln -s /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/bin/git-claude" "$df"
 assert_has "the main process starts it in window claude" "tmux send-keys -t main:claude /opt/aidc/bin/git-claude C-m" "$(cat "$G/gitctl-main.sh")"
 assert_has "with a shell window beside it" "-n shell" "$(cat "$G/gitctl-main.sh")"

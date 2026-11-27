@@ -515,11 +515,14 @@ in another window writes nothing, since its Stop is not the session's.
   from before 2.0 when they do not name the hook: `turn: "unknown"`, `why:
   "session_predates_hook_events"`, `session_send` refused with `session_outdated` (D6). A
   session whose settings cannot be read waits (`hooks_unread`) rather than being refused.
-- **A first-launch screen** (the folder-trust prompt, `trust_prompt`, the one named) comes
-  before any turn and any hook, and Claude waits there for a person. It is recognised by the
-  dialog's own rows, never by its text anywhere on screen: from the last full-width rule down to
-  the hint row that ends the screen, the first row is `Accessing workspace:` and one row is the
-  option `Yes, I trust this folder` (a permission menu's diff preview can quote both). With no
+- **A first-launch screen** comes before any turn and any hook, and Claude waits there for a
+  person. Two are named: the folder-trust prompt, `trust_prompt`, and the prompt for a folder
+  passed with `--add-dir` that this Claude has not worked in, `add_dir_prompt` (2.1.332; it
+  stopped the git agent live when its start passed the user's disk that way, so it no longer
+  does). Each is recognised by the dialog's own rows, never by its text anywhere on screen: from
+  the last full-width rule down to the hint row that ends the screen, the first row is the title
+  (`Accessing workspace:`, `Adding a new directory:`) and one row is the option (`Yes, I trust
+  this folder`, `Yes, add it`); a permission menu's diff preview can quote both. With no
   hook event yet, or none saying a turn is running, the session is `turn: "idle"`, `why:
   "claude_not_at_prompt"`, and `session_status`'s `dialog` names the screen, so an orchestrator
   sees it is stuck rather than `starting` (live, 2.1.332: a Claude started in a home folder is

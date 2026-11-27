@@ -62,6 +62,19 @@ _FIRST_LAUNCH_ROWS = (
      re.compile(r"(?:❯\s+)?(?:\d+\.\s+)?Yes, add it")),
 )
 FIRST_LAUNCH_DIALOGS = frozenset(name for name, _, _ in _FIRST_LAUNCH_ROWS)
+# The menu of Claude's question tool (AskUserQuestion), measured on 2.1.332 (the git agent,
+# live 2026-11-27). Below the last-but-one full-width rule: a tab row with one `☐ <header>`
+# per question, the question's rows (each starting `│ `), then one row per option, numbered,
+# the one under the keyboard carrying the pointer `❯ ` in place of the two-space indent, with
+# its description indented further on the next row. Claude Code adds "Type something." and,
+# under the last rule, "Chat about this"; the last row is the hint
+# "Enter to select · ↑/↓ to navigate · Esc to cancel". Recognised by that structure, never by
+# text anywhere on screen: a reply or a diff can quote any of it.
+QUESTION_MENU = "question"
+_QUESTION_HINTS = ("Enter to select", "to navigate")
+_QUESTION_TAB_RE = re.compile(r"\s*(?:←\s+)?[☐☒✔]\s+\S")
+_QUESTION_MARK_RE = re.compile(r"[☐☒✔]")
+_QUESTION_OPTION_RE = re.compile(r"(❯ |  )(\d+)\. (\S.*)")
 # The live box's second rule is the last rule on screen, with only the status row(s)
 # below it. More trailing rows than this means the rules belong to something else.
 _MAX_ROWS_BELOW_BOX = 4
@@ -85,12 +98,24 @@ _OTHER_ESCAPE_RE = re.compile(r"\x1b(?:\[[\x20-\x3f]*[\x40-\x7e]|\][^\x07\x1b]*(
 
 
 @dataclass(frozen=True)
+class QuestionMenu:
+    """The question menu on screen: its text, its numbered options in order, which one the
+    pointer is on, and whether it holds more than one question (tabs)."""
+
+    text: str
+    options: tuple[tuple[int, str], ...]
+    pointer: int          # the number of the option under the pointer, 0 for none
+    several: bool = False
+
+
+@dataclass(frozen=True)
 class ScreenState:
     input_box: str   # EMPTY, HAS_TEXT, NOT_AT_PROMPT or UNRECOGNIZED
     working: bool    # the status row shows `esc to interrupt`
-    # Which first-launch screen, when input_box is NOT_AT_PROMPT and it is one of
-    # FIRST_LAUNCH_DIALOGS; "" for any other dialog (a permission or question menu).
+    # Which dialog, when input_box is NOT_AT_PROMPT: one of FIRST_LAUNCH_DIALOGS, or
+    # QUESTION_MENU (then `question` holds the menu); "" for any other (a permission menu).
     dialog: str = field(default="", compare=False)
+    question: QuestionMenu | None = field(default=None, compare=False)
     # The text in the input box when it is HAS_TEXT: the non-dim characters, rows
     # joined with newlines, continuation indent and trailing padding removed. How
     # Claude Code wraps a long line is not preserved, so compare it with
@@ -197,6 +222,37 @@ def _first_launch_dialog(plain: list[str], rules: list[int]) -> str:
     return ""
 
 
+def _question_menu(plain: list[str], rules: list[int]) -> QuestionMenu | None:
+    """The question menu a screen without the input box shows, read from its own rows (from
+    the last-but-one rule down to its hint row, the last row on screen), or None."""
+    if len(rules) < 2 or not plain or not all(h in plain[-1] for h in _QUESTION_HINTS):
+        return None
+    rows = plain[rules[-2] + 1:-1]
+    tab = next((i for i, text in enumerate(rows) if text.strip()), None)
+    if tab is None or not _QUESTION_TAB_RE.match(rows[tab]):
+        return None
+    several = (len(_QUESTION_MARK_RE.findall(rows[tab])) > 1
+               or rows[tab].strip().startswith("←"))
+    text: list[str] = []
+    options: list[tuple[int, str]] = []
+    pointer = 0
+    for row in rows[tab + 1:]:
+        m = _QUESTION_OPTION_RE.fullmatch(row.rstrip())
+        if m is not None:
+            number = int(m.group(2))
+            if number != len(options) + 1:
+                return None
+            options.append((number, m.group(3).strip()))
+            if m.group(1) == _POINTER:
+                pointer = number
+        elif not options and row.startswith("│"):
+            text.append(row[1:].strip())
+    if not options or not text:
+        return None
+    return QuestionMenu(text="\n".join(text), options=tuple(options), pointer=pointer,
+                        several=several)
+
+
 def classify(ansi: str) -> ScreenState:
     """Classify a `tmux capture-pane -p -e -J` capture of the claude window."""
     rows: list[list[tuple[str, bool]]] = []
@@ -211,7 +267,10 @@ def classify(ansi: str) -> ScreenState:
 
     rules = [i for i, text in enumerate(plain) if _is_rule(text)]
     dialog = any(hint in text for text in plain for hint in _DIALOG_HINTS)
-    no_box = (ScreenState(NOT_AT_PROMPT, False, dialog=_first_launch_dialog(plain, rules))
+    question = _question_menu(plain, rules) if dialog else None
+    no_box = (ScreenState(NOT_AT_PROMPT, False, dialog=QUESTION_MENU, question=question)
+              if question is not None
+              else ScreenState(NOT_AT_PROMPT, False, dialog=_first_launch_dialog(plain, rules))
               if dialog else ScreenState(UNRECOGNIZED, False))
     end = _agent_list_start(plain)
     if len(rules) < 2 or end - 1 - rules[-1] > _MAX_ROWS_BELOW_BOX:
@@ -220,7 +279,8 @@ def classify(ansi: str) -> ScreenState:
     working = any(_WORKING_TEXT in text for text in plain[bottom + 1:end])
     box = rows[top + 1:bottom]
     if not box or not plain[top + 1].startswith(_BOX_GLYPH):
-        return ScreenState(no_box.input_box, working, dialog=no_box.dialog)
+        return ScreenState(no_box.input_box, working, dialog=no_box.dialog,
+                           question=no_box.question)
 
     pointed = any(text.startswith(_POINTER) for text in plain[end:])
     focused = pointed and any(hint in text for text in plain[bottom + 1:end]

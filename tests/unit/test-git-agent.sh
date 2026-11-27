@@ -48,6 +48,8 @@ assert_has "ask mode: the question tool" "Ask with your question tool (AskUserQu
 assert_has "the agent cannot decide: approvals come only from outside" "You cannot approve or deny one" "$md"
 assert_has "an answer is carried out by the user's command, which the agent names" 'reply in a line with the command that carries it out' "$md"
 assert_has "..." '`aidc git approve <id>`' "$md"
+assert_has "each option says only what it does, no command to run (live 2026-11-27)" 'Approve "Carry out this request as asked."' "$md"
+assert_has "..." "Write no commands or next steps" "$md"
 assert_has "choosing Approve approves nothing by itself" "Choosing Approve in your question does not approve anything" "$md"
 assert_has "the push and PR procedure is a request too, named by its folder (gh -C)" 'gh -C <working copy> pr create --head <branch>' "$md"
 assert_has "the issue procedure puts -C right after gh too (the stand-in's leading form)" 'gh -C <working copy> issue list|view|create|edit|comment|close|reopen' "$md"

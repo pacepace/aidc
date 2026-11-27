@@ -487,7 +487,9 @@ in another window writes nothing, since its Stop is not the session's.
 
 - **The turn** (`turns.turn_from_hooks`) is the latest event about it: `SessionStart` idle
   (`session_started`), `UserPromptSubmit` running (`prompt_submitted`), `Notification`
-  `permission_prompt` running (`waiting_on_permission`), `idle_prompt` idle, `Stop` idle
+  `permission_prompt` running (`waiting_on_permission`; `waiting_on_question` when the
+  newest tool call is an open AskUserQuestion, which raises the same notification, and the
+  screen, when read, decides between the two by the menu it shows), `idle_prompt` idle, `Stop` idle
   (`turn_stopped`). Other notification types change nothing.
 - **The transcript, the record,** adds what the hooks cannot say. After each idle event Claude
   Code can open or continue a turn with no `UserPromptSubmit`: a blocking Stop hook sends Claude
@@ -561,11 +563,20 @@ into the question:
   `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev`, as `aidc git approve`
   runs it; Kubernetes: the pod's gitreq container, plan chunk 14), which acts only on a request
   still waiting. One no longer waiting is decided by nothing.
-- **All or nothing.** When the git agent's send queue is full, the answer could not go into the
-  question afterwards, so it is refused (`queue_full`) before the request is decided: a decision
-  is never carried out by a `session_send` that fails.
-- **Reported.** The send goes on as any other (the answer reaches the question, so the agent's
-  turn goes on), and its result carries `git_request`: `request_id`, `decision`, `done`, the
+- **Never queued.** The answer goes into the question menu, not the input box, so the git agent's
+  send queue does not hold it back, full or not (it fills while the menu is open: every other
+  prompt waits behind it as `claude_asking_question`).
+- **The question answered.** Claude's question menu takes no typed text (live 2026-11-27: the
+  answer waited behind it, never pasted), so once the holder has decided (or the request was no
+  longer waiting) the MCP chooses the same option in the menu under the send lock: it reads the
+  menu (screen.QuestionMenu: its one question must name the request id), moves the pointer
+  with the arrow keys, reads the pointer back on the option, then presses Enter, and reads the
+  menu gone. Arrows rather than a number key, because a number may choose at once with no
+  chance to check what was chosen. Nothing is pasted or queued: after the menu the text would
+  be a second, stray prompt. A menu that cannot be answered gets no Enter; the decision stands
+  and the result says `question_answered: false` with `question_not_answered`. A holder that
+  did not decide leaves the question open, so the answer can be sent again.
+- **Reported.** The result (status `answered_question`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
   holder's `exit` and `message`, or `code` `git_request_not_waiting` / `git_request_not_decided`.
   The access log records each as `git_request_answered`, and each refusal as
   `git_request_answer_refused` with its reason.

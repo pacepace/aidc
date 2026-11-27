@@ -171,7 +171,7 @@ def _join_refusal(name: str, state: tn.SessionState) -> str:
     if not state.claude_running or state.screen is None:
         return "claude_not_running"
     if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return tn.WHY_NOT_AT_PROMPT
+        return tn.not_at_prompt_reason(state.screen)
     if state.screen.input_box == scr.UNRECOGNIZED:
         return "screen_unrecognized"
     if state.screen.list_focused:
@@ -808,8 +808,14 @@ WAITING_EXPLAINED = {
     "input_has_text": "someone has unsent text in Claude's input box in the session "
                       "(the session's status line tells them)",
     "claude_not_running": "Claude is not running in the session",
-    tn.WHY_NOT_AT_PROMPT: ("Claude is showing a dialog (e.g. folder trust, login) instead of "
-                           "its prompt; session_status names a first-launch screen (dialog)"),
+    tn.WHY_NOT_AT_PROMPT: ("Claude is showing a dialog instead of its prompt: a first-launch "
+                           "screen (session_status names it in `dialog`) or a permission "
+                           "prompt (session_status says why \"waiting_on_permission\"), which "
+                           "a person at the session answers"),
+    tn.WAIT_ON_QUESTION: ("Claude is asking a question (its question menu is open, "
+                          "session_status says why \"waiting_on_question\"), and text typed "
+                          "now would not answer it; the prompt goes in once the question is "
+                          "answered"),
     HELD_ELSEWHERE: ("the conversation is open on another of the person's machines (it is "
                      "synced with them); the paste is tried again each minute, and goes in "
                      "once that machine has let it go"),
@@ -879,24 +885,153 @@ async def send(
     answer = await gitapprove.answer_in(name, prompt)
     if answer.refusal is not None:
         return answer.refusal
-    if answer.decision and len(ss.pending_sends.get(name, [])) >= PENDING_MAX_DEPTH:
-        # The answer could not go into the question afterwards (the queue is full), so the
-        # decision is not carried out either: session_send never succeeds in part (D6).
-        audit.log_event("tool_call", tool="session_send_failed", session=name,
-                        prompt_len=len(prompt), reason="queue_full", depth=PENDING_MAX_DEPTH,
-                        git_request=answer.decision.request_id)
-        return com.envelope_err(
-            f"{PENDING_MAX_DEPTH} prompts are already queued for this session and none has "
-            "been injected yet, so this answer was not taken and its git request was not "
-            "decided. Stop sending and tell the user to check the session.", code="queue_full")
-    decided = await gitapprove.carry_out(answer.decision) if answer.decision else None
-    result = await _send_accepted(name, prompt, conversation_id, sent_by, sender_label,
-                                  deliver, container, announce)
-    if decided is not None:
-        result.setdefault("data", {})
-        if isinstance(result["data"], dict):
-            result["data"]["git_request"] = decided
-    return result
+    # A decided answer is never queued: it goes into the question menu, not the input box,
+    # so a full queue (which fills while that menu is open: every prompt waits behind it) does
+    # not hold it back.
+    if answer.decision is not None:
+        decided = await gitapprove.carry_out(answer.decision)
+        return await _answer_git_question(name, conversation_id, container, answer.decision,
+                                          decided, announce)
+    return await _send_accepted(name, prompt, conversation_id, sent_by, sender_label,
+                                deliver, container, announce)
+
+
+async def _ensure_watcher(name: str, conversation_id: str | None,
+                          announce: Callable[[], Awaitable[None]]) -> str:
+    """Start the session's transcript watcher when none runs; "" or why none could be."""
+    if name in ss.session_watchers:
+        return ""
+    base_url = orc.orchestrator_callback_url() if conversation_id else ""
+    if not conversation_id:
+        return ("no conversation_id was supplied — the orchestrator injects it automatically, "
+                "so this call did not come from an orchestrated conversation")
+    if not base_url:
+        return f"{orc.callback_url_unset()}; replies have nowhere to be POSTed"
+    await dlv.start_watcher(name, conversation_id, base_url, announce)
+    audit.log_event("tool_call", tool="session_send_auto_watch", session=name,
+              conversation_id=conversation_id)
+    return ""
+
+
+#: Answering Claude's question menu (AskUserQuestion): how many times the screen is read,
+#: and how far apart, while Claude Code redraws it after a key.
+_MENU_POLLS = 10
+_MENU_POLL_S = 0.3
+
+#: why answer_question_menu did not answer, for session_send's result
+QUESTION_NOT_ANSWERED = {
+    "request_not_decided": "the git request was not decided, so its question is left open: "
+                           "send the answer again, or decide with aidc git approve|deny <id>",
+    "no_question_on_screen": "Claude's question menu is not on the session's screen",
+    "another_question": "the question on the screen does not name this git request",
+    "several_questions": "the question menu holds more than one question",
+    "no_such_option": "the question menu offers no such option",
+    "pointer_not_moved": "the menu's pointer did not reach the option, so nothing was chosen",
+    "menu_still_open": "Enter was pressed on the option, and the menu is still on the screen",
+}
+
+
+async def _read_menu(container: str, name: str) -> scr.QuestionMenu | None:
+    raw = await tmx.capture_screen(container, tmx.SESSION_WINDOW)
+    ss.last_screen_raw[name] = raw
+    return scr.classify(raw).question
+
+
+async def answer_question_menu(container: str, name: str, choice: str, must_name: str) -> str:
+    """Choose the option whose label starts with `choice` in the question menu open in the
+    session, the one question it holds naming `must_name`. "" when it was answered, else why
+    not (a QUESTION_NOT_ANSWERED key).
+
+    The pointer is moved with the arrow keys and read back before Enter: a number key may
+    choose its option at once, with no chance to check what was chosen, and Enter on the
+    wrong option would answer the question wrongly. A menu that cannot be read, or whose
+    pointer does not land on the option, gets no Enter. Called under the session's send lock,
+    so no paste goes in meanwhile."""
+    menu = await _read_menu(container, name)
+    if menu is None:
+        return "no_question_on_screen"
+    if must_name not in "".join(menu.text.split()):
+        return "another_question"
+    if menu.several:
+        return "several_questions"
+    matches = [n for n, label in menu.options if label.lower().startswith(choice.lower())]
+    if len(matches) != 1:
+        return "no_such_option"
+    target = matches[0]
+    target_window = f"main:{tmx.SESSION_WINDOW}"
+    if menu.pointer != target:
+        if not menu.pointer:
+            return "pointer_not_moved"
+        # One move, from where the pointer was read; then only read until it shows there.
+        # Keys sent again on a screen not redrawn yet would overshoot.
+        key = "Down" if target > menu.pointer else "Up"
+        await tmx.tmux_exec(container, ["send-keys", "-t", target_window,
+                                        *[key] * abs(target - menu.pointer)])
+        for _ in range(_MENU_POLLS):
+            await asyncio.sleep(_MENU_POLL_S)
+            menu = await _read_menu(container, name)
+            if menu is None or must_name not in "".join(menu.text.split()):
+                return "pointer_not_moved"
+            if menu.pointer == target:
+                break
+        else:
+            return "pointer_not_moved"
+    await tmx.tmux_exec(container, ["send-keys", "-t", target_window, "Enter"])
+    for _ in range(_MENU_POLLS):
+        await asyncio.sleep(_MENU_POLL_S)
+        menu = await _read_menu(container, name)
+        if menu is None or must_name not in "".join(menu.text.split()):
+            com.session_changed(name)
+            return ""
+    return "menu_still_open"
+
+
+async def _answer_git_question(name: str, conversation_id: str | None, container: str,
+                               decision: gitapprove.Decision, decided: dict[str, Any],
+                               announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
+    """session_send's end for an answer to the git agent's question about a git request,
+    once the holder has carried it out: the same option is chosen in the agent's question
+    menu, so its turn goes on (the menu takes no typed text). The holder's decision is what
+    counts; the menu only lets the agent go on, so a menu that could not be answered is
+    reported, never a failed send. Nothing is queued: typed text never reaches the menu,
+    and pasted after it, it would be a second, stray prompt."""
+    no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
+    if decided.get("done") or decided.get("code") == "git_request_not_waiting":
+        lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            why_not = await answer_question_menu(container, name, decision.verb,
+                                                 decision.request_id)
+    else:
+        why_not = "request_not_decided"
+    answered = not why_not
+    audit.log_event("git_question_answered" if answered else "git_question_not_answered",
+                    session=name, request_id=decision.request_id, option=decision.verb,
+                    reason=why_not)
+    watching = name in ss.session_watchers
+    watched = dlv.watched_conversation(name) if watching else ""
+    elsewhere = bool(conversation_id and watched and watched != conversation_id)
+    reply_goes = "nowhere" if not watching else "elsewhere" if elsewhere else "here"
+    where = (f"to conversation {watched} (one webhook per session), not this one" if elsewhere
+             else "over the webhook" if watching
+             else "nowhere: no webhook is open for this session"
+             + (f" ({no_watch_reason})" if no_watch_reason else ""))
+    option = decision.verb.capitalize()
+    if answered:
+        delivery = (f"Answered: {option} was chosen in the git agent's question, so its turn "
+                    f"goes on; its reply comes {where}. Nothing else was sent. Do NOT re-send.")
+    else:
+        delivery = (f"The git request's decision stands (git_request), but the git agent's "
+                    f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "
+                    "was typed into the session. Tell the user the question is still open in "
+                    f"the git agent's terminal ({option} there lets it go on).")
+    return com.envelope_ok({
+        "status": "answered_question" if answered else "question_open",
+        "session": name, "prompt_id": ts.new_prompt_id(), "reply_goes": reply_goes,
+        "question_answered": answered,
+        **({"question_not_answered": why_not} if why_not else {}),
+        "git_request": decided,
+        **({"watched_conversation_id": watched} if watched else {}),
+        "window": tmx.SESSION_WINDOW, "delivery": delivery})
 
 
 async def _send_accepted(name: str, prompt: str, conversation_id: str | None, sent_by: str,
@@ -911,22 +1046,7 @@ async def _send_accepted(name: str, prompt: str, conversation_id: str | None, se
     # simply absent from config.yaml; every session_send logged
     # `watching:false` and no further clue, and diagnosis meant reading the
     # source). `no_watch_reason` names the gate so the log answers it.
-    no_watch_reason = ""
-    if name not in ss.session_watchers:
-        base_url = orc.orchestrator_callback_url() if conversation_id else ""
-        if not conversation_id:
-            no_watch_reason = (
-                "no conversation_id was supplied — the orchestrator injects it automatically, "
-                "so this call did not come from an orchestrated conversation"
-            )
-        elif not base_url:
-            no_watch_reason = (
-                f"{orc.callback_url_unset()}; replies have nowhere to be POSTed"
-            )
-        else:
-            await dlv.start_watcher(name, conversation_id, base_url, announce)
-            audit.log_event("tool_call", tool="session_send_auto_watch", session=name,
-                      conversation_id=conversation_id)
+    no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
 
     lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
 

@@ -6,8 +6,8 @@ question tool, naming the request's id, and decides nothing itself (owner ruling
 session_send to the session `git`. When the agent's open question names exactly one git
 request that is still waiting, and the answer is plainly Approve or Deny, this module runs
 `git-requests approve|deny <id> [why]` in the git container as the request holder (gitreq),
-which acts only on a request still waiting. The answer still goes into the question, so the
-agent's turn goes on.
+which acts only on a request still waiting. The same option is then chosen in the agent's
+question menu (sending.answer_question_menu), so its turn goes on.
 
 Strict, because an approval pushes to GitHub:
 
@@ -16,8 +16,8 @@ Strict, because an approval pushes to GitHub:
 - The question must name one request id; naming several is `git_request_ambiguous`.
 - The answer must start with Approve or Deny, and say nothing else for Approve (Deny may give
   its reason after it): anything else is `git_answer_unclear`, and nothing is sent.
-- A request no longer waiting (decided, or gone) is approved or denied by nothing; the answer
-  still goes in, and the result says so.
+- A request no longer waiting (decided, or gone) is approved or denied by nothing; the option
+  is still chosen in the question, and the result says so.
 
 The holder's own checks stand behind all of this: it refuses a request that is not waiting,
 one being run, or one whose working copy moved (git-requests.sh).

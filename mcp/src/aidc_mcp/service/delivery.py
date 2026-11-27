@@ -387,6 +387,15 @@ async def _rotate_if_stale_pin(session: str, conversation_id: str,
     return True
 
 
+def _filler_for_history(turn: ts.Turn, mark: ts.Watermark) -> bool:
+    """Whether `turn` is closed by Claude Code's filler (ts.NO_RESPONSE_FILLER) and its last
+    line before it was written before this watch was (re)anchored."""
+    if turn.filler_after is None:
+        return False
+    anchored = ts.wall_time({"timestamp": mark.baselined_at})
+    return anchored is not None and turn.filler_after < anchored
+
+
 def _interrupted_before_output(session: str, conversation_id: str, suffix: list[dict],
                                active: Path, wall_now: float,
                                transcripts_base: Path | None = None) -> ts.Turn | None:
@@ -681,6 +690,14 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
         # An interrupt is delivered even with no text: the orchestrator must hear
         # that its task was cut off.
         deliverable = turn.interrupted or not turn.is_empty
+        history = deliverable and _filler_for_history(turn, mark)
+        if history:
+            # Claude Code's filler closing a turn that was over before this watch began
+            # (cut off, then Claude restarted): history, only closed now by the next
+            # prompt. Forward-only (MCP-17): skipped, as the baseline skips any history.
+            deliverable = False
+            audit.log_event("transcript_history_filler_skipped", session=session,
+                      conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         fingerprint = ts.delivery_fingerprint(turn) if deliverable else ""
         already_delivered = bool(fingerprint) and fingerprint in delivered_fps
         terminal_prompts, sent_by, batch = (
@@ -728,7 +745,9 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
             # hook ran longer than the watcher held it. This delivery is the rest.
             audit.log_event("transcript_late_pushback", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
-        if not deliverable:
+        if history:
+            pass
+        elif not deliverable:
             audit.log_event("transcript_empty_turn", session=session,
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         else:

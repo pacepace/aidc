@@ -13,6 +13,7 @@ from aidc_mcp.screen import (
     FIRST_LAUNCH_DIALOGS,
     HAS_TEXT,
     NOT_AT_PROMPT,
+    QUESTION_MENU,
     TRUST_PROMPT,
     UNRECOGNIZED,
     ScreenState,
@@ -66,6 +67,48 @@ def test_the_added_folder_prompt_is_named():
     state = classify((SCREENS / "claude-2.1.332-add-dir-new-directory.ansi").read_text())
     assert state.input_box == NOT_AT_PROMPT and state.dialog == ADD_DIR_PROMPT
     assert ADD_DIR_PROMPT in FIRST_LAUNCH_DIALOGS
+
+
+QUESTION = SCREENS / "claude-2.1.332-question-menu.ansi"
+QUESTION_ID = "a41e5935805a68a3297915532e7b1e28"
+
+
+def test_the_question_menu_is_named_with_its_options_and_pointer():
+    """Claude Code 2.1.332's question tool (AskUserQuestion) menu, the git agent asking about
+    a git request (live 2026-11-27; a plain capture, names replaced): no input box, a dialog
+    of its own, its numbered options and the pointer on the first."""
+    state = classify(QUESTION.read_text())
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == QUESTION_MENU
+    menu = state.question
+    assert menu.options == ((1, "Deny"), (2, "Approve"), (3, "Type something."),
+                            (4, "Chat about this"))
+    assert menu.pointer == 1 and menu.several is False
+    assert QUESTION_ID in "".join(menu.text.split())
+    assert QUESTION_MENU not in FIRST_LAUNCH_DIALOGS
+
+
+def test_the_pointer_is_read_on_any_option():
+    text = QUESTION.read_text().replace("❯ 1. Deny", "  1. Deny").replace(
+        "  2. Approve", "❯ 2. Approve")
+    assert classify(text).question.pointer == 2
+
+
+def test_a_menu_of_several_questions_says_so():
+    text = QUESTION.read_text().replace(" ☐ PR request", "←  ☐ PR request  ☐ Merge  ✔ Submit  →")
+    assert classify(text).question.several is True
+
+
+def test_a_reply_quoting_the_question_menu_is_not_one():
+    """Quoted above the live input box (a reply, a diff), the menu's rows are text."""
+    quoted = QUESTION.read_text().rsplit("\n", 3)[0]
+    rule = "─" * 80
+    state = classify(quoted + "\n" + "\n".join(["", rule, "❯\xa0", rule, "  ? for shortcuts"]))
+    assert state.input_box == EMPTY and state.question is None
+
+
+def test_a_permission_menu_is_not_the_question_menu():
+    state = classify(RULE + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n")
+    assert state.dialog == "" and state.question is None
 
 
 RULE = "─" * 80

@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.332
+▝▜██████▀  Opus 5.5 · Claude Ultra
+ ▝▝   ▝▝   ~/work
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+
+❯ git request c91b375488b7c833efbff88cf23bfff1 waits for the user's decision: run git-requests prompt c91b375488b7c833efbff88cf23bfff1 and follow it.
+
+  Ran 1 shell command, no result recorded for 1 other call, did not run 1 other call
+  ⎿  $ cd /home/alice/hello-world-wt && git log --format='%H%n%an <%ae>%n%B----' main..5900b8bfc629e0e79704eb22d47647ae7e7569d3; git diff --stat main...5900b8bfc629e0e79704eb22d47647ae7e7569d3;
+     gitctl protection /home/alice/hello-world
+  ⎿  Interrupted · What should Claude do instead?
+  ⎿  1 action not run · permission denied
+     │ Reason: PreToolUse:Bash hook error: aidc gitctl: not allowed for the git agent: the command head (Bash: head -50)
+
+❯ git request 4f3c663d02aabf835659597a712c840d waits for the user's decision: run git-requests prompt 4f3c663d02aabf835659597a712c840d and follow it.
+
+  Ran 1 shell command, no result recorded for 1 other call
+  ⎿  $ git -C /home/alice/hello-world-wt log --format='%H%n%an <%ae>%n%B----' main..54c9221610796ae3c428a2ebe3fa5f322f864094; git -C /home/alice/hello-world-wt diff --stat
+     main...54c9221610796ae3c428a2ebe3fa5f322f864094; gitctl protection /home/alice/hello-world
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ git request a41e5935805a68a3297915532e7b1e28 waits for the user's decision: run git-requests prompt a41e5935805a68a3297915532e7b1e28 and follow it.
+
+  Ran 3 shell commands
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ PR request
+
+│ Git request a41e5935805a68a3297915532e7b1e28: session proj asks to open a pull request on octocat/hello-world, branch feat → main, head commit 26ceffe5bce2 (one commit, "add a test"),
+│ title "t", body "b". No AI attribution and no rule breaks found. Approve or deny?
+
+❯ 1. Deny
+     Refuse this pull request.
+  2. Approve
+     Open the PR. You'll still need to run the approve command on your own machine.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

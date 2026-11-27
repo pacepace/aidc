@@ -61,6 +61,12 @@ PREDATES_HOOK_EVENTS = "session_predates_hook_events"
 # box; for a first-launch screen (screen.FIRST_LAUNCH_DIALOGS) the screen's `dialog` names
 # which. Not screen.NOT_AT_PROMPT, which is an input_box value.
 WHY_NOT_AT_PROMPT = "claude_not_at_prompt"
+#: why a session waits inside a turn: on a permission prompt, or on its question tool's menu
+#: (AskUserQuestion), which raises the same notification (permission_prompt)
+WHY_ON_PERMISSION = "waiting_on_permission"
+WHY_ON_QUESTION = "waiting_on_question"
+#: why a prompt waits: Claude's question menu is open, where typed text goes nowhere
+WAIT_ON_QUESTION = "claude_asking_question"
 
 
 # The idle verdicts of a turn the transcript may still show open: Claude reported idle, or
@@ -251,7 +257,10 @@ def turn_from_hooks(name: str, objs: list[dict], mtime: float,
             return TURN_IDLE, "log_finished"
         return TURN_RUNNING, "prompt_submitted"
     if event is not None and event.notification_type == he.PERMISSION_PROMPT:
-        return TURN_RUNNING, "waiting_on_permission"
+        # Claude Code raises the same notification for its question tool: the transcript
+        # tells them apart (the newest tool call is a question still open).
+        return TURN_RUNNING, (WHY_ON_QUESTION if ts.asking_question(objs)
+                              else WHY_ON_PERMISSION)
     # Every event left says idle, and after each Claude Code can open or continue a turn
     # with no event of its own: a turn the record shows open, written after the event, is
     # that turn, however quiet it is (a tool call). A SessionStart other than a compact's
@@ -356,6 +365,9 @@ async def session_state(container: str, name: str) -> SessionState:
         return SessionState(True, screen, TURN_IDLE, WHY_NOT_AT_PROMPT)
     if turn == TURN_UNKNOWN:
         return SessionState(True, None, turn, why)
+    if why in (WHY_ON_PERMISSION, WHY_ON_QUESTION) and screen.input_box == scr.NOT_AT_PROMPT:
+        # The screen shows which menu is open, where the transcript can lag the screen.
+        why = WHY_ON_QUESTION if screen.dialog == scr.QUESTION_MENU else WHY_ON_PERMISSION
     awaiting = ss.sent_awaiting_echo.get(name)
     if awaiting is not None:
         if _prompt_arrived(name, awaiting[0], awaiting[1], objs):
@@ -377,12 +389,21 @@ async def session_state(container: str, name: str) -> SessionState:
     return SessionState(True, screen, turn, why)
 
 
+def not_at_prompt_reason(screen: scr.ScreenState) -> str:
+    """Why a screen without the input box takes no prompt: the question menu, or another
+    dialog."""
+    return WAIT_ON_QUESTION if screen.dialog == scr.QUESTION_MENU else WHY_NOT_AT_PROMPT
+
+
 def paste_reason(state: SessionState) -> str:
     """"" when a prompt may be pasted now, else why not:
 
       session_outdated      the session predates hook events: recreate it (MCP-47)
       claude_not_running    the claude window is at a shell
-      claude_not_at_prompt  a dialog (e.g. folder trust, login) instead of the input box
+      claude_asking_question  Claude's question menu (AskUserQuestion) instead of the
+                            input box: typed text goes nowhere until it is answered
+      claude_not_at_prompt  another dialog (a first-launch screen, a permission menu)
+                            instead of the input box
       screen_unrecognized   neither the input box nor a known dialog: a layout aidc
                             does not recognize (a screen excerpt is saved)
       claude_busy           Claude is working on a turn, or a prompt just pasted has
@@ -396,7 +417,7 @@ def paste_reason(state: SessionState) -> str:
     if not state.claude_running or state.screen is None:
         return "claude_not_running"
     if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return WHY_NOT_AT_PROMPT
+        return not_at_prompt_reason(state.screen)
     if state.screen.input_box == scr.UNRECOGNIZED:
         return "screen_unrecognized"
     if state.turn == TURN_RUNNING:

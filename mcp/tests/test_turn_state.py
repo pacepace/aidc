@@ -181,6 +181,56 @@ class TestCheckFree:
         assert state.screen.dialog == ""
         assert await session.check() == "claude_not_at_prompt"
 
+    @staticmethod
+    def _asking(answered=False):
+        """A turn whose newest tool call is the question tool's (AskUserQuestion)."""
+        ask = {"type": "assistant", "uuid": "a1", "timestamp": ISO_NOW, "message": {
+            "role": "assistant", "stop_reason": "tool_use", "content": [
+                {"type": "tool_use", "id": "tq", "name": "AskUserQuestion", "input": {
+                    "questions": [{"question": "Approve?", "options": [{"label": "Deny"}]}]}}]}}
+        lines = [_typed("u1", "q"), ask]
+        if answered:
+            lines += [{"type": "user", "uuid": "r1", "timestamp": ISO_NOW, "message": {
+                "role": "user", "content": [{"type": "tool_result", "tool_use_id": "tq",
+                                             "content": "Deny"}]}},
+                      _reply("a2", None, stop="tool_use")]
+        return lines
+
+    async def test_an_open_question_is_its_own_why_not_a_permission_prompt(self, session):
+        """Claude Code raises the permission_prompt notification for its question tool too
+        (live 2026-11-27, 2.1.332): the screen shows the question menu, and session_status
+        says waiting_on_question; a send waits for the question, and says so."""
+        session.write(self._asking(), age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        session.screen = (SCREENS / "claude-2.1.332-question-menu.ansi").read_text()
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_RUNNING, "waiting_on_question")
+        assert state.screen.dialog == "question"
+        assert await session.check() == "claude_asking_question"
+        assert snd._join_refusal("proj", state) == "claude_asking_question"
+        assert "asking a question" in snd.WAITING_EXPLAINED["claude_asking_question"]
+        assert "first-launch screen (dialog)" not in snd.WAITING_EXPLAINED["claude_not_at_prompt"]
+
+    async def test_the_transcript_tells_a_question_from_a_permission_prompt(self, session):
+        """The watcher has no screen: the newest tool call decides. A question answered,
+        then a tool waiting on permission, is a permission prompt."""
+        session.write(self._asking(), age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        objs, mtime, _ = tn.session_transcript("proj")
+        assert tn.turn_from_hooks("proj", objs, mtime)[1] == "waiting_on_question"
+        session.write(self._asking(answered=True), age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        objs, mtime, _ = tn.session_transcript("proj")
+        assert tn.turn_from_hooks("proj", objs, mtime)[1] == "waiting_on_permission"
+
+    async def test_a_permission_menu_outranks_an_open_question_in_the_transcript(self, session):
+        session.write(self._asking(), age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        session.screen = "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n"
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert state.why == "waiting_on_permission"
+        assert await session.check() == "claude_not_at_prompt"
+
     async def test_a_permission_menu_quoting_the_trust_prompt_keeps_the_turn(self, session):
         """A session working on the screen reader itself: the permission menu's diff preview
         quotes the trust prompt. The turn waits on permission, never idle."""

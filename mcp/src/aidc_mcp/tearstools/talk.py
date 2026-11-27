@@ -153,6 +153,14 @@ class SessionSend(SessionAwareTool):
         every prompt in it (`prompts`: prompt_id, sent_by, conversation_id) and when the
         batch was pasted (`pasted_at`).
 
+        THE GIT AGENT'S QUESTION (session "git"). When it asks about a git request, answer
+        "Approve" or "Deny: <why>": the request is decided by aidc as you answer (the
+        return's `git_request`), and the same option is chosen in the agent's question menu,
+        so its turn goes on (status "answered_question"; nothing is pasted, typed text never
+        reaches that menu). If the menu could not be answered, the decision still stands:
+        status "question_open", question_answered false and question_not_answered saying
+        why; the question then waits for the user at the git agent's terminal.
+
         Every return carries `prompt_id`, stable for this prompt: session_queue_cancel
         takes it to take back this prompt alone while it still waits, and the reply's
         `prompts` names it. Never re-send a prompt to "make sure it arrived", and never reach

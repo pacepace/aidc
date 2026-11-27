@@ -87,11 +87,30 @@ EXTENDED_IN_2_0 = {
          "used; null otherwise),\n"),
         # the first-launch screen a Claude waits at (live, 2026-11-27): an orchestrator must
         # see why a session is stuck rather than "starting"
+        # ... and the question menu, told from a permission prompt (live 2026-11-27: the git
+        # agent's question read as waiting_on_permission)
         ("evidence), claude_running,",
-         "evidence), dialog (\"trust_prompt\" while Claude shows its folder-trust screen,\n"
+         "evidence; inside a turn, \"waiting_on_permission\" while Claude waits on a permission\n"
+         "prompt, \"waiting_on_question\" while its question menu (AskUserQuestion) is open),\n"
+         "dialog (\"trust_prompt\" while Claude shows its folder-trust screen,\n"
          "\"add_dir_prompt\" while it asks about a folder added with --add-dir; only a person\n"
-         "at the session can answer either, with why \"claude_not_at_prompt\"; absent\n"
+         "at the session can answer either, with why \"claude_not_at_prompt\"; \"question\" while\n"
+         "its question menu is open; absent\n"
          "otherwise), claude_running,"),
+    ],
+    # The git agent's question about a git request (K8S-05): the answer decides the request
+    # and chooses the option in the agent's question menu, which takes no typed text (live
+    # 2026-11-27: the answer waited behind it, never pasted)
+    "session_send": [
+        ("Every return carries `prompt_id`, stable for this prompt:",
+         "THE GIT AGENT'S QUESTION (session \"git\"). When it asks about a git request, answer\n"
+         "\"Approve\" or \"Deny: <why>\": the request is decided by aidc as you answer (the\n"
+         "return's `git_request`), and the same option is chosen in the agent's question menu,\n"
+         "so its turn goes on (status \"answered_question\"; nothing is pasted, typed text never\n"
+         "reaches that menu). If the menu could not be answered, the decision still stands:\n"
+         "status \"question_open\", question_answered false and question_not_answered saying\n"
+         "why; the question then waits for the user at the git agent's terminal.\n\n"
+         "Every return carries `prompt_id`, stable for this prompt:"),
     ],
 }
 

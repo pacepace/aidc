@@ -167,6 +167,47 @@ class TestDrain:
         await _drain(base, state, rec)              # dedup
         assert rec.delivered == ["a2", "a3"]
 
+    @staticmethod
+    def _filler(uuid, at):
+        """Claude Code's own line closing a turn that ended with no reply, written once the
+        next prompt comes (live 2026-11-27, Claude Code 2.1.332)."""
+        return _ts({"type": "assistant", "uuid": uuid, "message": {
+            "role": "assistant", "model": ts.SYNTHETIC_MODEL, "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": ts.NO_RESPONSE_FILLER}]}}, at)
+
+    async def test_a_turn_cut_off_before_the_watch_is_not_delivered_when_closed(self, tmp_path):
+        """A turn cut off in an earlier run (its tool call rejected, then Claude restarted)
+        is still open when the watch starts; the next prompt makes Claude Code close it with
+        its filler. That is history: the watch delivers the new turn only."""
+        base = tmp_path / "t"; state = tmp_path / "s"
+        old = "2020-01-01T00:00:00.000Z"
+        hist = [_ts(_user("u1", "a"), old), _ts(_assistant("a1", "OLD"), old),
+                _ts(_user("u2", "git request 1 waits"), old),
+                _ts(_assistant("a2", None, stop="tool_use"), old)]
+        _mk_transcript(base, "sess", "sid1", hist)
+        rec = Recorder()
+        await _drain(base, state, rec)              # the watch starts
+        new = "2100-01-01T00:00:00.000Z"
+        _mk_transcript(base, "sess", "sid1", hist + [
+            self._filler("f1", new), _ts(_user("u3", "git request 2 waits"), new),
+            _ts(_assistant("a3", "NEW"), new)])
+        await _drain(base, state, rec)
+        assert rec.delivered == ["a3"]
+        assert ts.load_watermark(state, "sess", "conv").last_delivered_uuid == "a3"
+
+    async def test_a_turn_cut_off_while_watched_is_still_delivered_when_closed(self, tmp_path):
+        base = tmp_path / "t"; state = tmp_path / "s"
+        old, new = "2020-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z"
+        hist = [_ts(_user("u1", "a"), old), _ts(_assistant("a1", "OLD"), old)]
+        _mk_transcript(base, "sess", "sid1", hist)
+        rec = Recorder()
+        await _drain(base, state, rec)
+        _mk_transcript(base, "sess", "sid1", hist + [
+            _ts(_user("u2", "b"), new), _ts(_assistant("a2", None, stop="tool_use"), new),
+            self._filler("f1", new)])
+        await _drain(base, state, rec)
+        assert rec.delivered == ["f1"]
+
     async def test_baseline_persists_across_restart_no_replay(self, tmp_path):
         """A re-baseline with no new history re-anchors to the same turn — so a
         re-register (e.g. after MCP restart) never replays already-seen history."""

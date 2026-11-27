@@ -131,6 +131,13 @@ class Turn:
     # the MCP's opened. Delivery metadata, not what the turn is.
     pasted_at: str = field(default="", compare=False)
     batch: tuple[dict, ...] = field(default=(), compare=False)
+    # Set when the turn's terminal is Claude Code's own filler (NO_RESPONSE_FILLER), written
+    # for a turn that ended with no reply once the next prompt comes: when the turn's last
+    # line before the filler was written (epoch seconds); None when none says. The watcher
+    # does not deliver such a turn when that is from before its watch was (re)anchored (a
+    # watch start, or its registration after an MCP restart): it is history, only closed now
+    # (live 2026-11-27, a cut-off turn of an earlier run).
+    filler_after: float | None = field(default=None, compare=False)
 
     @property
     def is_empty(self) -> bool:
@@ -356,6 +363,27 @@ def _blocking_tool_use_block(message: dict) -> dict | None:
         if isinstance(name, str) and name in INTERACTIVE_BLOCK_TOOLS:
             return b
     return None
+
+
+def asking_question(objs: list[dict]) -> bool:
+    """Whether the session's newest tool call is an AskUserQuestion still waiting for its
+    answer: Claude is on its question, not on a permission prompt for another tool. An
+    older question left open (a turn cut off while it asked) does not count."""
+    answered: set[str] = set()
+    for obj in reversed(objs):
+        message = obj.get("message") if isinstance(obj, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        blocks = [b for b in content if isinstance(b, dict)]
+        for b in blocks:
+            if b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
+                answered.add(b["tool_use_id"])
+        uses = [b for b in blocks if b.get("type") == "tool_use"]
+        if obj.get("type") == "assistant" and uses:
+            return any(b.get("name") == "AskUserQuestion" and b.get("id") not in answered
+                       for b in uses)
+    return False
 
 
 def open_question(objs: list[dict]) -> dict | None:
@@ -726,6 +754,17 @@ def awaiting_stop_hooks(tail: list[dict], transcript: list[dict]) -> bool:
     return False
 
 
+#: the assistant line Claude Code writes itself, not the model, for a turn that ended with
+#: no reply (an interrupt, a rejected tool call), once the conversation goes on
+NO_RESPONSE_FILLER = "No response requested."
+SYNTHETIC_MODEL = "<synthetic>"
+
+
+def _is_no_response_filler(message: dict) -> bool:
+    return (message.get("model") == SYNTHETIC_MODEL
+            and _text_of(message).strip() == NO_RESPONSE_FILLER)
+
+
 def extract_completed_turns(objs: list[dict],
                             dropped: list[str] | None = None) -> list[Turn]:
     """Return completed assistant turns in file order, COALESCED by user-prompt
@@ -777,6 +816,8 @@ def extract_completed_turns(objs: list[dict],
     terminal_had_text = False  # did the terminal line itself carry reply text?
     withdrawn_uuid = ""       # the last terminal a pushback withdrew in this group
     late_pushback = False     # a pushback found no terminal to withdraw
+    last_at: float | None = None        # when the group's newest line was written
+    filler_after: float | None = None   # set when the terminal is Claude Code's filler
 
     def withdraw_terminal() -> None:
         nonlocal committed, terminal_uuid, has_terminal, committed_ok, terminal_had_text
@@ -793,7 +834,7 @@ def extract_completed_turns(objs: list[dict],
     def flush(end_of_read: bool = False) -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
         nonlocal prompts, saw_assistant, interrupted, superseded, terminal_had_text
-        nonlocal withdrawn_uuid, late_pushback
+        nonlocal withdrawn_uuid, late_pushback, last_at, filler_after
         # Only a group that reached a terminal is a completed (deliverable) turn.
         # Deliver the text COMMITTED at that terminal — never the trailing `pending`
         # text from non-terminal lines after it. Those lines sit past the turn's
@@ -804,7 +845,7 @@ def extract_completed_turns(objs: list[dict],
             turns.append(Turn(terminal_uuid=terminal_uuid, text=committed.strip(),
                               ok=committed_ok, prompts=tuple(prompts),
                               interrupted=interrupted, superseded=superseded,
-                              late_pushback=late_pushback))
+                              late_pushback=late_pushback, filler_after=filler_after))
         elif withdrawn_uuid and dropped is not None and not end_of_read:
             # Only a group something else closed was dropped. At the end of the read
             # a pushed-back group is still open: Claude is working on its next reply.
@@ -821,6 +862,8 @@ def extract_completed_turns(objs: list[dict],
         terminal_had_text = False
         withdrawn_uuid = ""
         late_pushback = False
+        last_at = None
+        filler_after = None
 
     for index, obj in enumerate(objs):
         # `type` is attacker-influenced; an unhashable value would raise on the
@@ -870,6 +913,7 @@ def extract_completed_turns(objs: list[dict],
                 typed = human_prompt_text(obj)
                 if typed:
                     prompts.append(typed)
+            last_at = wall_time(obj) or last_at
             continue
 
         # assistant line
@@ -954,6 +998,9 @@ def extract_completed_turns(objs: list[dict],
                 # A real terminal SUPERSEDES a preceding API error in this group
                 # (the retry succeeded): deliver the successful answer, not a failure.
                 committed_ok = True
+                filler_after = last_at if _is_no_response_filler(message) else None
+        if not _is_no_response_filler(message):
+            last_at = wall_time(obj) or last_at
 
     flush(end_of_read=True)  # emit the final open group if it reached a terminal
     return turns

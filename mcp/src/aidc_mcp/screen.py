@@ -92,8 +92,15 @@ def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
     Only intensity matters here: SGR 2 turns dim on; 0, 22 or an empty parameter
     list turns it off. Colour changes (e.g. 39) leave it alone, which is exactly how
     Claude Code draws the queued-message placeholder (`\\x1b[2m\\x1b[39m…`).
+
+    Reverse video (SGR 7, off with 27 or a reset) is Claude Code's own cursor. Over
+    the startup placeholder it covers the first character, drawn reverse but not dim
+    (`\\x1b[7mT\\x1b[0;2mry "edit <filepath> to…"`, measured on 2.1.332): a reverse
+    character with dim text right after it is the placeholder's, so it counts as dim.
     """
     out: list[tuple[str, bool]] = []
+    rev: list[bool] = []
+    reverse = False
     i = 0
     while i < len(line):
         if line[i] == "\x1b":
@@ -109,10 +116,16 @@ def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
                         mode = params[k + 1] if k + 1 < len(params) else ""
                         k += 3 if mode == "5" else 5 if mode == "2" else 2
                         continue
-                    if p in ("", "0", "22"):
+                    if p in ("", "0"):
+                        dim = reverse = False
+                    elif p == "22":
                         dim = False
                     elif p == "2":
                         dim = True
+                    elif p == "7":
+                        reverse = True
+                    elif p == "27":
+                        reverse = False
                     k += 1
                 i = m.end()
                 continue
@@ -120,7 +133,11 @@ def _cells(line: str, dim: bool) -> tuple[list[tuple[str, bool]], bool]:
             i = other.end() if other else i + 1
             continue
         out.append((line[i], dim))
+        rev.append(reverse)
         i += 1
+    for j in range(len(out) - 1):
+        if rev[j] and not out[j][1] and out[j + 1][1]:
+            out[j] = (out[j][0], True)
     return out, dim
 
 

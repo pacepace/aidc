@@ -110,6 +110,26 @@ def test_startup_placeholder_is_empty():
     assert classify(_box(row)).input_box == EMPTY
 
 
+def test_startup_placeholder_under_the_cursor_is_empty():
+    """Measured on Claude Code 2.1.332 in a new cluster session: the cursor (reverse
+    video, not dim) covers the placeholder's first letter. Read as typed text, every
+    prompt to the session was held as input_has_text (live, 2026-11-27)."""
+    row = '\x1b[39m❯\xa0\x1b[7mT\x1b[0;2mry "edit <filepath> to…"\x1b[0m'
+    assert classify(_box(row)).input_box == EMPTY
+
+
+@pytest.mark.parametrize("row, typed", [
+    # The cursor on a typed letter, typed text after it.
+    ('❯\xa0\x1b[7ma\x1b[27mbc', "abc"),
+    # The cursor on the only typed letter.
+    ('❯\xa0x\x1b[7my\x1b[0m', "xy"),
+    # Typed text, then the cursor as a reverse space.
+    ('❯\xa0typed\x1b[7m \x1b[0m', "typed"),
+])
+def test_text_under_the_cursor_is_still_typed(row, typed):
+    assert classify(_box(row)) == ScreenState(HAS_TEXT, working=False, typed=typed)
+
+
 def test_dim_is_cleared_by_reset_so_later_typed_text_counts():
     row = '\x1b[39m❯\xa0\x1b[2mhint\x1b[0mtyped'
     assert classify(_box(row)).input_box == HAS_TEXT

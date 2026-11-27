@@ -198,6 +198,17 @@ and the envelope are unchanged; what an MCP caller sees differently:
   kill or create of its own. A prompt queued by the earlier `aidc-mcp` gets its header when the queue is loaded, unless it
   is already in a session's input box.
 
+### Fixed
+- **A new cluster session starts at Claude's prompt.** Its first `~/.claude.json` is seeded as
+  on Docker, from this machine's minus its account and every other project's state (an empty one
+  when there is none, as for a session your MCP server makes), with onboarding marked done and
+  the session's start folder trusted. It used to open on the theme picker, the security notes
+  and the folder-trust prompt. The bypass-permissions warning is still settings' to skip
+  (`skipDangerousModePermissionPrompt`, from the template `aidc sync push-settings` leaves).
+- **A prompt is no longer held behind Claude's startup hint.** With the cursor drawn over the
+  hint's first letter (Claude Code 2.1.332), the MCP server read the hint as unsent text and held
+  every prompt to a new session as `input_has_text`.
+
 ### Changed
 - **A pasted prompt says who sent it.** Every prompt `session_send` pastes opens with
   `[Sent through aidc by <sender>, from conversation <id>. Not typed at this terminal.]`, then a

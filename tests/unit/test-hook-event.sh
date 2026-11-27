@@ -159,6 +159,19 @@ check "...and a prompt goes through the lease alone, which hands only one it let
 aidc_install_managed_settings "$root" "$reg" false
 check "on Docker neither (the host's status line is the session's own)" \
     "$([ "$(jq -c '[has("statusLine"), (.hooks | has("StopFailure"))]' "$ms")" = '[false,false]' ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false cluster bypass
+check "a cluster session launched with bypass skips the bypass-permissions warning (owner ruling 2026-11-27)" \
+    "$([ "$(jq -c '.skipDangerousModePermissionPrompt' "$ms")" = true ] && [ "$(jq -c '.hooks | has("StopFailure")' "$ms")" = true ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false cluster
+check "...one launched without bypass does not" \
+    "$([ "$(jq -c 'has("skipDangerousModePermissionPrompt")' "$ms")" = false ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false "" bypass
+check "...nor a Docker session (the cluster's unattended first launch only)" \
+    "$([ "$(jq -c 'has("skipDangerousModePermissionPrompt")' "$ms")" = false ] && echo yes || echo no)"
+check "bypass is yolo (also the default when unset) and bypassPermissions, no other mode" \
+    "$([ "$(for m in yolo "" bypassPermissions safe default acceptEdits auto dontAsk plan; do printf '%s,' "$(aidc_managed_bypass "$m")"; done)" = 'bypass,bypass,bypass,,,,,,,' ] && echo yes || echo no)"
+check "the entrypoint passes the session's claude_mode through it" \
+    "$(grep -q '_managed_bypass=$(aidc_managed_bypass "${AIDC_CLAUDE_MODE:-yolo}")' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && grep -q '"$_managed_cluster" "$_managed_bypass"; then' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 check "the entrypoint asks for the cluster form on Kubernetes only" \
     "$(grep -q '\[ "${AIDC_BACKEND:-}" = kubernetes \] && _managed_cluster=cluster' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 mkdir -p "$S/ro/etc"; chmod 0500 "$S/ro/etc"

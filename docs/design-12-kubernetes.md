@@ -1010,7 +1010,15 @@ any pod mounts it; the dev pod's `claude-seed` step fills a new one once, as the
 from the Claude config the home already had, else the image's; then, when that left no
 `.claude.json`, from the state seed `aidc create` put in the session's audit-seed ConfigMap
 (Docker's filtered copy of the machine's own, else empty, with onboarding done and the start
-folder trusted: owner ruling 2026-11-27), so the first launch goes straight to the prompt. The git agent's is the folder
+folder trusted: owner ruling 2026-11-27), so the first launch goes straight to the prompt. The
+machine's file names the project by the machine's path (a Mac's `/Users/<name>/x`), the session
+by the cluster's (`/home/<user>/x`): the entry is picked by the one and moved to the other. The
+seed's key is not in the proxy pod's mount of that ConfigMap (its seed-audit step sees only the
+audit record's two first files). A session launched with bypass (claude_mode `yolo`, the
+default, or `bypassPermissions`) also skips the bypass-permissions warning: the entrypoint sets
+`skipDangerousModePermissionPrompt` in its managed settings, a settings key, so it is not
+`.claude.json`'s to carry, and it follows the mode on every start (the mode is the user's
+consent to bypass; the same ruling). The git agent's is the folder
 `git` (owner 2000, group 1000, 0770: the broker writes its credentials as group 1000, of which
 the git user is a member), filled from its home's Claude config with its own history.
 `aidc kill` removes a session's folder (the broker's `forget`, or a one-shot pod when no broker
@@ -1295,9 +1303,13 @@ namespace (TRS-23, MCP-02/03 as amended):
   node's (their InternalIPs, as the cluster reports them, at the same port), so the policy
   allows each. Which one the kubeconfig names is not taken on the machine's word: once the pod
   runs, start asks from inside it (its own kubectl, `get --raw /readyz`, which any client may
-  read) and uses the first it reaches, rewriting the kubeconfig and restarting the server when
-  that is not the first; when the pod reaches none (a VPN, tunnel or load-balancer address
-  only the machine can route), start refuses, saying to set `kubernetes.api_endpoints`.
+  read) and uses the first it reaches. A server that runs already is asked before its
+  kubeconfig is written (the ConfigMap is projected into the running pod, so a write is live),
+  and is restarted only when the address it reaches is not the one it held; a new one starts on
+  the first and is restarted when it reaches another only. When the pod reaches none (a VPN,
+  tunnel or load-balancer address only the machine can route), start refuses, saying to set
+  `kubernetes.api_endpoints`, with the last attempt's own error (a refused connection reads
+  differently from an exec that failed for its own reason).
   Trade-off, taken knowingly: no failover while the server runs. A kubeconfig cluster has one
   server; the server and the CLI call kubectl directly in many places; and a retrying wrapper
   would have to replay a command's stdin, which a streaming exec (attach, send) cannot. So

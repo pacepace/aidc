@@ -98,6 +98,11 @@ assert "a file with no projects key yields an empty projects map" \
 printf 'not json' > "$SCRATCH/bad.json"
 assert "unparseable input fails (caller falls back to in-container onboarding)" \
     "! aidc_claude_state_seed '$SCRATCH/bad.json' /r /r"
+printf '%s' '{"theme":"x","projects":{"/Users/a/r":{"allowedTools":["Bash"]},"/Users/a/r/sub":{},"/Users/a/r2":{},"/o":{}}}' > "$SCRATCH/rekey.json"
+assert "rekey moves the project and its subfolders to the other path, nothing else" \
+    "[ \"\$(aidc_claude_state_rekey /Users/a/r /home/a/r < '$SCRATCH/rekey.json' | jq -c .)\" = '{\"theme\":\"x\",\"projects\":{\"/home/a/r\":{\"allowedTools\":[\"Bash\"]},\"/home/a/r/sub\":{},\"/Users/a/r2\":{},\"/o\":{}}}' ]"
+assert "rekey to the same path changes nothing" \
+    "[ \"\$(aidc_claude_state_rekey /Users/a/r /Users/a/r < '$SCRATCH/rekey.json' | jq -c .)\" = \"\$(jq -c . '$SCRATCH/rekey.json')\" ]"
 echo
 
 echo "passed: $PASS"

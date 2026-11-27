@@ -131,18 +131,35 @@ mcp_control_plane_ips() {
 
 # mcp_reachable_endpoint <ipv4>:<port>...: the first of them the running server's pod reaches
 # the API server at, asked from inside the pod with its own kubectl (the address the pod's
-# kubeconfig will name, checked where it is used, not where it was resolved); returns 1 when it
-# reaches none. /readyz is readable by any client, so no grant is needed for the question.
+# kubeconfig will name, checked where it is used, not where it was resolved). When it reaches
+# none, prints the last attempt's error instead (a refused connection, or an exec that failed
+# for its own reason: the two read differently) and returns 1. /readyz is readable by any
+# client, so no grant is needed for the question.
 mcp_reachable_endpoint() {
-    local ep
+    local ep errf why=""
+    errf=$(mktemp) || { printf 'cannot make a temporary file'; return 1; }
     for ep in "$@"; do
         if k8s_kubectl -n "$ns" exec "deployment/${K8S_MCP_NAME}" -c mcp -- kubectl --server "https://${ep}" \
-            --tls-server-name kubernetes.default.svc --request-timeout=5s get --raw /readyz </dev/null >/dev/null 2>&1; then
+            --tls-server-name kubernetes.default.svc --request-timeout=5s get --raw /readyz </dev/null >/dev/null 2>"$errf"; then
+            rm -f "$errf"
             printf '%s' "$ep"
             return 0
         fi
+        why=$(grep -v '^[[:space:]]*$' "$errf" | tail -n1)
     done
+    rm -f "$errf"
+    printf '%s' "${why:-no answer}"
     return 1
+}
+
+# mcp_config_endpoint: the API server address the running server's kubeconfig names now (its
+# ConfigMap's), "" when it has none or the cluster does not answer.
+mcp_config_endpoint() {
+    local kc server
+    kc=$(k8s_get "$ns" configmap "$K8S_MCP_CONFIG" -o 'jsonpath={.data.kubeconfig}' 2>/dev/null) || return 0
+    server=$(printf '%s' "$kc" | yq '.clusters[0].cluster.server // ""' 2>/dev/null) || return 0
+    case "$server" in https://*) printf '%s' "${server#https://}" ;; esac
+    return 0
 }
 
 # mcp_callback: K8S_MCP_CALLBACK_IP, _PORT and _HOST, where the server posts finished turns
@@ -282,7 +299,7 @@ mcp_add_endpoints() {
 }
 
 mcp_start() {
-    local sel tok rc=0 eps api_eps first reach state incluster="" known expose
+    local sel tok rc=0 eps api_eps first reach target held="" state incluster="" known expose
     # A token first: the pod mounts it, and a cluster that does not say whether there is one
     # must not get a second.
     tok=$(mcp_token_read) || rc=$?
@@ -306,6 +323,17 @@ mcp_start() {
         fi
         eps=$(mcp_add_endpoints "$eps" "$incluster")
     fi
+    # The pod's kubectl goes to one API server address (docs/design-12-kubernetes.md, the MCP
+    # server's "API server reach"). A server that runs already is asked which it reaches before
+    # its kubeconfig is written (it is projected into the running pod, so a write is live): it
+    # keeps the one it reaches, and is restarted only when that is not the one it held. A new
+    # server starts on the first, until it says it reaches another only (below).
+    target="$first"
+    if [ "$state" != "NOT RUNNING" ]; then
+        held=$(mcp_config_endpoint)
+        # shellcheck disable=SC2086  # one endpoint per word
+        if reach=$(mcp_reachable_endpoint $api_eps); then target="$reach"; fi
+    fi
     if [ -z "$tok" ]; then
         tok=$(mcp_token_new)
         [ "${#tok}" -ge 40 ] || die "cannot make a token"
@@ -316,9 +344,7 @@ mcp_start() {
     sel=$(k8s_node_selector) || exit 1
     k8s_ensure_transcripts "$ns" || exit 1
     k8s_ensure_claim "$ns" "$K8S_MCP_STATE_CLAIM" "MCP server's state" k8s_render_mcp_state || exit 1
-    # The pod's kubectl goes to one API server address (docs/design-12-kubernetes.md, the MCP
-    # server's "API server reach"): the first, until the pod says it reaches another only (below).
-    k8s_render_mcp_config "$first" | k8s_kubectl apply -f - >/dev/null \
+    k8s_render_mcp_config "$target" | k8s_kubectl apply -f - >/dev/null \
         || die "could not write the MCP server's config"
     mcp_load_settings
     if [ "${AIDC_MCP_SESSION_CREATE:-}" = true ]; then
@@ -332,6 +358,7 @@ mcp_start() {
     k8s_kubectl -n "$ns" rollout status "deployment/${K8S_MCP_NAME}" --timeout=300s >&2 \
         || die "the MCP server did not become ready; see: kubectl -n ${ns} describe pod -l app=${K8S_MCP_NAME}"
     if [ "$state" = "NOT RUNNING" ]; then
+        held="$target"
         incluster=$(mcp_incluster_api) \
             || die "your MCP server started, but its in-cluster API address could not be read, so it may not reach the API server: run aidc mcp start again (aidc mcp logs says more)"
         if ! printf '%s\n' "$eps" | grep -qxF "$incluster"; then
@@ -343,11 +370,13 @@ mcp_start() {
     fi
     # shellcheck disable=SC2086  # one endpoint per word
     reach=$(mcp_reachable_endpoint $api_eps) \
-        || die "your MCP server's pod reaches the API server at none of $(printf '%s' "$api_eps" | paste -sd' ' -): set kubernetes.api_endpoints to the API server's <ipv4>:<port> as pods in the cluster reach it, then aidc mcp start again"
-    if [ "$reach" != "$first" ]; then
-        info "your MCP server's pod does not reach the API server at ${first}: it uses ${reach}"
+        || die "your MCP server's pod reaches the API server at none of $(printf '%s' "$api_eps" | paste -sd' ' -) (${reach}): set kubernetes.api_endpoints to the API server's <ipv4>:<port> as pods in the cluster reach it, then aidc mcp start again"
+    [ "$reach" = "$first" ] || info "your MCP server's pod does not reach the API server at ${first}: it uses ${reach}"
+    if [ "$reach" != "$target" ]; then
         k8s_render_mcp_config "$reach" | k8s_kubectl apply -f - >/dev/null \
             || die "could not write the MCP server's config"
+    fi
+    if [ "$reach" != "$held" ]; then
         k8s_kubectl -n "$ns" rollout restart "deployment/${K8S_MCP_NAME}" >/dev/null \
             || die "could not restart the MCP server onto ${reach}"
         k8s_kubectl -n "$ns" rollout status "deployment/${K8S_MCP_NAME}" --timeout=300s >&2 \

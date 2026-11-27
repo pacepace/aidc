@@ -283,11 +283,16 @@ jq -n --arg session "$NAME" --arg profile "$PROFILE" --arg repo "$REPO_PATH" \
 # account and every other project's state (lib/claude-state.sh), else empty; onboarding done
 # and the session's start folder trusted (owner ruling 2026-11-27), so its first launch goes
 # straight to the prompt. The dev pod's claude-seed step installs it while the session's
-# Claude config dir has no .claude.json yet.
+# Claude config dir has no .claude.json yet. This machine's file names the project by the path
+# here (the $PWD REPO_PATH was made from: /Users/<name>/x on a Mac), the session's Claude by
+# REPO_PATH: the project's entry is picked by the one and moved to the other.
 host_state="$(aidc_host_home)/.claude.json"
+host_repo="${PWD%/}"
 state_seed='{}'
 if [ -f "$host_state" ]; then
-    if state_seed=$(aidc_claude_state_seed "$host_state" "$REPO_PATH" "$REPO_PATH"); then
+    if state_seed=$(aidc_claude_state_seed "$host_state" "$host_repo" "$host_repo" \
+            | aidc_claude_state_rekey "$host_repo" "$REPO_PATH") \
+            && [ -n "$state_seed" ]; then
         info "state: seeded from this machine's ~/.claude.json (onboarding; no account)"
     else
         state_seed='{}'

@@ -243,10 +243,15 @@ assert_eq "...from the session's audit-seed ConfigMap, optional (a session made 
 assert_eq "with no ~/.claude.json on this machine the seed marks onboarding done and trusts the start folder" \
     '{"hasCompletedOnboarding":true,"projects":{"/home/alice/code/proj":{"hasTrustDialogAccepted":true}}}' \
     "$(jq -c . "$K_STATE_SEED")"
-printf '%s' '{"theme":"light","numStartups":40,"oauthAccount":{"emailAddress":"a@example.com"},"primaryApiKey":"k","mcpServers":{"x":{}},"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"history":["secret"]},"/elsewhere":{"hasTrustDialogAccepted":true}}}' > "$HOME/.claude.json"
+# This machine's home is not /home/alice (a Mac's /Users/alice, here the scratch home), so its
+# ~/.claude.json names the project by this machine's path: the seed picks the entry by that
+# path and carries it to the cluster's (/home/alice/...), where the session's Claude looks.
+jq -n -c --arg p "$HOME/code/proj" '{"theme":"light","numStartups":40,"oauthAccount":{"emailAddress":"a@example.com"},"primaryApiKey":"k","mcpServers":{"x":{}},
+    "projects":{($p):{"allowedTools":["Bash"],"history":["secret"]},($p + "/sub"):{"ignorePatterns":["x"]},
+                ($p + "2"):{"allowedTools":["Edit"]},"/home/alice/code/proj":{"allowedTools":["Write"]},"/elsewhere":{"hasTrustDialogAccepted":true}}}' > "$HOME/.claude.json"
 out=$(run create demo --backend kubernetes)
-assert_has "...with one, the seed is Docker's filtered copy (no account, key, servers, other projects, history)" \
-    '{"theme":"light","numStartups":40,"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"hasTrustDialogAccepted":true}},"hasCompletedOnboarding":true}' \
+assert_has "...with one, the seed is Docker's filtered copy (no account, key, servers, other projects, history), this project's entry moved from this machine's path to the cluster's" \
+    '{"theme":"light","numStartups":40,"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"hasTrustDialogAccepted":true},"/home/alice/code/proj/sub":{"ignorePatterns":["x"]}},"hasCompletedOnboarding":true}' \
     "$(jq -c . "$K_STATE_SEED")"
 assert_has "...and says so" "state: seeded from this machine's ~/.claude.json" "$out"
 rm -f "$HOME/.claude.json"
@@ -258,6 +263,9 @@ assert_eq "the proxy pod's first steps make the session's Claude config dir (roo
     '[["claude-dirs","d=/claude-config/demo && mkdir -p \"$d\" && chown 1000:1000 \"$d\" && chmod 0700 \"$d\"","root"],["claude-projects","umask 002 && mkdir -p \"/disk/.claude/projects\" \"/disk/.claude-shared\"",{"runAsUser":1000,"runAsGroup":1000}]]' \
     "$(proxyq '[.spec.template.spec.initContainers[] | select(.name == "claude-dirs" or .name == "claude-projects") | [.name, .command[2], (.securityContext // "root")]]')"
 assert_eq "...ahead of the rest" '["claude-dirs","claude-projects"]' "$(proxyq '[.spec.template.spec.initContainers[0:2][].name]')"
+assert_eq "the proxy pod's seed-audit step sees the audit record's two first files only, never the Claude state seed beside them" \
+    '{"name":"audit-seed","configMap":{"name":"demo-audit-seed","items":[{"key":"meta.json","path":"meta.json"},{"key":"config-snapshot.yaml","path":"config-snapshot.yaml"}]}}' \
+    "$(proxyq '.spec.template.spec.volumes[] | select(.name == "audit-seed")')"
 assert_has "the audit sidecar takes the session's own conversations from its mirror folder (the shared history holds other sessions')" \
     '{"name":"AIDC_AUDIT_CLAUDE_PROJECTS","value":"/var/aidc/session-transcripts"}' \
     "$(proxyq '.spec.template.spec.containers[] | select(.name == "audit") | .env')"

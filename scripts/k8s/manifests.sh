@@ -1267,7 +1267,9 @@ spec:
           volumeMounts: [{name: disk, mountPath: /disk}]
         # The audit record's first files, as aidc create writes them on Docker: meta.json (the
         # audit sidecar stamps tainted_at and killed_at into it) and the config snapshot. Only
-        # when absent: a restarted proxy pod must not reset them.
+        # when absent: a restarted proxy pod must not reset them. Its volume holds those two keys
+        # only: the ConfigMap also carries the session's Claude state seed, which is no part of
+        # the audit record.
         - name: seed-audit
           image: ${img}/audit:${AIDC_VERSION_TAG}
           imagePullPolicy: Always
@@ -1355,7 +1357,7 @@ spec:
         - {name: state, persistentVolumeClaim: {claimName: ${session}-state}}
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
         - {name: audit, persistentVolumeClaim: {claimName: ${audit}}}
-        - {name: audit-seed, configMap: {name: ${session}-audit-seed}}
+        - {name: audit-seed, configMap: {name: ${session}-audit-seed, items: [{key: meta.json, path: meta.json}, {key: config-snapshot.yaml, path: config-snapshot.yaml}]}}
         - {name: disk, persistentVolumeClaim: {claimName: disk}}
         - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}

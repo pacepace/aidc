@@ -119,8 +119,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   `~/.config/aidc/mcp-token`. New settings: `kubernetes.mcp_state_size` and
   `kubernetes.api_endpoints` (README, Kubernetes backend). Start asks the running server's
   pod which allowed API server address it reaches (your kubeconfig's, and every control-plane
-  node's when that is one of them) and uses that one; when it reaches none, start says to set
-  `kubernetes.api_endpoints`. With that control-plane node down, run `aidc mcp start` again.
+  node's when that is one of them) and uses that one, restarting the server only when that
+  address changed; when it reaches none, start says to set `kubernetes.api_endpoints`, with the
+  error it met. With that control-plane node down, run `aidc mcp start` again.
 - **Reaching it:** in the cluster at `http://aidc-mcp.aidc-u-<user>.svc:7878/mcp`, from any
   namespace but yours; on your network with `mcp.kubernetes.expose: ingress` at
   `https://mcp-<user>.<kubernetes.ingress.domain>/mcp`, on your pages' class and certificate,
@@ -202,9 +203,12 @@ and the envelope are unchanged; what an MCP caller sees differently:
 - **A new cluster session starts at Claude's prompt.** Its first `~/.claude.json` is seeded as
   on Docker, from this machine's minus its account and every other project's state (an empty one
   when there is none, as for a session your MCP server makes), with onboarding marked done and
-  the session's start folder trusted. It used to open on the theme picker, the security notes
-  and the folder-trust prompt. The bypass-permissions warning is still settings' to skip
-  (`skipDangerousModePermissionPrompt`, from the template `aidc sync push-settings` leaves).
+  the session's start folder trusted. This project's state is found under this machine's path
+  (a Mac's `/Users/<you>/...` too) and carried to the session's `/home/<user>/...`. A session
+  launched with bypassed permissions (claude_mode `yolo`, the default, or `bypassPermissions`)
+  skips the bypass-permissions warning too (`skipDangerousModePermissionPrompt`, in its managed
+  settings). It used to open on the theme picker, the security notes, the folder-trust prompt
+  and that warning.
 - **A prompt is no longer held behind Claude's startup hint.** With the cursor drawn over the
   hint's first letter (Claude Code 2.1.332), the MCP server read the hint as unsent text and held
   every prompt to a new session as `input_has_text`.

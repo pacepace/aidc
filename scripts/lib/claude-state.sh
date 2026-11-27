@@ -43,6 +43,19 @@ aidc_claude_state_seed() {
     ' "$src"
 }
 
+# aidc_claude_state_rekey <from> <to>
+# A seed (on stdin) with each project entry at <from>, or below it, moved to the same place
+# under <to>. A cluster session sees the repo at another path than this machine does (a Mac's
+# /Users/<name>/x is /home/<user>/x there), and Claude finds a project's entry by the path it
+# runs in. Prints the result.
+aidc_claude_state_rekey() {
+    jq --arg from "$1" --arg to "$2" '
+        .projects = ((.projects // {}) | with_entries(
+            if .key == $from then .key = $to
+            elif (.key | startswith($from + "/")) then .key = $to + (.key | ltrimstr($from))
+            else . end))'
+}
+
 # aidc_claude_state_ready <folder>
 # A seed (on stdin, a JSON object) with onboarding marked done and <folder> trusted, for a
 # cluster session's first launch: it has no host state of its own to carry the dialogs'

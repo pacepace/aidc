@@ -502,3 +502,6 @@ The owner's other products and projects are never named in code, tests or docs o
 
 ## 2026-11-27 Cluster sessions trust their start folder
 Owner ruling: a cluster session marks its start folder trusted in Claude (hasTrustDialogAccepted) and is seeded past onboarding, so a session made unattended (session_create) never stops at the first-launch screens. Docker keeps carrying only the host's own trust. Reason: no one may be at the screen, and the sandbox is the boundary.
+
+## 2026-11-27 The git agent trusts its own work folder on both backends
+Owner ruling: the git agent's Claude, on Docker and on Kubernetes, starts in its own work folder (/home/git/work) marked trusted and past onboarding, so it never stops at a first-launch screen after a restart and ask mode keeps working unattended. User sessions on Docker still carry only the host's own trust; cluster sessions follow the earlier 2026-11-27 ruling.

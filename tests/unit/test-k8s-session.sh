@@ -152,7 +152,9 @@ case "$*" in
         printf '  NAME   READY   STATUS\n  demo-dev-0   true   Running\n' ;;
     *"get networkpolicy -o name"*) [ "${K_STATUS_READS_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         printf 'networkpolicy.networking.k8s.io/default-deny\nnetworkpolicy.networking.k8s.io/demo-dev-only-to-its-proxy\nnetworkpolicy.networking.k8s.io/demo-proxy-public-only\n' ;;
-    *"create configmap"*) printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed, namespace: aidc-u-alice}\ndata: {meta.json: "{}"}\n' ;;
+    *"create configmap"*)
+        for a in "$@"; do case "$a" in --from-file=*claude-state-seed.json) cp "${a#--from-file=}" "$K_STATE_SEED" ;; esac; done
+        printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo-audit-seed, namespace: aidc-u-alice}\ndata: {meta.json: "{}"}\n' ;;
 esac
 exit 0
 STUB
@@ -160,7 +162,7 @@ chmod +x "$SCRATCH/bin/kubectl"
 
 export K_UID_FILE="$SCRATCH/dev-uid" AIDC_ROOT_FOR_STUB="$AIDC_ROOT" AIDC_K8S_READY_WAIT=4
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH"
+    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" K_STATE_SEED="$SCRATCH/state-seed.json"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab
@@ -221,7 +223,7 @@ assert_eq "claude-config is the user's claim" \
 assert_eq "no container or step of the dev pod mounts another session's Claude config dir, or the whole claim" "[]" \
     "$(dev '[(.spec.template.spec.containers[], .spec.template.spec.initContainers[]) | .volumeMounts[] | select(.name == "claude-config" and (.subPath // "") != "demo")]')"
 assert_eq "the Claude config dir is filled once, as the session user, from its home's (read-only) or the image's" \
-    '[{"runAsUser":1000,"runAsGroup":1000},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"demo"},{"name":"disk","mountPath":"/shared-claude","subPath":".claude-shared","readOnly":true}]]' \
+    '[{"runAsUser":1000,"runAsGroup":1000},[{"name":"home","mountPath":"/seed","readOnly":true},{"name":"claude-config","mountPath":"/claude-config-own","subPath":"demo"},{"name":"disk","mountPath":"/shared-claude","subPath":".claude-shared","readOnly":true},{"name":"claude-state-seed","mountPath":"/claude-state-seed","readOnly":true}]]' \
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | [.securityContext, .volumeMounts]')"
 assert_has "...its projects/ left out (the disk's is mounted over it)" "--exclude=./projects" \
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
@@ -230,6 +232,24 @@ assert_has "...the user's synced Claude files linked in every start (K8S-18), a 
     "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
 assert_has "...a new session's settings.json from the template a laptop pushed, once" \
     'cp /shared-claude/settings.template.json' "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+# A new session's Claude showed the theme picker, the security notes, the folder-trust prompt
+# (live, 2026-11-27): the cluster path never seeded its ~/.claude.json, as Docker does.
+assert_has "...its first .claude.json from the state seed, only while it has none" \
+    'if [ ! -e \"$d/.claude.json\" ] && [ -s /claude-state-seed/claude-state-seed.json ]; then (umask 077 && cp /claude-state-seed/claude-state-seed.json \"$d/.claude.json\"); fi' \
+    "$(dev '.spec.template.spec.initContainers[] | select(.name == "claude-seed") | .command[2]')"
+assert_eq "...from the session's audit-seed ConfigMap, optional (a session made before it has no such key)" \
+    '{"name":"claude-state-seed","configMap":{"name":"demo-audit-seed","optional":true,"items":[{"key":"claude-state-seed.json","path":"claude-state-seed.json"}]}}' \
+    "$(dev '.spec.template.spec.volumes[] | select(.name == "claude-state-seed")')"
+assert_eq "with no ~/.claude.json on this machine the seed marks onboarding done and trusts the start folder" \
+    '{"hasCompletedOnboarding":true,"projects":{"/home/alice/code/proj":{"hasTrustDialogAccepted":true}}}' \
+    "$(jq -c . "$K_STATE_SEED")"
+printf '%s' '{"theme":"light","numStartups":40,"oauthAccount":{"emailAddress":"a@example.com"},"primaryApiKey":"k","mcpServers":{"x":{}},"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"history":["secret"]},"/elsewhere":{"hasTrustDialogAccepted":true}}}' > "$HOME/.claude.json"
+out=$(run create demo --backend kubernetes)
+assert_has "...with one, the seed is Docker's filtered copy (no account, key, servers, other projects, history)" \
+    '{"theme":"light","numStartups":40,"projects":{"/home/alice/code/proj":{"allowedTools":["Bash"],"hasTrustDialogAccepted":true}},"hasCompletedOnboarding":true}' \
+    "$(jq -c . "$K_STATE_SEED")"
+assert_has "...and says so" "state: seeded from this machine's ~/.claude.json" "$out"
+rm -f "$HOME/.claude.json"
 assert_has "the session's name in its conversations' leases, and the shared Claude folder" \
     '{"name":"AIDC_LEASE_MACHINE","value":"cluster/demo"},{"name":"AIDC_SHARED_CLAUDE","value":"/home/alice/.claude-shared"}' \
     "$(dev '.spec.template.spec.containers[0].env')"

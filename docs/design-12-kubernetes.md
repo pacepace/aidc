@@ -1007,7 +1007,10 @@ would not do: the broker would have to mount every session's home, and a `.crede
 symlinked to a broker-written file is refused (Claude Code 2.1.332 reads it as
 "refused-symlink"). The proxy pod's first step makes the folder (root: owner 1000, 0700), before
 any pod mounts it; the dev pod's `claude-seed` step fills a new one once, as the session user,
-from the Claude config the home already had, else the image's. The git agent's is the folder
+from the Claude config the home already had, else the image's; then, when that left no
+`.claude.json`, from the state seed `aidc create` put in the session's audit-seed ConfigMap
+(Docker's filtered copy of the machine's own, else empty, with onboarding done and the start
+folder trusted: owner ruling 2026-11-27), so the first launch goes straight to the prompt. The git agent's is the folder
 `git` (owner 2000, group 1000, 0770: the broker writes its credentials as group 1000, of which
 the git user is a member), filled from its home's Claude config with its own history.
 `aidc kill` removes a session's folder (the broker's `forget`, or a one-shot pod when no broker

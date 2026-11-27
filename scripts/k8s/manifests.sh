@@ -324,6 +324,10 @@ K8S_BROKER_HOME=/var/lib/claude-broker
 # status line), which come from the user's machines only: sessions mount them read-only.
 K8S_DISK_PROJECTS=.claude/projects
 K8S_DISK_SHARED=.claude-shared
+# The session's first ~/.claude.json (k8s/session-create.sh), a key of its audit-seed ConfigMap,
+# which the dev pod's claude-seed step mounts at K8S_CLAUDE_STATE_SEED_DIR.
+K8S_CLAUDE_STATE_SEED=claude-state-seed.json
+K8S_CLAUDE_STATE_SEED_DIR=/claude-state-seed
 
 k8s_render_claude_config() {
     cat <<EOF
@@ -402,11 +406,12 @@ _k8s_claude_dir_cmd() {
 # a new folder of claude-config once (.aidc-seeded marks it): from the Claude config the pod's
 # home already had (a session or git agent made before its config moved here keeps its login,
 # settings and history), else the image's. A session's projects/ is left out (the user's disk's
-# is mounted over it); with own-projects (the git agent) it comes along.
+# is mounted over it); with own-projects (the git agent) it comes along. Then, when that left
+# no .claude.json, the state seed session-create wrote, if the pod mounts one.
 _k8s_claude_seed_cmd() {
     local exclude="--exclude=./projects "
     [ "${2:-}" = own-projects ] && exclude=""
-    printf '%s' "d=/claude-config-own && if [ ! -e \"\$d/.aidc-seeded\" ]; then src=${1}; if [ -d /seed/.claude ] && [ -n \"\$(ls -A /seed/.claude 2>/dev/null)\" ]; then src=/seed/.claude; fi; (cd \"\$src\" && tar ${exclude}-cf - .) | tar -C \"\$d\" -xf - && mkdir -p \"\$d/projects\" && : > \"\$d/.aidc-seeded\"; fi"
+    printf '%s' "d=/claude-config-own && if [ ! -e \"\$d/.aidc-seeded\" ]; then src=${1}; if [ -d /seed/.claude ] && [ -n \"\$(ls -A /seed/.claude 2>/dev/null)\" ]; then src=/seed/.claude; fi; (cd \"\$src\" && tar ${exclude}-cf - .) | tar -C \"\$d\" -xf - && mkdir -p \"\$d/projects\" && if [ ! -e \"\$d/.claude.json\" ] && [ -s ${K8S_CLAUDE_STATE_SEED_DIR}/${K8S_CLAUDE_STATE_SEED} ]; then (umask 077 && cp ${K8S_CLAUDE_STATE_SEED_DIR}/${K8S_CLAUDE_STATE_SEED} \"\$d/.claude.json\"); fi && : > \"\$d/.aidc-seeded\"; fi"
 }
 
 # _k8s_claude_shared_cmd: the session user's step that links the user's shared Claude files (on
@@ -1412,6 +1417,7 @@ spec:
             - {name: home, mountPath: /seed, readOnly: true}
             - {name: claude-config, mountPath: /claude-config-own, subPath: ${session}}
             - {name: disk, mountPath: /shared-claude, subPath: ${K8S_DISK_SHARED}, readOnly: true}
+            - {name: claude-state-seed, mountPath: ${K8S_CLAUDE_STATE_SEED_DIR}, readOnly: true}
         # The repo folder, made as the session user when it is not on the disk yet, group-writable
         # like everything sessions make on the disk (the git container tidies there).
         - name: repo-dir
@@ -1482,6 +1488,8 @@ $(_k8s_claude_token_env "$session")            # Sysbox gives the inner Docker a
         - {name: home, persistentVolumeClaim: {claimName: ${session}-home}}
         - {name: transcripts, persistentVolumeClaim: {claimName: ${K8S_TRANSCRIPTS_CLAIM}}}
         - {name: claude-config, persistentVolumeClaim: {claimName: ${K8S_CLAUDE_CONFIG_CLAIM}}}
+        # Optional: a session made before the seed was there has no such key.
+        - {name: claude-state-seed, configMap: {name: ${session}-audit-seed, optional: true, items: [{key: ${K8S_CLAUDE_STATE_SEED}, path: ${K8S_CLAUDE_STATE_SEED}}]}}
 EOF
 }
 

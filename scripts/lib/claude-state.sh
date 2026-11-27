@@ -43,6 +43,16 @@ aidc_claude_state_seed() {
     ' "$src"
 }
 
+# aidc_claude_state_ready <folder>
+# A seed (on stdin, a JSON object) with onboarding marked done and <folder> trusted, for a
+# cluster session's first launch: it has no host state of its own to carry the dialogs'
+# answers, and the session starts in <folder> (owner ruling 2026-11-27). Prints the result.
+aidc_claude_state_ready() {
+    jq --arg dir "$1" '.hasCompletedOnboarding = true
+        | .projects = (.projects // {})
+        | .projects[$dir] = ((.projects[$dir] // {}) + {hasTrustDialogAccepted: true})'
+}
+
 # aidc_statusline_scripts <settings.json> <host-home>
 # The status line's script, for the settings bridge. settings.json is mounted into
 # the session, so its statusLine command runs there too, but a script it names under

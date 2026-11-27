@@ -28,6 +28,8 @@ set -euo pipefail
 . "$AIDC_SCRIPTS/k8s/expose.sh"
 # shellcheck source=broker.sh
 . "$AIDC_SCRIPTS/k8s/broker.sh"
+# shellcheck source=../lib/claude-state.sh
+. "$AIDC_SCRIPTS/lib/claude-state.sh"
 
 usage() {
     cat <<'USAGE'
@@ -277,8 +279,26 @@ jq -n --arg session "$NAME" --arg profile "$PROFILE" --arg repo "$REPO_PATH" \
     --arg ns "$ns" --arg claim "$AUDIT_CLAIM" \
     '{session:$session, profile:$profile, repo:$repo, created_at:$created, taint_response:$taint,
       backend:"kubernetes", namespace:$ns, audit_claim:$claim}' > "${seed}/meta.json"
+# The session's first ~/.claude.json, as on Docker (cmd-create.sh): this machine's, minus its
+# account and every other project's state (lib/claude-state.sh), else empty; onboarding done
+# and the session's start folder trusted (owner ruling 2026-11-27), so its first launch goes
+# straight to the prompt. The dev pod's claude-seed step installs it while the session's
+# Claude config dir has no .claude.json yet.
+host_state="$(aidc_host_home)/.claude.json"
+state_seed='{}'
+if [ -f "$host_state" ]; then
+    if state_seed=$(aidc_claude_state_seed "$host_state" "$REPO_PATH" "$REPO_PATH"); then
+        info "state: seeded from this machine's ~/.claude.json (onboarding; no account)"
+    else
+        state_seed='{}'
+        info "state: could not read this machine's ~/.claude.json (onboarding marked done only)"
+    fi
+fi
+( umask 0077; printf '%s' "$state_seed" | aidc_claude_state_ready "$REPO_PATH" > "${seed}/${K8S_CLAUDE_STATE_SEED}" ) \
+    || die "cannot write the session's Claude state seed"
 k8s_kubectl -n "$ns" create configmap "${NAME}-audit-seed" --from-file="${seed}/meta.json" \
-    --from-file="${seed}/config-snapshot.yaml" --dry-run=client -o yaml \
+    --from-file="${seed}/config-snapshot.yaml" --from-file="${seed}/${K8S_CLAUDE_STATE_SEED}" \
+    --dry-run=client -o yaml \
     | yq '.metadata.labels = {"app.kubernetes.io/managed-by": "aidc", "aidc/session": "'"${NAME}"'"}' \
     | k8s_kubectl apply -f - >&2
 # The session's transcripts and hook events reach the user's MCP server through the mirror claim.

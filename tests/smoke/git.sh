@@ -245,7 +245,7 @@ sg_part_claude() {
     assert "the request waits (${SG_REQUEST:-none})" "[ -n '${SG_REQUEST}' ]"
     for i in $(seq 40); do
         # shellcheck disable=SC2016  # run by the git container's shell
-        if sg_git bash -c 'grep -l "AskUserQuestion" "$HOME"/.claude/projects/-home-git/*.jsonl 2>/dev/null | xargs -r grep -l "$1"' _ "$SG_SESSION" >/dev/null 2>&1; then found=1; break; fi
+        if sg_git bash -c 'grep -l "AskUserQuestion" "$HOME"/.claude/projects/-home-git-work/*.jsonl 2>/dev/null | xargs -r grep -l "$1"' _ "$SG_SESSION" >/dev/null 2>&1; then found=1; break; fi
         [ "$i" -lt 40 ] && sleep 3
     done
     assert "the git agent asks about it with its question tool (in its transcript, naming the session)" "[ -n '${found}' ]"

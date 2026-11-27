@@ -57,6 +57,10 @@ TURN_UNKNOWN = "unknown"
 
 PREDATES_HOOK_EVENTS = "session_predates_hook_events"
 
+# The `why` of a session whose Claude shows a first-launch screen (screen.FIRST_LAUNCH_DIALOGS)
+# instead of its input box: the paste reason's own word, the screen's `dialog` naming which.
+NOT_AT_PROMPT = "claude_not_at_prompt"
+
 
 # The idle verdicts of a turn the transcript may still show open: Claude reported idle, or
 # said its turn was over. The send path and the watcher both treat exactly these, with an
@@ -328,12 +332,20 @@ async def session_state(container: str, name: str) -> SessionState:
     await _sync_session_markers(name)
     objs, mtime, status = session_transcript(name)
     installed = await _hooks_installed(container, name)
+    # the screen, for what a paste needs: the input box, a dialog (S2)
+    screen = await read_screen(container, name)
+    if screen.input_box == scr.NOT_AT_PROMPT and screen.dialog in scr.FIRST_LAUNCH_DIALOGS \
+            and installed is not False:
+        # A first-launch screen (folder trust, login, text style): Claude waits there for a
+        # person, before any turn and before it runs a hook, so it is not working and not
+        # "starting" either. Named, so an orchestrator sees why it is stuck (screen.dialog).
+        # The silence clock starts again once it is past it.
+        ss.hooks_silent_since.pop(name, None)
+        return SessionState(True, screen, TURN_IDLE, NOT_AT_PROMPT)
     turn, why = turn_from_hooks(name, objs if status == "ok" else [], mtime,
                                 installed=installed)
     if turn == TURN_UNKNOWN:
         return SessionState(True, None, turn, why)
-    # the screen, for what a paste needs: the input box, a dialog (S2)
-    screen = await read_screen(container, name)
     awaiting = ss.sent_awaiting_echo.get(name)
     if awaiting is not None:
         if _prompt_arrived(name, awaiting[0], awaiting[1], objs):

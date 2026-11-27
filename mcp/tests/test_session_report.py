@@ -15,6 +15,7 @@ import pytest
 from aidc_mcp import repo, scope
 from aidc_mcp import session_facts as sf
 from aidc_mcp import transcript as ts
+from aidc_mcp.screen import NOT_AT_PROMPT, ScreenState
 from aidc_mcp.service import common as com
 from aidc_mcp.service import sending as snd
 from aidc_mcp.service import state as ss
@@ -57,6 +58,9 @@ def facts(monkeypatch, tmp_path):
     monkeypatch.setattr(sf, "run_backend", run)
 
     async def session_state(container, name):
+        if name == "proj" and state.get("dialog"):
+            return tn.SessionState(True, ScreenState(NOT_AT_PROMPT, False, dialog=state["dialog"]),
+                                   tn.TURN_IDLE, tn.NOT_AT_PROMPT)
         if name == "proj" and state["working"]:
             return tn.SessionState(True, None, tn.TURN_RUNNING, "log_growing")
         return tn.SessionState(name == "proj", None, tn.TURN_IDLE, "log_finished")
@@ -151,6 +155,16 @@ async def test_status_carries_the_taint_as_a_typed_field(facts):
     d = (await _tool("session_status")(name="proj"))["data"]
     assert d["tainted"] == {"at": "2026-10-14T09:00:00Z", "trigger": "blocklist",
                             "domain": "evil.example"}
+
+
+async def test_status_names_a_first_launch_screen_claude_waits_at(facts):
+    """A Claude at its folder-trust prompt is not working and not starting: the status says
+    it is not at its prompt, and which screen holds it (live, 2026-11-27)."""
+    assert (await _tool("session_status")(name="proj"))["data"]["dialog"] is None
+    facts["dialog"] = "trust_prompt"
+    d = (await _tool("session_status")(name="proj"))["data"]
+    assert d["working"] is False and d["turn"] == "idle"
+    assert d["why"] == "claude_not_at_prompt" and d["dialog"] == "trust_prompt"
 
 
 async def test_status_says_when_the_sessions_claude_account_needs_the_person(facts, tmp_path):

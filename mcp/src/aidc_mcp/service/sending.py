@@ -195,7 +195,8 @@ async def join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt) 
     turn at its next tool boundary (or runs it next, if the turn ends first);
     _prompt_arrived recognizes that arrival."""
     state = await tn.session_state(container, name)
-    if state.claude_running and state.turn != tn.TURN_RUNNING:
+    # A first-launch screen is no turn, but not a prompt an ordinary send can go into either.
+    if state.claude_running and state.turn != tn.TURN_RUNNING and state.why != tn.NOT_AT_PROMPT:
         return "idle"
     refusal = _join_refusal(name, state)
     if not refusal and await sf.taint_or_none(name) is not None:
@@ -806,7 +807,8 @@ WAITING_EXPLAINED = {
     "input_has_text": "someone has unsent text in Claude's input box in the session "
                       "(the session's status line tells them)",
     "claude_not_running": "Claude is not running in the session",
-    "claude_not_at_prompt": "Claude is showing a dialog (e.g. login) instead of its prompt",
+    "claude_not_at_prompt": ("Claude is showing a dialog (e.g. folder trust, login) instead of "
+                             "its prompt; session_status names it (dialog)"),
     HELD_ELSEWHERE: ("the conversation is open on another of the person's machines (it is "
                      "synced with them); the paste is tried again each minute, and goes in "
                      "once that machine has let it go"),

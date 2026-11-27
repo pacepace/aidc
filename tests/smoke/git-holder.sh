@@ -59,7 +59,7 @@ git -C "$P" switch -q -c feat && git -C "$P" -c user.name=T -c user.email=t@exam
 # aidc git setup makes them.
 KEY=sk-ant-api03-test-only-000000000000000000000000
 docker run --rm --network none -u 0:0 -v "${N}-home:/home/git" -v "${N}-tr:/t" --entrypoint /bin/sh "$IMG" -c \
-    "chown 2000:2000 /t && chmod 0750 /t && printf '%s' '{\"hasCompletedOnboarding\":true,\"customApiKeyResponses\":{\"approved\":[\"${KEY: -20}\"],\"rejected\":[]},\"projects\":{\"/home/git\":{\"hasTrustDialogAccepted\":true}}}' > /home/git/.claude.json && chown 2000:2000 /home/git/.claude.json" \
+    "chown 2000:2000 /t && chmod 0750 /t && printf '%s' '{\"hasCompletedOnboarding\":true,\"customApiKeyResponses\":{\"approved\":[\"${KEY: -20}\"],\"rejected\":[]},\"projects\":{\"/home/git/work\":{\"hasTrustDialogAccepted\":true}}}' > /home/git/.claude.json && chown 2000:2000 /home/git/.claude.json" \
     || { echo "could not seed"; exit 1; }
 docker run -d --name "$N" --network none \
     --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add AUDIT_WRITE \

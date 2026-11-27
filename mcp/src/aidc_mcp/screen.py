@@ -40,6 +40,24 @@ _WORKING_TEXT = "esc to interrupt"
 # 2.1.270). A screen without the input box that shows one of these is a dialog waiting
 # for a person; one that shows neither is a layout this module does not know.
 _DIALOG_HINTS = ("Enter to confirm", "Esc to cancel")
+# The dialogs a fresh Claude Code shows before its input box ever appears, each by text it
+# carries. Claude cannot get past one without a person (or a seeded ~/.claude.json), and none
+# can appear inside a turn, so a session showing one is not working, whatever its hook events
+# say (owner ruling 2026-11-27: unattended sessions never stop at first-launch screens; when
+# one does, it says so). The folder-trust prompt is measured on 2.1.270 and 2.1.332 (where a
+# home folder adds "This is your home folder, so Yes lasts for this session only"); the login
+# and text-style screens are Claude Code's onboarding text, not captured here.
+TRUST_PROMPT = "trust_prompt"
+LOGIN_PROMPT = "login_prompt"
+THEME_PROMPT = "theme_prompt"
+OTHER_DIALOG = "dialog"
+_FIRST_LAUNCH_TEXT = (
+    (TRUST_PROMPT, ("Accessing workspace:", "Yes, I trust this folder",
+                    "Do you trust the files in this folder?")),
+    (LOGIN_PROMPT, ("Select login method:",)),
+    (THEME_PROMPT, ("Choose the text style",)),
+)
+FIRST_LAUNCH_DIALOGS = frozenset(kind for kind, _ in _FIRST_LAUNCH_TEXT)
 # The live box's second rule is the last rule on screen, with only the status row(s)
 # below it. More trailing rows than this means the rules belong to something else.
 _MAX_ROWS_BELOW_BOX = 4
@@ -66,6 +84,9 @@ _OTHER_ESCAPE_RE = re.compile(r"\x1b(?:\[[\x20-\x3f]*[\x40-\x7e]|\][^\x07\x1b]*(
 class ScreenState:
     input_box: str   # EMPTY, HAS_TEXT, NOT_AT_PROMPT or UNRECOGNIZED
     working: bool    # the status row shows `esc to interrupt`
+    # Which dialog, when input_box is NOT_AT_PROMPT: one of FIRST_LAUNCH_DIALOGS, or
+    # OTHER_DIALOG for one this module does not name (a permission or question menu).
+    dialog: str = field(default="", compare=False)
     # The text in the input box when it is HAS_TEXT: the non-dim characters, rows
     # joined with newlines, continuation indent and trailing padding removed. How
     # Claude Code wraps a long line is not preserved, so compare it with
@@ -159,6 +180,15 @@ def _agent_list_start(plain: list[str]) -> int:
     return start - 1
 
 
+def _dialog_kind(plain: list[str]) -> str:
+    """Which dialog a screen without the input box shows: a first-launch one by its text,
+    else OTHER_DIALOG."""
+    for kind, texts in _FIRST_LAUNCH_TEXT:
+        if any(t in line for line in plain for t in texts):
+            return kind
+    return OTHER_DIALOG
+
+
 def classify(ansi: str) -> ScreenState:
     """Classify a `tmux capture-pane -p -e -J` capture of the claude window."""
     rows: list[list[tuple[str, bool]]] = []
@@ -173,7 +203,8 @@ def classify(ansi: str) -> ScreenState:
 
     rules = [i for i, text in enumerate(plain) if _is_rule(text)]
     dialog = any(hint in text for text in plain for hint in _DIALOG_HINTS)
-    no_box = ScreenState(NOT_AT_PROMPT if dialog else UNRECOGNIZED, False)
+    no_box = (ScreenState(NOT_AT_PROMPT, False, dialog=_dialog_kind(plain)) if dialog
+              else ScreenState(UNRECOGNIZED, False))
     end = _agent_list_start(plain)
     if len(rules) < 2 or end - 1 - rules[-1] > _MAX_ROWS_BELOW_BOX:
         return no_box
@@ -181,7 +212,7 @@ def classify(ansi: str) -> ScreenState:
     working = any(_WORKING_TEXT in text for text in plain[bottom + 1:end])
     box = rows[top + 1:bottom]
     if not box or not plain[top + 1].startswith(_BOX_GLYPH):
-        return ScreenState(no_box.input_box, working)
+        return ScreenState(no_box.input_box, working, dialog=no_box.dialog)
 
     pointed = any(text.startswith(_POINTER) for text in plain[end:])
     focused = pointed and any(hint in text for text in plain[bottom + 1:end]

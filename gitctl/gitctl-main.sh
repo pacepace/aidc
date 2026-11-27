@@ -41,7 +41,8 @@ if [ -d "$OUT" ]; then
     rm -rf -- "$OUT/hook-events"
     # shellcheck source=../.devcontainer/transcript-mirror.sh
     . "$MIRROR"
-    proj="${HOME:-/home/git}/.claude/projects/$(printf '%s' "${HOME:-/home/git}" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')"
+    # The agent's Claude runs in ~/work (git-claude.sh), so its conversation is that folder's.
+    proj="${HOME:-/home/git}/.claude/projects/$(printf '%s' "${HOME:-/home/git}/work" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g')"
     ( while :; do aidc_mirror_copy_forward_pass "$proj" "$OUT"; sleep 2; done ) &
 fi
 # handover: one waiting request, if the holder names one, typed into the agent's Claude.

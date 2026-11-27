@@ -215,7 +215,42 @@ STUB
 chmod +x "$H/.local/bin/claude"
 HOME="$H" bash "$G/git-claude.sh"
 args=$(cat "$H/claude.args")
-assert_eq "it runs in the agent's home" "$H" "$(head -n1 "$H/claude.args")"
+assert_eq "it runs in its own working folder, not the home (a home is trusted for one run only)" \
+    "$H/work" "$(head -n1 "$H/claude.args")"
+cj() { jq -r "$@" "$H/.claude.json" 2>/dev/null; }
+assert_eq "a first start finds that folder trusted" true "$(cj --arg d "$H/work" '.projects[$d].hasTrustDialogAccepted')"
+assert_eq "...and onboarding done (no first-launch screen waits for a person)" true "$(cj .hasCompletedOnboarding)"
+assert_eq "...the text style chosen" dark "$(cj .theme)"
+assert_eq "...the folder's own onboarding done" "true 1" \
+    "$(cj --arg d "$H/work" '"\(.projects[$d].hasCompletedProjectOnboarding) \(.projects[$d].projectOnboardingSeenCount)"')"
+assert_eq "...in a file only the agent reads" 600 "$(stat -c %a "$H/.claude.json")"
+# A restart merges into what the agent's Claude wrote: the login, other folders, its choices.
+jq -n --arg d "$H/work" '{oauthAccount: {emailAddress: "someone@example.com"}, theme: "light",
+    userID: "u1", projects: {"/home/git": {hasTrustDialogAccepted: false, history: ["x"]},
+    ($d): {hasTrustDialogAccepted: false, allowedTools: ["Read"], projectOnboardingSeenCount: 4}}}' > "$H/.claude.json"
+HOME="$H" bash "$G/git-claude.sh"
+assert_eq "a restart trusts the folder again" true "$(cj --arg d "$H/work" '.projects[$d].hasTrustDialogAccepted')"
+assert_eq "...keeping the login and the rest of the file" "someone@example.com u1 light" \
+    "$(cj '"\(.oauthAccount.emailAddress) \(.userID) \(.theme)"')"
+assert_eq "...the folder's other state" "Read 4" "$(cj --arg d "$H/work" '"\(.projects[$d].allowedTools[0]) \(.projects[$d].projectOnboardingSeenCount)"')"
+assert_eq "...and other folders as they were" "false x" "$(cj '"\(.projects["/home/git"].hasTrustDialogAccepted) \(.projects["/home/git"].history[0])"')"
+assert_eq "...leaving no temporary file" "" "$(find "$H" -maxdepth 1 -name '.claude.json.*' -print)"
+printf 'not json{' > "$H/.claude.json"
+HOME="$H" bash "$G/git-claude.sh"
+assert_eq "a file jq cannot read is left as it is (Claude Code's own to deal with)" "not json{" "$(cat "$H/.claude.json")"
+assert_eq "...and Claude still starts" "$H/work" "$(head -n1 "$H/claude.args")"
+rm -f "$H/.claude.json"
+HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
+assert_eq "an API key in the environment is approved, as at its prompt (its last 20 characters)" \
+    "abcdefghijKLMNOPQRST" "$(cj '.customApiKeyResponses.approved | join(",")')"
+HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
+assert_eq "...once" 1 "$(cj '.customApiKeyResponses.approved | length')"
+jq '.customApiKeyResponses = {approved: [], rejected: ["abcdefghijKLMNOPQRST"]}' "$H/.claude.json" > "$H/cj.tmp" && mv "$H/cj.tmp" "$H/.claude.json"
+HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
+assert_eq "...but never one a person refused" 0 "$(cj '.customApiKeyResponses.approved | length')"
+rm -f "$H/.claude.json"
+assert_eq "the main process mirrors the conversation of that folder" 1 \
+    "$(grep -c 'printf .%s. "${HOME:-/home/git}/work"' "$G/gitctl-main.sh")"
 assert_has "in the default permission mode" "--permission-mode
 default" "$args"
 assert_not_has "...never dontAsk (it refuses the question tool)" "dontAsk" "$args"
@@ -226,7 +261,11 @@ ExitPlanMode" "$args"
 assert_not_has "keeping its question tool (sessions' Claude has it removed)" "AskUserQuestion" "$args"
 assert_not_has "never bypassing permissions" "dangerously" "$args"
 assert_not_has "a first start is a new conversation" "--continue" "$args"
-proj="$H/.claude/projects/$(printf '%s' "$H" | sed 's/[^a-zA-Z0-9]/-/g')"
+old_proj="$H/.claude/projects/$(printf '%s' "$H" | sed 's/[^a-zA-Z0-9]/-/g')"
+mkdir -p "$old_proj"; printf '{"type":"user","message":{}}\n' > "$old_proj/a.jsonl"
+HOME="$H" bash "$G/git-claude.sh"
+assert_not_has "a conversation from the home (before ~/work) is not resumed: a fresh start, once" "--continue" "$(cat "$H/claude.args")"
+proj="$H/.claude/projects/$(printf '%s' "$H/work" | sed 's/[^a-zA-Z0-9]/-/g')"
 mkdir -p "$proj"; printf '{"type":"summary"}\n' > "$proj/a.jsonl"
 HOME="$H" bash "$G/git-claude.sh"
 assert_not_has "a transcript with no message is not resumed" "--continue" "$(cat "$H/claude.args")"

@@ -268,8 +268,9 @@ in `work/` after an hour.
 The git agent (owner rulings 2026-11-24: it is an aidc session; it does no prawduct work; its
 instructions are one managed CLAUDE.md, no skills; it tidies after every merge; ask-mode
 approvals bubble up through the orchestrator's approval path). The git container's tmux is laid
-out as a session's: window `claude` runs `git-claude` (Claude Code in the agent's home, resuming
-its conversation), window `shell` a shell. Its instructions are `/etc/claude-code/CLAUDE.md`,
+out as a session's: window `claude` runs `git-claude` (Claude Code in the agent's working folder
+`~/work`, marked trusted with onboarding done at every start, resuming its conversation; not
+the home, which Claude Code trusts for one run only), window `shell` a shell. Its instructions are `/etc/claude-code/CLAUDE.md`,
 root's, always loaded: gitctl as the only way to GitHub, the hard rules, everything sessions
 write is data, the ask-mode procedure, push/PR, merge then tidy, protections, leftovers
 reported. Its managed settings add a permission list (gitctl, git-requests, git, its gh

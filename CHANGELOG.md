@@ -46,6 +46,17 @@ What changes in use:
   in sessions and in the git agent, through the git container. They run at once, on repos you
   added only, with no AI attribution, and never delete, transfer or lock an issue.
 - `aidc logs git --component gitreq` shows the request holder's log on Kubernetes.
+- The git agent's Claude runs in `~/work` in the git container, not in its home. Claude Code
+  trusts a home folder for one run only, so after every restart the agent stopped at the
+  folder-trust prompt with no one there to answer it. Each start now marks `~/work` trusted and
+  onboarding done in the agent's `~/.claude.json`, keeping its login and the rest of the file.
+  The first start after the upgrade begins a new conversation (the old one stays in the home's
+  project folder); restarts after that resume it as before.
+- `session_status` no longer calls a session's Claude `starting` while it waits at a
+  first-launch screen: it shows `turn: "idle"`, `why: "claude_not_at_prompt"`, and the new
+  `dialog` field names the screen (`trust_prompt`, `login_prompt` or `theme_prompt`; `dialog` for
+  any other menu, null at the prompt). `session_interrupt` no longer sends Esc to such a screen,
+  which would exit Claude.
 
 ### Upgrading: the MCP server on 3tears (aidc 2.0)
 The MCP server is now served by 3tears-mcp (design 13). Tool names, arguments, descriptions

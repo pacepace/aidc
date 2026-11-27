@@ -9,8 +9,13 @@ import pytest
 
 from aidc_mcp.screen import (
     EMPTY,
+    FIRST_LAUNCH_DIALOGS,
     HAS_TEXT,
+    LOGIN_PROMPT,
     NOT_AT_PROMPT,
+    OTHER_DIALOG,
+    THEME_PROMPT,
+    TRUST_PROMPT,
     UNRECOGNIZED,
     ScreenState,
     classify,
@@ -42,6 +47,34 @@ def _screen(name):
 ])
 def test_real_captures(name, expected):
     assert classify(_screen(name)) == expected
+
+
+@pytest.mark.parametrize("fixture", [
+    "claude-2.1.27x-trust-folder.ansi",
+    # Claude Code 2.1.332 in a home folder (the git agent's, live 2026-11-27): it trusts a
+    # home folder for one run only, so every restart stopped here, reported as "starting".
+    "claude-2.1.332-trust-home-folder.ansi",
+])
+def test_the_folder_trust_prompt_is_named(fixture):
+    state = classify((SCREENS / fixture).read_text())
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == TRUST_PROMPT
+    assert TRUST_PROMPT in FIRST_LAUNCH_DIALOGS
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("Select login method:\n\n ❯ 1. Claude account with subscription\n", LOGIN_PROMPT),
+    ("Choose the text style that looks best with your terminal\n ❯ 1. Dark mode\n", THEME_PROMPT),
+    # A permission or question menu inside a turn is a dialog, but no first-launch one.
+    ("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", OTHER_DIALOG),
+])
+def test_other_dialogs_are_told_apart(text, kind):
+    state = classify(text + "\n Enter to confirm · Esc to cancel\n")
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == kind
+    assert (kind in FIRST_LAUNCH_DIALOGS) == (kind != OTHER_DIALOG)
+
+
+def test_a_screen_with_its_input_box_names_no_dialog():
+    assert classify(_screen("idle-empty")).dialog == ""
 
 
 def test_a_rule_carrying_the_session_name_still_bounds_the_box():

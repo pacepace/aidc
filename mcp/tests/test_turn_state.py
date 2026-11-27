@@ -148,6 +148,39 @@ class TestCheckFree:
         session.screen = _screen("trust-folder")
         assert await session.check() == "claude_not_at_prompt"
 
+    async def test_a_trust_prompt_before_any_hook_event_is_not_starting(self, session):
+        """Claude Code 2.1.332 trusts a home folder for one run only: a restarted git agent
+        sat at the trust prompt, which fires no hook, and was reported running, "starting"
+        (live, 2026-11-27). It is not working; it is not at its prompt, and says which."""
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        session.screen = (SCREENS / "claude-2.1.332-trust-home-folder.ansi").read_text()
+        assert await session.check() == "claude_not_at_prompt"
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_IDLE, "claude_not_at_prompt")
+        assert state.screen.dialog == "trust_prompt"
+        # long past HOOK_EVENTS_DUE_S, still the dialog, never a missing-hooks fault
+        session.clock += 10 * tn.HOOK_EVENTS_DUE_S
+        assert (await tn.session_state("aidc-proj-dev", "proj")).why == "claude_not_at_prompt"
+        assert "proj" not in ss.hooks_silent_since
+        # once a person answers it, Claude starts and reports as ever
+        session.screen = _screen("idle-empty")
+        session.hook(hk.he.SESSION_START, source="startup")
+        assert await session.check() == ""
+
+    async def test_a_dialog_inside_a_turn_keeps_the_turn(self, session):
+        """A permission or question menu is a dialog too, but a turn's: the turn stays
+        running; only a paste is held."""
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        session.screen = "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n"
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_RUNNING, "waiting_on_permission")
+        assert state.screen.dialog == "dialog"
+        assert await session.check() == "claude_not_at_prompt"
+
     async def test_unsent_text_holds_the_prompt(self, session):
         session.write(FINISHED)
         session.screen = _screen("typed-unsent")
@@ -1232,6 +1265,7 @@ class TestSendDeliverJoin:
 
     @pytest.mark.parametrize("screen,why", [
         ("claude-2.1.27x-trust-folder.ansi", "claude_not_at_prompt"),
+        ("claude-2.1.332-trust-home-folder.ansi", "claude_not_at_prompt"),
         ("claude-2.1.27x-shell-after-exit.ansi", "screen_unrecognized"),
         ("claude-2.1.30x-idle-agent-list-selected.ansi", "agent_list_selected"),
     ])

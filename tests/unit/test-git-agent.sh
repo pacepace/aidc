@@ -49,7 +49,10 @@ assert_has "the agent cannot decide: approvals come only from outside" "You cann
 assert_has "an answer is carried out by the user's command, which the agent names" 'reply in a line with the command that carries it out' "$md"
 assert_has "..." '`aidc git approve <id>`' "$md"
 assert_has "choosing Approve approves nothing by itself" "Choosing Approve in your question does not approve anything" "$md"
-assert_has "the push and PR procedure is a request too" 'gh pr create --head <branch>' "$md"
+assert_has "the push and PR procedure is a request too, named by its folder (gh -C)" 'gh -C <working copy> pr create --head <branch>' "$md"
+assert_has "never cd: git -C, gh -C and absolute paths instead (Claude asks before a cd followed by git)" 'Never `cd` (nor `pushd` or `popd`), alone or before other commands' "$md"
+assert_has "..." '`git -C <dir> ...`, `gh -C <dir> ...`, and absolute paths for `gitctl`' "$md"
+assert_not_has "no procedure says to run a command in the working copy (that takes a cd)" "in the working copy," "$md"
 assert_has "a merge is a request, tidied after" "a request the same way (always a merge
   commit; the holder tidies after it)" "$md"
 assert_has "protections: checked; the user turns them on" '`aidc git protect <repo>`' "$md"
@@ -76,7 +79,7 @@ bash_call() { jq -n -c --arg c "$1" '{tool_name: "Bash", tool_input: {command: $
 denied() { case "$2" in "deny: "*) pass "$1";; *) fail "$1 (got '$2')";; esac; }
 assert_eq "an allowed Bash command gets no decision" none "$(decide "$(bash_call 'git status')")"
 assert_eq "...nor a compound of allowed ones, a pipe, a redirect, a quoted separator" none \
-    "$(decide "$(bash_call 'cd /home/alice/code/proj && git log --oneline -3 2>&1 | git-requests list; gitctl fetch proj; git commit -m "a; b | c && d"')")"
+    "$(decide "$(bash_call 'git -C /home/alice/code/proj log --oneline -3 2>&1 | git-requests list; gitctl fetch /home/alice/code/proj; git commit -m "a; b | c && d"')")"
 assert_eq "...nor a bare listed command" none "$(decide "$(bash_call 'git')")"
 denied "a Bash command the list does not name is denied, with a reason" "$(decide "$(bash_call 'cat /etc/passwd')")"
 assert_has "...naming the command" "the command cat" "$(decide "$(bash_call 'cat /etc/passwd')")"
@@ -105,6 +108,56 @@ denied "...or a redirect" "$(decide "$(bash_call "git log >#x")")"
 assert_eq "a # inside a word, or quoted, is plain text (no decision)" none \
     "$(decide "$(bash_call "git log --format=x#y && git commit -m '#1' -m \"#2\" && git show \\#3")")"
 denied "an empty command is denied" "$(decide "$(bash_call '')")"
+
+# Claude Code's own safety prompts: in the default mode it asks before some calls the list
+# covers, and no one answers (the live agent sat at waiting_on_permission on a cd before git).
+# The hook denies those shapes with a reason that says what to write instead.
+cdr=$(decide "$(bash_call 'cd /home/alice/code/proj-wt && git log --oneline -3')")
+denied "a cd before git (cd x && git ...) is denied, not left to Claude's prompt" "$cdr"
+assert_has "...telling the agent to use git -C" "git -C <dir>" "$cdr"
+assert_has "...and absolute paths for gitctl" "absolute paths for gitctl" "$cdr"
+denied "...and with a ; (cd x; git ...)" "$(decide "$(bash_call 'cd /home/alice/code/proj; git status')")"
+denied "...the live one: cd, then git, git and gitctl" \
+    "$(decide "$(bash_call 'cd /home/alice/code/proj-wt && git log --oneline -5 ; git diff --stat main ; gitctl protection /home/alice/code/proj')")"
+denied "...and later in a command (git status && cd x && git log)" "$(decide "$(bash_call 'git status && cd /home/alice && git log')")"
+denied "pushd is denied the same way" "$(decide "$(bash_call 'pushd /home/alice/code/proj && git status')")"
+assert_has "...naming the rule" "never cd (or pushd/popd)" "$(decide "$(bash_call 'pushd /home/alice/code/proj')")"
+denied "...and popd" "$(decide "$(bash_call 'popd')")"
+denied "a bare cd is denied (the folder does not stay put for the agent)" "$(decide "$(bash_call 'cd /home/alice/code/proj')")"
+denied "...and cd with no folder" "$(decide "$(bash_call 'cd')")"
+assert_eq "git -C <dir> log gets no decision (allowed; Claude's own check follows)" none \
+    "$(decide "$(bash_call 'git -C /home/alice/code/proj log --oneline -3')")"
+assert_eq "...and gh -C <dir>" none "$(decide "$(bash_call 'gh -C /home/alice/code/proj pr view 12')")"
+assert_eq "a word that only starts with cd is no cd (cdx is not on the list either)" "deny: aidc gitctl: not allowed for the git agent: the command cdx (Bash: cdx)" \
+    "$(decide "$(bash_call 'cdx')")"
+gl=$(decide "$(bash_call 'git add src/*.py')")
+denied "an unquoted glob in git is denied (Claude asks: it could expand to a flag)" "$gl"
+assert_has "...telling the agent to quote it" "quote the pattern" "$gl"
+denied "...and a ? or [" "$(decide "$(bash_call 'git log -- a?c && git log -- [ab]')")"
+assert_eq "a quoted or escaped pattern gets no decision" none "$(decide "$(bash_call "git add 'src/*.py' \"x?\" \\*.md")")"
+assert_eq "...nor ls with a glob (Claude lets ls glob)" none "$(decide "$(bash_call 'ls /home/alice/*')")"
+rd=$(decide "$(bash_call 'git log > log.txt')")
+denied "a redirect into the working folder is denied (the default mode asks before that write)" "$rd"
+assert_has "...naming where it may write" "/dev/null or to a file under /tmp" "$rd"
+denied "...and to ~ (Claude always asks there)" "$(decide "$(bash_call 'git log >> ~/log.txt')")"
+denied "...and to a pattern" "$(decide "$(bash_call 'git log > /tmp/*.txt')")"
+denied "...and to a working copy" "$(decide "$(bash_call 'git diff > /home/alice/code/proj/x.diff')")"
+denied "...and out of /tmp by .." "$(decide "$(bash_call 'git log > /tmp/../home/git/x')")"
+denied "...and to a protected path under /tmp (.git, .bashrc)" "$(decide "$(bash_call 'git log > /tmp/w/.git/config')")"
+denied "...and &> or >& to a file" "$(decide "$(bash_call 'git log &> out.txt; git log >& out.txt')")"
+denied "an input redirect from a pattern is denied" "$(decide "$(bash_call 'git apply < /tmp/*.diff')")"
+assert_eq "redirects to /dev/null, to a file under /tmp, fd copies and here-strings get no decision" none \
+    "$(decide "$(bash_call 'git log 2>/dev/null >/tmp/log.txt 2>&1 && git status >&2 && git apply < /tmp/a.diff && git hash-object --stdin <<< x')")"
+assert_eq "...and a > or * inside quotes is text" none "$(decide "$(bash_call 'git commit -m "a > b * c"')")"
+denied "a command ending with && is denied (Claude does not split it)" "$(decide "$(bash_call 'git status &&')")"
+denied "...or with ||" "$(decide "$(bash_call 'git status ||')")"
+denied "...or a |" "$(decide "$(bash_call 'git log |')")"
+denied "a command longer than 10,000 characters is denied (Claude always asks)" \
+    "$(decide "$(bash_call "git commit -m '$(head -c 10001 /dev/zero | tr '\0' a)'")")"
+pw=$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/.bashrc", "content": "x"}}')
+denied "a Write to a protected path, even under /tmp, is denied (Claude always asks)" "$pw"
+assert_has "...saying where to write instead" "a plain file under /tmp" "$pw"
+denied "...and an Edit in a .git folder there" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/tmp/w/.git/config", "old_string": "a", "new_string": "b"}}')"
 assert_eq "AskUserQuestion gets no decision (the list allows it)" none \
     "$(decide '{"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Approve git request r1?", "options": [{"label": "Deny"}, {"label": "Approve"}]}]}}')"
 assert_eq "a listed tool (Read) gets no decision" none "$(decide '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}')"
@@ -159,6 +212,9 @@ allow=$(jq -r '.permissions.allow[]' "$ms")
 for a in 'Bash(gitctl *)' 'Bash(git-requests *)' 'Bash(gh *)' 'AskUserQuestion' 'Read'; do
     assert_eq "allowed: $a" yes "$(printf '%s\n' "$allow" | grep -qxF "$a" && echo yes || echo no)"
 done
+# The hook denies every cd (Claude asks before a cd followed by git), so the list names none.
+assert_eq "the list names no cd, pushd or popd (the hook denies them)" no \
+    "$(printf '%s\n' "$allow" | grep -qE '^Bash\((cd|pushd|popd)( \*)?\)$' && echo yes || echo no)"
 assert_eq "no blanket Bash, no sudo" no "$(printf '%s\n' "$allow" | grep -qE '^Bash(\(\*\))?$|sudo' && echo yes || echo no)"
 # An Edit rule: Claude matches Write, Edit, NotebookEdit and MultiEdit against Edit(path) rules,
 # and a Write(path) rule against nothing (code.claude.com/docs, permissions).

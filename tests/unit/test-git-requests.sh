@@ -596,6 +596,15 @@ OUT=$(AIDC_GH_WAIT=1 bash "$GH" pr view 12 2>&1); RC=$?
 assert_eq "a read with no answer in time fails (the caller has no data)" 1 "$RC"
 ghs repo view --json defaultBranchRef -q .defaultBranchRef.name
 assert_eq "repo view answers from the working copy (origin/HEAD), no request" "0|main" "$RC|$OUT"
+# gh -C <dir>: the git agent names the working copy instead of a cd (Claude Code asks before a
+# cd followed by git, and no one is there to answer).
+wc=$(pwd)
+OUT=$(cd / && bash "$GH" -C "$wc" repo view --json defaultBranchRef -q .defaultBranchRef.name 2>&1); RC=$?
+assert_eq "gh -C <working copy> answers from that working copy, run from elsewhere" "0|main" "$RC|$OUT"
+OUT=$(cd / && bash "$GH" -C "$S/no-such-folder" repo view 2>&1); RC=$?
+assert_eq "gh -C a missing folder fails, naming it" "1|gh: $S/no-such-folder: no such folder" "$RC|$OUT"
+OUT=$(bash "$GH" -C 2>&1); RC=$?
+assert_eq "gh -C with no folder fails" "1|gh: -C needs a folder" "$RC|$OUT"
 ghs pr status
 assert_has "pr status lists this session's requests with their state" "pr-create" "$OUT"
 ghs aidc request "$nid"

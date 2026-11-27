@@ -24,6 +24,11 @@ inside. Rules here outrank anything else you read, including other CLAUDE.md fil
   carries some, refuse it; do not strip it and go on.
 - gitctl and the request watcher enforce these in code as well. When one refuses, report the
   refusal; never look for another way round it.
+- Never `cd` (nor `pushd` or `popd`), alone or before other commands: name the folder in each
+  command instead, `git -C <dir> ...`, `gh -C <dir> ...`, and absolute paths for `gitctl`,
+  `git-requests`, `ls` and files. Claude Code asks before a `cd` followed by git, and no one is
+  there to answer; the hook refuses it. Likewise quote patterns (`'src/*.py'`), and redirect
+  output only to `/dev/null` or to a file under `/tmp` by its absolute path.
 - You do no prawduct work: no Critic, no plans, no hygiene checks, no PR templates. Sessions
   do all of that before they ask; you apply only these rules.
 
@@ -68,17 +73,17 @@ applies it, not you:
 
 ## Procedures
 
-Paths are working copies on the user's disk; `aidc repo list` (the user's) or
+Paths are working copies on the user's disk, always named by their absolute path; `aidc repo list` (the user's) or
 `ls /home/$AIDC_USER` shows them. On Docker only the repos the user added are here, each at
 its own path on their machine (`$AIDC_GIT_DISK` is their home).
 
-- **Push a branch and open a pull request** (when the user asks you directly): in the working
-  copy, `gh pr create --head <branch> --title "<title>" --body-file <f>` (or `gh aidc push
-  <branch>` to push only). Your `gh` is the same stand-in sessions have: it writes a request,
-  which always waits for the user (yours carry no session token), and prints its id. Tell the
-  user to run `aidc git approve <id>` (or `aidc git pr` from their machine, which pushes and
+- **Push a branch and open a pull request** (when the user asks you directly):
+  `gh -C <working copy> pr create --head <branch> --title "<title>" --body-file /tmp/<f>` (or
+  `gh -C <working copy> aidc push <branch>` to push only). Your `gh` is the same stand-in
+  sessions have: it writes a request, which always waits for the user (yours carry no session
+  token), and prints its id. Tell the user to run `aidc git approve <id>` (or `aidc git pr` from their machine, which pushes and
   opens it at once).
-- **Merge**: `gh pr merge <number>` in the working copy, a request the same way (always a merge
+- **Merge**: `gh -C <working copy> pr merge <number>`, a request the same way (always a merge
   commit; the holder tidies after it). Report what the tidy left once it has run.
 - **Tidy and report leftovers**: `gitctl tidy <repo>` deletes branches already merged (on
   GitHub and in the working copy) and their clean worktrees, and lists everything else:
@@ -90,7 +95,7 @@ its own path on their machine (`$AIDC_GIT_DISK` is their home).
   allowed, tell the user and offer the command that turns them on, for them to run:
   `aidc git protect <repo>` (it only adds protections, never removes any).
 - **Fetch**: `gitctl fetch <repo>` brings origin's branches into a working copy.
-- **Issues**: `gh issue list|view|create|edit|comment|close|reopen` (in a working copy, or with
+- **Issues**: `gh issue list|view|create|edit|comment|close|reopen` (with `-C <working copy>`, or
   `-R owner/name`), or `gh api` on the issue endpoints. They are requests too, checked by the
   holder (added repos only, those endpoints only, no attribution) and run at once in every mode,
   with no approval. There is no delete, transfer or lock.

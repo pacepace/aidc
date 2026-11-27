@@ -173,7 +173,7 @@ if [ "$is_write" = 1 ] && [ "$CALLER" != gitreq ]; then
     case "$verb" in
         api) die "api ${1:-}: an issue write changes GitHub, so it runs only as a request (gh api, or gh issue, writes one)" ;;
         logout) die "logout takes the git container off GitHub: only the user does that (aidc git logout, on their own machine)" ;;
-        *) die "${verb} changes GitHub, so it runs only as a request the user approves: in a working copy, gh pr create, gh pr merge or gh aidc push writes one (the user then runs aidc git approve <id>); or the user runs aidc git ${verb%%-*} from their own machine" ;;
+        *) die "${verb} changes GitHub, so it runs only as a request the user approves: in a working copy (or with gh -C <working copy>), gh pr create, gh pr merge or gh aidc push writes one (the user then runs aidc git approve <id>); or the user runs aidc git ${verb%%-*} from their own machine" ;;
     esac
 fi
 

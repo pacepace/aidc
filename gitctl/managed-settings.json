@@ -9,7 +9,6 @@
       "Bash(git *)",
       "Bash(ls *)",
       "Bash(gh *)",
-      "Bash(cd *)",
       "Read",
       "Grep",
       "Glob",

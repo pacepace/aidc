@@ -106,6 +106,118 @@ _bash_allowed() {
     return 0
 }
 
+# Claude Code's own safety prompts (code.claude.com/docs, permissions, "Read-only commands",
+# "Compound commands", "Redirections"; permission-modes, "Protected paths"). In the default mode
+# Claude asks before some calls the allow list covers, whatever the list or a hook's silence
+# says, and no one is there to answer: the agent sits at waiting_on_permission. So the hook
+# denies those shapes, with a reason that says what to write instead; it adds no "allow".
+_STEER="(Claude Code would stop at its own safety prompt, which no one answers here)"
+_NO_CD="never cd (or pushd/popd): Claude Code asks before a cd followed by git, and the shell's folder does not stay put. Name the folder instead: git -C <dir> ..., gh -C <dir> ..., and absolute paths for gitctl, git-requests and ls"
+
+# _protected_path PATH: 0 when Claude Code counts PATH as a protected path, whose writes it
+# always asks about in the default mode (an allow rule does not pre-approve them).
+_protected_path() {
+    local p="/$1/" f
+    case "$p" in
+        */.git/*|*/.config/git/*|*/.vscode/*|*/.idea/*|*/.husky/*|*/.cargo/*|*/.devcontainer/*|*/.yarn/*|*/.mvn/*|*/.claude/*) return 0 ;;
+    esac
+    f="${1##*/}"
+    case "$f" in
+        .gitconfig|.gitmodules|.bashrc|.bash_profile|.bash_login|.bash_aliases|.bash_logout|.zshrc|.zprofile|.zshenv|.zlogin|.zlogout|.profile|.envrc|.npmrc|.yarnrc|.yarnrc.yml|.pnp.cjs|.pnp.loader.mjs|.pnpmfile.cjs|bunfig.toml|.bunfig.toml|.bazelrc|.bazelversion|.bazeliskrc|.pre-commit-config.yaml|lefthook.yml|lefthook.yaml|.lefthook.yml|.lefthook.yaml|gradle-wrapper.properties|maven-wrapper.properties|.devcontainer.json|.ripgreprc|pyrightconfig.json|.mcp.json|.claude.json|remote-settings.json) return 0 ;;
+    esac
+    return 1
+}
+
+# _out_target_ok WORD: 0 for an output redirect target Claude Code writes without asking here:
+# /dev/null, or an absolute path under /tmp (the list's Edit(//tmp/**)) with no ~, no glob and
+# no protected part. Anything else (the working folder too: the default mode asks before a
+# write the list does not allow) prompts.
+_out_target_ok() {
+    local w="$1" real
+    [ "$w" = /dev/null ] && return 0
+    case "$w" in *'*'*|*'?'*|*'['*|'~'*) return 1 ;; esac
+    real=$(realpath -m -- "$w" 2>/dev/null) || return 1
+    case "$real" in /tmp/?*) ;; *) return 1 ;; esac
+    _protected_path "$real" && return 1
+    return 0
+}
+
+# _seg_prompts SEG: 1 (GITCTL_REASON set) when Claude Code would ask about this simple command
+# although the list allows it: a cd/pushd/popd, an unquoted glob (Claude asks for commands such
+# as git whose flags write, as the glob could expand to one; ls is exempt), or a redirect whose
+# target it cannot pre-approve (see _out_target_ok; an input target with a glob).
+_seg_prompts() {
+    local seg="$1" i c n q="" op word wq first
+    first="${seg%%[[:space:]]*}"
+    case "$first" in
+        cd|pushd|popd) GITCTL_REASON="${first} in: ${seg:0:120}: ${_NO_CD}"; return 1 ;;
+    esac
+    for ((i = 0; i < ${#seg}; i++)); do
+        c="${seg:i:1}" n="${seg:i+1:1}"
+        if [ "$q" = "'" ]; then [ "$c" = "'" ] && q=""; continue; fi
+        if [ "$c" = "\\" ]; then i=$((i + 1)); continue; fi
+        if [ "$q" = '"' ]; then [ "$c" = '"' ] && q=""; continue; fi
+        case "$c" in
+            "'"|'"') q="$c" ;;
+            '*'|'?'|'[')
+                [ "$first" = ls ] && continue
+                GITCTL_REASON="an unquoted ${c} in: ${seg:0:120} ${_STEER}: quote the pattern ('src/*.py'); git reads a quoted pathspec itself"
+                return 1 ;;
+            '<'|'>')
+                if [ "$c" = '<' ] && [ "$n" = '<' ]; then
+                    # A here-doc or here-string: no file behind it, Claude checks nothing.
+                    while [ "${seg:i+1:1}" = '<' ] || [ "${seg:i+1:1}" = '-' ]; do i=$((i + 1)); done
+                    continue
+                fi
+                op="$c"
+                while case "${seg:i+1:1}" in '>'|'|'|'&') true ;; *) false ;; esac; do i=$((i + 1)); op+="${seg:i:1}"; done
+                while [ "${seg:i+1:1}" = ' ' ] || [ "${seg:i+1:1}" = $'\t' ]; do i=$((i + 1)); done
+                word="" wq=""
+                while [ $((i + 1)) -lt ${#seg} ]; do
+                    c="${seg:i+1:1}"
+                    if [ -z "$wq" ]; then
+                        case "$c" in [[:space:]]|'<'|'>'|'&'|'|') break ;; "'"|'"') wq="$c"; i=$((i + 1)); continue ;;
+                            "\\") word+="${seg:i+2:1}"; i=$((i + 2)); continue ;; esac
+                    elif [ "$c" = "$wq" ]; then wq=""; i=$((i + 1)); continue
+                    fi
+                    word+="$c"; i=$((i + 1))
+                done
+                case "$op" in
+                    *'&') case "$word" in -|[0-9]|[0-9][0-9]) continue ;; esac ;;
+                esac
+                if [ "${op:0:1}" = '<' ]; then
+                    case "$word" in *'*'*|*'?'*|*'['*) GITCTL_REASON="an input redirect from a pattern (${word}) in: ${seg:0:120} ${_STEER}: name one file" ; return 1 ;; esac
+                    continue
+                fi
+                _out_target_ok "$word" || {
+                    GITCTL_REASON="a redirect to ${word:-nothing} in: ${seg:0:120} ${_STEER}: write only to /dev/null or to a file under /tmp, by its absolute path (no ~, no pattern)"
+                    return 1; }
+                ;;
+        esac
+    done
+    return 0
+}
+
+# _claude_prompts CMD: 1 (GITCTL_REASON set) when Claude Code would stop at a safety prompt for
+# CMD although every part is on the list: a command longer than its parser reads (10,000
+# characters), an operator with nothing after it (it then does not split the command), or a
+# part _seg_prompts names. A command it cannot split is left to _bash_allowed, which denies it.
+_claude_prompts() {
+    local cmd="$1" segs seg t
+    [ "${#cmd}" -le 10000 ] || { GITCTL_REASON="a command of ${#cmd} characters ${_STEER}: run it in smaller parts"; return 1; }
+    t="${cmd%"${cmd##*[![:space:]]}"}"
+    case "$t" in
+        *'&&'|*'||'|*[!\\]'|'|'|') GITCTL_REASON="a command that ends with an operator (${t: -2}) ${_STEER}: finish it or drop the operator"; return 1 ;;
+    esac
+    segs=$(_bash_segments "$cmd") || return 0
+    while IFS= read -r seg; do
+        seg="${seg#"${seg%%[![:space:]]*}"}"; seg="${seg%"${seg##*[![:space:]]}"}"
+        [ -n "$seg" ] || continue
+        _seg_prompts "$seg" || return 1
+    done <<<"$segs"
+    return 0
+}
+
 # _path_allowed TOOL PATH RULES: 0 when a TOOL(//<dir>/**) rule holds PATH (resolved, so no ..
 # leaves the folder). The file-editing tools are judged with TOOL=Edit, as Claude Code judges
 # them (code.claude.com/docs, permissions, "What Read and Edit rules cover"): Edit rules apply to
@@ -161,9 +273,13 @@ case "$_NO_PERMISSION_TOOLS" in *" ${tool} "*) exit 0 ;; esac
 if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then exit 0; fi
 case "$tool" in
     Bash)
+        _claude_prompts "$cmd" || deny "$GITCTL_REASON"
         _bash_allowed "$cmd" "$rules" && exit 0
         deny "$GITCTL_REASON" ;;
     Edit|Write|MultiEdit|NotebookEdit)
+        if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
+            deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
+        fi
         printf '%s\n' "$rules" | grep -qxF -- Edit && exit 0
         _path_allowed Edit "$path" "$rules" && exit 0 ;;
     *) ;;

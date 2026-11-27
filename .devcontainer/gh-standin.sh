@@ -27,6 +27,7 @@
 #   gh issue comment <n> (-b B | -F FILE) [-R owner/name]
 #   gh issue close <n> [-c COMMENT] [-r completed|"not planned"] [-R owner/name]
 #   gh issue reopen <n> [-R owner/name]
+#   gh -C <dir> <any of the above>                                   run in that working copy, as git -C
 #
 # The request folder belongs to the git container's request holder (gitreq, uid 2003): a session
 # (or the git agent, whose gh is this same stand-in) can drop a request into
@@ -638,6 +639,14 @@ issue_state() { # close|reopen ARGS...
     issue_call PATCH "repos/${SLUG}/issues/${n}" "$json"
     if [ "$verb" = close ]; then printf 'Closed issue %s#%s\n' "$SLUG" "$n"; else printf 'Reopened issue %s#%s\n' "$SLUG" "$n"; fi
 }
+
+# -C <dir>: run in that working copy, as git -C does, for a caller that does not cd into it (the
+# git agent: Claude Code asks before a cd followed by git, and no one is there to answer).
+if [ "${1:-}" = -C ]; then
+    { [ $# -ge 2 ] && [ -n "$2" ]; } || die "-C needs a folder"
+    cd -- "$2" 2>/dev/null || die "${2}: no such folder"
+    shift 2
+fi
 
 case "${1:-} ${2:-}" in
     "pr create") shift 2; pr_create "$@" ;;

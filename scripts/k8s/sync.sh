@@ -166,6 +166,7 @@ sync_live() {
 sync_push_settings() {
     local src="${HOME}/.claude" cmd script tmpl
     [ "$(sync_state 2>/dev/null || true)" = RUNNING ] || die "Syncthing is not running in ${ns}: aidc sync start"
+    [ -f "${src}/settings.json" ] || { info "no ${src}/settings.json here: nothing pushed (new cluster sessions keep the template they have, if any)"; return 0; }
     if [ -f "${src}/settings.json" ]; then
         # Without the hooks `aidc sync setup --hooks` added here: they name this machine's
         # paths, and a cluster session runs its own from its managed settings.

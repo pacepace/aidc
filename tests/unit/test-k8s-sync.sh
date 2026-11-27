@@ -155,6 +155,11 @@ assert_has "...a folder in step" "aidc-claude-projects: idle" "$out"
 out=$(K_RUNNING=1 run stop)
 assert_has "stop removes its Deployment and policy (identity and history kept)" \
     "delete deployment,networkpolicy -l app=syncthing" "$(cat "$K_LOG")"
+rm -f "$HOME/.claude/settings.json"
+: > "$K_LOG"
+out=$(K_RUNNING=1 run push-settings)
+assert_has "push-settings with no settings.json here says nothing was pushed" "nothing pushed" "$out"
+assert_not_has "...and copies nothing" "settings.template.json" "$(cat "$K_LOG")"
 printf '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"},"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/aidc/.devcontainer/claude-lease.sh hook"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"mine"}]}]}}' > "$HOME/.claude/settings.json"
 printf '#!/bin/sh\necho mine\n' > "$HOME/.claude/statusline.sh"
 rm -f "$K_PUSHED".*

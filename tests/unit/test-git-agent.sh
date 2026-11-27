@@ -55,15 +55,70 @@ assert_has "a merge is a request, tidied after" "a request the same way (always 
 assert_has "protections: checked; the user turns them on" '`aidc git protect <repo>`' "$md"
 assert_has "leftovers are reported" "Report every leftover to the user" "$md"
 hook() { jq -n --arg t "$1" --arg k "$2" --arg v "$3" '{tool_name: $t, tool_input: {($k): $v}}' \
-    | bash "$G/claude-hook.sh" >/dev/null 2>&1; echo $?; }
+    | bash "$G/claude-hook.sh" "$G/managed-settings.json" >/dev/null 2>&1; echo $?; }
 assert_eq "the hook refuses an Edit of the managed CLAUDE.md" 2 "$(hook Edit file_path /etc/claude-code/CLAUDE.md)"
 assert_eq "and a shell write to it" 2 "$(hook Bash command 'echo x >> /etc/claude-code/CLAUDE.md')"
-assert_eq "the hook lets the question tool through" 0 "$(jq -n '{tool_name: "AskUserQuestion", tool_input: {questions: []}}' \
-    | bash "$G/claude-hook.sh" >/dev/null 2>&1; echo $?)"
+
+echo "=== the hook holds the allow list (the default permission mode, as dontAsk did) ==="
+# decide <tool call JSON>: what the hook decides, run as the managed settings run it (with the
+# image's managed-settings.json): "none" (no decision: Claude's own check of the allow list
+# follows), "deny: <reason>" (a permissionDecision deny), or "blocked" (exit 2).
+decide() {
+    local out rc
+    out=$(printf '%s' "$1" | bash "$G/claude-hook.sh" "$G/managed-settings.json" 2>/dev/null); rc=$?
+    if [ "$rc" = 2 ]; then echo blocked
+    elif [ "$rc" != 0 ]; then echo "exit $rc"
+    elif [ -z "$out" ]; then echo none
+    else printf '%s' "$out" | jq -r 'if .hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"
+        then "deny: " + .hookSpecificOutput.permissionDecisionReason else "other: " + tostring end' 2>/dev/null || echo "unreadable: $out"; fi
+}
+bash_call() { jq -n -c --arg c "$1" '{tool_name: "Bash", tool_input: {command: $c}}'; }
+denied() { case "$2" in "deny: "*) pass "$1";; *) fail "$1 (got '$2')";; esac; }
+assert_eq "an allowed Bash command gets no decision" none "$(decide "$(bash_call 'git status')")"
+assert_eq "...nor a compound of allowed ones, a pipe, a redirect, a quoted separator" none \
+    "$(decide "$(bash_call 'cd /home/alice/code/proj && git log --oneline -3 2>&1 | git-requests list; gitctl fetch proj; git commit -m "a; b | c && d"')")"
+assert_eq "...nor a bare listed command" none "$(decide "$(bash_call 'git')")"
+denied "a Bash command the list does not name is denied, with a reason" "$(decide "$(bash_call 'cat /etc/passwd')")"
+assert_has "...naming the command" "the command cat" "$(decide "$(bash_call 'cat /etc/passwd')")"
+denied "...also behind an allowed one" "$(decide "$(bash_call 'git status && curl https://example.org')")"
+denied "...or after a pipe" "$(decide "$(bash_call 'git log | sh')")"
+denied "...or as a prefix that only looks like one (gitx is not git)" "$(decide "$(bash_call 'gitx status')")"
+denied "a command substitution is denied (it cannot be judged part by part)" "$(decide "$(bash_call 'git commit -m "$(cat /etc/shadow)"')")"
+denied "...and backticks" "$(decide "$(bash_call 'git log `id`')")"
+denied "...and an open quote" "$(decide "$(bash_call 'git commit -m "x')")"
+denied "an empty command is denied" "$(decide "$(bash_call '')")"
+assert_eq "AskUserQuestion gets no decision (the list allows it)" none \
+    "$(decide '{"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Approve git request r1?", "options": [{"label": "Deny"}, {"label": "Approve"}]}]}}')"
+assert_eq "a listed tool (Read) gets no decision" none "$(decide '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}')"
+assert_eq "a Write under /tmp (the list's Write(//tmp/**)) gets no decision" none \
+    "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/pr-body.md", "content": "x"}}')"
+denied "a Write elsewhere is denied" "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/.bashrc", "content": "x"}}')"
+denied "...and a Write that leaves /tmp by .." "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/../home/git/.bashrc", "content": "x"}}')"
+denied "an unlisted tool is denied (Edit)" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/home/git/x", "old_string": "a", "new_string": "b"}}')"
+denied "...and WebFetch" "$(decide '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}')"
+assert_eq "Claude's tools that ask no permission get none (dontAsk ran them too): TodoWrite" none \
+    "$(decide '{"tool_name": "TodoWrite", "tool_input": {"todos": []}}')"
+assert_eq "malformed input is blocked" blocked "$(decide 'not json')"
+assert_eq "...and input with no tool name" blocked "$(decide '{"tool_input": {}}')"
+assert_eq "an allow list it cannot read blocks everything (exit 2)" 2 \
+    "$(printf '%s' "$(bash_call 'git status')" | bash "$G/claude-hook.sh" "$S/no-such-settings.json" >/dev/null 2>&1; echo $?)"
+# Every entry of the list is one the hook can match, so none is silently refused.
+for a in $(jq -r '.permissions.allow[] | @base64' "$G/managed-settings.json"); do
+    a=$(printf '%s' "$a" | base64 -d)
+    case "$a" in
+        'Bash('*' *)') c="${a#Bash(}"; c="${c% \*)} x"; got=$(decide "$(bash_call "$c")") ;;
+        'Write(//'*'/**)') d="${a#Write(/}"; d="${d%/\*\*)}"; got=$(decide "$(jq -n -c --arg p "$d/f" '{tool_name: "Write", tool_input: {file_path: $p}}')") ;;
+        *'('*) got="a form the test does not know" ;;
+        *) got=$(decide "$(jq -n -c --arg t "$a" '{tool_name: $t, tool_input: {}}')") ;;
+    esac
+    assert_eq "the list's ${a} is matched by the hook" none "$got"
+done
 
 echo "=== the managed settings: the git verbs, reads and the question tool; nothing waits on a prompt ==="
 ms="$G/managed-settings.json"
-assert_eq "dontAsk: anything not allowed is refused, never a prompt nobody sees" '"dontAsk"' "$(jq -c '.permissions.defaultMode' "$ms")"
+assert_eq "the default mode, not dontAsk (Claude refuses AskUserQuestion there); the hook refuses the rest" '"default"' "$(jq -c '.permissions.defaultMode' "$ms")"
+assert_eq "the hook runs before every tool, the first of its PreToolUse hooks" '"*" "/opt/aidc/lib/gitctl/claude-hook.sh"' \
+    "$(jq -r '"\"\(.hooks.PreToolUse[0].matcher)\" \"\(.hooks.PreToolUse[0].hooks[0].command)\""' "$ms")"
 assert_eq "bypass mode is off (no --dangerously-skip-permissions)" '"disable"' "$(jq -c '.disableBypassPermissionsMode' "$ms")"
 allow=$(jq -r '.permissions.allow[]' "$ms")
 for a in 'Bash(gitctl *)' 'Bash(git-requests *)' 'Bash(gh *)' 'AskUserQuestion' 'Read'; do
@@ -135,8 +190,9 @@ chmod +x "$H/.local/bin/claude"
 HOME="$H" bash "$G/git-claude.sh"
 args=$(cat "$H/claude.args")
 assert_eq "it runs in the agent's home" "$H" "$(head -n1 "$H/claude.args")"
-assert_has "in dontAsk mode" "--permission-mode
-dontAsk" "$args"
+assert_has "in the default permission mode" "--permission-mode
+default" "$args"
+assert_not_has "...never dontAsk (it refuses the question tool)" "dontAsk" "$args"
 assert_has "without the plan-mode tools" "--disallowedTools
 EnterPlanMode
 --disallowedTools

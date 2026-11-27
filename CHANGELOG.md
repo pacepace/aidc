@@ -209,6 +209,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   skips the bypass-permissions warning too (`skipDangerousModePermissionPrompt`, in its managed
   settings). It used to open on the theme picker, the security notes, the folder-trust prompt
   and that warning.
+- **The git agent's question reaches the orchestrator in ask mode** (Docker and Kubernetes).
+  Its Claude ran in `dontAsk`, which refuses AskUserQuestion, so the question came out as plain
+  text and an orchestrator's Approve or Deny decided nothing. It now runs in the default mode,
+  and its managed PreToolUse hook denies whatever the managed allow list does not allow, so
+  it may do exactly what it could before. Rebuild the gitctl image.
 - **A prompt is no longer held behind Claude's startup hint.** With the cursor drawn over the
   hint's first letter (Claude Code 2.1.332), the MCP server read the hint as unsent text and held
   every prompt to a new session as `input_has_text`.

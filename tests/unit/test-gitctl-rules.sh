@@ -525,13 +525,15 @@ for v in api "auth token" credential "markdown -Ftext=@/var/lib/gitctl/gitcred/g
 done
 
 echo ""
-echo "=== the PreToolUse hook (a courtesy; gitctl is the enforcement) ==="
+echo "=== the PreToolUse hook's guard rules (a courtesy; gitctl is the enforcement) ==="
+# Run with the image's managed settings, whose allow list it also applies (test-git-agent.sh).
 hook() { # TOOL FIELD VALUE
     HOUT=$(jq -n --arg t "$1" --arg k "$2" --arg v "$3" '{tool_name: $t, tool_input: {($k): $v}}' \
-        | bash "$GITCTL/claude-hook.sh" 2>&1); HRC=$?
+        | bash "$GITCTL/claude-hook.sh" "$GITCTL/managed-settings.json" 2>&1); HRC=$?
 }
 blocked() { local d="$1"; shift; hook "$@"; if [ "$HRC" = 2 ]; then pass "hook blocks: $d"; else fail "hook let through: $d ($HOUT)"; fi; }
-allowed() { local d="$1"; shift; hook "$@"; if [ "$HRC" = 0 ]; then pass "hook allows: $d"; else fail "hook blocked: $d ($HOUT)"; fi; }
+allowed() { local d="$1"; shift; hook "$@"
+    if [ "$HRC" = 0 ] && [ -z "$HOUT" ]; then pass "hook allows: $d"; else fail "hook blocked: $d ($HRC $HOUT)"; fi; }
 blocked "sudo" Bash command "sudo -u gitcred /opt/aidc/lib/gitctl/gitctl.sh status"
 blocked "su" Bash command "echo x | su gitcred -c id"
 blocked "reading the login's home" Bash command "cat /var/lib/gitctl/gitcred/gh/hosts.yml"
@@ -543,10 +545,10 @@ blocked "Write to gitctl" Write file_path /opt/aidc/lib/gitctl/gitctl.sh
 blocked "Edit the sudo rules" Edit file_path /etc/sudoers.d/aidc-gitctl
 allowed "ordinary git" Bash command "git status && git log --oneline -3"
 allowed "a gitctl verb" Bash command "gitctl push /home/alice/code/proj feature"
-allowed "reading the managed settings" Bash command "cat /etc/claude-code/managed-settings.json"
+allowed "listing the managed settings (only a change to them is a guard file's)" Bash command "ls -l /etc/claude-code/managed-settings.json"
 allowed "a message that talks about Claude" Bash command 'git commit -m "Fix the Claude Code transcript reader"'
 allowed "a read tool" Read file_path /etc/claude-code/managed-settings.json
-HOUT=$(printf 'not json' | bash "$GITCTL/claude-hook.sh" 2>&1); HRC=$?
+HOUT=$(printf 'not json' | bash "$GITCTL/claude-hook.sh" "$GITCTL/managed-settings.json" 2>&1); HRC=$?
 assert_eq "input it cannot read is blocked (the hook fails closed)" 2 "$HRC"
 
 echo ""

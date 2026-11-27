@@ -2,7 +2,7 @@
   "allowManagedHooksOnly": true,
   "disableBypassPermissionsMode": "disable",
   "permissions": {
-    "defaultMode": "dontAsk",
+    "defaultMode": "default",
     "allow": [
       "Bash(gitctl *)",
       "Bash(git-requests *)",

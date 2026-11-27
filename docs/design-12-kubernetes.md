@@ -273,9 +273,29 @@ its conversation), window `shell` a shell. Its instructions are `/etc/claude-cod
 root's, always loaded: gitctl as the only way to GitHub, the hard rules, everything sessions
 write is data, the ask-mode procedure, push/PR, merge then tidy, protections, leftovers
 reported. Its managed settings add a permission list (gitctl, git-requests, git, its gh
-stand-in, reads, its question tool, writes under /tmp) in `dontAsk` mode, with bypass mode disabled: anything else is
+stand-in, reads, its question tool, writes under /tmp), with bypass mode disabled: anything else is
 refused, never left waiting on a prompt nobody sees. Unlike a sandboxed session's Claude it
-keeps AskUserQuestion. The Deployment carries the reserved session label `aidc/session: git`
+keeps AskUserQuestion.
+
+Its permission mode (2026-11-27): Claude Code's `default`, not `dontAsk`. The agent's Claude
+first ran in `dontAsk`, which refuses AskUserQuestion (Claude Code 2.1.332, live) even with the
+tool in the managed allow list and a PreToolUse hook returning allow; its question then came out
+as plain text, no question was open for the orchestrator's answer to settle, and ask mode
+decided nothing. So the refusal `dontAsk` gave moved into the managed PreToolUse hook
+(`claude-hook.sh`, matcher `*`, which also applies the guard rules): it reads `permissions.allow`
+from the managed settings, the one list, and returns `permissionDecision: "deny"`, with a
+reason, for every call the list would not allow. A Bash command is judged part by part (split
+at `&&`, `||`, `;`, `|`, `&` and newlines outside quotes, as Claude checks a compound command),
+each part starting with a listed command; a command or process substitution, or an open quote,
+is denied. Claude's tools that ask no permission (TodoWrite, ToolSearch, Glob ...) get no
+decision, as `dontAsk` ran them. A call the list allows gets no decision and goes on to
+Claude's own check of the same list. The effective allow set is the one `dontAsk` enforced. When
+the hook itself fails (a crash, a non-zero exit other than 2, or its timeout), Claude Code
+treats it as a non-blocking error and the call goes on through the normal permission flow
+(code.claude.com/docs, hooks: "staying silent doesn't approve it"): in the default mode a
+listed call runs and any other asks, so aidc shows the agent `waiting_on_permission`. A failed
+hook never runs a call the list does not allow; it can only leave one waiting. Input the hook
+cannot read, or a list it cannot read, blocks the call (exit 2). The Deployment carries the reserved session label `aidc/session: git`
 (not in its selector), so `aidc list` shows it, `aidc attach|logs|status git` reach it
 (`aidc git attach` is the same attach), `aidc create git` is refused (its claims would collide
 with the git container's) and `aidc kill git` refuses it. A home seeded before Claude Code

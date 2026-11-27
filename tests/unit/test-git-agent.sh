@@ -122,6 +122,17 @@ denied "...and a MultiEdit" "$(decide '{"tool_name": "MultiEdit", "tool_input": 
 denied "...and WebFetch" "$(decide '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}')"
 assert_eq "Claude's tools that ask no permission get none (dontAsk ran them too): TodoWrite" none \
     "$(decide '{"tool_name": "TodoWrite", "tool_input": {"todos": []}}')"
+# A rule scoped to a tool in a shape the hook does not model: denied (fail safe), naming it.
+jq '.permissions.allow += ["WebFetch(domain:example.org)", "Edit(./notes/**)"]' "$G/managed-settings.json" > "$S/unmodeled-settings.json"
+unmodeled() { printf '%s' "$1" | bash "$G/claude-hook.sh" "$S/unmodeled-settings.json" 2>/dev/null \
+    | jq -r '.hookSpecificOutput.permissionDecision + ": " + .hookSpecificOutput.permissionDecisionReason' 2>/dev/null; }
+assert_has "a call a rule shape the hook does not model covers is denied, naming the rule" \
+    "deny: aidc gitctl: not allowed for the git agent: the tool WebFetch: the allow list's rule WebFetch(domain:example.org) has a shape this hook does not match" \
+    "$(unmodeled '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}')"
+assert_has "...an Edit rule too, for any tool that edits files" "the allow list's rule Edit(./notes/**) has a shape" \
+    "$(unmodeled '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/notes/x", "content": "x"}}')"
+assert_eq "...while a write the modeled Edit(//tmp/**) holds still gets no decision" "" \
+    "$(unmodeled '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/x", "content": "x"}}')"
 assert_eq "malformed input is blocked" blocked "$(decide 'not json')"
 assert_eq "...and input with no tool name" blocked "$(decide '{"tool_input": {}}')"
 assert_eq "an allow list it cannot read blocks everything (exit 2)" 2 \
@@ -181,6 +192,15 @@ assert_eq "every file gitctl/Dockerfile copies is in the staged context" "" \
         | sed 's/\\//g' | awk '{for (i = 2; i < NF; i++) print $i}' \
         | while read -r f; do [ -e "$ctx/$f" ] || printf '%s ' "$f"; done)"
 assert_eq "...and the Dockerfile it builds from" yes "$([ -f "$ctx/Dockerfile" ] && echo yes || echo no)"
+assert_eq "the staged gitctl context holds the CLI's claude-state.sh, byte for byte" "" \
+    "$(cmp "$ctx/claude-state.sh" "$AIDC_ROOT/scripts/lib/claude-state.sh" 2>&1)"
+assert_eq "...and gitctl/ keeps no copy of it" no "$([ -e "$G/claude-state.sh" ] && echo yes || echo no)"
+assert_has "the image installs it beside git-claude.sh" "transcript-mirror.sh claude-state.sh claude-refresh.sh" "$(cat "$G/Dockerfile")"
+SH="$S/staged-home"; mkdir -p "$SH/.local/bin"; printf '#!/bin/sh\n' > "$SH/.local/bin/claude"; chmod +x "$SH/.local/bin/claude"
+HOME="$SH" bash "$ctx/git-claude.sh" 2>"$S/staged.err"
+assert_eq "git-claude in the image's layout (the helper beside it) trusts its folder" true \
+    "$(jq -r --arg d "$SH/work" '.projects[$d].hasTrustDialogAccepted' "$SH/.claude.json" 2>/dev/null)"
+assert_eq "...saying nothing" "" "$(cat "$S/staged.err")"
 # Run as the agent in its tmux window main:claude (gitctl-main.sh names it so), it writes
 # into the mirror the MCP reads for the session git (Docker: /var/aidc/transcript-out; here a
 # scratch stand-in).
@@ -220,9 +240,9 @@ assert_eq "it runs in its own working folder, not the home (a home is trusted fo
 cj() { jq -r "$@" "$H/.claude.json" 2>/dev/null; }
 assert_eq "a first start finds that folder trusted" true "$(cj --arg d "$H/work" '.projects[$d].hasTrustDialogAccepted')"
 assert_eq "...and onboarding done (no first-launch screen waits for a person)" true "$(cj .hasCompletedOnboarding)"
-assert_eq "...the text style chosen" dark "$(cj .theme)"
-assert_eq "...the folder's own onboarding done" "true 1" \
-    "$(cj --arg d "$H/work" '"\(.projects[$d].hasCompletedProjectOnboarding) \(.projects[$d].projectOnboardingSeenCount)"')"
+assert_eq "...and nothing else chosen for the person (no text style, no API key)" "hasCompletedOnboarding projects" \
+    "$(cj 'keys_unsorted | join(" ")')"
+assert_eq "...the folder only trusted" hasTrustDialogAccepted "$(cj --arg d "$H/work" '.projects[$d] | keys | join(" ")')"
 assert_eq "...in a file only the agent reads" 600 "$(stat -c %a "$H/.claude.json")"
 # A restart merges into what the agent's Claude wrote: the login, other folders, its choices.
 jq -n --arg d "$H/work" '{oauthAccount: {emailAddress: "someone@example.com"}, theme: "light",
@@ -236,18 +256,17 @@ assert_eq "...the folder's other state" "Read 4" "$(cj --arg d "$H/work" '"\(.pr
 assert_eq "...and other folders as they were" "false x" "$(cj '"\(.projects["/home/git"].hasTrustDialogAccepted) \(.projects["/home/git"].history[0])"')"
 assert_eq "...leaving no temporary file" "" "$(find "$H" -maxdepth 1 -name '.claude.json.*' -print)"
 printf 'not json{' > "$H/.claude.json"
-HOME="$H" bash "$G/git-claude.sh"
+HOME="$H" bash "$G/git-claude.sh" 2>"$S/gc.err"
 assert_eq "a file jq cannot read is left as it is (Claude Code's own to deal with)" "not json{" "$(cat "$H/.claude.json")"
 assert_eq "...and Claude still starts" "$H/work" "$(head -n1 "$H/claude.args")"
-rm -f "$H/.claude.json"
-HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
-assert_eq "an API key in the environment is approved, as at its prompt (its last 20 characters)" \
-    "abcdefghijKLMNOPQRST" "$(cj '.customApiKeyResponses.approved | join(",")')"
-HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
-assert_eq "...once" 1 "$(cj '.customApiKeyResponses.approved | length')"
-jq '.customApiKeyResponses = {approved: [], rejected: ["abcdefghijKLMNOPQRST"]}' "$H/.claude.json" > "$H/cj.tmp" && mv "$H/cj.tmp" "$H/.claude.json"
-HOME="$H" ANTHROPIC_API_KEY="sk-test-0123456789abcdefghijKLMNOPQRST" bash "$G/git-claude.sh"
-assert_eq "...but never one a person refused" 0 "$(cj '.customApiKeyResponses.approved | length')"
+assert_eq "...saying in one line which file and which step failed" \
+    "git-claude: $H/.claude.json left as it was: reading it as a JSON object failed (Claude may stop at its trust prompt)" \
+    "$(cat "$S/gc.err")"
+printf '{"projects": []}' > "$H/.claude.json"
+HOME="$H" bash "$G/git-claude.sh" 2>"$S/gc.err"
+assert_eq "a file the merge fails on is left as it is" '{"projects": []}' "$(cat "$H/.claude.json")"
+assert_has "...naming the merge" "left as it was: marking $H/work trusted and onboarding done failed" "$(cat "$S/gc.err")"
+assert_eq "...leaving no temporary file" "" "$(find "$H" -maxdepth 1 -name '.claude.json.*' -print)"
 rm -f "$H/.claude.json"
 assert_eq "the main process mirrors the conversation of that folder" 1 \
     "$(grep -c 'printf .%s. "${HOME:-/home/git}/work"' "$G/gitctl-main.sh")"

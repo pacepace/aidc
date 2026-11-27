@@ -171,7 +171,7 @@ def _join_refusal(name: str, state: tn.SessionState) -> str:
     if not state.claude_running or state.screen is None:
         return "claude_not_running"
     if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return "claude_not_at_prompt"
+        return tn.WHY_NOT_AT_PROMPT
     if state.screen.input_box == scr.UNRECOGNIZED:
         return "screen_unrecognized"
     if state.screen.list_focused:
@@ -187,16 +187,17 @@ async def join_running_turn(container: str, name: str, prompt: ts.QueuedPrompt) 
     """Paste `prompt` into the turn running in `name` now, for session_send's
     deliver="join". Called under the session's send lock, with nothing queued.
 
-    Returns "joined" once it went in; "idle" when no turn is running, so the caller
-    sends as usual; else why it may not go in now (a waiting reason, or
-    "interrupt_not_reported_yet"), and the caller queues it.
+    Returns "joined" once it went in; "idle" when an ordinary send applies (no turn is
+    running and Claude is not at a first-launch screen), so the caller sends as usual;
+    else why it may not go in now (a waiting reason, or "interrupt_not_reported_yet"),
+    and the caller queues it.
 
     Claude Code holds a prompt pasted mid-turn as a queue-operation and hands it to the
     turn at its next tool boundary (or runs it next, if the turn ends first);
     _prompt_arrived recognizes that arrival."""
     state = await tn.session_state(container, name)
     # A first-launch screen is no turn, but not a prompt an ordinary send can go into either.
-    if state.claude_running and state.turn != tn.TURN_RUNNING and state.why != tn.NOT_AT_PROMPT:
+    if state.claude_running and state.turn != tn.TURN_RUNNING and state.why != tn.WHY_NOT_AT_PROMPT:
         return "idle"
     refusal = _join_refusal(name, state)
     if not refusal and await sf.taint_or_none(name) is not None:
@@ -807,8 +808,8 @@ WAITING_EXPLAINED = {
     "input_has_text": "someone has unsent text in Claude's input box in the session "
                       "(the session's status line tells them)",
     "claude_not_running": "Claude is not running in the session",
-    "claude_not_at_prompt": ("Claude is showing a dialog (e.g. folder trust, login) instead of "
-                             "its prompt; session_status names it (dialog)"),
+    tn.WHY_NOT_AT_PROMPT: ("Claude is showing a dialog (e.g. folder trust, login) instead of "
+                           "its prompt; session_status names a first-launch screen (dialog)"),
     HELD_ELSEWHERE: ("the conversation is open on another of the person's machines (it is "
                      "synced with them); the paste is tried again each minute, and goes in "
                      "once that machine has let it go"),

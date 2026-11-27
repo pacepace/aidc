@@ -281,7 +281,7 @@ jq -n --arg session "$NAME" --arg profile "$PROFILE" --arg repo "$REPO_PATH" \
       backend:"kubernetes", namespace:$ns, audit_claim:$claim}' > "${seed}/meta.json"
 # The session's first ~/.claude.json, as on Docker (cmd-create.sh): this machine's, minus its
 # account and every other project's state (lib/claude-state.sh), else empty; onboarding done
-# and the session's start folder trusted (owner ruling 2026-11-27), so its first launch goes
+# and the session's start folder trusted (owner ruling 2026-11-27, cluster sessions trust their start folder), so its first launch goes
 # straight to the prompt. The dev pod's claude-seed step installs it while the session's
 # Claude config dir has no .claude.json yet. This machine's file names the project by the path
 # here (the $PWD REPO_PATH was made from: /Users/<name>/x on a Mac), the session's Claude by

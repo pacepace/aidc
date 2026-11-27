@@ -178,8 +178,61 @@ class TestCheckFree:
         session.screen = "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n"
         state = await tn.session_state("aidc-proj-dev", "proj")
         assert (state.turn, state.why) == (tn.TURN_RUNNING, "waiting_on_permission")
-        assert state.screen.dialog == "dialog"
+        assert state.screen.dialog == ""
         assert await session.check() == "claude_not_at_prompt"
+
+    async def test_a_permission_menu_quoting_the_trust_prompt_keeps_the_turn(self, session):
+        """A session working on the screen reader itself: the permission menu's diff preview
+        quotes the trust prompt. The turn waits on permission, never idle."""
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        rule = "─" * 80
+        session.screen = "\n".join([
+            rule, " Edit file", " mcp/tests/fixtures/screens/trust.ansi",
+            " 1 + Accessing workspace:", " 2 + Do you trust the files in this folder?",
+            " 3 + ❯ 1. Yes, I trust this folder",
+            " Do you want to make this edit to trust.ansi?", " ❯ 1. Yes", "   2. No", "",
+            " Esc to cancel · Tab to amend", ""])
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_RUNNING, "waiting_on_permission")
+        assert state.screen.dialog == ""
+
+    async def test_the_trust_screen_never_ends_a_turn_the_hooks_say_is_running(self, session):
+        """Even a screen read as the trust prompt does not outrank a hook that says a turn is
+        running: the screen decides a turn is over only when no hook says it runs."""
+        session.write([_typed("u1", "q"), _reply("a1", None, stop="tool_use")], age=20.0)
+        session.hook(hk.he.NOTIFICATION, notification_type="permission_prompt")
+        session.screen = (SCREENS / "claude-2.1.332-trust-home-folder.ansi").read_text()
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_RUNNING, "waiting_on_permission")
+
+    async def test_a_claude_restarted_to_the_trust_screen_after_turns_is_not_working(
+            self, session):
+        session.write(FINISHED)
+        session.screen = (SCREENS / "claude-2.1.332-trust-home-folder.ansi").read_text()
+        state = await tn.session_state("aidc-proj-dev", "proj")
+        assert (state.turn, state.why) == (tn.TURN_IDLE, "claude_not_at_prompt")
+        assert state.screen.dialog == "trust_prompt"
+
+    async def test_an_interrupt_sends_no_esc_to_the_trust_screen(self, session, monkeypatch):
+        """An Esc at the folder-trust prompt answers it "No, exit": Claude would quit."""
+        from aidc_mcp.service import repos as rps
+        from aidc_mcp.service import sessions as ses
+        ss.hook_events_read.clear()
+        ss.hook_turn_event.clear()
+        for f in (session.base / "proj" / "hook-events").iterdir():
+            f.unlink()
+        session.screen = (SCREENS / "claude-2.1.332-trust-home-folder.ansi").read_text()
+
+        async def tmux(container, args):
+            raise AssertionError(f"Esc sent to the trust screen: {args}")
+
+        async def tree(name):
+            return None
+        monkeypatch.setattr(tmx, "tmux_exec", tmux)
+        monkeypatch.setattr(rps, "tree", tree)
+        res = await ses.interrupt("proj")
+        assert res["data"]["interrupted"] is False and res["data"]["was_running"] is None
 
     async def test_unsent_text_holds_the_prompt(self, session):
         session.write(FINISHED)

@@ -116,10 +116,9 @@ class SessionStatus(AidcTool):
         """What one session is doing: whether its coding agent is working, and on what.
 
         Returns: working (true while the coding agent is on a turn), turn and why (the
-        evidence), dialog (what Claude shows instead of its prompt, or null:
-        "trust_prompt", "login_prompt" or "theme_prompt" is a first-launch screen only a
-        person at the session can answer, with why "claude_not_at_prompt"; "dialog" any
-        other menu), claude_running, and while working, what the turn is: working_on (the
+        evidence), dialog ("trust_prompt" while Claude shows its folder-trust screen,
+        which only a person at the session can answer, with why "claude_not_at_prompt";
+        absent otherwise), claude_running, and while working, what the turn is: working_on (the
         prompt it answers, or what else started it, e.g. "background task completed:
         ..."), started_by (what opened the turn: "prompt" a person's or a session_send
         prompt, "background_task" a background task finishing, "session_message" another

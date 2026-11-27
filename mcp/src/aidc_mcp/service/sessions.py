@@ -130,9 +130,10 @@ async def session_report(name: str) -> dict[str, Any]:
         "working": working,
         "turn": state.turn,
         "why": state.why,
-        # The dialog Claude shows instead of its input box, when it shows one: a first-launch
-        # screen (trust_prompt, login_prompt, theme_prompt) waits for a person.
-        "dialog": (state.screen.dialog or None) if state.screen is not None else None,
+        # The first-launch screen Claude shows instead of its input box (trust_prompt), only
+        # while it shows one: it waits for a person, and the bare why does not say which.
+        **({"dialog": state.screen.dialog}
+           if state.screen is not None and state.screen.dialog else {}),
         # What the open turn is: what opened it, since when, its newest step. Read
         # from the transcript only while the agent is working, so an idle session
         # names no work.

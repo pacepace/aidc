@@ -10,8 +10,11 @@
 #    permissions.allow would not allow, as dontAsk did, so while the hook runs nothing waits on
 #    a permission prompt no one sees (when it fails, see below). A call the list allows gets no
 #    decision and goes on to Claude's own permission check of that same list, so the hook
-#    matches rules as Claude does. The list is read from the managed settings each time; this
-#    hook keeps no copy of it.
+#    matches rules as Claude does, for the shapes it models: a bare tool name, Bash(...) and
+#    Edit(//<dir>/**). A rule of any other shape scoped to a tool (WebFetch(domain:...),
+#    Read(//x/**)) is not matched: such a call is denied with a reason naming that rule, so a
+#    rule added to the list is never refused without a word. The list is read from the managed
+#    settings each time; this hook keeps no copy of it.
 # 2. The guard rules (gitctl-rules.sh), a courtesy, not the enforcement: the agent holds no
 #    credential, and gitctl, the only way to the GitHub login, checks everything itself. They
 #    stop early what would fail or break a rule anyway: switching user, reading the login's
@@ -123,6 +126,21 @@ _path_allowed() {
     return 1
 }
 
+# _unmodeled_rule TOOL RULES: the first rule scoped to TOOL (a "TOOL(...)" entry) whose shape
+# this hook does not match: any other than Bash(...) and Edit(//<dir>/**). Claude may allow a
+# call such a rule covers (WebFetch(domain:...), Read(//x/**)); this hook fails safe and denies
+# it, and the deny says which rule, so a rule added to the list is not refused without a word.
+_unmodeled_rule() {
+    local tool="$1" r
+    while IFS= read -r r; do
+        case "$r" in
+            'Bash('*|'Edit(//'*'/**)') ;;
+            "${tool}("*) printf '%s' "$r"; return 0 ;;
+        esac
+    done <<<"$2"
+    return 1
+}
+
 input=$(cat)
 command -v jq >/dev/null 2>&1 || block "the hook cannot read the tool call (no jq)"
 tool=$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null) || block "the hook cannot read the tool call"
@@ -143,11 +161,17 @@ case "$_NO_PERMISSION_TOOLS" in *" ${tool} "*) exit 0 ;; esac
 if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then exit 0; fi
 case "$tool" in
     Bash)
-        _bash_allowed "$cmd" "$rules" || deny "$GITCTL_REASON" ;;
+        _bash_allowed "$cmd" "$rules" && exit 0
+        deny "$GITCTL_REASON" ;;
     Edit|Write|MultiEdit|NotebookEdit)
         printf '%s\n' "$rules" | grep -qxF -- Edit && exit 0
-        _path_allowed Edit "$path" "$rules" || deny "the tool ${tool}${path:+ on ${path}}" ;;
-    *)
-        deny "the tool ${tool}${path:+ on ${path}}" ;;
+        _path_allowed Edit "$path" "$rules" && exit 0 ;;
+    *) ;;
 esac
+scope=Edit
+case "$tool" in Edit|Write|MultiEdit|NotebookEdit) ;; *) scope="$tool" ;; esac
+if unmodeled=$(_unmodeled_rule "$scope" "$rules"); then
+    deny "the tool ${tool}${path:+ on ${path}}: the allow list's rule ${unmodeled} has a shape this hook does not match (only a bare tool name, Bash(...) and Edit(//<dir>/**)), so the hook refuses it rather than guess"
+fi
+deny "the tool ${tool}${path:+ on ${path}}"
 exit 0

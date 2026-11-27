@@ -49,14 +49,14 @@ What changes in use:
 - The git agent's Claude runs in `~/work` in the git container, not in its home. Claude Code
   trusts a home folder for one run only, so after every restart the agent stopped at the
   folder-trust prompt with no one there to answer it. Each start now marks `~/work` trusted and
-  onboarding done in the agent's `~/.claude.json`, keeping its login and the rest of the file.
+  onboarding done in the agent's `~/.claude.json`, keeping its login and the rest of the file;
+  when it cannot, one line in the agent's claude window names the file and the step that failed.
   The first start after the upgrade begins a new conversation (the old one stays in the home's
   project folder); restarts after that resume it as before.
-- `session_status` no longer calls a session's Claude `starting` while it waits at a
-  first-launch screen: it shows `turn: "idle"`, `why: "claude_not_at_prompt"`, and the new
-  `dialog` field names the screen (`trust_prompt`, `login_prompt` or `theme_prompt`; `dialog` for
-  any other menu, null at the prompt). `session_interrupt` no longer sends Esc to such a screen,
-  which would exit Claude.
+- `session_status` no longer calls a session's Claude `starting` while it waits at the
+  folder-trust prompt: it shows `turn: "idle"`, `why: "claude_not_at_prompt"`, and the new
+  `dialog` field is `trust_prompt` (it is absent otherwise). A hook that says a turn is running
+  still decides. `session_interrupt` no longer sends Esc to that screen, which would exit Claude.
 
 ### Upgrading: the MCP server on 3tears (aidc 2.0)
 The MCP server is now served by 3tears-mcp (design 13). Tool names, arguments, descriptions

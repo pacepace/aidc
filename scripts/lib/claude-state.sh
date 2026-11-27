@@ -57,9 +57,13 @@ aidc_claude_state_rekey() {
 }
 
 # aidc_claude_state_ready <folder>
-# A seed (on stdin, a JSON object) with onboarding marked done and <folder> trusted, for a
-# cluster session's first launch: it has no host state of its own to carry the dialogs'
-# answers, and the session starts in <folder> (owner ruling 2026-11-27). Prints the result.
+# A ~/.claude.json (on stdin, a JSON object) with onboarding marked done and <folder> trusted,
+# merged into what is there: the one writer of these first-launch keys. For a cluster session's
+# first launch, which has no host state of its own to carry the dialogs' answers and starts in
+# <folder> (owner ruling 2026-11-27, cluster sessions trust their start folder); and for each
+# start of the git agent, which runs it from its image (gitctl/git-claude.sh; owner ruling
+# 2026-11-27, the git agent trusts its own work folder on both backends). Prints the result;
+# exits non-zero when jq cannot merge it.
 aidc_claude_state_ready() {
     jq --arg dir "$1" '.hasCompletedOnboarding = true
         | .projects = (.projects // {})

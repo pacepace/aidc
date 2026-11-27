@@ -14,7 +14,7 @@
 #     (aidc-claude-lease), since its Claude history is shared with the user's other machines;
 #   - in a cluster session launched with bypass (claude_mode yolo or bypassPermissions),
 #     skipDangerousModePermissionPrompt: the mode is the user's consent to bypass, and a
-#     session made unattended never stops at a first-launch screen (owner ruling 2026-11-27).
+#     session made unattended never stops at a first-launch screen (owner ruling 2026-11-27, cluster sessions trust their start folder).
 
 AIDC_HOOK_EVENT_COMMAND="${AIDC_HOOK_EVENT_COMMAND:-/usr/local/bin/aidc-hook-event}"
 AIDC_CLAUDE_USAGE_COMMAND="${AIDC_CLAUDE_USAGE_COMMAND:-/usr/local/bin/aidc-claude-usage}"

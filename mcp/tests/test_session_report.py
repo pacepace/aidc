@@ -60,7 +60,7 @@ def facts(monkeypatch, tmp_path):
     async def session_state(container, name):
         if name == "proj" and state.get("dialog"):
             return tn.SessionState(True, ScreenState(NOT_AT_PROMPT, False, dialog=state["dialog"]),
-                                   tn.TURN_IDLE, tn.NOT_AT_PROMPT)
+                                   tn.TURN_IDLE, tn.WHY_NOT_AT_PROMPT)
         if name == "proj" and state["working"]:
             return tn.SessionState(True, None, tn.TURN_RUNNING, "log_growing")
         return tn.SessionState(name == "proj", None, tn.TURN_IDLE, "log_finished")
@@ -160,7 +160,7 @@ async def test_status_carries_the_taint_as_a_typed_field(facts):
 async def test_status_names_a_first_launch_screen_claude_waits_at(facts):
     """A Claude at its folder-trust prompt is not working and not starting: the status says
     it is not at its prompt, and which screen holds it (live, 2026-11-27)."""
-    assert (await _tool("session_status")(name="proj"))["data"]["dialog"] is None
+    assert "dialog" not in (await _tool("session_status")(name="proj"))["data"]
     facts["dialog"] = "trust_prompt"
     d = (await _tool("session_status")(name="proj"))["data"]
     assert d["working"] is False and d["turn"] == "idle"

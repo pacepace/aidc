@@ -260,8 +260,10 @@ EOF
 # aidc k8s build. Returns 1 only when the copy could not be made.
 # The scripts the git image takes from .devcontainer/, the sessions' own (gitctl/Dockerfile
 # copies each from its staged context): the Claude Code hook writer, the gh stand-in that
-# writes requests, and the transcript copy-forward.
+# writes requests, and the transcript copy-forward. AIDC_GITCTL_SHARED_LIB: the ones it takes
+# from scripts/lib/, the CLI's: the writer of Claude's first-launch keys (git-claude.sh).
 AIDC_GITCTL_SHARED="hook-event.sh gh-standin.sh transcript-mirror.sh claude-usage.sh"
+AIDC_GITCTL_SHARED_LIB="claude-state.sh"
 aidc_build_context() {
     local lib
     AIDC_BUILD_CONTEXT="$2" AIDC_BUILD_STAGE=""
@@ -274,6 +276,10 @@ aidc_build_context() {
             for shared in $AIDC_GITCTL_SHARED; do
                 [ "$ok" = 1 ] || break
                 cp "$2/../.devcontainer/${shared}" "${AIDC_BUILD_STAGE}/context/${shared}" || ok=0
+            done
+            for shared in $AIDC_GITCTL_SHARED_LIB; do
+                [ "$ok" = 1 ] || break
+                cp "$2/../scripts/lib/${shared}" "${AIDC_BUILD_STAGE}/context/${shared}" || ok=0
             done
             if [ "$ok" != 1 ]; then
                 echo "cannot stage the gitctl build context with the sessions' scripts" >&2

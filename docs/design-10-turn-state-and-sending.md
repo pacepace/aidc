@@ -515,13 +515,17 @@ in another window writes nothing, since its Stop is not the session's.
   from before 2.0 when they do not name the hook: `turn: "unknown"`, `why:
   "session_predates_hook_events"`, `session_send` refused with `session_outdated` (D6). A
   session whose settings cannot be read waits (`hooks_unread`) rather than being refused.
-- **A first-launch screen** (the folder-trust prompt, the login or text-style screen, named by
-  their text: `trust_prompt`, `login_prompt`, `theme_prompt`) comes before any turn and any hook,
-  and Claude waits there for a person: whatever the hook events say, the session is `turn:
-  "idle"`, `why: "claude_not_at_prompt"`, and `session_status`'s `dialog` names the screen, so an
-  orchestrator sees it is stuck rather than `starting` (live, 2.1.332: a Claude started in a home
-  folder is trusted there for one run only). Any other menu without the input box (a permission
-  or question menu, inside a turn) is `dialog` and leaves the turn as the hooks say.
+- **A first-launch screen** (the folder-trust prompt, `trust_prompt`, the one named) comes
+  before any turn and any hook, and Claude waits there for a person. It is recognised by the
+  dialog's own rows, never by its text anywhere on screen: from the last full-width rule down to
+  the hint row that ends the screen, the first row is `Accessing workspace:` and one row is the
+  option `Yes, I trust this folder` (a permission menu's diff preview can quote both). With no
+  hook event yet, or none saying a turn is running, the session is `turn: "idle"`, `why:
+  "claude_not_at_prompt"`, and `session_status`'s `dialog` names the screen, so an orchestrator
+  sees it is stuck rather than `starting` (live, 2.1.332: a Claude started in a home folder is
+  trusted there for one run only). A hook that says a turn is running outranks it: the screen
+  never ends a turn. Any other menu without the input box (a permission or question menu, inside
+  a turn) has no `dialog` and leaves the turn as the hooks say.
 - **A session created again** starts with no events: `aidc create` empties its `hook-events/`
   (on Kubernetes the dev pod's mirror step, at every pod start), and the git container's main
   process empties the git agent's as it starts.

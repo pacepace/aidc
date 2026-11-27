@@ -103,10 +103,12 @@ RUN groupadd -g 2003 gitreq \
     && install -d -o gitreq -g gitreq -m 0700 /var/lib/gitctl/gitreq \
     && install -d -o root -g root -m 0755 /var/aidc /etc/aidc \
     && install -d -o gitreq -g session -m 2755 /var/aidc/git-requests
-# gh-standin.sh and transcript-mirror.sh are the sessions' own (.devcontainer/), put beside this
-# Dockerfile by the staged build context (aidc_build_context, scripts/lib/common.sh).
+# gh-standin.sh and transcript-mirror.sh are the sessions' own (.devcontainer/), and
+# claude-state.sh the CLI's own writer of Claude's first-launch keys (scripts/lib/, which
+# git-claude.sh sources), put beside this Dockerfile by the staged build context
+# (aidc_build_context, scripts/lib/common.sh).
 COPY gitctl-rules.sh gitctl.sh gitctl-run.sh gitctl-cred.sh gitctl-agent.sh git-requests.sh gh-standin.sh cred-helper.sh claude-hook.sh \
-     git-claude.sh git-notify.sh transcript-mirror.sh claude-refresh.sh /opt/aidc/lib/gitctl/
+     git-claude.sh git-notify.sh transcript-mirror.sh claude-state.sh claude-refresh.sh /opt/aidc/lib/gitctl/
 COPY gitconfig /etc/gitconfig
 COPY sudoers /etc/sudoers.d/aidc-gitctl
 # The git agent's Claude Code: its managed settings (the hook, its permissions) and its one set
@@ -123,6 +125,7 @@ RUN chown -R root:root /opt/aidc /etc/claude-code /etc/gitconfig /etc/sudoers.d/
                   /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/lib/gitctl/git-notify.sh \
                   /opt/aidc/lib/gitctl/claude-refresh.sh \
     && chmod 0644 /opt/aidc/lib/gitctl/gitctl-run.sh /opt/aidc/lib/gitctl/gitctl-cred.sh /opt/aidc/lib/gitctl/gitctl-agent.sh \
+                  /opt/aidc/lib/gitctl/claude-state.sh \
     && chmod 0440 /etc/sudoers.d/aidc-gitctl \
     && visudo -c -f /etc/sudoers.d/aidc-gitctl \
     && install -d -m 0755 /opt/aidc/bin \

@@ -11,10 +11,7 @@ from aidc_mcp.screen import (
     EMPTY,
     FIRST_LAUNCH_DIALOGS,
     HAS_TEXT,
-    LOGIN_PROMPT,
     NOT_AT_PROMPT,
-    OTHER_DIALOG,
-    THEME_PROMPT,
     TRUST_PROMPT,
     UNRECOGNIZED,
     ScreenState,
@@ -61,16 +58,30 @@ def test_the_folder_trust_prompt_is_named(fixture):
     assert TRUST_PROMPT in FIRST_LAUNCH_DIALOGS
 
 
-@pytest.mark.parametrize("text, kind", [
-    ("Select login method:\n\n ❯ 1. Claude account with subscription\n", LOGIN_PROMPT),
-    ("Choose the text style that looks best with your terminal\n ❯ 1. Dark mode\n", THEME_PROMPT),
+RULE = "─" * 80
+# A permission menu inside a turn, whose diff preview (above the menu's own rule) quotes the
+# trust prompt: a session working on this very module shows one.
+QUOTING_PREVIEW = "\n".join([
+    RULE, " Edit file", " mcp/tests/fixtures/screens/trust.ansi",
+    " ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    " 1 + Accessing workspace:", " 2 + Do you trust the files in this folder?",
+    " 3 + ❯ 1. Yes, I trust this folder",
+    " ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    " Do you want to make this edit to trust.ansi?", " ❯ 1. Yes", "   2. No", "",
+    " Esc to cancel · Tab to amend", ""])
+
+
+@pytest.mark.parametrize("text", [
     # A permission or question menu inside a turn is a dialog, but no first-launch one.
-    ("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", OTHER_DIALOG),
+    RULE + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n",
+    QUOTING_PREVIEW,
+    # The trust text above the dialog's own rule is another screen's, not this dialog's.
+    " Accessing workspace:\n ❯ 1. Yes, I trust this folder\n" + RULE
+    + "\n Do you want to proceed?\n ❯ 1. Yes\n\n Enter to confirm · Esc to cancel\n",
 ])
-def test_other_dialogs_are_told_apart(text, kind):
-    state = classify(text + "\n Enter to confirm · Esc to cancel\n")
-    assert state.input_box == NOT_AT_PROMPT and state.dialog == kind
-    assert (kind in FIRST_LAUNCH_DIALOGS) == (kind != OTHER_DIALOG)
+def test_a_dialog_quoting_the_trust_text_is_not_the_trust_prompt(text):
+    state = classify(text)
+    assert state.input_box == NOT_AT_PROMPT and state.dialog == ""
 
 
 def test_a_screen_with_its_input_box_names_no_dialog():

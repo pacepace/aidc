@@ -1037,7 +1037,7 @@ any pod mounts it; the dev pod's `claude-seed` step fills a new one once, as the
 from the Claude config the home already had, else the image's; then, when that left no
 `.claude.json`, from the state seed `aidc create` put in the session's audit-seed ConfigMap
 (Docker's filtered copy of the machine's own, else empty, with onboarding done and the start
-folder trusted: owner ruling 2026-11-27), so the first launch goes straight to the prompt. The
+folder trusted: owner ruling 2026-11-27, cluster sessions trust their start folder), so the first launch goes straight to the prompt. The
 machine's file names the project by the machine's path (a Mac's `/Users/<name>/x`), the session
 by the cluster's (`/home/<user>/x`): the entry is picked by the one and moved to the other. The
 seed's key is not in the proxy pod's mount of that ConfigMap (its seed-audit step sees only the

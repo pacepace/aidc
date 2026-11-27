@@ -57,9 +57,10 @@ TURN_UNKNOWN = "unknown"
 
 PREDATES_HOOK_EVENTS = "session_predates_hook_events"
 
-# The `why` of a session whose Claude shows a first-launch screen (screen.FIRST_LAUNCH_DIALOGS)
-# instead of its input box: the paste reason's own word, the screen's `dialog` naming which.
-NOT_AT_PROMPT = "claude_not_at_prompt"
+# The `why` and paste reason of a session whose Claude shows a dialog instead of its input
+# box; for a first-launch screen (screen.FIRST_LAUNCH_DIALOGS) the screen's `dialog` names
+# which. Not screen.NOT_AT_PROMPT, which is an input_box value.
+WHY_NOT_AT_PROMPT = "claude_not_at_prompt"
 
 
 # The idle verdicts of a turn the transcript may still show open: Claude reported idle, or
@@ -332,18 +333,27 @@ async def session_state(container: str, name: str) -> SessionState:
     await _sync_session_markers(name)
     objs, mtime, status = session_transcript(name)
     installed = await _hooks_installed(container, name)
+    any_events, _ = latest_hook_event(name)
+    if not any_events and installed is False:
+        # outdated (MCP-47): its result carries no screen, so none is read
+        return SessionState(True, None, TURN_UNKNOWN, PREDATES_HOOK_EVENTS)
     # the screen, for what a paste needs: the input box, a dialog (S2)
     screen = await read_screen(container, name)
-    if screen.input_box == scr.NOT_AT_PROMPT and screen.dialog in scr.FIRST_LAUNCH_DIALOGS \
-            and installed is not False:
-        # A first-launch screen (folder trust, login, text style): Claude waits there for a
-        # person, before any turn and before it runs a hook, so it is not working and not
+    first_launch = screen.input_box == scr.NOT_AT_PROMPT \
+        and screen.dialog in scr.FIRST_LAUNCH_DIALOGS
+    if first_launch and not any_events:
+        # A first-launch screen (folder trust) before any hook event: Claude waits there for
+        # a person, before any turn and before it runs a hook, so it is not working and not
         # "starting" either. Named, so an orchestrator sees why it is stuck (screen.dialog).
         # The silence clock starts again once it is past it.
         ss.hooks_silent_since.pop(name, None)
-        return SessionState(True, screen, TURN_IDLE, NOT_AT_PROMPT)
+        return SessionState(True, screen, TURN_IDLE, WHY_NOT_AT_PROMPT)
     turn, why = turn_from_hooks(name, objs if status == "ok" else [], mtime,
                                 installed=installed)
+    if first_launch and turn != TURN_RUNNING:
+        # Claude restarted to the screen after earlier turns. A hook that says a turn is
+        # running outranks the screen: the screen never decides a turn is over.
+        return SessionState(True, screen, TURN_IDLE, WHY_NOT_AT_PROMPT)
     if turn == TURN_UNKNOWN:
         return SessionState(True, None, turn, why)
     awaiting = ss.sent_awaiting_echo.get(name)
@@ -386,7 +396,7 @@ def paste_reason(state: SessionState) -> str:
     if not state.claude_running or state.screen is None:
         return "claude_not_running"
     if state.screen.input_box == scr.NOT_AT_PROMPT:
-        return "claude_not_at_prompt"
+        return WHY_NOT_AT_PROMPT
     if state.screen.input_box == scr.UNRECOGNIZED:
         return "screen_unrecognized"
     if state.turn == TURN_RUNNING:

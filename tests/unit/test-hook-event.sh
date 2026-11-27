@@ -160,7 +160,7 @@ aidc_install_managed_settings "$root" "$reg" false
 check "on Docker neither (the host's status line is the session's own)" \
     "$([ "$(jq -c '[has("statusLine"), (.hooks | has("StopFailure"))]' "$ms")" = '[false,false]' ] && echo yes || echo no)"
 aidc_install_managed_settings "$root" "$reg" false cluster bypass
-check "a cluster session launched with bypass skips the bypass-permissions warning (owner ruling 2026-11-27)" \
+check "a cluster session launched with bypass skips the bypass-permissions warning (owner ruling 2026-11-27, cluster sessions trust their start folder)" \
     "$([ "$(jq -c '.skipDangerousModePermissionPrompt' "$ms")" = true ] && [ "$(jq -c '.hooks | has("StopFailure")' "$ms")" = true ] && echo yes || echo no)"
 aidc_install_managed_settings "$root" "$reg" false cluster
 check "...one launched without bypass does not" \

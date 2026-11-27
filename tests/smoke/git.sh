@@ -103,7 +103,7 @@ sg_part_gitwc() {
 
 sg_part_requests() {
     echo "[git] a repo, a session's worktree, and its requests"
-    local wt_rel=".aidc-smoke-${SG_SESSION}"
+    local wt_rel=".aidc-smoke-${SG_SESSION}" out
     SG_WT="${SG_WC}/${wt_rel}"
     SG_BRANCH="aidc-smoke-${SG_SESSION}"
     assert "aidc repo list shows the working copy" "sg_has '${SG_WC}' repo list"
@@ -129,12 +129,14 @@ sg_part_requests() {
     assert "aidc git requests <id> shows it, with the session's branch" "sg_has '${SG_BRANCH}' git requests '${SG_REQUEST:-none}'"
     # Approvals are out of the agent's reach (owner ruling 2026-11-26): as git, git-requests
     # refuses to decide, sudo has no rule for it, and gitctl's GitHub writes refuse the agent.
-    assert "the git agent cannot approve it" \
-        "sg_git git-requests approve '${SG_REQUEST:-none}' 2>&1 | grep -q 'cannot approve'"
+    # The refusals exit 1, so their output is captured first: under pipefail a failing command
+    # piped into grep fails the assertion even when grep finds the text.
+    out=$(sg_git git-requests approve "${SG_REQUEST:-none}" 2>&1 || true)
+    assert "the git agent cannot approve it" "printf '%s' \"\$out\" | grep -q 'cannot approve'"
     assert "nor through sudo as the request holder" \
         "! sg_git sudo -n -u gitreq /opt/aidc/lib/gitctl/git-requests.sh approve '${SG_REQUEST:-none}'"
-    assert "nor push the branch itself" \
-        "sg_git gitctl push '${SG_WC}' '${SG_BRANCH}' 2>&1 | grep -q 'runs only as a request'"
+    out=$(sg_git gitctl push "${SG_WC}" "${SG_BRANCH}" 2>&1 || true)
+    assert "nor push the branch itself" "printf '%s' \"\$out\" | grep -q 'runs only as a request'"
     assert "and the request still waits" "sg_has '${SG_REQUEST:-none}' git requests"
     assert "aidc git deny refuses it" "sg_has denied git deny '${SG_REQUEST:-none}' 'smoke test'"
     assert "the session reads the denial and the reason" \

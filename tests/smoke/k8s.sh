@@ -282,7 +282,10 @@ assert "the audit volume holds the policy events" \
 # The freeze (SEC-05/08, W-K4): the user's MCP server, told by the sidecar's webhook, cuts the
 # session's way out within seconds (60 s at most, its own look at every flag). Without a running
 # server it is pending, and says so.
-if "$AIDC" mcp status --backend kubernetes </dev/null 2>/dev/null | grep -q '): RUNNING'; then
+# Captured first, as in status_has: grep -q stops reading at the first line, and under pipefail
+# the rest of the status written to the closed pipe made a running server look stopped.
+mcp_state=$("$AIDC" mcp status --backend kubernetes </dev/null 2>/dev/null || true)
+if case "$mcp_state" in *"): RUNNING"*) true ;; *) false ;; esac; then
     for _ in $(seq 30); do status_has 'freeze:   FROZEN' && break; sleep 3; done
     assert "the user's MCP server freezes the tainted session within 90 s, and aidc status says so" \
         "status_has 'freeze:   FROZEN'"

@@ -499,3 +499,6 @@ The owner's other products and projects are never named in code, tests or docs o
 - 2026-11-26 (cluster live runs): yes. Agents may run the 2.0 live checks in the owner's own namespace with test-named sessions. They may replace the owner's cluster git agent with the branch's version for chunk 13's live run, restoring it afterwards. Steps that need cluster-admin rights are not covered by this, and go to the owner.
 
 - 2026-11-26 (Q-K1, adding a Claude account): agreed. `aidc claude account add` runs Claude's normal login inside the user's broker pod and keeps the long-lived token there, on a claim only the broker mounts. Until the broker exists, a session may use a one-year inference token (`claude setup-token`) as a stopgap.
+
+## 2026-11-27 Cluster sessions trust their start folder
+Owner ruling: a cluster session marks its start folder trusted in Claude (hasTrustDialogAccepted) and is seeded past onboarding, so a session made unattended (session_create) never stops at the first-launch screens. Docker keeps carrying only the host's own trust. Reason: no one may be at the screen, and the sandbox is the boundary.

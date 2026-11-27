@@ -10,13 +10,13 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
-import subprocess
 import textwrap
 import threading
 import time
 
 from aidc_mcp import resources
 from aidc_mcp.service import common as com
+from aidc_mcp.service import sessions as ses
 from aidc_mcp.tearstools import build_tools
 from tests import toolcall
 
@@ -79,7 +79,7 @@ async def test_session_exec_does_not_stall_the_loop(monkeypatch):
         returncode, stdout, stderr = 0, "hi", ""
 
     async def call(release):
-        monkeypatch.setattr(subprocess, "run", _blocking(release, Done()))
+        monkeypatch.setattr(ses, "_run_bounded", _blocking(release, Done()))
         return await toolcall.call("session_exec", name="proj", cmd="echo hi")
 
     _, elapsed = await _call_while_loop_releases(call)

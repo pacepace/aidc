@@ -341,12 +341,51 @@ def exec_command(name: str, cmd: str, timeout_seconds: int = 60) -> dict[str, An
     container = backend.target(name)
     argv = backend.exec_argv(container, ["bash", "-lc", cmd], user="vscode")
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds)
+        proc = _run_bounded(name, argv, timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
         return com.envelope_err(f"timeout after {timeout_seconds}s",
-                                {"stdout": exc.stdout or ""}, code="timeout")
+                                {"stdout": out}, code="timeout")
     return com.envelope_ok({"stdout": proc.stdout, "stderr": proc.stderr,
                             "exit": proc.returncode})
+
+
+# How long a timed-out exec is waited for after it is killed, before it is left behind.
+EXEC_KILL_WAIT_SECONDS = 5
+
+
+def _run_bounded(name: str, argv: list[str],
+                 timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    """subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds), except
+    that a timeout always ends as subprocess.TimeoutExpired: run() kills the child and lets
+    the kill's error escape (a PermissionError when the child is another user's, as live with
+    a command that left a child in the background), then waits for the child without end.
+    Here a kill that fails is logged, the child is waited for a short while only, and the
+    timeout is raised as it is."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError as exc:
+            # The child may be another user's, or already gone.
+            audit.log_event("session_exec_kill_failed", session=name, pid=proc.pid,
+                            error_type=type(exc).__name__, error=str(exc))
+        try:
+            proc.wait(timeout=EXEC_KILL_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            audit.log_event("session_exec_left_running", session=name, pid=proc.pid)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 async def transcript(name: str, last_n: int = 5, since_uuid: str = "") -> dict[str, Any]:

@@ -6,15 +6,23 @@
 # 1. The allow list. The git agent's Claude runs in the default permission mode, not dontAsk:
 #    Claude Code 2.1.332 refuses AskUserQuestion in dontAsk whatever the settings or a hook say,
 #    and the question is how ask mode reaches the user (docs/design-12-kubernetes.md, "Git").
-#    So this hook refuses ("deny", with a reason) every call the managed settings'
-#    permissions.allow would not allow, as dontAsk did, so while the hook runs nothing waits on
-#    a permission prompt no one sees (when it fails, see below). A call the list allows gets no
-#    decision and goes on to Claude's own permission check of that same list, so the hook
-#    matches rules as Claude does, for the shapes it models: a bare tool name, Bash(...) and
-#    Edit(//<dir>/**). A rule of any other shape scoped to a tool (WebFetch(domain:...),
-#    Read(//x/**)) is not matched: such a call is denied with a reason naming that rule, so a
-#    rule added to the list is never refused without a word. The list is read from the managed
-#    settings each time; this hook keeps no copy of it.
+#    So this hook is the one authority over the agent's tools, with dontAsk's effective set: it
+#    refuses ("deny", with a reason) every call the managed settings' permissions.allow would
+#    not allow, and allows ("allow", with a reason) every call the list allows and it has
+#    checked. The explicit allow is needed: a call left without a decision goes on to Claude's
+#    own check, which in the default mode still asks about some listed calls (a cd before git;
+#    a git -C read of a working copy outside its working folder; three live instances, the last
+#    a plain "Do you want to proceed?"), and that prompt waits with no one there. Claude's safety
+#    shapes (a cd, an unquoted glob, a redirect it cannot pre-approve, a protected path) are
+#    still denied, with what to write instead, not allowed past the prompt. No decision is given
+#    only to Claude's tools that ask no permission (TodoWrite, ToolSearch, ...) and to
+#    AskUserQuestion, whose "permission" is the question itself: an "allow" would answer it
+#    with nothing, and no decision opens the real question. The hook matches rules as Claude
+#    does, for the shapes it models: a bare tool name, Bash(...) and Edit(//<dir>/**). A rule
+#    of any other shape scoped to a tool (WebFetch(domain:...), Read(//x/**)) is not matched:
+#    such a call is denied with a reason naming that rule, so a rule added to the list is never
+#    refused without a word. The list is read from the managed settings each time; this hook
+#    keeps no copy of it.
 # 2. The guard rules (gitctl-rules.sh), a courtesy, not the enforcement: the agent holds no
 #    credential, and gitctl, the only way to the GitHub login, checks everything itself. They
 #    stop early what would fail or break a rule anyway: switching user, reading the login's
@@ -22,8 +30,9 @@
 #    git or gitctl command. Exit 2 blocks the call, with the reason on stderr.
 #
 # Input it cannot read is blocked (exit 2). If the hook itself fails (a crash, a timeout), Claude
-# Code lets the call go on to its own permission check: a listed call runs, any other one asks,
-# and the session shows waiting_on_permission. It never runs a call the list does not allow.
+# Code lets the call go on to its own permission check: a listed call runs or asks, any other
+# one asks, and the session shows waiting_on_permission. It never runs a call the list does not
+# allow.
 #
 # Usage: claude-hook.sh [managed-settings.json] (tool call JSON on stdin). The settings path is
 # for tests; the managed settings name none, so the agent's Claude always reads the image's.
@@ -39,10 +48,19 @@ deny() {
         '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
     exit 0
 }
+# allow WHAT: the call is on the allow list and passed every check here; Claude's own prompt,
+# which no one would answer, is skipped. Only ever reached after the list matched.
+allow() {
+    jq -n -c --arg r "aidc gitctl: on the git agent's allow list (${1}), checked by its hook" \
+        '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: $r}}'
+    exit 0
+}
 
 # Claude Code's tools that ask no permission: dontAsk let them run whatever the list said
 # (code.claude.com/docs, "Tools available to Claude"), so they get no decision here either.
-# AskUserQuestion is not one of them here: dontAsk refused it, and the list names it.
+# AskUserQuestion is not one of them here: dontAsk refused it, and the list names it. Read, Grep
+# and Glob are, but the list names them, and Claude asks before they read outside its working
+# folder, so a listed one gets the list's "allow" (the list is checked first).
 _NO_PERMISSION_TOOLS=" Agent Task Glob Grep LS Read NotebookRead TodoWrite ToolSearch TaskCreate TaskGet TaskList TaskUpdate TaskOutput TaskStop BashOutput KillShell ListMcpResourcesTool ReadMcpResourceTool LSP "
 
 # _bash_segments CMD: CMD's simple commands, one a line (split at &&, ||, ;, |, & and newlines
@@ -110,7 +128,7 @@ _bash_allowed() {
 # "Compound commands", "Redirections"; permission-modes, "Protected paths"). In the default mode
 # Claude asks before some calls the allow list covers, whatever the list or a hook's silence
 # says, and no one is there to answer: the agent sits at waiting_on_permission. So the hook
-# denies those shapes, with a reason that says what to write instead; it adds no "allow".
+# denies those shapes, with a reason that says what to write instead, rather than allow them.
 _STEER="(Claude Code would stop at its own safety prompt, which no one answers here)"
 _NO_CD="never cd (or pushd/popd): Claude Code asks before a cd followed by git, and the shell's folder does not stay put. Name the folder instead: git -C <dir> ..., gh -C <dir> ..., and absolute paths for gitctl, git-requests and ls"
 
@@ -269,19 +287,30 @@ esac
 
 rules=$(jq -r '.permissions.allow[]' "$settings" 2>/dev/null) \
     || block "the hook cannot read the allow list in ${settings}"
+if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then
+    case "$tool" in
+        # No decision (see 1. above): the list names it, so Claude opens the real question.
+        AskUserQuestion) exit 0 ;;
+        Bash) _claude_prompts "$cmd" || deny "$GITCTL_REASON" ;;
+        Edit|Write|MultiEdit|NotebookEdit)
+            if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
+                deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
+            fi ;;
+    esac
+    allow "the tool ${tool}"
+fi
 case "$_NO_PERMISSION_TOOLS" in *" ${tool} "*) exit 0 ;; esac
-if printf '%s\n' "$rules" | grep -qxF -- "$tool"; then exit 0; fi
 case "$tool" in
     Bash)
         _claude_prompts "$cmd" || deny "$GITCTL_REASON"
-        _bash_allowed "$cmd" "$rules" && exit 0
+        _bash_allowed "$cmd" "$rules" && allow "Bash: every part of the command"
         deny "$GITCTL_REASON" ;;
     Edit|Write|MultiEdit|NotebookEdit)
         if [ -n "$path" ] && _protected_path "$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"; then
             deny "the tool ${tool} on ${path}: Claude Code counts it a protected path and always asks before writing it ${_STEER}: write PR and issue texts to a plain file under /tmp"
         fi
-        printf '%s\n' "$rules" | grep -qxF -- Edit && exit 0
-        _path_allowed Edit "$path" "$rules" && exit 0 ;;
+        printf '%s\n' "$rules" | grep -qxF -- Edit && allow "the tool ${tool}: the list's Edit"
+        _path_allowed Edit "$path" "$rules" && allow "the tool ${tool} on ${path}" ;;
     *) ;;
 esac
 scope=Edit

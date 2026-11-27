@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,18 @@ def _patch_sync_run(monkeypatch, result, record=None):
             raise result
         return result
     monkeypatch.setattr(subprocess, "run", _run)
+
+
+def _patch_exec_run(monkeypatch, result, record=None):
+    """session_exec's run (ses._run_bounded: subprocess.run whose timeout survives a failed
+    kill), stood in for as _patch_sync_run stands in for subprocess.run."""
+    def _run(name, argv, timeout_seconds):
+        if record is not None:
+            record.append((argv, {"timeout": timeout_seconds}))
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    monkeypatch.setattr(ses, "_run_bounded", _run)
 
 
 def _patch_cli(monkeypatch, result, record=None):
@@ -371,7 +384,7 @@ class TestSimpleCliTools:
 class TestSessionExec:
     async def test_happy(self, monkeypatch):
         rec = []
-        _patch_sync_run(monkeypatch, FakeCompleted(0, stdout="hi", stderr=""), record=rec)
+        _patch_exec_run(monkeypatch, FakeCompleted(0, stdout="hi", stderr=""), record=rec)
         res = await _tool("session_exec")(name="proj", cmd="echo hi")
         assert res["ok"] is True
         assert res["data"] == {"stdout": "hi", "stderr": "", "exit": 0}
@@ -381,14 +394,64 @@ class TestSessionExec:
 
     async def test_nonzero_exit_is_still_ok_envelope(self, monkeypatch):
         # A failing command is a successful tool call that reports exit!=0.
-        _patch_sync_run(monkeypatch, FakeCompleted(3, stdout="", stderr="nope"))
+        _patch_exec_run(monkeypatch, FakeCompleted(3, stdout="", stderr="nope"))
         res = await _tool("session_exec")(name="proj", cmd="false")
         assert res["ok"] is True and res["data"]["exit"] == 3
 
     async def test_timeout(self, monkeypatch):
-        _patch_sync_run(monkeypatch, subprocess.TimeoutExpired(cmd="x", timeout=60))
+        _patch_exec_run(monkeypatch, subprocess.TimeoutExpired(cmd="x", timeout=60))
         res = await _tool("session_exec")(name="proj", cmd="sleep 999", timeout_seconds=60)
         assert res["ok"] is False and "timeout" in res["error"]
+
+    async def test_a_kill_that_fails_still_ends_as_a_timeout(self, monkeypatch):
+        """Live: a command that left a child in the background timed out, and the kill raised
+        PermissionError (the child was another user's): the tool failed with that error
+        instead of answering timeout. Now the timeout is the answer and the kill is logged."""
+        events = []
+        monkeypatch.setattr(ses.audit, "log_event", lambda kind, **f: events.append((kind, f)))
+        monkeypatch.setattr(ses, "EXEC_KILL_WAIT_SECONDS", 0.2)
+        monkeypatch.setattr(backend, "exec_argv",
+                            lambda *a, **k: ["sh", "-c", "echo started; exec sleep 30"])
+        procs = []
+        real_kill = subprocess.Popen.kill
+
+        def kill(self):
+            procs.append(self)
+            raise PermissionError(1, "Operation not permitted")
+        monkeypatch.setattr(subprocess.Popen, "kill", kill)
+        try:
+            res = ses.exec_command("proj", "sleep 30 &", timeout_seconds=1)
+        finally:
+            for p in procs:
+                real_kill(p)
+                p.wait()
+        assert res["ok"] is False and res["error_code"] == "timeout"
+        assert res["error"] == "timeout after 1s"
+        assert res["data"]["stdout"] == "started\n"
+        kinds = [k for k, _ in events]
+        assert "session_exec_kill_failed" in kinds and "session_exec_left_running" in kinds
+        failed = dict(events)["session_exec_kill_failed"]
+        assert failed["session"] == "proj" and failed["error_type"] == "PermissionError"
+
+    async def test_a_child_already_gone_ends_as_a_timeout(self, monkeypatch):
+        monkeypatch.setattr(ses.audit, "log_event", lambda kind, **f: None)
+        monkeypatch.setattr(backend, "exec_argv", lambda *a, **k: ["sh", "-c", "exec sleep 30"])
+        def kill(self):
+            # The child ends just before the kill reaches it.
+            self.terminate()
+            self.wait()
+            raise ProcessLookupError(3, "No such process")
+        monkeypatch.setattr(subprocess.Popen, "kill", kill)
+        res = ses.exec_command("proj", "x", timeout_seconds=1)
+        assert res["ok"] is False and res["error_code"] == "timeout"
+
+    def test_run_bounded_runs_and_kills(self):
+        done = ses._run_bounded("proj", ["sh", "-c", "echo out; echo err >&2; exit 4"], 10)
+        assert (done.returncode, done.stdout, done.stderr) == (4, "out\n", "err\n")
+        start = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            ses._run_bounded("proj", ["sh", "-c", "exec sleep 30"], 1)
+        assert time.monotonic() - start < 10
 
 
 # --- session_invoke ----------------------------------------------------------

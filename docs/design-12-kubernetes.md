@@ -302,8 +302,14 @@ at `&&`, `||`, `;`, `|`, `&` and newlines outside quotes, as Claude checks a com
 each part starting with a listed command; a command or process substitution, an open quote, or
 bash's `$'...'` or `$"..."` quoting, or a comment (a `#` starting a word) is denied: in `$'...'`
 a `\'` does not end the string, and in a comment a quote opens nothing, so a plain quote toggle
-would read `git $'\'' ; rm -rf ~ ; git '\'` as one command where bash runs three. Claude's tools that ask no permission (TodoWrite, ToolSearch, Glob ...) get no
-decision, as `dontAsk` ran them. The hook matches rules as Claude does: an `Edit(path)`
+would read `git $'\'' ; rm -rf ~ ; git '\'` as one command where bash runs three. A call the
+list allows and every check passes gets `permissionDecision: "allow"`, with a reason, so the
+hook is the one authority over the agent's tools, with `dontAsk`'s effective set (2026-11-27,
+below). Claude's tools that ask no permission and the list does not name (TodoWrite,
+ToolSearch ...) get no decision, as `dontAsk` ran them; Read, Grep and Glob are named, and get
+the allow. AskUserQuestion gets no decision either: its permission step is the question itself,
+so an allow would answer it with nothing, while no decision on a listed AskUserQuestion opens
+the real question. The hook matches rules as Claude does: an `Edit(path)`
 rule covers every tool that edits files (Write, Edit, NotebookEdit, MultiEdit), and a
 `Write(path)` rule matches nothing (code.claude.com/docs, permissions). The list's first
 `Write(//tmp/**)` therefore allowed no write under `dontAsk`; it is `Edit(//tmp/**)` now.
@@ -319,8 +325,21 @@ container nobody is there to answer, so the agent sits at `waiting_on_permission
 the live check stalled: the agent ran `cd <working copy> && git ...`, both parts listed, and
 Claude asked before the cd. The denial's reason names what to write instead (`git -C <dir>`,
 `gh -C <dir>`, absolute paths, `/tmp` files), so the agent corrects itself and goes on. The hook
-adds no allow: a call it lets through still goes on to Claude's own check of the same list, which
-stays as an extra layer. The shapes it models come from the Claude Code documentation it cites
+allows explicitly what it has checked: at first it gave no decision on a listed call, leaving it
+to Claude's own check of the same list, and that check still asked about listed calls, with
+nobody there, three times live (Claude Code 2.1.332): the cd before git above; and
+`git -C <worktree> log ...; git -C <worktree> diff --stat ...; gitctl protection <repo>`, a plain
+"Do you want to proceed?" offering "allow reading from <worktree> from this project", since
+Claude asks before reads outside its working folder. Under `dontAsk` none of these asked. The
+safety shapes are still denied, not allowed past their prompt, and a call off the list is still
+denied, so the allow set does not widen (`tests/unit/test-git-agent.sh`: with an empty list the
+hook allows nothing, and each call it allows stops being allowed when the one rule that carries
+it is taken off the list). As defence in depth, in case Claude asks about a read of a working
+copy regardless, the user's disk is one of Claude's working folders: `git-claude` passes
+`--add-dir <disk>` (the flag form of `permissions.additionalDirectories`), the disk named by
+the holder's settings (`disk=`): `/home/<user>` on Kubernetes, the user's home on their machine
+on Docker, where the added working copies are mounted at their own paths. It is not in the
+managed settings because that file is fixed in the image and the path is the user's. The shapes it models come from the Claude Code documentation it cites
 (permissions: "Read-only commands", "Compound commands", "Redirections"; permission modes:
 "Protected paths") and change with Claude Code, so they are checked again on each upgrade of the
 image's Claude; a shape it misses shows up as the git agent at `waiting_on_permission`. So the
@@ -330,7 +349,7 @@ so, and the hook refuses one). When
 the hook itself fails (a crash, a non-zero exit other than 2, or its timeout), Claude Code
 treats it as a non-blocking error and the call goes on through the normal permission flow
 (code.claude.com/docs, hooks: "staying silent doesn't approve it"): in the default mode a
-listed call runs and any other asks, so aidc shows the agent `waiting_on_permission`. A failed
+listed call runs or asks and any other asks, so aidc shows the agent `waiting_on_permission`. A failed
 hook never runs a call the list does not allow; it can only leave one waiting. Input the hook
 cannot read, or a list it cannot read, blocks the call (exit 2). The Deployment carries the reserved session label `aidc/session: git`
 (not in its selector), so `aidc list` shows it, `aidc attach|logs|status git` reach it

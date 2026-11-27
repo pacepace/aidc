@@ -56,6 +56,17 @@ What changes in use:
   reason saying what to write instead, any call Claude Code would stop at its own safety prompt
   for (unquoted globs, redirects outside `/dev/null` and `/tmp`, writes to protected paths,
   commands it cannot parse), which nobody is there to answer.
+- The git agent no longer stops at a "Do you want to proceed?" prompt for a call its allow list
+  allows, such as `git -C <worktree> log` reading a working copy outside its own folder. Its
+  hook now allows explicitly each call that is on the list and passes its checks, instead of
+  leaving it to Claude Code's own check, which asked with nobody there (three times in live
+  runs). Calls off the list and Claude's safety shapes are still refused, so the agent can do
+  nothing it could not do before; its question tool is left alone, so the question still opens.
+  The agent's Claude also counts the user's disk (`/home/<user>` on Kubernetes, your home on
+  Docker) as one of its working folders.
+- `session_exec` answers `timeout` when a command that left a child running in the background
+  times out, instead of failing with `PermissionError` from killing it; the failed kill is
+  logged.
 - The git agent's Claude runs in `~/work` in the git container, not in its home. Claude Code
   trusts a home folder for one run only, so after every restart the agent stopped at the
   folder-trust prompt with no one there to answer it. Each start now marks `~/work` trusted and

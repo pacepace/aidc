@@ -532,8 +532,11 @@ hook() { # TOOL FIELD VALUE
         | bash "$GITCTL/claude-hook.sh" "$GITCTL/managed-settings.json" 2>&1); HRC=$?
 }
 blocked() { local d="$1"; shift; hook "$@"; if [ "$HRC" = 2 ]; then pass "hook blocks: $d"; else fail "hook let through: $d ($HOUT)"; fi; }
+# Allowed: past the guard rules and the allow list, so the hook allows it explicitly (no
+# decision would leave it to Claude's own prompt, which no one answers here).
 allowed() { local d="$1"; shift; hook "$@"
-    if [ "$HRC" = 0 ] && [ -z "$HOUT" ]; then pass "hook allows: $d"; else fail "hook blocked: $d ($HRC $HOUT)"; fi; }
+    if [ "$HRC" = 0 ] && [ "$(printf '%s' "$HOUT" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null)" = allow ]; then
+        pass "hook allows: $d"; else fail "hook blocked: $d ($HRC $HOUT)"; fi; }
 blocked "sudo" Bash command "sudo -u gitcred /opt/aidc/lib/gitctl/gitctl.sh status"
 blocked "su" Bash command "echo x | su gitcred -c id"
 blocked "reading the login's home" Bash command "cat /var/lib/gitctl/gitcred/gh/hosts.yml"

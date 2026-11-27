@@ -67,7 +67,8 @@ assert_eq "and a shell write to it" 2 "$(hook Bash command 'echo x >> /etc/claud
 
 echo "=== the hook holds the allow list (the default permission mode, as dontAsk did) ==="
 # decide <tool call JSON>: what the hook decides, run as the managed settings run it (with the
-# image's managed-settings.json): "none" (no decision: Claude's own check of the allow list
+# image's managed-settings.json): "allow" (a permissionDecision allow: the list allows it and
+# every check passed, so Claude's own prompt is skipped), "none" (no decision: Claude's own check
 # follows), "deny: <reason>" (a permissionDecision deny), or "blocked" (exit 2).
 decide() {
     local out rc
@@ -76,14 +77,17 @@ decide() {
     elif [ "$rc" != 0 ]; then echo "exit $rc"
     elif [ -z "$out" ]; then echo none
     else printf '%s' "$out" | jq -r 'if .hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"
-        then "deny: " + .hookSpecificOutput.permissionDecisionReason else "other: " + tostring end' 2>/dev/null || echo "unreadable: $out"; fi
+        then "deny: " + .hookSpecificOutput.permissionDecisionReason
+        elif .hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "allow"
+            and (.hookSpecificOutput.permissionDecisionReason | startswith("aidc gitctl: on the git agent'"'"'s allow list"))
+        then "allow" else "other: " + tostring end' 2>/dev/null || echo "unreadable: $out"; fi
 }
 bash_call() { jq -n -c --arg c "$1" '{tool_name: "Bash", tool_input: {command: $c}}'; }
 denied() { case "$2" in "deny: "*) pass "$1";; *) fail "$1 (got '$2')";; esac; }
-assert_eq "an allowed Bash command gets no decision" none "$(decide "$(bash_call 'git status')")"
-assert_eq "...nor a compound of allowed ones, a pipe, a redirect, a quoted separator" none \
+assert_eq "an allowed Bash command is allowed explicitly (Claude would prompt, no one answers)" allow "$(decide "$(bash_call 'git status')")"
+assert_eq "...and a compound of allowed ones, a pipe, a redirect, a quoted separator" allow \
     "$(decide "$(bash_call 'git -C /home/alice/code/proj log --oneline -3 2>&1 | git-requests list; gitctl fetch /home/alice/code/proj; git commit -m "a; b | c && d"')")"
-assert_eq "...nor a bare listed command" none "$(decide "$(bash_call 'git')")"
+assert_eq "...and a bare listed command" allow "$(decide "$(bash_call 'git')")"
 denied "a Bash command the list does not name is denied, with a reason" "$(decide "$(bash_call 'cat /etc/passwd')")"
 assert_has "...naming the command" "the command cat" "$(decide "$(bash_call 'cat /etc/passwd')")"
 denied "...also behind an allowed one" "$(decide "$(bash_call 'git status && curl https://example.org')")"
@@ -99,8 +103,8 @@ denied "ANSI-C quoting is denied: git \$'\\'' ; rm -rf ~ ; git '\\' is three com
 assert_has "...naming the quoting" "quoting" "$(decide "$(bash_call "git \$'\\'' ; rm -rf ~ ; git '\\'")")"
 denied "...and any \$'...' outside quotes" "$(decide "$(bash_call "git commit -m \$'a\\nb'")")"
 denied "...and locale quoting \$\"...\"" "$(decide "$(bash_call 'git commit -m $"a; b"')")"
-assert_eq "a \$' inside double quotes is plain text (no decision)" none "$(decide "$(bash_call "git commit -m \"cost \$'5\"")")"
-assert_eq "...and an escaped \\\$' too" none "$(decide "$(bash_call "git commit -m \\\$'x'")")"
+assert_eq "a \$' inside double quotes is plain text (allowed)" allow "$(decide "$(bash_call "git commit -m \"cost \$'5\"")")"
+assert_eq "...and an escaped \\\$' too" allow "$(decide "$(bash_call "git commit -m \\\$'x'")")"
 # A # starting a word begins a comment in bash, where a quote opens nothing: bash runs four
 # commands here (git a; git b; rm -rf ~; git c) where a quote toggle would see one quoted
 # string, whose lines both start with git.
@@ -108,7 +112,7 @@ denied "a comment is denied: git a #' / git b ; rm -rf ~ ; git c #' is four comm
     "$(decide "$(bash_call "git a #'"$'\n'"git b ; rm -rf ~ ; git c #'")")"
 denied "...also after a separator" "$(decide "$(bash_call "git status;#'"$'\n'"rm -rf ~")")"
 denied "...or a redirect" "$(decide "$(bash_call "git log >#x")")"
-assert_eq "a # inside a word, or quoted, is plain text (no decision)" none \
+assert_eq "a # inside a word, or quoted, is plain text (allowed)" allow \
     "$(decide "$(bash_call "git log --format=x#y && git commit -m '#1' -m \"#2\" && git show \\#3")")"
 denied "an empty command is denied" "$(decide "$(bash_call '')")"
 
@@ -128,17 +132,17 @@ assert_has "...naming the rule" "never cd (or pushd/popd)" "$(decide "$(bash_cal
 denied "...and popd" "$(decide "$(bash_call 'popd')")"
 denied "a bare cd is denied (the folder does not stay put for the agent)" "$(decide "$(bash_call 'cd /home/alice/code/proj')")"
 denied "...and cd with no folder" "$(decide "$(bash_call 'cd')")"
-assert_eq "git -C <dir> log gets no decision (allowed; Claude's own check follows)" none \
+assert_eq "git -C <dir> log is allowed explicitly (Claude asks before reading outside its folder)" allow \
     "$(decide "$(bash_call 'git -C /home/alice/code/proj log --oneline -3')")"
-assert_eq "...and gh -C <dir>" none "$(decide "$(bash_call 'gh -C /home/alice/code/proj pr view 12')")"
+assert_eq "...and gh -C <dir>" allow "$(decide "$(bash_call 'gh -C /home/alice/code/proj pr view 12')")"
 assert_eq "a word that only starts with cd is no cd (cdx is not on the list either)" "deny: aidc gitctl: not allowed for the git agent: the command cdx (Bash: cdx)" \
     "$(decide "$(bash_call 'cdx')")"
 gl=$(decide "$(bash_call 'git add src/*.py')")
 denied "an unquoted glob in git is denied (Claude asks: it could expand to a flag)" "$gl"
 assert_has "...telling the agent to quote it" "quote the pattern" "$gl"
 denied "...and a ? or [" "$(decide "$(bash_call 'git log -- a?c && git log -- [ab]')")"
-assert_eq "a quoted or escaped pattern gets no decision" none "$(decide "$(bash_call "git add 'src/*.py' \"x?\" \\*.md")")"
-assert_eq "...nor ls with a glob (Claude lets ls glob)" none "$(decide "$(bash_call 'ls /home/alice/*')")"
+assert_eq "a quoted or escaped pattern is allowed" allow "$(decide "$(bash_call "git add 'src/*.py' \"x?\" \\*.md")")"
+assert_eq "...and ls with a glob (Claude lets ls glob)" allow "$(decide "$(bash_call 'ls /home/alice/*')")"
 rd=$(decide "$(bash_call 'git log > log.txt')")
 denied "a redirect into the working folder is denied (the default mode asks before that write)" "$rd"
 assert_has "...naming where it may write" "/dev/null or to a file under /tmp" "$rd"
@@ -149,9 +153,9 @@ denied "...and out of /tmp by .." "$(decide "$(bash_call 'git log > /tmp/../home
 denied "...and to a protected path under /tmp (.git, .bashrc)" "$(decide "$(bash_call 'git log > /tmp/w/.git/config')")"
 denied "...and &> or >& to a file" "$(decide "$(bash_call 'git log &> out.txt; git log >& out.txt')")"
 denied "an input redirect from a pattern is denied" "$(decide "$(bash_call 'git apply < /tmp/*.diff')")"
-assert_eq "redirects to /dev/null, to a file under /tmp, fd copies and here-strings get no decision" none \
+assert_eq "redirects to /dev/null, to a file under /tmp, fd copies and here-strings are allowed" allow \
     "$(decide "$(bash_call 'git log 2>/dev/null >/tmp/log.txt 2>&1 && git status >&2 && git apply < /tmp/a.diff && git hash-object --stdin <<< x')")"
-assert_eq "...and a > or * inside quotes is text" none "$(decide "$(bash_call 'git commit -m "a > b * c"')")"
+assert_eq "...and a > or * inside quotes is text" allow "$(decide "$(bash_call 'git commit -m "a > b * c"')")"
 denied "a command ending with && is denied (Claude does not split it)" "$(decide "$(bash_call 'git status &&')")"
 denied "...or with ||" "$(decide "$(bash_call 'git status ||')")"
 denied "...or a |" "$(decide "$(bash_call 'git log |')")"
@@ -161,16 +165,16 @@ pw=$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/.bashrc", 
 denied "a Write to a protected path, even under /tmp, is denied (Claude always asks)" "$pw"
 assert_has "...saying where to write instead" "a plain file under /tmp" "$pw"
 denied "...and an Edit in a .git folder there" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/tmp/w/.git/config", "old_string": "a", "new_string": "b"}}')"
-assert_eq "AskUserQuestion gets no decision (the list allows it)" none \
+assert_eq "AskUserQuestion gets no decision (an allow would answer it with nothing; none opens the question)" none \
     "$(decide '{"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Approve git request r1?", "options": [{"label": "Deny"}, {"label": "Approve"}]}]}}')"
-assert_eq "a listed tool (Read) gets no decision" none "$(decide '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}')"
-assert_eq "a Write under /tmp (the list's Edit(//tmp/**)) gets no decision" none \
+assert_eq "a listed tool (Read) is allowed, outside the working folder too" allow "$(decide '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}')"
+assert_eq "a Write under /tmp (the list's Edit(//tmp/**)) is allowed" allow \
     "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/pr-body.md", "content": "x"}}')"
 # Claude applies Edit rules to every tool that edits files, so the hook does too.
-assert_eq "...nor an Edit there" none \
+assert_eq "...and an Edit there" allow \
     "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/tmp/pr-body.md", "old_string": "a", "new_string": "b"}}')"
-assert_eq "...nor a MultiEdit" none "$(decide '{"tool_name": "MultiEdit", "tool_input": {"file_path": "/tmp/pr-body.md", "edits": []}}')"
-assert_eq "...nor a NotebookEdit" none "$(decide '{"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb", "new_source": "x"}}')"
+assert_eq "...and a MultiEdit" allow "$(decide '{"tool_name": "MultiEdit", "tool_input": {"file_path": "/tmp/pr-body.md", "edits": []}}')"
+assert_eq "...and a NotebookEdit" allow "$(decide '{"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb", "new_source": "x"}}')"
 denied "a Write elsewhere is denied" "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/.bashrc", "content": "x"}}')"
 denied "...and a Write that leaves /tmp by .." "$(decide '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/../home/git/.bashrc", "content": "x"}}')"
 denied "an Edit outside /tmp is denied" "$(decide '{"tool_name": "Edit", "tool_input": {"file_path": "/home/git/x", "old_string": "a", "new_string": "b"}}')"
@@ -187,7 +191,7 @@ assert_has "a call a rule shape the hook does not model covers is denied, naming
     "$(unmodeled '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}')"
 assert_has "...an Edit rule too, for any tool that edits files" "the allow list's rule Edit(./notes/**) has a shape" \
     "$(unmodeled '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/notes/x", "content": "x"}}')"
-assert_eq "...while a write the modeled Edit(//tmp/**) holds still gets no decision" "" \
+assert_has "...while a write the modeled Edit(//tmp/**) holds is still allowed" "allow: aidc gitctl: on the git agent's allow list" \
     "$(unmodeled '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/x", "content": "x"}}')"
 assert_eq "malformed input is blocked" blocked "$(decide 'not json')"
 assert_eq "...and input with no tool name" blocked "$(decide '{"tool_input": {}}')"
@@ -202,8 +206,55 @@ for a in $(jq -r '.permissions.allow[] | @base64' "$G/managed-settings.json"); d
         *'('*) got="a form the test does not know" ;;
         *) got=$(decide "$(jq -n -c --arg t "$a" '{tool_name: $t, tool_input: {}}')") ;;
     esac
-    assert_eq "the list's ${a} is matched by the hook" none "$got"
+    want=allow; [ "$a" = AskUserQuestion ] && want=none
+    assert_eq "the list's ${a} is matched by the hook" "$want" "$got"
 done
+# The live prompt (Claude 2.1.332, "Yes, allow reading from <worktree> from this project"): git -C
+# reads of a worktree outside the agent's working folder, then gitctl. Now allowed by the hook.
+assert_eq "the live call (git -C <worktree> log; git -C ... diff --stat; gitctl protection) is allowed" allow \
+    "$(decide "$(bash_call 'git -C /home/alice/proj-wt log --oneline -5; git -C /home/alice/proj-wt diff --stat main; gitctl protection /home/alice/proj')")"
+assert_eq "Grep and Glob, on the list, are allowed" "allow allow" \
+    "$(decide '{"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "/home/alice/proj"}}') $(decide '{"tool_name": "Glob", "tool_input": {"pattern": "*", "path": "/home/alice/proj"}}')"
+assert_eq "ToolSearch, a tool that asks no permission and is not listed, still gets no decision" none \
+    "$(decide '{"tool_name": "ToolSearch", "tool_input": {"query": "x"}}')"
+
+# Every "allow" is for a call the list allows: the same calls judged against other lists.
+# decide_with SETTINGS CALL: decide, against SETTINGS.
+decide_with() { printf '%s' "$2" | bash "$G/claude-hook.sh" "$1" 2>/dev/null | jq -r '.hookSpecificOutput.permissionDecision // "none"' 2>/dev/null || echo none; }
+corpus=(
+    "$(bash_call 'git status')" "$(bash_call 'git')" "$(bash_call 'ls /home/alice/*')"
+    "$(bash_call 'git -C /home/alice/code/proj log --oneline -3 2>&1 | git-requests list; gitctl fetch /home/alice/code/proj')"
+    "$(bash_call 'gh -C /home/alice/code/proj pr view 12')" "$(bash_call 'git log 2>/dev/null >/tmp/log.txt')"
+    "$(bash_call 'cat /etc/passwd')" "$(bash_call 'cd /x && git log')" "$(bash_call 'git add src/*.py')"
+    '{"tool_name": "Read", "tool_input": {"file_path": "/home/git/x"}}'
+    '{"tool_name": "Grep", "tool_input": {"pattern": "x"}}' '{"tool_name": "Glob", "tool_input": {"pattern": "x"}}'
+    '{"tool_name": "Write", "tool_input": {"file_path": "/tmp/pr-body.md", "content": "x"}}'
+    '{"tool_name": "Edit", "tool_input": {"file_path": "/tmp/pr-body.md", "old_string": "a", "new_string": "b"}}'
+    '{"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb", "new_source": "x"}}'
+    '{"tool_name": "Write", "tool_input": {"file_path": "/home/git/x", "content": "x"}}'
+    '{"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "x"}}'
+    '{"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}'
+    '{"tool_name": "TodoWrite", "tool_input": {"todos": []}}' '{"tool_name": "ToolSearch", "tool_input": {"query": "x"}}'
+)
+jq '.permissions.allow = []' "$G/managed-settings.json" > "$S/empty-allow.json"
+n_allowed=0 bad_empty="" bad_dep=""
+for c in "${corpus[@]}"; do
+    [ "$(decide_with "$S/empty-allow.json" "$c")" = allow ] && bad_empty+="$c "
+    [ "$(decide_with "$G/managed-settings.json" "$c")" = allow ] || continue
+    n_allowed=$((n_allowed + 1)) dep=no
+    # Some rule of the list must carry it: without that one rule the call is no longer allowed.
+    for a in $(jq -r '.permissions.allow[] | @base64' "$G/managed-settings.json"); do
+        a=$(printf '%s' "$a" | base64 -d)
+        jq --arg a "$a" '.permissions.allow -= [$a]' "$G/managed-settings.json" > "$S/less-allow.json"
+        [ "$(decide_with "$S/less-allow.json" "$c")" = allow ] || { dep=yes; break; }
+    done
+    [ "$dep" = yes ] || bad_dep+="$c "
+done
+assert_eq "with an empty allow list the hook allows none of the calls" "" "$bad_empty"
+assert_eq "...and each call it allows with the list is allowed by one of the list's rules (taking it away stops it)" "" "$bad_dep"
+assert_eq "...for the 12 calls of the corpus the list allows" 12 "$n_allowed"
+assert_eq "AskUserQuestion taken off the list is denied, not left to Claude" deny \
+    "$(jq '.permissions.allow -= ["AskUserQuestion"]' "$G/managed-settings.json" > "$S/no-ask.json"; decide_with "$S/no-ask.json" '{"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}')"
 
 echo "=== the managed settings: the git verbs, reads and the question tool; nothing waits on a prompt ==="
 ms="$G/managed-settings.json"
@@ -350,6 +401,19 @@ assert_not_has "a transcript with no message is not resumed" "--continue" "$(cat
 printf '{"type":"user","message":{}}\n' >> "$proj/a.jsonl"
 HOME="$H" bash "$G/git-claude.sh"
 assert_has "a conversation is resumed after a restart" "--continue" "$(cat "$H/claude.args")"
+# The user's disk (the holder's settings' disk=: /home/<user> on Kubernetes, the user's home on
+# Docker) is one of Claude's working folders, so its reads of working copies never ask.
+DK="$S/disk/alice"; mkdir -p "$DK"
+gcs() { printf 'requests=/x\ndisk=%s\nmode=ask\n' "$1" > "$S/git-settings"; AIDC_GIT_CLAUDE_SETTINGS="$S/git-settings" HOME="$H" bash "$G/git-claude.sh"; cat "$H/claude.args"; }
+assert_has "the user's disk from the settings is added as a working folder" "--add-dir
+${DK}" "$(gcs "$DK")"
+assert_not_has "...not when the folder is missing" "--add-dir" "$(gcs "$S/disk/nobody")"
+assert_not_has "...nor a path that is not plain" "--add-dir" "$(gcs "$S/disk/../disk/alice")"
+assert_not_has "...nor a relative one" "--add-dir" "$(gcs "disk")"
+assert_not_has "...nor with no settings file" "--add-dir" \
+    "$(AIDC_GIT_CLAUDE_SETTINGS="$S/no-such-settings" HOME="$H" bash "$G/git-claude.sh"; cat "$H/claude.args")"
+assert_eq "the cluster's settings name /home/<user> as the disk" 1 "$(grep -c 'disk=/home/\${AIDC_K8S_USER}' "$AIDC_ROOT/scripts/k8s/manifests.sh")"
+assert_has "Docker's name the user's home" "disk=%s" "$(cat "$AIDC_ROOT/scripts/docker/lib.sh")"
 assert_has "the image puts git-claude on PATH" "ln -s /opt/aidc/lib/gitctl/git-claude.sh /opt/aidc/bin/git-claude" "$df"
 assert_has "the main process starts it in window claude" "tmux send-keys -t main:claude /opt/aidc/bin/git-claude C-m" "$(cat "$G/gitctl-main.sh")"
 assert_has "with a shell window beside it" "-n shell" "$(cat "$G/gitctl-main.sh")"

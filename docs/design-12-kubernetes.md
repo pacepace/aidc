@@ -246,7 +246,19 @@ Session requests (owner rulings 2026-11-24): a session's `gh` is a stand-in
 (the git container's folder, made by `aidc git setup`; sessions may add files there but not
 list it, and read results by id from `results/`), waits up to a minute and prints the result as
 gh would, "requested; waiting for approval" with the id when the request waits for the user,
-or that the git container has not taken it (exit 1) when it still sits in `requests/`. The watcher (`git-requests watch`,
+or that the git container has not taken it (exit 1) when it still sits in `requests/`. The
+stand-in also takes `-C <dir>` (2026-11-27), right after `gh` (`gh -C <dir> pr create ...`),
+right after the subcommand, or anywhere in a `gh issue` call as `-R` is: it runs in that folder,
+as `git -C` does, and finds the working copy from it (`git rev-parse --show-toplevel`) exactly as
+it would after a `cd` there. Real gh has no `-C`. The stand-in has one because the git agent,
+whose `gh` is this same stand-in, must not `cd` (Claude Code asks before a cd followed by git,
+and nobody answers in the git container; see its permission mode below), and the stand-in finds
+its working copy from a folder. Sessions get it too, because the file is shared; nobody needs to
+limit it, since it gives no new access: it names only a folder the caller could already `cd`
+into, and the holder still checks every field of every request (the working copy on the disk,
+its GitHub origin, branches, texts) whatever folder it came from. Bringing the stand-in back in
+line with real gh must keep `-C`: the git agent's procedures (`gh -C <working copy> pr create`,
+`pr merge`, `issue ...`, `aidc push`) and gitctl's refusal text depend on it. The watcher (`git-requests watch`,
 as the request holder `gitreq`, below) moves each request out by rename,
 refuses anything but a plain file, checks every field (known fields only, a working copy on the
 disk with a GitHub origin, branch names, no protected branch, title and body without
@@ -291,12 +303,30 @@ each part starting with a listed command; a command or process substitution, an 
 bash's `$'...'` or `$"..."` quoting, or a comment (a `#` starting a word) is denied: in `$'...'`
 a `\'` does not end the string, and in a comment a quote opens nothing, so a plain quote toggle
 would read `git $'\'' ; rm -rf ~ ; git '\'` as one command where bash runs three. Claude's tools that ask no permission (TodoWrite, ToolSearch, Glob ...) get no
-decision, as `dontAsk` ran them. A call the list allows gets no decision and goes on to
-Claude's own check of the same list, so the hook matches rules as Claude does: an `Edit(path)`
+decision, as `dontAsk` ran them. The hook matches rules as Claude does: an `Edit(path)`
 rule covers every tool that edits files (Write, Edit, NotebookEdit, MultiEdit), and a
 `Write(path)` rule matches nothing (code.claude.com/docs, permissions). The list's first
-`Write(//tmp/**)` therefore allowed no write under `dontAsk`; it is `Edit(//tmp/**)` now. Apart
-from those writes the effective allow set is the one `dontAsk` enforced. When
+`Write(//tmp/**)` therefore allowed no write under `dontAsk`; it is `Edit(//tmp/**)` now.
+
+The hook also denies, with guidance, calls the list allows that would trip Claude Code's own
+safety prompts (2026-11-27): a `cd`, `pushd` or `popd` (alone or before other commands); an
+unquoted glob (outside `ls`); a redirect to anything but `/dev/null` or an absolute path under
+`/tmp`, or an input redirect from a pattern; a write, by redirect or file tool, to a protected
+path (`.git/`, `.claude/`, shell rc files and the rest of Claude Code's list); and a command it
+cannot parse (over 10,000 characters, or ending in an operator). Why: in the default mode Claude
+asks before such a call whatever the allow list or a hook's silence says, and in the git
+container nobody is there to answer, so the agent sits at `waiting_on_permission`. That is how
+the live check stalled: the agent ran `cd <working copy> && git ...`, both parts listed, and
+Claude asked before the cd. The denial's reason names what to write instead (`git -C <dir>`,
+`gh -C <dir>`, absolute paths, `/tmp` files), so the agent corrects itself and goes on. The hook
+adds no allow: a call it lets through still goes on to Claude's own check of the same list, which
+stays as an extra layer. The shapes it models come from the Claude Code documentation it cites
+(permissions: "Read-only commands", "Compound commands", "Redirections"; permission modes:
+"Protected paths") and change with Claude Code, so they are checked again on each upgrade of the
+image's Claude; a shape it misses shows up as the git agent at `waiting_on_permission`. So the
+effective allow set is narrower than the one `dontAsk` enforced: `Bash(cd *)` was in it and has
+left the list, and must not return (the git agent never changes folder; `gitctl/CLAUDE.md` says
+so, and the hook refuses one). When
 the hook itself fails (a crash, a non-zero exit other than 2, or its timeout), Claude Code
 treats it as a non-blocking error and the call goes on through the normal permission flow
 (code.claude.com/docs, hooks: "staying silent doesn't approve it"): in the default mode a

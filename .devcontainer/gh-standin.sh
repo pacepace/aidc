@@ -28,6 +28,8 @@
 #   gh issue close <n> [-c COMMENT] [-r completed|"not planned"] [-R owner/name]
 #   gh issue reopen <n> [-R owner/name]
 #   gh -C <dir> <any of the above>                                   run in that working copy, as git -C
+#                                   (-C <dir> may also come right after the subcommand, and
+#                                   anywhere in a gh issue call, as -R does)
 #
 # The request folder belongs to the git container's request holder (gitreq, uid 2003): a session
 # (or the git agent, whose gh is this same stand-in) can drop a request into
@@ -46,6 +48,7 @@ usage() { sed -n '/^#   gh /s/^#   //p' "$0"; }
 printable() { LC_ALL=C tr -d '\000-\010\013-\037\177'; }
 
 unsupported() {
+    case "$1" in *" -C"|*" --cwd") die "${1}: -C <dir> goes right after gh (gh -C <dir> pr create ...) or right after the subcommand (gh pr create -C <dir> ...)" ;; esac
     die "${1}: not available in an aidc session. This gh is a stand-in that asks your git container; it does: pr create (pushes too), pr merge (merge commit), pr view, pr list, pr status, repo view, api (issue calls), issue list|view|create|edit|comment|close|reopen, aidc push, aidc request <id> (gh --help)"
 }
 
@@ -484,12 +487,19 @@ gh_api() {
     exit "$rc"
 }
 
-# issue_args ARGS...: -R owner/name taken out (else the working copy's origin): SLUG; the rest in
-# ARGS.
+# chdir_to DIR: -C <dir>, run in that working copy as git -C does.
+chdir_to() {
+    [ -n "${1:-}" ] || die "-C needs a folder"
+    cd -- "$1" 2>/dev/null || die "${1}: no such folder"
+}
+
+# issue_args ARGS...: -R owner/name taken out (else the working copy's origin): SLUG; -C <dir>
+# taken out wherever it is (the working copy to read origin from); the rest in ARGS.
 issue_args() {
     SLUG="" ARGS=()
     while [ $# -gt 0 ]; do
         case "$1" in
+            -C) [ $# -ge 2 ] || die "-C needs a folder"; chdir_to "$2"; shift 2 ;;
             -R|--repo) [ $# -ge 2 ] || die "$1 needs owner/name"; SLUG="$2"; shift 2 ;;
             --repo=*) SLUG="${1#--repo=}"; shift ;;
             *) ARGS+=("$1"); shift ;;
@@ -641,11 +651,25 @@ issue_state() { # close|reopen ARGS...
 }
 
 # -C <dir>: run in that working copy, as git -C does, for a caller that does not cd into it (the
-# git agent: Claude Code asks before a cd followed by git, and no one is there to answer).
-if [ "${1:-}" = -C ]; then
-    { [ $# -ge 2 ] && [ -n "$2" ]; } || die "-C needs a folder"
-    cd -- "$2" 2>/dev/null || die "${2}: no such folder"
-    shift 2
+# git agent: Claude Code asks before a cd followed by git, and no one is there to answer). Real
+# gh has no -C; this one takes it right after gh, or right after the subcommand (and gh issue
+# anywhere, in issue_args). It gives no new access: the holder checks every request it writes.
+while [ "${1:-}" = -C ]; do
+    [ $# -ge 2 ] || die "-C needs a folder"
+    chdir_to "$2"; shift 2
+done
+case "${1:-} ${2:-}" in
+    "pr "*|"repo view"|"aidc "*|"issue "*) words=2 ;;
+    "api "*) words=1 ;;
+    *) words=0 ;;
+esac
+if [ "$words" -gt 0 ] && [ $# -gt "$words" ] && [ "${@:$((words + 1)):1}" = -C ]; then
+    sub=("${@:1:$words}"); shift "$words"
+    while [ "${1:-}" = -C ]; do
+        [ $# -ge 2 ] || die "-C needs a folder"
+        chdir_to "$2"; shift 2
+    done
+    set -- "${sub[@]}" "$@"
 fi
 
 case "${1:-} ${2:-}" in

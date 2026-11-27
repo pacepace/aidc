@@ -710,6 +710,19 @@ issue_gh issue view 12 --json state,labels -q '.state + " " + .labels[0].name'
 assert_eq "gh issue view, as gh's JSON (the pr skill reads .state)" "0|OPEN bug" "$RC|$OUT"
 issue_gh issue list --json number,title
 assert_eq "gh issue list leaves the pull requests out" "0|[12]" "$RC|$(printf '%s' "$OUT" | jq -c '[.[].number]')"
+# The form the git agent's CLAUDE.md teaches (gh -C <working copy> issue ...), run from
+# elsewhere, and -C in the other places the stand-in takes it.
+wc=$(pwd)
+OUT=$(cd / && watching 8; AIDC_GH_WAIT=15 bash "$GH" -C "$wc" issue list --json number 2>&1); RC=$?; wait
+assert_eq "gh -C <working copy> issue list, from elsewhere: the working copy's repo" "0|[12]" "$RC|$(printf '%s' "$OUT" | jq -c '[.[].number]')"
+OUT=$(cd / && watching 8; AIDC_GH_WAIT=15 bash "$GH" issue list -C "$wc" --json number 2>&1); RC=$?; wait
+assert_eq "gh issue list -C <working copy> (after the subcommand) works too" "0|[12]" "$RC|$(printf '%s' "$OUT" | jq -c '[.[].number]')"
+OUT=$(cd / && watching 8; AIDC_GH_WAIT=15 bash "$GH" issue view 12 --json state -C "$wc" -q .state 2>&1); RC=$?; wait
+assert_eq "...and anywhere in a gh issue call, as -R" "0|OPEN" "$RC|$OUT"
+OUT=$(cd / && bash "$GH" pr view 12 --json number -C "$wc" 2>&1); RC=$?
+assert_eq "a -C the stand-in does not take says where it goes" "1|gh: gh pr view -C: -C <dir> goes right after gh (gh -C <dir> pr create ...) or right after the subcommand (gh pr create -C <dir> ...)" "$RC|$OUT"
+OUT=$(cd / && bash "$GH" pr view -C 2>&1); RC=$?
+assert_eq "-C after the subcommand with no folder fails" "1|gh: -C needs a folder" "$RC|$OUT"
 issue_gh issue create -t "New" -b "Text." -l bug
 assert_eq "gh issue create prints the new issue's URL" "0|https://github.com/o/r/issues/14" "$RC|$OUT"
 issue_gh issue close 12 -r "not planned"

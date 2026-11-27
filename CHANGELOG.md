@@ -46,6 +46,16 @@ What changes in use:
   in sessions and in the git agent, through the git container. They run at once, on repos you
   added only, with no AI attribution, and never delete, transfer or lock an issue.
 - `aidc logs git --component gitreq` shows the request holder's log on Kubernetes.
+- The `gh` stand-in takes `-C <dir>`, as `git -C` does: `gh -C <working copy> pr create ...`
+  (also right after the subcommand, and anywhere in a `gh issue` call). Real gh has no `-C`. The
+  git agent must not `cd` (Claude Code asks before a cd followed by git, and nobody answers in
+  the git container), and the stand-in finds its working copy from a folder, so the agent names
+  the folder instead. Sessions have it too, because the stand-in is the same file. It gives no
+  new access: the holder still checks every request, whatever folder it came from.
+- The git agent never changes folder: its hook refuses `cd`, `pushd` and `popd`, and, with a
+  reason saying what to write instead, any call Claude Code would stop at its own safety prompt
+  for (unquoted globs, redirects outside `/dev/null` and `/tmp`, writes to protected paths,
+  commands it cannot parse), which nobody is there to answer.
 - The git agent's Claude runs in `~/work` in the git container, not in its home. Claude Code
   trusts a home folder for one run only, so after every restart the agent stopped at the
   folder-trust prompt with no one there to answer it. Each start now marks `~/work` trusted and

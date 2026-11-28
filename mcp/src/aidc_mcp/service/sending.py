@@ -1205,8 +1205,8 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                     f"git_request_not_decided, git_request.failed): the git container says "
                     f"\"{holder_said}\". Git request {decision.request_id} is failed now. "
                     f"{menu} Nothing was typed into the session. Do NOT re-send the answer: it "
-                    "would decide nothing. Tell the user why it failed; once that is fixed "
-                    "(for example aidc git login), the session asks again.")
+                    "would decide nothing. Tell the user why it failed (the git container's "
+                    "words above); once its cause is fixed, the session can ask again.")
     elif gone and decided.get("already_decided"):
         # Decided before this answer (another answer won the race, or it was decided
         # outside): the question is gone with it, and nothing is left to send.

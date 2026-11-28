@@ -9,4 +9,4 @@
 
 ## Tests and the real host
 
-- Before a test's first case runs the aidc CLI or a script that can call docker or kubectl, put stubs first on PATH, and make the test refuse to run unless `command -v docker` (and `kubectl`) resolves to the stub. A real tool left on PATH is harmless only while the code it reaches does nothing. Instance: 2026-11-28, test-k8s-claude.sh's "on Docker" case had passed against the real docker for as long as that path only printed text. Once the Docker broker gave it real work, the case built aidc/broker:v1.9.10 and started a broker container, its volumes and its network on the owner's host.
+- Before a test runs the aidc CLI or a script that can reach docker or kubectl, put stubs first on PATH and refuse to run unless `command -v` finds the stubs, because a real docker on PATH once started a broker on the owner's host (2026-11-28).

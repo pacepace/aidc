@@ -1199,7 +1199,7 @@ mcp:
     callback_address: ""              # the orchestrator's IPv4 as the cluster reaches it, when its callback_url
                                       # names a host this machine cannot resolve (default: resolved here)
 
-# Only relevant for sessions in a cluster with your Claude account broker (aidc claude account add):
+# Only relevant with your Claude account broker (aidc claude account add), on Docker or in a cluster:
 claude_accounts:                      # the order accounts are used in; after the last comes the first
   - {name: work, switch_at: 90}       # switch_at: the weekly usage (%) at which aidc moves away from it
   - {name: personal, switch_at: 70}   #   (default 90); accounts not listed come after, by name

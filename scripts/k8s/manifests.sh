@@ -438,12 +438,8 @@ _k8s_claude_shared_cmd() {
 # k8s_render_broker_config: the broker's settings from the user's config (claude_accounts: the
 # order and each account's switch_at; claude_account_switch: auto or wait) as config.json.
 k8s_render_broker_config() {
-    local cfg json
-    cfg=$(_aidc_global_config_file)
-    json='{}'
-    if [ -n "$cfg" ]; then
-        json=$(aidc_yq '{"accounts": ((.claude_accounts // []) | map({"name": .name, "switch_at": (.switch_at // 90)})), "switch": (.claude_account_switch // "auto")}' -o=json -I=0 "$cfg" 2>/dev/null) || json='{}'
-    fi
+    local json
+    json=$(aidc_claude_broker_config_json)
     AIDC_BROKER_CFG="$json" yq -n '
         .apiVersion = "v1" | .kind = "ConfigMap"
         | .metadata.name = "'"${K8S_BROKER_CONFIG}"'"

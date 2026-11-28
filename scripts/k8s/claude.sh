@@ -50,9 +50,18 @@ Until you add an account, a session logs in itself (aidc attach <name>, then /lo
 USAGE
 }
 
+# wants_help <args...>: 0 when any of them asks for help (the verbs take no flag of that name), so
+# `account use --help` is never an account name.
+wants_help() {
+    local a
+    for a in "$@"; do case "$a" in -h|--help) return 0 ;; esac; done
+    return 1
+}
+
 claude_account() {
     local verb="${1:-}" state rc=0
     shift || true
+    if wants_help "$@"; then usage; return 0; fi
     case "$verb" in
         add)
             [ -n "${1:-}" ] || die "usage: aidc claude account add <name>"
@@ -90,6 +99,7 @@ claude_require_running() {
 claude_broker() {
     local verb="${1:-}" state rc=0
     shift || true
+    if wants_help "$@"; then usage; return 0; fi
     case "$verb" in
         start) k8s_broker_start "$ns" || exit 1; claude_broker status ;;
         stop)
@@ -109,6 +119,7 @@ claude_broker() {
 VERB="${1:-}"
 shift || true
 case "$VERB" in ""|help|-h|--help) usage; exit 0 ;; esac
+case "$VERB" in account|broker) if wants_help "$@"; then usage; exit 0; fi ;; esac
 k8s_require || exit 1
 ns=$(k8s_user_ns "$AIDC_K8S_USER")
 case "$VERB" in

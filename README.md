@@ -408,7 +408,7 @@ Each session owns its Claude config directory: `CLAUDE_CONFIG_DIR=/home/vscode/.
 
 **Why not share the host's login?** Claude Code replaces `.credentials.json` and `.claude.json` by writing a new file and renaming it into place, on every refresh and every `/login`. Many Claude processes on one host coexist because they share the same *directory*: a write lock serialises refreshes and each process re-reads the file when it changes. A single-file bind mount breaks both halves. After the host's first refresh the container is left holding the old inode ([anthropics/claude-code#18443](https://github.com/anthropics/claude-code/issues/18443)), and the container's own writes fail because you cannot rename over a mount point. That is what made in-container logins expire after a few hours and account switches not stick. Sharing the whole `~/.claude` *directory* would keep the renames working, but it hands the sandboxed container every project's memory and history, and `~/.claude.json` sits at the home root outside any directory that could be shared, so the container gets its own.
 
-**Two ways in. Both are supported; pick per host.**
+**Three ways in. All are supported; pick per host.** With a Claude account broker running (way 3) new sessions use it; without one, way 1 or 2.
 
 **1. Log in inside the session (default).** The first launch of a new session shows Claude's login prompt:
 
@@ -428,6 +428,18 @@ aidc claude-token clear       # removes it; new sessions log in inside instead
 ```
 
 Trade-offs: running `claude setup-token` invalidates the host's current login once (`/login` on the host afterwards); the token is **inference-only**, so **Remote Control does not work** in sessions that use it, and `/login` inside such a session is ignored while the token is set; rotate yearly by re-running setup. Billing stays on your subscription. Existing sessions keep whatever they were created with; `aidc kill` + `aidc create` moves one onto the other path.
+
+**3. Your Claude accounts, logged in once (the account broker).** The same broker as on Kubernetes, in a container of its own on this machine:
+
+```bash
+aidc claude account add work       # starts the broker (first time), then Claude's own login in it
+aidc claude account add personal   # more accounts are used in turn
+aidc claude account list           # order, threshold, usage (with its source and age), expiry
+aidc claude account use personal   # switch every broker session now
+aidc claude broker start|stop|status|logs
+```
+
+The broker (`aidc-claude-broker`) keeps each account's login, refresh token included, on a volume only it mounts (`aidc-claude-accounts`), renews each access token by running Claude Code itself before it expires, and writes the active account's credentials, **without the refresh token**, into every broker session's Claude config dir. A session made while it runs starts logged in, with no `/login`: its Claude config dir is its own folder of the `aidc-claude-config` volume (mounted at `/home/vscode/.claude` over dev-home's), and it gets no long-lived token (that would override the broker's). Accounts are switched as each one's weekly usage reaches its threshold (`claude_accounts`, `claude_account_switch`, under Config), or with `account use`; a running session takes the new account on its next message and keeps its conversation. It stays a broker session across `aidc restart` and `aidc upgrade`; `aidc kill` removes its folder. Sessions made before the broker, or while it is stopped, keep way 1 or 2. The git agent moves to the broker at its next `aidc git setup`. The broker's image (`aidc/broker`) is built the first time; `aidc rebuild` rebuilds it from then on. Your own `~/.claude` is never written.
 
 ### New package versions wait 14 days
 
@@ -671,7 +683,9 @@ browser. Commits it makes show as you (your GitHub name; your public email, else
 noreply address for your account), unsigned. `aidc git logout` removes the login. Its agent (a
 Claude of its own) needs its own Claude login: `aidc git attach` opens its terminal (window
 `claude`, and a `shell`), where you log in as in any session; detach with Ctrl-b d. With
-`aidc claude-token` set, the Docker git container takes that token as sessions do.
+`aidc claude-token` set, the Docker git container takes that token as sessions do; with the
+Claude account broker running (`aidc claude account add`), it uses the broker's active account
+instead, from its next `aidc git setup`.
 
 **Add your repos.** Only repos you add reach GitHub through it:
 
@@ -787,6 +801,7 @@ with `aidc git approve|deny`.
 | `aidc kill <name>` | Tear down. Audit dir preserved. Overlay volumes (container-only paths) removed. |
 | `aidc audit list` / `aidc audit trim [--older-than <age>] [<name>...] [--yes] [--dry-run]` | List kept audit trails (both backends), or remove old or named ones; never a running session's (see "Kept audit trails"). |
 | `aidc clean-env <name>\|--project <path>` | Remove stray container-only-path overlay volumes after a botched session. On Kubernetes (`--backend kubernetes`, or `backend: kubernetes`): what a session that is no longer running left in the cluster, except its audit claim. |
+| `aidc claude account add\|remove\|list\|use`, `aidc claude broker start\|stop\|status\|logs` | Your Claude accounts, logged in once in the account broker and used by every session made while it runs, switched as their weekly usage runs out. Docker by default; `--backend kubernetes` for a cluster's. See "Claude auth" above. |
 | `aidc claude-token <verb>` | Manage a long-lived OAuth token that new sessions use instead of logging in (`setup\|show\|clear`). Inference-only: Remote Control needs an in-session `/login` instead. See "Claude auth" above. |
 | `aidc config [global\|<name>]` | Show / edit config. |
 | `aidc mcp <verb>` | Control-plane lifecycle (see "Driving from another machine" above). |
@@ -909,7 +924,9 @@ will also run on a Kubernetes cluster, with the same commands. What works today:
   its conversation across a switch. Each session's Claude config dir is its own folder of your
   `claude-config` claim, and its conversations and memory (`projects/`) are your disk's
   `.claude/projects`, shared by all your sessions, so a repo has one history.
-  **Until you add an account** there are two ways, as on Docker: log in inside the session
+  `account list` gives each usage number's source (the status line, or a session hitting the
+  limit, which counts as the account's own) and age. The same broker runs on Docker (see "Claude
+  auth" above). **Until you add an account** there are two ways, as on Docker: log in inside the session
   (`aidc attach <name>`, then `/login`), or store a one-year inference token once with `aidc
   claude-token setup` (it runs `claude setup-token` on this machine); every session created
   after that, with no broker running, gets it as `CLAUDE_CODE_OAUTH_TOKEN` from a Secret of its

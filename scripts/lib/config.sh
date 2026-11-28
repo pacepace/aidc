@@ -686,6 +686,21 @@ _aidc_global_config_file() {
     fi
 }
 
+# aidc_claude_broker_config_json: the Claude account broker's settings from the user's config, as
+# one line of JSON ({accounts: [{name, switch_at}], switch}): claude_accounts (the order, each
+# account's switch_at, default 90) and claude_account_switch (auto, the default, or wait). Both
+# backends hand the broker this (a ConfigMap in a cluster, a file in its container on Docker).
+# {} when there is no config or yq cannot read it.
+aidc_claude_broker_config_json() {
+    local cfg json='{}'
+    cfg=$(_aidc_global_config_file)
+    if [ -n "$cfg" ]; then
+        json=$(aidc_yq '{"accounts": ((.claude_accounts // []) | map({"name": .name, "switch_at": (.switch_at // 90)})), "switch": (.claude_account_switch // "auto")}' -o=json -I=0 "$cfg" 2>/dev/null) || json='{}'
+    fi
+    [ -n "$json" ] || json='{}'
+    printf '%s\n' "$json"
+}
+
 # aidc_callback_url_misplaced [file]: the top-level section, other than `orchestrator:`, that
 # holds a callback_url key (a config written before the section was renamed), echoed; returns
 # 1 when there is none. aidc-mcp reads only `orchestrator:` (no fallback). A key is

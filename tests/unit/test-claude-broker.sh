@@ -47,7 +47,9 @@ assert_not_has() {
 #                refresh token rt-<name>, expiring in $C_LOGIN_EXP_S seconds (default 8 hours);
 #                C_NO_REFRESH=1 leaves the refresh token out
 #   -p ...       a refresh, as Claude does before a call: the access token's number goes up and
-#                it expires in 8 hours; C_RENEW_FAIL=1 fails without writing
+#                it expires in 8 hours; C_RENEW_FAIL=1 fails without writing; C_RENEW_NOOP=1
+#                answers ok and leaves the token as it is (Claude Code before its own refresh
+#                window, the last minutes before expiry)
 #   auth logout  nothing
 cat > "$SCRATCH/bin/claude" <<'STUB_CLAUDE_BROKER_r7'
 #!/bin/sh
@@ -64,6 +66,7 @@ case "$*" in
         fi ;;
     "-p "*)
         [ "${C_RENEW_FAIL:-}" = 1 ] && { echo "OAuth token refresh failed: invalid_grant" >&2; exit 1; }
+        [ "${C_RENEW_NOOP:-}" = 1 ] && { echo ok; exit 0; }
         n=$(jq -r '.claudeAiOauth.accessToken | split("-") | last | tonumber' "$f")
         exp=$(( ($(date +%s) + 28800) * 1000 ))
         jq -c --arg t "at-${name}-$((n + 1))" --argjson e "$exp" '.claudeAiOauth.accessToken = $t | .claudeAiOauth.expiresAt = $e' "$f" > "$f.new" && mv "$f.new" "$f"
@@ -144,6 +147,29 @@ broker pass 2>/dev/null
 assert_has "a token within the margin is renewed by running Claude in its folder" "work|-p --model haiku" "$(cat "$C_LOG")"
 assert_eq "the session gets the renewed token" "at-work-2" "$(jq -r .claudeAiOauth.accessToken "$BROKER_ACCESS/s1/.credentials.json")"
 assert_has "the renewal is recorded" "renewed_at" "$(cat "$BROKER_HOME/state.json")"
+
+echo "== a renewal Claude finds not due yet is no failure, and waits for Claude's own window"
+fresh 18
+# The login's own pass is the first try.
+C_LOGIN_EXP_S=3000 C_RENEW_NOOP=1 broker login work >/dev/null 2>"$W/log1"
+assert_has "the prompt that left the token as it was is logged as not due yet" "work: renewal not due yet" "$(cat "$W/log1")"
+assert_not_has "never as a failure" "could not renew" "$(cat "$W/log1")"
+assert_eq "the list shows no renewal failing" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+assert_eq "the next try is set to Claude's window, 240s before expiry" "yes" \
+    "$(jq -r --argjson e "$(( $(jq -r .claudeAiOauth.expiresAt "$BROKER_HOME/accounts/work/.credentials.json") / 1000 ))" \
+        'if .accounts.work.renew_next_s == ($e - 240) then "yes" else "no" end' "$BROKER_HOME/state.json")"
+C_RENEW_NOOP=1 broker pass 2>"$W/log2"; C_RENEW_NOOP=1 broker pass 2>>"$W/log2"
+assert_eq "later passes before then run no prompt (one prompt so far, not one a minute)" "1" "$(grep -c -- '-p --model haiku' "$C_LOG")"
+assert_eq "...and log nothing of it" "" "$(cat "$W/log2")"
+jq '.claudeAiOauth.expiresAt = (now + 200 | floor) * 1000' "$BROKER_HOME/accounts/work/.credentials.json" > "$W/c" \
+    && mv "$W/c" "$BROKER_HOME/accounts/work/.credentials.json"
+C_RENEW_NOOP=1 broker pass 2>"$W/log3"
+assert_has "inside Claude's window, a prompt that still did not refresh is a real failure, said" \
+    "could not renew work: Claude Code ran but did not refresh the token" "$(cat "$W/log3")"
+assert_has "...and shown in the list" "RENEWAL FAILING: Claude Code ran but did not refresh" "$(broker list 2>/dev/null)"
+broker pass 2>"$W/log4"
+assert_has "a refresh then is a renewal" "renewed work" "$(cat "$W/log4")"
+assert_eq "...clearing the failure" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
 
 echo "== a failed renewal shows in the list and in the session's notice"
 fresh 7
@@ -230,6 +256,36 @@ assert_eq "a new one does" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
 ln -s /etc/passwd "$BROKER_ACCESS/s1/.aidc-usage.json"
 broker pass 2>/dev/null
 assert_eq "a usage file that is a symlink is not read" "personal" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+
+echo "== after a weekly-limit switch, the old account's week is never credited to the new one"
+# Seen live: a session's first call hit main's weekly limit; the broker switched it to second;
+# then its status line, still showing that call's numbers, reported main's week as second's.
+fresh 19 '{"accounts":[{"name":"main","switch_at":90},{"name":"second","switch_at":90}]}'
+broker login main >/dev/null 2>&1; broker login second >/dev/null 2>&1
+broker session s1 2>/dev/null
+R_MAIN=$(( $(date +%s) + 86400 ))
+usage s1 main 70 "$R_MAIN"
+broker pass 2>/dev/null
+assert_has "the list gives the usage's source and age" "usage 70% (status line, just now)" "$(broker list 2>/dev/null)"
+assert_eq "list --json too" "statusline" "$(broker list --json | jq -r '.accounts[] | select(.name == "main") | .usage_source')"
+sleep 1
+printf '{"account":"main","at_s":%s,"kind":"weekly"}\n' "$(date +%s)" > "$BROKER_ACCESS/s1/.aidc-limit.json"
+broker pass 2>"$W/log1"
+assert_eq "the weekly limit moves the session to second" "second" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+assert_has "the log names the weekly limit" "session s1 hit the weekly limit of main" "$(cat "$W/log1")"
+assert_eq "the limit event is authoritative: main is at 100%, from the limit" "100 limit" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "main") | "\(.usage) \(.usage_source)"')"
+assert_has "the list says why, and where the number came from" "usage 100% (a session hit its limit, just now) (at its weekly limit (a session hit it))" "$(broker list 2>/dev/null)"
+assert_eq "main stays limited until its week resets" "$R_MAIN" "$(jq -r '.accounts.main.limited_until_s' "$BROKER_HOME/state.json")"
+usage s1 second 100 "$R_MAIN"
+broker pass 2>/dev/null
+assert_eq "a report under second's name carrying main's week is not second's" "null" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "second") | .usage')"
+assert_eq "so second is not marked at its threshold, and the session stays on it" "second" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+assert_not_has "...and nothing claims every account is at a limit" "no account is under its limit" "$(broker list 2>/dev/null)"
+usage s1 second 5 "$(( R_MAIN + 3600 ))"
+broker pass 2>/dev/null
+assert_eq "second's own week is counted" "5" "$(broker list --json | jq -r '.accounts[] | select(.name == "second") | .usage')"
 
 echo "== an account whose login ended (expired, renewal failing) is moved away from"
 fresh 14 '{"accounts":[{"name":"a"},{"name":"b"}]}'

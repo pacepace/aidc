@@ -159,6 +159,13 @@ check "...and a prompt goes through the lease alone, which hands only one it let
 aidc_install_managed_settings "$root" "$reg" false
 check "on Docker neither (the host's status line is the session's own)" \
     "$([ "$(jq -c '[has("statusLine"), (.hooks | has("StopFailure"))]' "$ms")" = '[false,false]' ] && echo yes || echo no)"
+aidc_install_managed_settings "$root" "$reg" false broker bypass
+check "a Docker session the account broker manages: the status line and rate-limit hook the broker reads" \
+    "$([ "$(jq -c '[.statusLine.command, .hooks.StopFailure[0].hooks[0].command]' "$ms")" = '["/usr/local/bin/aidc-claude-usage statusline","/usr/local/bin/aidc-claude-usage rate-limited"]' ] && echo yes || echo no)"
+check "...and nothing else of a cluster session's: no lease (its history is its own), no bypass-warning skip" \
+    "$([ "$(jq -c '[(.hooks | keys), has("skipDangerousModePermissionPrompt")]' "$ms")" = '[["Notification","SessionStart","Stop","StopFailure","UserPromptSubmit"],false]' ] && echo yes || echo no)"
+check "the entrypoint asks for the broker form when aidc create said the broker manages the session" \
+    "$(grep -q '\[ -z "$_managed_cluster" \] && \[ "${AIDC_CLAUDE_BROKER:-}" = 1 \] && _managed_cluster=broker' "$AIDC_ROOT/.devcontainer/entrypoint.sh" && echo yes || echo no)"
 aidc_install_managed_settings "$root" "$reg" false cluster bypass
 check "a cluster session launched with bypass skips the bypass-permissions warning (owner ruling 2026-11-27, cluster sessions trust their start folder)" \
     "$([ "$(jq -c '.skipDangerousModePermissionPrompt' "$ms")" = true ] && [ "$(jq -c '.hooks | has("StopFailure")' "$ms")" = true ] && echo yes || echo no)"

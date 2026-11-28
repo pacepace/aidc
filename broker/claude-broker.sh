@@ -49,6 +49,10 @@ BROKER_INTERVAL="${BROKER_INTERVAL:-60}"
 BROKER_GIT_SESSION="${BROKER_GIT_SESSION:-git}"
 # Usage reported longer ago than this says nothing about the account now.
 BROKER_USAGE_FRESH_S="${BROKER_USAGE_FRESH_S:-1800}"
+# Claude Code refreshes an access token only in the last minutes before it expires (seen: 4.5
+# minutes before, Claude Code 2.1.332); a prompt run earlier succeeds on the old token. A renewal
+# that finds the token not due yet tries again this long before its expiry.
+BROKER_CLAUDE_WINDOW_S="${BROKER_CLAUDE_WINDOW_S:-240}"
 # A rate limit with no reset time is taken to last this long.
 BROKER_LIMIT_S="${BROKER_LIMIT_S:-3600}"
 
@@ -184,13 +188,25 @@ access_only() {
         "$(account_creds "$1")" 2>/dev/null
 }
 
+# hhmm <epoch-s>: the time of day, UTC, for the log.
+hhmm() { date -u -d "@${1}" +%H:%M:%SZ 2>/dev/null || printf '%s' "$1"; }
+
 # renew <account>: Claude Code refreshes the account's token when it is within the margin of
-# expiring; recorded in state.json either way. Returns 1 when it is still near expiry after.
+# expiring; recorded in state.json either way. Claude refreshes only in its own last minutes
+# (BROKER_CLAUDE_WINDOW_S): a prompt that ran well and left the token as it was found it not due
+# yet, which is no failure; the next try waits until that window (renew_next_s), so an hour's
+# margin costs two prompts, not one a minute. A prompt that failed, or one inside that window
+# that still left the token unrenewed, is a failure, recorded and said. Returns 1 then.
 renew() {
-    local name="$1" exp now margin out rc=0
+    local name="$1" exp before now margin out rc=0 next
     exp=$(expires_s "$name") now=$(now_s) margin=$(renew_margin_s)
     [ "$exp" -gt $((now + margin)) ] && return 0
-    log "renewing ${name} (its access token expires at $(date -u -d "@${exp}" +%H:%M:%SZ 2>/dev/null || echo "${exp}"))"
+    next=$(state_json | jq -r --arg n "$name" '.accounts[$n].renew_next_s // 0')
+    case "$next" in ''|*[!0-9]*) next=0 ;; esac
+    # Inside Claude's window every pass tries, whatever an earlier try set.
+    [ "$exp" -gt $((now + BROKER_CLAUDE_WINDOW_S)) ] && [ "$next" -gt "$now" ] && return 0
+    before="$exp"
+    log "renewing ${name} (its access token expires at $(hhmm "$exp"))"
     # The cheapest call that makes Claude Code refresh: `claude auth status` only reads the
     # stored login (Claude Code 2.1.332), so a one-word prompt to the smallest model, with no
     # tools, MCP servers, slash commands or session kept.
@@ -198,14 +214,25 @@ renew() {
         timeout 120 "$BROKER_CLAUDE" -p --model haiku --tools "" --strict-mcp-config \
         --disable-slash-commands --no-session-persistence "Reply with the word ok." </dev/null 2>&1) || rc=$?
     exp=$(expires_s "$name") now=$(now_s)
-    if [ "$rc" = 0 ] && [ "$exp" -gt $((now + margin)) ]; then
-        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renewed_at: $at} | del(.renew_error))' \
+    if [ "$rc" = 0 ] && { [ "$exp" -gt $((now + margin)) ] || [ "$exp" -gt "$before" ]; }; then
+        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renewed_at: $at} | del(.renew_error, .renew_next_s))' \
             --arg n "$name" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
         log "renewed ${name}"
         return 0
     fi
-    out=$(printf '%s' "$out" | tr -d '\r' | tail -n 3 | tr '\n' ' ' | head -c 300)
-    state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_error: $e, renew_failed_at: $at})' \
+    if [ "$rc" = 0 ] && [ "$exp" -gt $((now + BROKER_CLAUDE_WINDOW_S)) ]; then
+        next=$((exp - BROKER_CLAUDE_WINDOW_S))
+        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_next_s: $x} | del(.renew_error))' \
+            --arg n "$name" --argjson x "$next" || return 1
+        log "${name}: renewal not due yet (Claude Code refreshes a token only in its last minutes; it expires at $(hhmm "$exp")): next try at $(hhmm "$next")"
+        return 0
+    fi
+    if [ "$rc" = 0 ]; then
+        out="Claude Code ran but did not refresh the token (it expires at $(hhmm "$exp"))"
+    else
+        out=$(printf '%s' "$out" | tr -d '\r' | tail -n 3 | tr '\n' ' ' | head -c 300)
+    fi
+    state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_error: $e, renew_failed_at: $at} | del(.renew_next_s))' \
         --arg n "$name" --arg e "${out:-claude exited ${rc}}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     log "could not renew ${name}: ${out:-claude exited ${rc}}"
     return 1
@@ -232,8 +259,9 @@ usage_reports() {
 }
 
 # rate_limited_since <epoch-s>: the sessions whose Claude hit its rate limit since then, one
-# {session, account, at_s} a line (their StopFailure rate_limit hook's .aidc-limit.json, naming
-# the account it was on).
+# {session, account, at_s, kind} a line (their StopFailure rate_limit hook's .aidc-limit.json,
+# naming the account it was on; kind weekly when Claude said the weekly limit was reached, else
+# rate).
 rate_limited_since() {
     local since="$1" f n
     while IFS= read -r n; do
@@ -242,22 +270,41 @@ rate_limited_since() {
         [ -f "$f" ] && [ ! -L "$f" ] || continue
         jq -c --arg s "$n" --argjson since "$since" '
             select((.at_s | type) == "number" and .at_s > $since and (.account | type) == "string"
-                   and .account != "") | {session: $s, account, at_s}' "$f" 2>/dev/null
+                   and .account != "")
+            | {session: $s, account, at_s, kind: (if .kind == "weekly" then "weekly" else "rate" end)}' "$f" 2>/dev/null
     done < <(sessions)
 }
 
 
-# record_usage: what the sessions reported, into state.json per account (the newest report), and
-# rate limits, which mark the account the session was on as at its limit.
+# JQ_EPOCH: a reset time as Claude Code gives it (epoch seconds) or an ISO time, as epoch seconds;
+# null when there is none.
+JQ_EPOCH='def epoch: if type == "number" then . elif type == "string" then (sub("\\.[0-9]+"; "") | fromdateiso8601? // 0) else null end;'
+
+# record_usage: what the sessions reported, into state.json per account (the newest report, with
+# its source), and rate limits, which mark the account the session was on as at its limit.
+#
+# A report is credited only to the account whose credentials produced it. The session's status
+# line shows the numbers of its last API call, which right after a switch are the previous
+# account's under the new account's name (the wrapper drops those it can tell: claude-usage.sh);
+# here, a report whose week (its reset time) is another account's week, and not the named
+# account's own, is that other account's, and is not counted.
+#
+# A session's limit event is authoritative for the account it was on: a weekly limit makes the
+# account's usage 100% (source limit) until its week resets (its known reset time, else an hour);
+# any other rate limit marks it limited for an hour.
 record_usage() {
-    local reports last limits line s acct t
+    local reports last limits line s acct t kind
     reports=$(usage_reports)
     if [ -n "$reports" ]; then
         state_update '
             reduce ($r | split("\n")[] | select(length > 0) | fromjson | select(.account != "")) as $x
-              (.; if ((.accounts[$x.account].usage_at_s // 0) <= $x.at_s)
+              (.;
+               ($x.resets_at) as $rx
+               | (if $rx == null or ((.accounts[$x.account].resets_at // null) == $rx) then false
+                  else any((.accounts // {}) | to_entries[]; .key != $x.account and .value.resets_at == $rx) end) as $others
+               | if (((.accounts[$x.account].usage_at_s // 0) <= $x.at_s) and ($others | not))
                   then .accounts[$x.account] = ((.accounts[$x.account] // {})
-                       + {usage: $x.seven_day, usage_at_s: $x.at_s, resets_at: $x.resets_at})
+                       + {usage: $x.seven_day, usage_at_s: $x.at_s, resets_at: $x.resets_at, usage_source: "statusline"})
                   else . end)' --arg r "$reports"
     fi
     last=$(state_json | jq -r '.limits_read_s // 0')
@@ -265,17 +312,28 @@ record_usage() {
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         s=$(printf '%s' "$line" | jq -r .session) t=$(printf '%s' "$line" | jq -r .at_s)
-        acct=$(printf '%s' "$line" | jq -r .account)
-        log "session ${s} hit the rate limit of ${acct}"
-        state_update '.accounts[$a] = ((.accounts[$a] // {}) + {limited_until_s: ($t + $d)})' \
-            --arg a "$acct" --argjson t "$t" --argjson d "$BROKER_LIMIT_S"
+        acct=$(printf '%s' "$line" | jq -r .account) kind=$(printf '%s' "$line" | jq -r .kind)
+        if [ "$kind" = weekly ]; then
+            log "session ${s} hit the weekly limit of ${acct}"
+            state_update "${JQ_EPOCH}"'
+                ((.accounts[$a].resets_at // null) | epoch) as $reset
+                | .accounts[$a] = ((.accounts[$a] // {})
+                    + {usage: 100, usage_at_s: $t, usage_source: "limit", limit_kind: "weekly",
+                       limited_until_s: (if $reset != null and $reset > $t then $reset else $t + $d end)})' \
+                --arg a "$acct" --argjson t "$t" --argjson d "$BROKER_LIMIT_S"
+        else
+            log "session ${s} hit the rate limit of ${acct}"
+            state_update '.accounts[$a] = ((.accounts[$a] // {}) + {limited_until_s: ($t + $d), limit_kind: "rate"})' \
+                --arg a "$acct" --argjson t "$t" --argjson d "$BROKER_LIMIT_S"
+        fi
     done <<<"$limits"
     state_update '.limits_read_s = $n' --argjson n "$(now_s)"
 }
 
 # spent_reason <account>: why the account cannot be used now, as far as the broker knows:
-# login_ended (its access token expired and renewing it fails), rate_limited (a session hit its
-# rate limit within the hour), threshold (its weekly usage is at its switch_at and its week has
+# login_ended (its access token expired and renewing it fails), weekly_limit (a session hit its
+# weekly limit, and its week has not reset), rate_limited (a session hit its rate limit within
+# the hour), threshold (its weekly usage is at its switch_at and its week has
 # not reset); "" when it can be used (or nothing is known).
 spent_reason() {
     local name="$1" at now
@@ -285,13 +343,10 @@ spent_reason() {
         printf 'login_ended'
         return 0
     fi
-    state_json | jq -r --arg n "$name" --argjson at "$at" --argjson now "$now" '
+    state_json | jq -r --arg n "$name" --argjson at "$at" --argjson now "$now" "${JQ_EPOCH}"'
         (.accounts[$n] // {}) as $a
-        # resets_at as Claude Code gives it (epoch seconds), or an ISO time
-        | ($a.resets_at | if type == "number" then .
-                          elif type == "string" then (sub("\\.[0-9]+"; "") | fromdateiso8601? // 0)
-                          else null end) as $reset
-        | if ($a.limited_until_s // 0) > $now then "rate_limited"
+        | ($a.resets_at | epoch) as $reset
+        | if ($a.limited_until_s // 0) > $now then (if $a.limit_kind == "weekly" then "weekly_limit" else "rate_limited" end)
           elif ($a.usage // -1) >= $at and ($reset == null or $reset > $now) then "threshold"
           else "" end' 2>/dev/null
 }
@@ -303,6 +358,7 @@ spent() { [ -n "$(spent_reason "$1")" ]; }
 reason_text() {
     case "$2" in
         login_ended) printf 'its login ended (renewal failing): aidc claude account add %s' "$1" ;;
+        weekly_limit) printf 'at its weekly limit (a session hit it)' ;;
         rate_limited) printf 'at its rate limit' ;;
         threshold) printf 'at its weekly threshold (%s%%)' "$(switch_at "$1")" ;;
     esac
@@ -504,7 +560,7 @@ do_login() {
         say "Claude logged in but left no renewable login in ${dir} (a token without a refresh token cannot be renewed here)"
         return 1
     fi
-    locked state_update '.accounts[$n] = ((.accounts[$n] // {}) | del(.renew_error, .renew_failed_at))' --arg n "$name"
+    locked state_update '.accounts[$n] = ((.accounts[$n] // {}) | del(.renew_error, .renew_failed_at, .renew_next_s))' --arg n "$name"
     say "account ${name} added"
     locked do_pass
 }
@@ -556,11 +612,14 @@ do_list() {
         reason=$(spent_reason "$n")
         rows="${rows}$(printf '%s' "$st" | jq -c --arg n "$n" --arg active "$active" --arg waiting "$waiting" \
             --argjson at "$(switch_at "$n")" --argjson exp "$exp" --argjson spent "$([ -n "$reason" ] && echo true || echo false)" \
-            --arg reason "$reason" --arg why "$(reason_text "$n" "$reason")" '
+            --arg reason "$reason" --arg why "$(reason_text "$n" "$reason")" --argjson now "$(now_s)" '
             (.accounts[$n] // {}) as $a
             | {name: $n, active: ($n == $active), next: ($n == $waiting), switch_at: $at,
                expires_at: (if $exp > 0 then ($exp | todateiso8601) else null end),
-               usage: ($a.usage // null), resets_at: ($a.resets_at // null), spent: $spent,
+               usage: ($a.usage // null), resets_at: ($a.resets_at // null),
+               usage_source: (if $a.usage == null then null else ($a.usage_source // "statusline") end),
+               usage_at: (if $a.usage_at_s == null then null else ($a.usage_at_s | todateiso8601) end),
+               usage_age_s: (if $a.usage_at_s == null then null else ($now - $a.usage_at_s) end), spent: $spent,
                spent_reason: (if $reason == "" then null else $reason end),
                why: (if $why == "" then null else $why end),
                renewed_at: ($a.renewed_at // null), renew_error: ($a.renew_error // null)}')
@@ -575,7 +634,7 @@ do_list() {
     printf '%s' "$json" | jq -r '
         "switch: \(.switch)",
         (if (.accounts | length) == 0 then "no accounts: aidc claude account add <name>" else
-          (.accounts[] | "\(if .active then "*" elif .next then ">" else " " end) \(.name)  switch at \(.switch_at)%  usage \(if .usage == null then "?" else "\(.usage)%" end)\(if .spent then " (\(.why))" else "" end)  expires \(.expires_at // "?")\(if .renew_error then "  RENEWAL FAILING: \(.renew_error)" else "" end)")
+          (.accounts[] | "\(if .active then "*" elif .next then ">" else " " end) \(.name)  switch at \(.switch_at)%  usage \(if .usage == null then "?" else "\(.usage)% (\(if .usage_source == "limit" then "a session hit its limit" else "status line" end), \(.usage_age_s | if . < 60 then "just now" elif . < 3600 then "\(. / 60 | floor)m ago" elif . < 86400 then "\(. / 3600 | floor)h ago" else "\(. / 86400 | floor)d ago" end))" end)\(if .spent then " (\(.why))" else "" end)  expires \(.expires_at // "?")\(if .renew_error then "  RENEWAL FAILING: \(.renew_error)" else "" end)")
          end),
         (if .none_usable == "logins_ended" then "NO ACCOUNT CAN BE USED: every login ended; aidc claude account add <name> again for each"
          elif .none_usable == "limits" then "no account is under its limit: staying on the active one" else empty end),

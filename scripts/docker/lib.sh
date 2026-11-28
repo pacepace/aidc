@@ -28,6 +28,9 @@
 . "$AIDC_SCRIPTS/lib/config.sh"
 # shellcheck source=../lib/git-common.sh
 . "$AIDC_SCRIPTS/lib/git-common.sh"
+# The user's Claude account broker (its Docker glue): the git agent's Claude may use it.
+# shellcheck source=broker.sh
+. "$AIDC_SCRIPTS/docker/broker.sh"
 
 # The git agent's session name, reserved on both backends, and the names of what setup makes.
 # shellcheck disable=SC2034  # read by the scripts that source this
@@ -287,16 +290,24 @@ dk_git_check_mounts() {
 
 # dk_git_start: (re)create the git container with the current settings and the added working
 # copies mounted, and wait for it. The volumes, networks and proxy must exist (aidc git setup).
+# Its Claude: when the user's account broker runs (or the git container it replaces had it), the
+# agent's Claude config dir is its folder of aidc-claude-config, which the broker writes the
+# active account's credentials into, and no long-lived token is handed on (it would override
+# them); else its home's, with the long-lived token when one is stored.
 # A working copy that is gone, or is no longer at its recorded path as recorded (a symlink at
 # it or on the way: dk_git_mount_ok), is left out with a warning (Docker would make an empty
 # root-owned folder in place of a gone one, and follow a symlink to another folder).
 dk_git_start() {
-    local disk transcripts token="" tokfile mounts=() mounted=() p bad added settings
+    local disk transcripts token="" tokfile mounts=() mounted=() p bad added settings claude=()
     dk_git_settings
     disk=$(dk_git_disk)
     transcripts=$(dk_git_transcripts_dir)
     tokfile="$(aidc_host_home)/.config/aidc/claude-oauth-token"
-    if [ -f "$tokfile" ]; then
+    if dk_git_uses_broker; then
+        dk_git_claude_ready || die "the git agent's Claude config dir could not be made"
+        claude=(--mount "type=volume,src=${DK_CLAUDE_CONFIG_VOLUME},dst=/home/git/.claude,volume-subpath=${DK_BROKER_GIT_FOLDER}")
+        info "Claude: the git agent uses your account broker's active account (aidc claude account list)"
+    elif [ -f "$tokfile" ]; then
         token=$(tr -d '[:space:]' < "$tokfile" 2>/dev/null || true)
         case "$token" in sk-ant-oat01-*) ;; *) token="" ;; esac
     fi
@@ -330,6 +341,7 @@ dk_git_start() {
         -v aidc-git-run:/var/lib/gitctl/gitrun -v "${DK_GIT_REQUESTS_VOLUME}:${DK_GIT_REQUESTS}" \
         -v "${transcripts}:/var/aidc/transcript-out:rw" -v "${added}:/etc/aidc/git-repos:ro" \
         -v "${settings}:/etc/aidc/git-settings:ro" \
+        ${claude[@]+"${claude[@]}"} \
         ${mounts[@]+"${mounts[@]}"} \
         "aidc/gitctl:${AIDC_VERSION_TAG}" >/dev/null || die "could not start the git container"
     if ! bad=$(dk_git_check_mounts ${mounted[@]+"${mounted[@]}"}); then

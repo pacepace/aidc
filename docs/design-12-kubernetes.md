@@ -1236,6 +1236,102 @@ skills across profiles and syncs settings through git, but does no credential sw
 conversations do not follow across profiles (confirmed by a user of it). We may reuse its layout; we do
 not depend on it.
 
+### Crediting usage, limit events and renewal (amended 2026-11-28)
+
+The live switch test (2026-11-28) found three faults, fixed in the shared program and status line
+so both backends have the fixes (K8S-17 as amended):
+
+- **Usage is credited only to the account whose credentials produced it.** Claude's status line
+  shows the numbers of its last API call. A new session whose first call hit `main`'s weekly
+  limit was switched to `second` in seconds, and its status line, with no earlier report to
+  compare with, reported `main`'s week as `second`'s, so `second` was marked at its threshold.
+  Two guards now: `aidc-claude-usage` writes no report when the transcript's newest assistant
+  entry (a failed call's error included) is no later than `.aidc-account`'s time, the moment the
+  broker named the account (where the transcript cannot be read, the earlier rule: the previous
+  report's numbers under a new name are dropped); and the broker counts no report whose week
+  (its reset time) is another account's and not the named account's own.
+- **A limit event is authoritative.** The `StopFailure` hook now says which limit was hit
+  (`kind: weekly` when Claude's words name the weekly limit, else `rate`). A weekly limit makes the
+  account's usage 100% (source: limit) and keeps it spent until its known reset time (else an
+  hour); any other rate limit, an hour, as before. `aidc claude account list` shows each usage
+  number's source and age (`usage 70% (status line, 6h ago)`), so a stale number is not trusted
+  blindly; `--json` carries `usage_source`, `usage_at`, `usage_age_s`.
+- **Renewal before Claude's own window is not a failure.** Claude Code refreshes a token only in
+  its last minutes (seen 4.5 minutes before expiry), so with the hour's margin the broker ran a
+  prompt a minute for 55 minutes and logged each as `could not renew main: ok`. Now a prompt that
+  succeeded and left the token as it was is logged once as "renewal not due yet" and the next try
+  waits until four minutes before expiry (`BROKER_CLAUDE_WINDOW_S`, 240); inside that window
+  every pass tries, and a prompt there that still did not refresh is a failure, recorded and
+  shown as RENEWAL FAILING. An hour's margin costs two prompts.
+
+`--help` (or `-h`) on any `aidc claude account|broker` verb prints the help on both backends; it
+was passed to the broker as an account name.
+
+### The broker on Docker
+
+Owner ruling 2026-11-28 ("Account switching on Docker too"; K8S-27, K8S-28): the broker and
+switching work on Docker as in a cluster. The same `aidc/broker` image and `claude-broker`
+program; the difference is the Docker glue (`scripts/docker/broker.sh`, `scripts/docker/claude.sh`):
+
+| | Kubernetes | Docker |
+|---|---|---|
+| broker | Deployment `claude-broker` in the user's namespace | container `aidc-claude-broker`, one per machine user (a Docker daemon serves one user's aidc, as `aidc-git-dev` does), `--restart unless-stopped` |
+| accounts | claim `claude-accounts`, only the broker mounts it | volume `aidc-claude-accounts`, only the broker mounts it |
+| sessions' Claude config dirs | claim `claude-config`, `subPath: <session>` | volume `aidc-claude-config`, a volume subpath `<session>` at `/home/vscode/.claude` (compose `volume: {subpath: ...}`) |
+| settings | ConfigMap `claude-broker-config` | `config.json` copied into the container when it is made (`aidc claude broker start` makes it again) |
+| network | NetworkPolicy: no way in, out to Quad9 and public 443 | a bridge of its own (`aidc-claude-broker-net`), Quad9 DNS, nothing published, `--cap-drop ALL`, no-new-privileges |
+| reaching it | `kubectl exec` | `docker exec` |
+
+The one settings function both backends use is `aidc_claude_broker_config_json`
+(`scripts/lib/config.sh`). The volumes are readied by a one-shot root container from the broker
+image with no network and only `CHOWN`/`FOWNER` (both the broker's uid 1000, 0700). Names are
+volumes, never host paths, so `aidc create` run by aidc-mcp's container (session_create) resolves
+them in the daemon's namespace as the CLI does.
+
+Docker's network is looser than the cluster's NetworkPolicy: the broker can reach the LAN. It runs
+no agent: Claude Code only for the user's own login and for a fixed one-word prompt with no tools,
+MCP servers or slash commands; nothing connects in. The sessions' sandbox is unchanged.
+
+**Which sessions use it.** A session made while the broker runs (`dk_claude_session_ready`):
+the broker makes its folder and writes the active account's credentials (`claude-broker session
+<name>`) before the session starts; its compose file mounts the folder over dev-home's
+`.claude`, declares the volume external, sets `AIDC_CLAUDE_BROKER=1`, and hands on no long-lived
+token (it would override the broker's credentials). The entrypoint then installs the managed
+settings' `broker` form: the status line through `aidc-claude-usage` and the `StopFailure`
+rate-limit hook, nothing else of a cluster session's (no lease: its history is its own). The
+compose file is the session's record, so restart and upgrade keep the choice. A session made while
+no broker runs (or while it did not answer) keeps its Claude config dir on dev-home: its own
+`/login`, or the long-lived token. Sessions made before keep theirs; nothing about a running
+session changes. The host's `~/.claude` is never written; the broker's refresh tokens never leave
+`aidc-claude-accounts`.
+
+**Switching** reaches running broker sessions as in a cluster: the broker writes each folder by
+rename; Claude reads the new credentials on its next message, conversation kept.
+
+**`aidc kill`** removes the session's folder: the broker's `forget` (under its lock) when it runs;
+else, or for what the broker cannot remove (a mountpoint Docker made root-owned for a nested
+mount), a one-shot root container from the broker image with no network and only
+`DAC_OVERRIDE`. Never fatal; a create that stopped after the folder was made is cleaned the same
+way by the kill of its leftovers.
+
+**The git agent** (`dk_git_start`, at `aidc git setup`): when the broker runs, or the git container
+it replaces already had it (once moved it stays, so its history follows), its Claude config dir is
+the folder `git` of `aidc-claude-config`, made as root (owner 2000, group 1000, 0770: the broker
+writes the credentials as group 1000, of which the git user is a member) and filled once, as the
+agent, from its home's `.claude` with its history (`.aidc-seeded`); the broker writes its
+credentials before the container starts, and no token is handed on. The gitctl image's managed
+settings already carry the rate-limit hook. A broker started later reaches the git agent at its
+next start; `aidc claude broker start` says so.
+
+**Images.** `aidc claude account add` and `broker start` build `aidc/broker` when missing (as
+`ensure_image` does for any image); `aidc rebuild` rebuilds it where its accounts' volume exists,
+with a fresh Claude Code. The dev image carries the `broker` form of the managed settings and the
+amended `aidc-claude-usage`.
+
+Not covered on Docker: the audit sidecar reads `.claude/projects` from dev-home, where a broker
+session's Claude config dir no longer is; with the memory bridge on (the default) that folder is
+the host's in every session anyway.
+
 ### One history per repo, on every machine
 
 A repo's conversations and memory are one history across the cluster, Mac, Linux and WSL

@@ -60,6 +60,32 @@ printf '{"model":{"display_name":"Opus"}}' | bash "$U" statusline >/dev/null
 assert_eq "a status with no weekly usage (an API-key login) leaves the last report" "42.5" "$(jq -r .seven_day "$D/.aidc-usage.json")"
 assert_eq "no temp file is left" "" "$(find "$D" -name '.*.json.*')"
 
+echo "== a new session switched by its first call's weekly limit: that call's week is not the new account's"
+# Seen live: the first call hit main's weekly limit, the broker switched the session to second
+# within seconds, and the status line, still showing that call's numbers, had no earlier report
+# to compare with. The transcript says when the last call answered; .aidc-account when the
+# broker named the account.
+D2="$D"
+fresh 5
+T=$(date -u +%s)
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.123Z; }
+TP="$D/transcript.jsonl"
+printf '{"type":"user","timestamp":"%s"}\n{"type":"assistant","timestamp":"%s","isApiErrorMessage":true}\n' "$(iso $((T - 60)))" "$(iso $((T - 50)))" > "$TP"
+echo second > "$D/.aidc-account"; touch -d "@$((T - 10))" "$D/.aidc-account"
+LIMITED=$(jq -n -c --arg tp "$TP" '{model: {display_name: "Opus"}, transcript_path: $tp,
+    rate_limits: {seven_day: {used_percentage: 100, resets_at: 1790000000}}}')
+printf '%s' "$LIMITED" | bash "$U" statusline >/dev/null
+assert_eq "the limited call's numbers are not reported under the account named after it" "no" "$([ -e "$D/.aidc-usage.json" ] && echo yes || echo no)"
+printf '{"type":"assistant","timestamp":"%s"}\n' "$(iso "$T")" >> "$TP"
+printf '%s' "$LIMITED" | jq -c '.rate_limits.seven_day = {used_percentage: 5, resets_at: 1790400000}' | bash "$U" statusline >/dev/null
+assert_eq "the first call made after the switch is reported as the new account's" '["second",5,1790400000]' \
+    "$(jq -c '[.account, .seven_day, .resets_at]' "$D/.aidc-usage.json" 2>/dev/null)"
+printf '{"error":"rate_limit","message":"You have reached your weekly limit. Resets Monday."}' | bash "$U" rate-limited
+assert_eq "a weekly limit is reported as one" '["second","weekly"]' "$(jq -c '[.account, .kind]' "$D/.aidc-limit.json")"
+printf '{"error":"rate_limit","message":"5-hour limit reached"}' | bash "$U" rate-limited
+assert_eq "any other limit as a rate limit" "rate" "$(jq -r '.kind' "$D/.aidc-limit.json")"
+D="$D2"; export CLAUDE_CONFIG_DIR="$D"
+
 echo "== the account and its notice reach the user's MCP server (session_status)"
 M="$SCRATCH/mirror2"; mkdir -p "$M"
 printf '%s' "$STATUS" | AIDC_TRANSCRIPT_OUT="$M" bash "$U" statusline >/dev/null

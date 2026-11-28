@@ -68,8 +68,13 @@ exit 0
 STUB_K8S_CLAUDE_m3
 chmod +x "$SCRATCH/bin/kubectl"
 
+# A docker that answers nothing, so no case reaches this machine's real daemon (the Docker
+# backend's broker would otherwise be built and started for real).
+printf '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' > "$SCRATCH/bin/docker"; chmod +x "$SCRATCH/bin/docker"
+
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
     PATH="$SCRATCH/bin:$PATH"
+[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] || { echo "FAIL: docker is not the stub ($(command -v docker)); refusing to run"; exit 1; }
 CFG="$HOME/.config/aidc/config.yaml"
 cat > "$CFG" <<'CFG_K8S_CLAUDE_m3'
 backend: kubernetes
@@ -175,10 +180,23 @@ out=$(K_ROLLOUT_FAIL=1 run account add work)
 assert_has "a broker that does not start says where to look" "aidc k8s build --only broker" "$out"
 assert_not_has "...and no login is tried" "claude-broker login" "$(cat "$K_LOG")"
 
-echo "=== on Docker ==="
+echo "=== --help on every verb is help, never an account name ==="
+for v in "account use" "account remove" "account add" "account list" "broker start" "broker stop" "broker logs"; do
+    # shellcheck disable=SC2086  # the verb's two words
+    out=$(: > "$K_LOG"; K_RUNNING=1 run $v --help)
+    assert_has "aidc claude ${v} --help prints the help" "account use <name>" "$out"
+    assert_eq "...and asks the broker nothing" "" "$(grep -E 'exec|apply|delete|rollout' "$K_LOG")"
+done
+out=$(: > "$K_LOG"; K_RUNNING=1 run account use -h)
+assert_has "-h too" "account use <name>" "$out"
+
+echo "=== on Docker: the Docker broker, never the cluster ==="
 out=$(: > "$K_LOG"; ("$AIDC_ROOT/scripts/aidc" claude account add work --backend docker 2>&1 </dev/null); echo "exit=$?")
-assert_has "it is for cluster sessions, and says what Docker has" "aidc claude-token setup" "$out"
-assert_has "...exit 2" "exit=2" "$out"
+assert_eq "--backend docker asks no cluster" "" "$(cat "$K_LOG")"
+assert_not_has "...and is not refused as cluster-only" "is for sessions in a cluster" "$out"
+assert_not_has "...it stops at the docker that does not answer" "exit=0" "$out"
+out=$("$AIDC_ROOT/scripts/aidc" claude help --backend docker 2>&1 </dev/null)
+assert_has "its help names the Docker broker" "aidc-claude-broker" "$out"
 
 echo
 echo "k8s claude: passed: $PASS  failed: $FAIL"

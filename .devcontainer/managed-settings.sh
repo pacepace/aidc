@@ -12,6 +12,9 @@
 #     the status line through aidc-claude-usage (the weekly usage; the user's own status line
 #     is still shown), and a StopFailure rate_limit hook; and the conversation lease
 #     (aidc-claude-lease), since its Claude history is shared with the user's other machines;
+#   - in a Docker session whose Claude config dir the account broker manages (AIDC_CLAUDE_BROKER=1,
+#     set by aidc create when a broker ran), the same status line and rate-limit hook, nothing
+#     else of a cluster session's (its history is its own, so no lease);
 #   - in a cluster session launched with bypass (claude_mode yolo or bypassPermissions),
 #     skipDangerousModePermissionPrompt: the mode is the user's consent to bypass, and a
 #     session made unattended never stops at a first-launch screen (owner ruling 2026-11-27, cluster sessions trust their start folder).
@@ -20,10 +23,12 @@ AIDC_HOOK_EVENT_COMMAND="${AIDC_HOOK_EVENT_COMMAND:-/usr/local/bin/aidc-hook-eve
 AIDC_CLAUDE_USAGE_COMMAND="${AIDC_CLAUDE_USAGE_COMMAND:-/usr/local/bin/aidc-claude-usage}"
 AIDC_CLAUDE_LEASE_COMMAND="${AIDC_CLAUDE_LEASE_COMMAND:-/usr/local/bin/aidc-claude-lease}"
 
-# aidc_managed_settings <plugin-registry> <share-plugins true|false> [cluster [bypass]]
+# aidc_managed_settings <plugin-registry> <share-plugins true|false> [cluster|broker [bypass]]
 # Prints the managed settings JSON. The registry is Claude Code's installed_plugins.json;
 # a missing or empty one enables nothing. With `cluster` (a Kubernetes session), the status
-# line and the rate-limit hook the account broker reads; with `bypass` too (its Claude runs
+# line and the rate-limit hook the account broker reads, and the lease; with `broker` (a Docker
+# session the broker manages), the status line and the rate-limit hook only; with `bypass` too
+# (cluster only) (its Claude runs
 # with bypassed permissions), the bypass-permissions warning skipped. Returns non-zero, saying why on
 # stderr, when the JSON cannot be built (jq missing or failing).
 aidc_managed_settings() {
@@ -35,10 +40,11 @@ aidc_managed_settings() {
     jq -n -c --arg cmd "$AIDC_HOOK_EVENT_COMMAND" --arg usage "$AIDC_CLAUDE_USAGE_COMMAND" \
         --arg lease "$AIDC_CLAUDE_LEASE_COMMAND" \
         --argjson plugins "$plugins" --argjson cluster "$([ "$cluster" = cluster ] && echo true || echo false)" \
+        --argjson broker "$([ "$cluster" = cluster ] || [ "$cluster" = broker ] && echo true || echo false)" \
         --argjson bypass "$([ "$cluster" = cluster ] && [ "$bypass" = bypass ] && echo true || echo false)" '
         {hooks: ((["SessionStart", "Stop", "Notification", "UserPromptSubmit"]
                   | map({(.): [{hooks: [{type: "command", command: $cmd}]}]}) | add)
-                 + (if $cluster then {StopFailure: [{matcher: "rate_limit",
+                 + (if $broker then {StopFailure: [{matcher: "rate_limit",
                         hooks: [{type: "command", command: ($usage + " rate-limited")}]}]} else {} end)
                  | if $cluster then
                        reduce ("SessionStart", "PostToolUse", "Stop", "SessionEnd") as $e (.;
@@ -51,7 +57,7 @@ aidc_managed_settings() {
                        # the two lists equal.
                        | .UserPromptSubmit = [{hooks: [{type: "command", command: ($lease + " hook --then " + $cmd)}]}]
                    else . end)}
-        + (if $cluster then {statusLine: {type: "command", command: ($usage + " statusline")}} else {} end)
+        + (if $broker then {statusLine: {type: "command", command: ($usage + " statusline")}} else {} end)
         + (if $bypass then {skipDangerousModePermissionPrompt: true} else {} end)
         + (if ($plugins | length) > 0 then {enabledPlugins: $plugins} else {} end)' \
         || { echo "aidc_managed_settings: jq could not build the managed settings" >&2; return 1; }
@@ -63,7 +69,7 @@ aidc_managed_bypass() {
     case "${1:-yolo}" in yolo|bypassPermissions) printf 'bypass' ;; esac
 }
 
-# aidc_install_managed_settings <root> <plugin-registry> <share-plugins> [cluster [bypass]]
+# aidc_install_managed_settings <root> <plugin-registry> <share-plugins> [cluster|broker [bypass]]
 # Writes <root>/etc/claude-code/managed-settings.json (mode 0644) by temp then rename.
 # Returns non-zero, saying why on stderr, when it cannot.
 aidc_install_managed_settings() {

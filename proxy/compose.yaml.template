@@ -40,6 +40,9 @@ volumes:
   # The git container's request folder (aidc git setup), shared and never removed with a
   # session: external. Declared only when it exists.
 ${GIT_REQUESTS_VOLUME_DECL}
+  # The Claude account broker's sessions' folders (aidc claude account add), shared and never
+  # removed with a session: external. Declared only when the broker manages this session.
+${CLAUDE_CONFIG_VOLUME_DECL}
 ${OVERLAY_VOLUMES_DECLARATIONS}
 services:
   squid:
@@ -175,6 +178,10 @@ ${DEV_NETWORKS_BLOCK}
       # When set, it takes precedence over any stored login (inference-only:
       # Remote Control is unavailable with it).
       CLAUDE_CODE_OAUTH_TOKEN: "${AIDC_CLAUDE_TOKEN}"
+      # 1 when the account broker manages this session's Claude config dir (its folder of the
+      # aidc-claude-config volume, mounted over dev-home's below): the entrypoint then has its
+      # status line and rate-limit hook tell the broker the account's usage. Empty otherwise.
+      AIDC_CLAUDE_BROKER: "${CLAUDE_BROKER}"
     # Dev container's DIRECT-lookup resolvers (proxied HTTP goes through
     # squid, which has its own dns_nameservers — see the squid service env).
     # Rendered from --dns flags / dns_servers config; defaults to Quad9.
@@ -192,6 +199,7 @@ ${DNS_BLOCK}
       # other Python version installed by the entrypoint persists too.
       - pyenv-versions:/usr/local/pyenv/versions:rw
       - ${AUDIT_DIR}:/var/aidc/audit:ro     # transparency: Claude can see logs about it
+      ${CLAUDE_CONFIG_MOUNT}                # the account broker's folder for this session at /home/vscode/.claude (only when it manages it)
       ${CLAUDE_MEMORY_MOUNT}                # per-project memory dir (optional; share_memory config)
       ${CLAUDE_SCRATCHPAD_MOUNT}            # per-project scratchpad + tasks (optional; share_scratchpad config)
       ${CLAUDE_SETTINGS_MOUNT}              # the status-line script, read-only (settings.json itself is copied in at create)

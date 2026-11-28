@@ -13,6 +13,18 @@ Each release also has full notes on the [GitHub releases page](https://github.co
 
 ## [Unreleased]
 
+### Upgrading: Claude accounts on Docker (aidc 2.0)
+The Claude account broker now runs on Docker too. Nothing changes until you add an account:
+sessions keep their own `/login` or your long-lived token. To use it:
+1. `aidc rebuild` (the dev image gains the broker's status line and rate-limit hook; the git
+   image the amended limit report).
+2. `aidc claude account add <name>` for each account: it builds `aidc/broker` and starts the
+   broker container `aidc-claude-broker` the first time.
+3. New sessions use it; existing ones keep their login until `aidc kill` + `aidc create`.
+   `aidc git setup` moves the git agent to it.
+On Kubernetes rebuild the broker and dev images (`aidc k8s build`) for the fixes below, then
+`aidc claude broker start` and upgrade sessions.
+
 ### Upgrading: git approvals out of the git agent's reach (aidc 2.0)
 Requests are now held and decided by a user of their own in the git container, `gitreq`; the
 git agent can no longer approve, deny, push, open or merge a pull request, log the container
@@ -245,6 +257,20 @@ and the envelope are unchanged; what an MCP caller sees differently:
   is already in a session's input box.
 
 ### Fixed
+- **A usage report is credited only to the account that produced it.** After a session's first
+  call hit one account's weekly limit and the broker switched it, its status line reported that
+  account's week under the new account's name, and the broker marked the new account at its
+  threshold. The status line now skips numbers from a call older than the switch, and the
+  broker counts no report carrying another account's week.
+- **A session's limit event is authoritative.** A weekly limit hit in a session makes that
+  account's usage 100% until its week resets; `aidc claude account list` shows each usage
+  number's source and age, so an hours-old 70% is not trusted blindly.
+- **Renewal no longer runs a prompt every minute for an hour.** Claude Code refreshes only in
+  its last minutes before expiry; a prompt that found the token not due yet is now logged once
+  as such and tried again in that window, never as `could not renew ...: ok`. A real failure is
+  still recorded and shown.
+- **`aidc claude account use --help`** (and every other `aidc claude` verb with `--help` or
+  `-h`) prints the help instead of passing `--help` to the broker as an account name.
 - **A turn nobody sent is no longer credited to the orchestrator's last prompt.** A prompt
   Claude Code held while it worked and ran next (a person typing then, or the git container
   pasting a new request's notice) opened a turn delivered with `prompt_origin`
@@ -313,6 +339,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   header. Design 10 S8.
 
 ### Added
+- **The Claude account broker on Docker** (`aidc claude account add|remove|list|use`,
+  `aidc claude broker start|stop|status|logs`), the same broker and switching as on Kubernetes:
+  accounts on a volume only the broker mounts, the active account's credentials without the
+  refresh token in each broker session's own Claude config dir, switches reaching running
+  sessions with the conversation kept, renewal by Claude Code itself, the git agent included.
 - **`sender_label` on `session_send`**: optional, names the sender in the header (one line,
   brackets removed, at most 120 characters). Declared in the input schema.
 

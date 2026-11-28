@@ -63,8 +63,20 @@ echo "-- aidc rebuild over the full inventory --"
 HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out.log" 2>&1
 eq "rebuild exits 0 with the stub docker" "0" "$?"
 
-eq "one docker build per inventory image Docker runs (not gitctl with no git container set up, never the cluster's account broker)" "7" "$(wc -l < "$TMP/builds.log" | tr -d ' ')"
-eq "the account broker is not built (it runs only in a cluster)" "0" "$(grep -c -- '-t aidc/broker:' "$TMP/builds.log")"
+eq "one docker build per inventory image Docker runs (not gitctl with no git container set up, nor the account broker with none set up)" "7" "$(wc -l < "$TMP/builds.log" | tr -d ' ')"
+eq "the account broker is not built where it is not set up" "0" "$(grep -c -- '-t aidc/broker:' "$TMP/builds.log")"
+
+echo
+echo "-- with the account broker set up here (its accounts' volume), its image is rebuilt too --"
+sed 's|^    info) exit 0 ;;|    info) exit 0 ;;\n    volume) [ "\$3" = aidc-claude-accounts ] \&\& exit 0; exit 1 ;;|' "$TMP/bin/docker" > "$TMP/docker2"
+mkdir -p "$TMP/bin2"; mv "$TMP/docker2" "$TMP/bin2/docker"; chmod +x "$TMP/bin2/docker"
+: > "$TMP/builds.log"
+HOME="$TMP/home" PATH="$TMP/bin2:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out2.log" 2>&1
+eq "the broker is built, refreshing its Claude Code (its logins and renewals are Claude Code's)" "1" \
+   "$(grep -c -- '--build-arg CLAUDE_CODE_REFRESH=[0-9][0-9]* .*-t aidc/broker:vtest ' "$TMP/builds.log")"
+# The cases below read the run with no broker set up.
+: > "$TMP/builds.log"; : > "$TMP/contexts.log"
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out.log" 2>&1
 
 echo
 echo "-- CLAUDE_CODE_REFRESH goes to dev-base and only dev-base --"

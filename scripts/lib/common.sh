@@ -223,8 +223,9 @@ require_cmd() {
 #   <image-tag>|<build-context-dir>|<dockerfile-path>
 #
 # Order matters: small images first (fail-fast on the cheap ones), dev-base
-# the slowest. broker (a cluster user's Claude account broker) is built by `aidc k8s build`
-# only; it runs nowhere on Docker. gitctl (the git container) is built by `aidc k8s build` for a
+# the slowest. broker (the user's Claude account broker) is built by `aidc k8s build` for a
+# cluster, and on Docker by `aidc claude account add|broker start` when missing; `aidc rebuild`
+# builds it only where the broker is set up here (its accounts' volume exists). gitctl (the git container) is built by `aidc k8s build` for a
 # cluster, and on Docker by `aidc git setup` when missing; `aidc rebuild` builds it
 # only where a Docker git container is set up. Used by:
 #   - cmd-rebuild.sh (iterates every Docker row; force rebuild of each)

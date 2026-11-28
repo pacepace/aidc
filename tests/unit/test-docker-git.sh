@@ -47,6 +47,7 @@ assert_not_has() {
 #   D_REQERR=text     git-requests list fails in the status probe, with this reason
 #   D_GITCT=false     the git container is not running (docker inspect of aidc-git-dev for kill/create)
 #   D_NO_BASE=1       git-requests pr-base finds no base (origin has no default branch)
+#   D_BROKER=running  the user's Claude account broker runs (default: there is none)
 cat > "$SCRATCH/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$D_LOG"
@@ -83,6 +84,11 @@ case "$a" in
     "inspect aidc-"*"-dev --format"*) echo "2026-11-24T00:00:00Z"; exit 0 ;;
     "exec aidc-"*"-policy test -f /var/state/tainted") exit 1 ;;
     "exec -u git aidc-git-dev tmux has-session -t main") exit 0 ;;
+    "inspect -f {{.State.Running}} aidc-claude-broker")
+        [ "${D_BROKER:-}" = running ] && { echo true; exit 0; }
+        echo "Error: No such object: aidc-claude-broker" >&2; exit 1 ;;
+    "inspect -f {{range .Mounts}}"*) exit 0 ;;
+    "exec aidc-claude-broker claude-broker session git") exit 0 ;;
     "exec -u git aidc-git-dev stat -c %d:%i -- "*) # what the container sees at a mounted path
         [ -n "${D_SEEN:-}" ] && { echo "$D_SEEN"; exit 0; }
         stat -c %d:%i -- "${a##* }"; exit 0 ;;
@@ -443,6 +449,20 @@ assert_has "aidc list shows it" "git" "$out"
 assert_eq "as the git agent, with no taint column of its own (no sandbox proxy)" "git-agent -" \
     "$(printf '%s\n' "$out" | awk '$1 == "git" { print $(NF-2), $NF }')"
 assert_not_has "and never asks a policy sidecar it does not have" "aidc-git-policy" "$(calls)"
+
+echo "=== the git agent's Claude: the account broker's when it runs, its home's otherwise ==="
+printf 'sk-ant-oat01-%s\n' "$(printf 'x%.0s' $(seq 40))" > "$HOME/.config/aidc/claude-oauth-token"
+run git setup >/dev/null
+git_run=$(line 'run -d --name aidc-git-dev')
+assert_has "with no broker, the long-lived token is handed on as before" "-e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-" "$git_run"
+assert_not_has "...and its Claude config dir stays its home's" "/home/git/.claude" "$git_run"
+D_BROKER=running run git setup >/dev/null
+git_run=$(line 'run -d --name aidc-git-dev')
+assert_has "with the broker running, its Claude config dir is its folder of aidc-claude-config" \
+    "--mount type=volume,src=aidc-claude-config,dst=/home/git/.claude,volume-subpath=git" "$git_run"
+assert_has "...and no token is handed on (it would override the broker's credentials)" "-e CLAUDE_CODE_OAUTH_TOKEN= " "$git_run"
+assert_has "the broker writes its credentials before it starts" "exec aidc-claude-broker claude-broker session git" "$(calls)"
+rm -f "$HOME/.config/aidc/claude-oauth-token"
 
 echo "=== sessions: their request folder and token ==="
 render() {

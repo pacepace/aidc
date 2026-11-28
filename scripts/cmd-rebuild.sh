@@ -25,9 +25,10 @@ aidc rebuild
 
 Rebuilds every aidc/* image at the current VERSION (squid, refresher,
 policy, audit, forwarder, mcp, dev-base; gitctl where `aidc git setup`
-made a git container here). Does not touch any running session. To swap a
+made a git container here; broker where `aidc claude account add` set up the
+Claude account broker here). Does not touch any running session. To swap a
 session onto a freshly-rebuilt image afterward, use `aidc upgrade <session>`;
-the git container, `aidc git setup`.
+the git container, `aidc git setup`; the broker, `aidc claude broker start`.
 
 No flags in v1; rebuild always builds all images.
 EOF
@@ -47,14 +48,16 @@ while IFS='|' read -r tag context dockerfile; do
     # exists; aidc git setup then runs the new image): building it for every Docker user would
     # cost minutes for an image nothing runs. A cluster's is built by aidc k8s build.
     case "$tag" in aidc/gitctl:*) docker volume inspect aidc-git-home >/dev/null 2>&1 || continue ;; esac
-    # The Claude account broker runs only in a cluster (aidc k8s build).
-    case "$tag" in aidc/broker:*) continue ;; esac
+    # The Claude account broker's likewise: only where it was set up here (aidc claude account add
+    # made its accounts' volume; aidc claude broker start then runs the new image). A cluster's is
+    # built by aidc k8s build.
+    case "$tag" in aidc/broker:*) docker volume inspect aidc-claude-accounts >/dev/null 2>&1 || continue ;; esac
     info "==> building ${tag}"
     # dev-base bakes Claude Code from Anthropic's installer; bust that one
     # layer so every rebuild fetches the current release (see Dockerfile).
     build_args=()
     case "$tag" in
-        aidc/dev-base:*|aidc/gitctl:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
+        aidc/dev-base:*|aidc/gitctl:*|aidc/broker:*) build_args=(--build-arg "CLAUDE_CODE_REFRESH=$(date +%s)") ;;
     esac
     # ${arr[@]+"${arr[@]}"}: bash 3.2 (stock macOS) treats an empty array as
     # unbound under `set -u`; this idiom expands to nothing instead of dying.

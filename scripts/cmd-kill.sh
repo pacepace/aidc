@@ -57,6 +57,8 @@ if ! session_exists "$NAME"; then
         exit 0
     fi
     if [ -n "$LEFT_FILES" ]; then
+        # A create that stopped after the account broker readied the session's Claude config dir.
+        dk_claude_session_forget "$NAME"
         printf "Session '%s' had no containers left; removed its leftover compose file.\n" "$NAME"
         exit 0
     fi
@@ -122,6 +124,10 @@ if [ "$(docker inspect -f '{{.State.Running}}' "$DK_GIT_CT" 2>/dev/null)" = true
     docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq "$DK_GIT_CT" git-requests forget "$NAME" >/dev/null 2>&1 \
         || info "the git container did not forget ${NAME}'s git mode; aidc git setup prunes it"
 fi
+
+# The session's Claude config dir in the account broker's volume, when it had one (its
+# conversation goes with it, as dev-home's does): scripts/docker/broker.sh.
+dk_claude_session_forget "$NAME"
 
 # Anything else still attached (another session joined with `aidc network`) keeps a
 # network alive past the down; detach it and remove the network, or say so loudly.

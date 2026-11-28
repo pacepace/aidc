@@ -500,8 +500,14 @@ fi
 # anthropics/claude-code#18443) and cannot be written on the other (EBUSY).
 # That is what made in-container logins expire and account switches not stick.
 #
-# Two ways in:
+# Three ways in:
 #
+# 0. The user's Claude account broker (aidc claude account add; scripts/docker/broker.sh), when it
+#    runs now: the session's Claude config dir is then its own folder of the aidc-claude-config
+#    volume instead (mounted over dev-home's), which the broker keeps holding the active
+#    account's credentials, without the refresh token, and switches with it. No token is handed
+#    on (CLAUDE_CODE_OAUTH_TOKEN would override them). The choice is in the compose file, so
+#    restart and upgrade keep it; sessions made with no broker keep 1 or 2.
 # 1. Long-lived OAuth token (~/.config/aidc/claude-oauth-token, written by
 #    `aidc claude-token setup`): injected as CLAUDE_CODE_OAUTH_TOKEN. No login,
 #    no refresh -- but the token is inference-only, so Remote Control is not
@@ -514,7 +520,13 @@ AIDC_CLAUDE_TOKEN_FILE="$(aidc_host_home)/.config/aidc/claude-oauth-token"
 AIDC_CLAUDE_TOKEN=""
 USING_LONG_LIVED_TOKEN=0
 
-if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
+dk_claude_session_ready "$NAME"
+export CLAUDE_CONFIG_MOUNT CLAUDE_CONFIG_VOLUME_DECL CLAUDE_BROKER
+if [ "$DK_CLAUDE_VIA" = broker ]; then
+    if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
+        info "auth: your long-lived token is not handed on (it would override the broker's credentials)"
+    fi
+elif [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
     AIDC_CLAUDE_TOKEN=$(cat "$AIDC_CLAUDE_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]' || true)
     case "$AIDC_CLAUDE_TOKEN" in
         sk-ant-oat01-*)
@@ -527,7 +539,7 @@ if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
             ;;
     esac
 fi
-if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ]; then
+if [ "$USING_LONG_LIVED_TOKEN" -eq 0 ] && [ "$DK_CLAUDE_VIA" != broker ]; then
     info "auth: log in inside the session once it is up ('aidc attach ${NAME}', then /login)"
 fi
 export AIDC_CLAUDE_TOKEN USING_LONG_LIVED_TOKEN
@@ -1131,7 +1143,9 @@ fi
 
 # ---- summary -----------------------------------------------------------------
 
-if [ "${USING_LONG_LIVED_TOKEN:-0}" = "1" ]; then
+if [ "${DK_CLAUDE_VIA:-none}" = broker ]; then
+    CLAUDE_AUTH_LINE="  claude:     your account broker's active account (aidc claude account list; switches reach the session)"
+elif [ "${USING_LONG_LIVED_TOKEN:-0}" = "1" ]; then
     CLAUDE_AUTH_LINE="  claude:     long-lived OAuth token (no login; Remote Control unavailable)"
 else
     CLAUDE_AUTH_LINE="  claude:     log in once inside: 'aidc attach ${NAME}', then /login (persists across restart/upgrade)"

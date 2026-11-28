@@ -93,6 +93,9 @@ fi
 PLUGIN_REGISTRY="/home/vscode/.claude/plugins/installed_plugins.json"
 _managed_cluster=""
 [ "${AIDC_BACKEND:-}" = kubernetes ] && _managed_cluster=cluster
+# A Docker session whose Claude config dir the account broker manages (aidc create sets it when a
+# broker ran): its status line and rate-limit hook tell the broker the account's usage.
+[ -z "$_managed_cluster" ] && [ "${AIDC_CLAUDE_BROKER:-}" = 1 ] && _managed_cluster=broker
 _managed_bypass=$(aidc_managed_bypass "${AIDC_CLAUDE_MODE:-yolo}")
 if aidc_install_managed_settings / "$PLUGIN_REGISTRY" "${AIDC_SHARE_PLUGINS:-false}" "$_managed_cluster" "$_managed_bypass"; then
     names=$(jq -r '.enabledPlugins // {} | keys | join(", ")' /etc/claude-code/managed-settings.json 2>/dev/null)

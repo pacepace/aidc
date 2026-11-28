@@ -13,10 +13,12 @@
 #                                    notice, at}), where the user's MCP server reads them for
 #                                    session_status.
 #   aidc-claude-usage rate-limited   Claude Code's StopFailure hook, matcher rate_limit: leaves
-#                                    .aidc-limit.json ({account, at_s}) there.
+#                                    .aidc-limit.json ({account, at_s, kind}) there; kind is
+#                                    weekly when Claude's words say the weekly limit was
+#                                    reached, else rate.
 #
-# The broker reads both from the session's folder of claude-config, which is this Claude config
-# dir. Only where a broker manages the session (it wrote .aidc-account) is anything written. It
+# The broker reads both from the session's Claude config dir, its folder of the user's
+# claude-config (a claim in a cluster, a volume on Docker). Only where a broker manages the session (it wrote .aidc-account) is anything written. It
 # never fails and never holds Claude up: every path exits 0.
 set -u
 
@@ -55,16 +57,39 @@ user_statusline() {
     printf '%s' "$cmd"
 }
 
+# last_call_s <status-json>: when Claude's last API call answered (its transcript's newest
+# assistant entry, a failed call's error included), epoch seconds; "" when that cannot be read.
+last_call_s() {
+    local tp
+    tp=$(printf '%s' "$1" | jq -r '.transcript_path // empty | select(type == "string")' 2>/dev/null) || return 0
+    [ -n "$tp" ] && [ -f "$tp" ] || return 0
+    tail -n 50 -- "$tp" 2>/dev/null | jq -R -r -s '
+        [split("\n")[] | fromjson? | select(type == "object" and .type == "assistant" and (.timestamp | type) == "string")
+         | .timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601?] | last // empty' 2>/dev/null
+}
+
 do_statusline() {
-    local input usage cmd line notice
+    local input input_usage usage cmd line notice called switched
     input=$(cat 2>/dev/null) || input=""
     if managed; then
-        # The report names the account it measured. Claude shows the usage of its last API
-        # call: right after the broker switches accounts the status still carries the old
-        # account's numbers, so a report whose numbers are the previous report's, under a new
-        # account name, is the old account's and is not written; the new one's first call
-        # brings its own numbers (each account's week resets at its own time).
-        usage=$(printf '%s' "$input" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" \
+        # The report names the account it measured, and is credited only to the account whose
+        # credentials produced it. Claude shows the usage of its last API call: right after the
+        # broker switches accounts the status still carries the old account's numbers. So a
+        # report is not written when that call answered no later than the broker named this
+        # account (.aidc-account's time; a session whose very first call hit a limit and was
+        # switched has no earlier report to compare with), nor, when the transcript cannot
+        # tell, when its numbers are the previous report's under a new account name; the new
+        # account's first call brings its own (each account's week resets at its own time).
+        called=$(last_call_s "$input")
+        switched=$(stat -c %Y -- "${dir}/.aidc-account" 2>/dev/null || stat -f %m -- "${dir}/.aidc-account" 2>/dev/null || true)
+        case "$called" in ''|*[!0-9]*) called="" ;; esac
+        case "$switched" in ''|*[!0-9]*) switched="" ;; esac
+        if [ -n "$called" ] && [ -n "$switched" ] && [ "$called" -le "$switched" ]; then
+            input_usage=""
+        else
+            input_usage="$input"
+        fi
+        usage=$(printf '%s' "$input_usage" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" \
             --slurpfile prev <(cat "${dir}/.aidc-usage.json" 2>/dev/null || echo null) '
             .rate_limits.seven_day as $w
             | select(($w.used_percentage | type) == "number" and $a != "")
@@ -107,9 +132,13 @@ do_statusline() {
 }
 
 do_rate_limited() {
-    cat >/dev/null 2>&1 || true
+    local input kind=rate
+    input=$(cat 2>/dev/null) || input=""
     managed || return 0
-    write_json .aidc-limit.json "$(jq -n -c --arg a "$(account_now)" --argjson t "$(date -u +%s)" '{account: $a, at_s: $t}')"
+    # Claude's words for the limit it hit, wherever the hook's JSON carries them.
+    printf '%s' "$input" | grep -Eqi 'weekly|seven[ _-]?day|7[ -]day' && kind=weekly
+    write_json .aidc-limit.json "$(jq -n -c --arg a "$(account_now)" --argjson t "$(date -u +%s)" --arg k "$kind" \
+        '{account: $a, at_s: $t, kind: $k}')"
 }
 
 case "${1:-}" in

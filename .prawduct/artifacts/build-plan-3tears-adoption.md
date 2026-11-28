@@ -514,6 +514,41 @@ Order follows design-13 "Upstream work".
   `/prawduct:critic cumulative` run and blocking findings resolved.
 - **Owner's hands:** the 3tears release; the REL-09 answer.
 
+### Chunk 25: The account broker and switching on Docker; the live test's broker fixes
+
+- **Description:** Owner ruling 2026-11-28 ("Account switching on Docker too"): the broker image
+  and `claude-broker` program unchanged in role, the Docker glue in `scripts/docker/broker.sh`
+  and `scripts/docker/claude.sh` (design-12 "The broker on Docker"): the container
+  `aidc-claude-broker`, the volumes `aidc-claude-accounts` (the broker's alone) and
+  `aidc-claude-config` (a subpath per session at `/home/vscode/.claude`, written by the broker by
+  rename), sessions made while it runs use it and get no long-lived token, sessions made without
+  it keep today's ways, `aidc kill` forgets the folder, the git agent moves to it at its next
+  start, `aidc rebuild` rebuilds the broker image where it is set up, the dev image's managed
+  settings gain a `broker` form (status line and rate-limit hook). With it, the live switch test's
+  broker defects, fixed in the shared code for both backends (design-12 "Crediting usage, limit
+  events and renewal"): usage credited only to the account that produced it, limit events
+  authoritative with usage source and age in the list, renewal not due yet is no failure and
+  backs off to Claude's window, `--help` on every verb.
+- **Depends on:** 17, 18.
+- **Requirements:** K8S-27, K8S-28; K8S-17 as amended 2026-11-28.
+- **Done when:**
+  1. Unit tests: test-docker-broker.sh (the Docker glue, docker a stub it insists on),
+     test-claude-broker.sh, test-claude-usage.sh (the live sequence), test-hook-event.sh,
+     test-docker-git.sh, test-k8s-claude.sh, test-rebuild.sh.
+  2. `/prawduct:critic`; blocking findings fixed; committed and pushed.
+  3. Live, run by the owner (Docker): after `aidc rebuild` and `aidc claude account add` for two
+     accounts, a new session starts logged in with no `/login` and no refresh token in its
+     `.credentials.json`; `aidc claude account use <other>` and a lowered `switch_at` (then
+     `aidc claude broker start`) each move it mid-conversation with the conversation kept;
+     `aidc restart` and `aidc upgrade` keep it on the broker; a session made before keeps its
+     own login; `aidc git setup` moves the git agent to the broker; `aidc kill` removes the
+     session's folder; the broker's log shows "renewal not due yet" once, then "renewed", and
+     never "could not renew ...: ok".
+  4. Live, run by the owner (Kubernetes): with the rebuilt broker and dev images, a weekly-limit
+     switch no longer marks the next account at its threshold, and `account list` shows each
+     usage number's source and age.
+- **Owner's hands:** two Claude accounts; the live runs.
+
 ## Early Feedback Milestone
 
 **Milestone chunk:** 04

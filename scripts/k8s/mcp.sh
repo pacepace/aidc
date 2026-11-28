@@ -379,7 +379,7 @@ mcp_start() {
     else
         info "session_create: not offered (set mcp.session_create: true to enable)"
     fi
-    info "starting your MCP server in ${ns} (it reaches the API server at $(printf '%s' "$eps" | paste -sd' ' -) only)"
+    info "starting your MCP server in ${ns}"
     # shellcheck disable=SC2086  # one endpoint per word
     k8s_render_mcp "$sel" $eps | k8s_kubectl apply -f - >&2 || die "could not apply the MCP server"
     k8s_kubectl -n "$ns" rollout status "deployment/${K8S_MCP_NAME}" --timeout=300s >&2 \
@@ -395,6 +395,9 @@ mcp_start() {
                 || die "could not let the MCP server reach the API server at ${incluster}"
         fi
     fi
+    # Said once the in-cluster address is in (a new server's is known only now), so a first
+    # start and a later one name the same addresses: those its policy holds.
+    info "your MCP server may reach the API server at $(printf '%s' "$eps" | paste -sd' ' -) only"
     reach_err=$(mktemp) || die "cannot make a temporary file"
     # shellcheck disable=SC2086  # one endpoint per word
     reach=$(mcp_reachable_endpoint $api_eps 2>"$reach_err") \

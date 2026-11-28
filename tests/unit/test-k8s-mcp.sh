@@ -367,6 +367,22 @@ assert_has "a new server whose in-cluster address cannot be read is said to be c
 out=$(K_SVC_HOST=192.0.2.10 K_SVC_PORT=6443 run start)
 assert_eq "an in-cluster address already allowed is not added twice (one apply)" '["192.0.2.10/32"]' "$(pols)"
 
+echo "=== a first start and a second name the same API addresses: those the policy holds ==="
+# A new server's in-cluster address is known only once it runs; it was left out of what a
+# first start said (three addresses, then four on the next start, the policy holding four).
+said() { printf '%s\n' "$1" | sed -n 's/.*may reach the API server at \(.*\) only$/\1/p'; }
+held_eps() { pol | jq -r '[.egress[] | (.to[0].ipBlock.cidr | sub("/32$"; "")) + ":" + (.ports[0].port | tostring)] | join(" ")'; }
+out=$(K_CP_NODES='192.0.2.11 192.0.2.10 192.0.2.12' K_TOKEN=kept-token run start)
+first_said=$(said "$out") first_held=$(held_eps)
+assert_has "exit 0" "exit=0" "$out"
+assert_has "a first start names the in-cluster address too" "10.43.0.1:443" "$first_said"
+assert_eq "...and exactly what its policy holds" "$first_held" "$first_said"
+assert_eq "...said once" 1 "$(printf '%s\n' "$out" | grep -c 'may reach the API server at')"
+out=$(K_CP_NODES='192.0.2.11 192.0.2.10 192.0.2.12' K_RUNNING=1 K_HELD=192.0.2.10:6443 K_TOKEN=kept-token run start)
+assert_eq "a second start names the same addresses" "192.0.2.10:6443 192.0.2.11:6443 192.0.2.12:6443 10.43.0.1:443" "$(said "$out")"
+assert_eq "...as the first did" "$first_said" "$(said "$out")"
+assert_eq "...which its policy holds" "$(held_eps)" "$(said "$out")"
+
 yq -i '.mcp.kubernetes.callback_address = "203.0.113.5"' "$CFG"
 out=$(K_RUNNING=1 K_TOKEN=kept-token K_PRINTENV_FAIL=1 \
     K_POLICY='{"spec":{"egress":[{"to":[{"ipBlock":{"cidr":"192.0.2.10/32"}}],"ports":[{"port":6443}]},{"to":[{"ipBlock":{"cidr":"10.43.0.9/32"}}],"ports":[{"port":443}]}]}}' run start)

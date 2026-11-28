@@ -51,6 +51,7 @@ assert_not_has() {
 #   get deployment claude-broker   "claude-broker|1" when K_RUNNING=1; K_DOWN=1: no answer
 #   get pvc claude-config|claude-accounts  there unless K_NO_CLAIMS=1
 #   exec ... claude-broker list    a list
+#   apply -f -                     says the Deployment configured, or unchanged when K_UNCHANGED=1
 cat > "$SCRATCH/bin/kubectl" <<'STUB_K8S_CLAUDE_m3'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -60,7 +61,9 @@ case "$*" in
         [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_RUNNING:-}" = 1 ] && printf 'claude-broker|1' ;;
     *"get pvc claude-config"*|*"get pvc claude-accounts"*) [ "${K_NO_CLAIMS:-}" = 1 ] || echo "persistentvolumeclaim/x" ;;
-    *"apply -f -"*) { echo '---'; cat; } >> "$K_APPLIED" ;;
+    *"apply -f -"*)
+        { echo '---'; cat; } >> "$K_APPLIED"
+        if [ "${K_UNCHANGED:-}" = 1 ]; then echo "deployment.apps/claude-broker unchanged"; else echo "deployment.apps/claude-broker configured"; fi ;;
     *"rollout status"*) [ "${K_ROLLOUT_FAIL:-}" = 1 ] && { echo 'timed out' >&2; exit 1; } ;;
     *"claude-broker list"*) echo "* work  switch at 90%" ;;
 esac
@@ -75,6 +78,7 @@ printf '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' > "
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
     PATH="$SCRATCH/bin:$PATH"
 [ "$(command -v docker)" = "$SCRATCH/bin/docker" ] || { echo "FAIL: docker is not the stub ($(command -v docker)); refusing to run"; exit 1; }
+[ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] || { echo "FAIL: kubectl is not the stub ($(command -v kubectl)); refusing to run"; exit 1; }
 CFG="$HOME/.config/aidc/config.yaml"
 cat > "$CFG" <<'CFG_K8S_CLAUDE_m3'
 backend: kubernetes
@@ -162,6 +166,15 @@ assert_has "account remove too" "claude-broker remove work" "$(cat "$K_LOG")"
 out=$(K_RUNNING=1 run broker status)
 assert_has "broker status shows the state and the accounts" "claude-broker (kubernetes, aidc-u-alice): RUNNING" "$out"
 assert_has "..." "  * work" "$out"
+out=$(K_RUNNING=1 run broker start)
+assert_eq "broker start on a Deployment that applied changed lets it roll by itself: no restart" "" "$(grep 'rollout restart' "$K_LOG")"
+out=$(K_RUNNING=1 K_UNCHANGED=1 run broker start)
+assert_has "an unchanged Deployment (same tag, maybe a rebuilt image) is restarted, so the pod pulls the image again" \
+    "rollout restart deployment/claude-broker" "$(cat "$K_LOG")"
+assert_has "...saying so, and that the accounts are kept" "its accounts are kept" "$out"
+assert_eq "...before it waits for it" "yes" \
+    "$([ "$(grep -n 'rollout restart' "$K_LOG" | cut -d: -f1)" -lt "$(grep -n 'rollout status' "$K_LOG" | cut -d: -f1)" ] && echo yes || echo no)"
+assert_eq "...and the accounts' claim is never touched" "" "$(grep -E 'delete.*(pvc|claude-accounts)' "$K_LOG")"
 out=$(K_RUNNING=1 run broker stop)
 assert_has "broker stop removes its Deployment and policy only (claims kept)" \
     "delete deployment,networkpolicy -l app=claude-broker" "$(cat "$K_LOG")"

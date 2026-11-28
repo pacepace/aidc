@@ -27,15 +27,28 @@ k8s_broker_exec_tty() {
 
 # k8s_broker_start <namespace>: the broker's claims, settings and pod, applied; waits until it
 # is ready. Returns 1, saying why.
+#
+# The image tag is aidc's version, so `aidc k8s build --force` replaces the image under the same
+# tag and an unchanged Deployment would keep running the old one (seen live: "deployment
+# unchanged", the old pod kept). Start restarts it then, as git setup does the git container:
+# the new pod pulls the image again (imagePullPolicy Always). Always, not only when the
+# registry's digest differs: the registry is reachable from the cluster, not from here, and
+# start is run on purpose. The accounts are on their claim and survive the new pod.
 k8s_broker_start() {
-    local ns="$1" sel
+    local ns="$1" sel applied
     k8s_ensure_claude_config "$ns" || return 1
     k8s_ensure_claude_accounts "$ns" || return 1
     k8s_render_broker_config | k8s_kubectl apply -f - >/dev/null \
         || { err "could not write the Claude account broker's settings"; return 1; }
     sel=$(k8s_node_selector) || return 1
-    k8s_render_broker "$sel" | k8s_kubectl apply -f - >&2 \
+    applied=$(k8s_render_broker "$sel" | k8s_kubectl apply -f -) \
         || { err "could not apply the Claude account broker"; return 1; }
+    printf '%s\n' "$applied" >&2
+    if printf '%s\n' "$applied" | grep -q "^deployment.apps/${K8S_BROKER_NAME} unchanged"; then
+        info "restarting it, so it runs the image now in the registry (its accounts are kept)"
+        k8s_kubectl -n "$ns" rollout restart "deployment/${K8S_BROKER_NAME}" >&2 \
+            || { err "could not restart the Claude account broker"; return 1; }
+    fi
     k8s_kubectl -n "$ns" rollout status "deployment/${K8S_BROKER_NAME}" --timeout=300s >&2 \
         || { err "the Claude account broker did not become ready; see: kubectl -n ${ns} describe pod -l app=${K8S_BROKER_NAME} (is its image built? aidc k8s build --only broker)"; return 1; }
 }

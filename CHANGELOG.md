@@ -278,6 +278,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   window as not due yet, waits for that window after any other early failure, and clears a
   recorded failure when the token is found renewed already. A renewal that fails inside the
   window is still shown as RENEWAL FAILING.
+- **`aidc claude broker start` runs a broker image rebuilt under the same tag.** It said
+  "deployment unchanged" and kept the old pod; now it restarts the broker then, as `aidc git
+  setup` does the git container. Its accounts are kept.
 - **`aidc claude account use --help`** (and every other `aidc claude` verb with `--help` or
   `-h`) prints the help instead of passing `--help` to the broker as an account name.
 - **A turn nobody sent is no longer credited to the orchestrator's last prompt.** A prompt

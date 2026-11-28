@@ -1185,6 +1185,10 @@ account list` (RENEWAL FAILING) and in the sessions' status line, and tried agai
 own refresh window (below, "Crediting usage, limit events and renewal"). A
 session's own login (a `.credentials.json` the broker did not write) is replaced only while the
 broker has an active account; with none, it is left as it is.
+`aidc claude broker start` restarts a broker whose Deployment applied unchanged, as `aidc git
+setup` does the git container: the image tag is aidc's version, so an image rebuilt under it
+(`aidc k8s build --force`) is pulled only by a new pod. The accounts are on their claim and
+survive it.
 
 Switching, as built (K8S-17): the order is `claude_accounts` (accounts not listed come after, by
 name), each with `switch_at` (default 90); `claude_account_switch: auto|wait` (default auto).

@@ -26,7 +26,7 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 # Pending: files another change is editing now, to be moved onto the helper once it lands.
 # Each must still need the helper (an entry that no longer does is a failure, so this list
 # cannot outlive its reason).
-PENDING="test-k8s-images.sh test-k8s-mcp.sh"
+PENDING=""
 
 # What puts a test in scope, read from its lines outside comments:
 #  - a docker or kubectl stub written: a redirect into a path ending in /docker or /kubectl,

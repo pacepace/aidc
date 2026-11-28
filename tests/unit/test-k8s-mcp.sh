@@ -123,9 +123,11 @@ GETENT_K8S_MCP_x41
 chmod +x "$SCRATCH/bin/kubectl" "$SCRATCH/bin/docker" "$SCRATCH/bin/getent"
 
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
-    PATH="$SCRATCH/bin:$PATH" XDG_STATE_HOME="$SCRATCH/home/.local/state"
-[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
-    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
+    XDG_STATE_HOME="$SCRATCH/home/.local/state"
+# docker and kubectl first on PATH are the stubs above, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 CFG="$HOME/.config/aidc/config.yaml"
 write_config() {
     cat > "$CFG" <<'CFG_K8S_MCP_x41'

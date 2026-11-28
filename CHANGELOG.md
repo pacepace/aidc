@@ -62,9 +62,12 @@ What changes in use:
   request was not waiting, and 1 only for a run that failed. A plain Approve or Deny sent while
   the agent's question names no request id aidc can read is refused,
   `git_request_not_named`, never queued as a prompt behind the menu. When another dialog
-  (a permission prompt) replaces the question after Enter, the result names it
-  (`question_not_answered` `another_dialog`, `dialog`) rather than saying the screen could not
-  be read. On Kubernetes this comes with the per-user MCP
+  (a permission prompt) replaces the question after Enter, the result names it (status
+  `dialog_open`, `question_answered: true`, `dialog`) rather than saying the screen could not
+  be read or that the question is still open. When the git container's answer cannot be
+  confirmed either way (it did not say it was done, and neither the request's result nor
+  the waiting list could be read after), the result is `git_request_outcome_unknown` and
+  says to check the request before answering again, never to send the answer again. On Kubernetes this comes with the per-user MCP
   server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a

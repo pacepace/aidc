@@ -399,6 +399,39 @@ async def test_an_exit_1_with_an_unreadable_result_falls_back_to_the_waiting_lis
     assert ["list"] in git.calls[1:]
 
 
+async def test_an_exit_1_with_nothing_readable_after_is_not_known_never_still_waiting(
+        git, monkeypatch):
+    """The holder exited 1, and neither the request's result (show) nor the waiting list could
+    be read after: whether it ran cannot be told. That is its own code, never "still waits,
+    send the answer again" (Critic 2026-11-28 O-3); the question is left alone."""
+    git.decide_exit = 1
+    git.show_exit = 1
+    git.list_exit = 1
+    real = git.run
+    listed = {"n": 0}
+
+    async def list_fails_after(argv, timeout):
+        # The first list (before the decision) answers; the one after fails.
+        if argv[0] == "list":
+            listed["n"] += 1
+            if listed["n"] == 1:
+                git.list_exit = 0
+                rc_out = await real(argv, timeout)
+                git.list_exit = 1
+                return rc_out
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", list_fails_after)
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["code"] == "git_request_outcome_unknown"
+    assert "failed" not in gr and "already_decided" not in gr
+    assert res["data"]["question_not_answered"] == "outcome_unknown"
+    assert res["data"]["status"] == "question_open"
+    d = res["data"]["delivery"]
+    assert "NOT KNOWN" in d and "Do NOT re-send" in d and "Send the answer again" not in d
+    assert git.menu.keys == [] and git.wiring.paste_calls == []
+
+
 def test_exit_not_waiting_is_the_holders_own_value():
     """The MCP server tells a lost race from a failed run by the holder's exit status: its
     EXIT_NOT_WAITING must be the one gitctl/git-requests.sh exits with."""
@@ -569,7 +602,9 @@ async def test_an_empty_read_after_enter_is_not_taken_for_answered(git, monkeypa
 
 async def test_another_dialog_after_enter_is_named_not_called_unreadable(git, monkeypatch):
     """After Enter the question is gone and a permission prompt asks about the agent's next
-    command: the screen was read, so the result names that dialog, not screen_unread."""
+    command: the screen was read, so the result names that dialog, not screen_unread. The
+    question is no longer open: status dialog_open, question_answered true (the option was
+    chosen), never question_open (Critic 2026-11-28 O-4)."""
     perm = "\n".join(["● older output", RULE, " Bash command", "",
                       "   git-requests show " + A, "", " Do you want to proceed?",
                       " ❯ 1. Yes", "   2. No", "", " Esc to cancel", ""])
@@ -579,8 +614,11 @@ async def test_another_dialog_after_enter_is_named_not_called_unreadable(git, mo
     monkeypatch.setattr(tmx, "capture_screen", capture)
     res = await _send("Approve")
     assert git.decisions == [["approve", A]]
-    assert res["data"]["question_not_answered"] == "another_dialog"
+    assert res["data"]["status"] == "dialog_open"
+    assert res["data"]["question_answered"] is True
+    assert "question_not_answered" not in res["data"]
     assert "permission prompt" in res["data"]["dialog"]
+    assert "no longer open" in res["data"]["delivery"]
     assert "could not be read" not in res["data"]["delivery"]
     assert "permission prompt" in res["data"]["delivery"]
 

@@ -109,12 +109,17 @@ EXTENDED_IN_2_0 = {
          "so its turn goes on (status \"answered_question\"; nothing is pasted, typed text never\n"
          "reaches that menu). If the menu could not be answered, the decision still stands:\n"
          "status \"question_open\", question_answered false and question_not_answered saying\n"
-         "why; the question then waits for the user at the git agent's terminal. A request\n"
+         "why; the question then waits for the user at the git agent's terminal. When the\n"
+         "option was chosen and another dialog took the question's place (a permission\n"
+         "prompt), the status is \"dialog_open\", question_answered true and `dialog` names\n"
+         "what waits for the user now. A request\n"
          "already decided (by the user, or by another answer first) is git_request's\n"
          "already_decided, not an error. One the git container ran that FAILED (a push\n"
          "refused, not logged in to GitHub) is git_request's code git_request_not_decided\n"
          "with failed true and the container's reason in message: tell the user; sending the\n"
-         "answer again decides nothing. Approve or Deny with no question open is refused,\n"
+         "answer again decides nothing. Code git_request_outcome_unknown: whether it ran\n"
+         "cannot be told; check aidc git requests before answering again. Approve or Deny\n"
+         "with no question open is refused,\n"
          "git_request_not_waiting; with a question open that names no readable request id,\n"
          "git_request_not_named; when the agent's transcript and screen cannot be read it\n"
          "is git_transcript_unreadable, retryable.\n\n"
@@ -404,3 +409,18 @@ def test_prepare_arguments_turns_whole_numbers_in_text_into_numbers_only_for_int
     transcript = _tool("session_transcript")
     assert transcript.prepare_arguments({"last_n": "+4", "since_uuid": "12"}) == {
         "last_n": 4, "since_uuid": "12"}
+
+
+def test_session_creates_name_rule_is_aidcs_one_rule():
+    """session_create says which names it takes; aidc create refuses the rest by the one rule
+    in scripts/lib/common.sh (AIDC_SESSION_NAME_RE). The pattern the tool states is read from
+    the published list (generated from the code) and must be that rule, so the two cannot
+    drift. session_mcp.SERVER_NAME_RE, an MCP server's name, is a rule of its own."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    common = (root / "scripts" / "lib" / "common.sh").read_text()
+    rule = [line.split("=", 1)[1].strip("'") for line in common.splitlines()
+            if line.startswith("AIDC_SESSION_NAME_RE=")]
+    assert len(rule) == 1 and rule[0].startswith("^")
+    tools = json.loads((root / "mcp" / "published-tools.json").read_text())
+    desc = next(t["description"] for t in tools if t["name"] == "session_create")
+    assert f"session name (must match `{rule[0]}`)" in desc

@@ -934,12 +934,15 @@ QUESTION_NOT_ANSWERED = {
                      "answered cannot be told",
     "another_dialog": "Enter was pressed on the option, and the screen now shows another "
                       "dialog instead of this question (the agent's next step waits on it)",
+    "outcome_unknown": "whether the git container ran the request cannot be told, so its "
+                       "question is left as it is",
 }
 
 #: the dialog a screen shows (screen.ScreenState.dialog), as the result names it
+#: (a question menu is never one: open_question reads it as a question, and
+#: answer_question_menu takes the screen for answered then)
 _DIALOG_NAMES = {scr.TRUST_PROMPT: "the folder-trust prompt",
-                 scr.ADD_DIR_PROMPT: "the prompt to add a folder",
-                 scr.QUESTION_MENU: "another question"}
+                 scr.ADD_DIR_PROMPT: "the prompt to add a folder"}
 
 
 def dialog_name(screen: scr.ScreenState) -> str:
@@ -1050,12 +1053,17 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
         async with lock:
             why_not, dialog = await answer_question_menu(container, name, decision.verb,
                                                          decision.request_id)
+    elif decided.get("code") == "git_request_outcome_unknown":
+        why_not = "outcome_unknown"
     else:
         why_not = "request_not_decided"
-    answered = not why_not
+    # Another dialog in the question's place: the option was chosen and the question is gone
+    # (no longer open); what waits now is that dialog, named in `dialog`.
+    replaced = why_not == "another_dialog"
+    answered = not why_not or replaced
     audit.log_event("git_question_answered" if answered else "git_question_not_answered",
                     session=name, request_id=decision.request_id, option=decision.verb,
-                    reason=why_not)
+                    reason=why_not, dialog=dialog)
     watching = name in ss.session_watchers
     watched = dlv.watched_conversation(name) if watching else ""
     elsewhere = bool(conversation_id and watched and watched != conversation_id)
@@ -1089,12 +1097,21 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                     "it on screen: this answer approved or denied nothing, and nothing was "
                     "sent. Do NOT re-send; git-requests show, or aidc git requests, says how "
                     "it was decided.")
-    elif answered:
+    elif answered and not replaced:
         settled = (" The request was already decided (git_request.already_decided), so this "
                    "answer approved or denied nothing." if decided.get("already_decided") else "")
         delivery = (f"Answered: {option} was chosen in the git agent's question, so its turn "
                     f"goes on; its reply comes {where}.{settled} Nothing else was sent. "
                     "Do NOT re-send.")
+    elif why_not == "outcome_unknown":
+        delivery = (f"Whether the {option} was carried out is NOT KNOWN (git_request.code "
+                    f"git_request_outcome_unknown): the git container said \"{holder_said}\", "
+                    f"and git request {decision.request_id}'s result and the waiting list could "
+                    "not be read after it, so it may have run. The git agent's question is left "
+                    "as it is, and nothing was typed into the session. Do NOT re-send the "
+                    "answer blindly: check the request first (aidc git requests, or ask the "
+                    f"user to run aidc git requests); if it still waits, decide with aidc git "
+                    f"{decision.verb} {decision.request_id}.")
     elif why_not == "request_not_decided":
         delivery = (f"The {option} was NOT carried out (git_request.code "
                     f"git_request_not_decided): the git container says \"{holder_said}\". "
@@ -1102,21 +1119,23 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                     "question is left open. Nothing was typed into the session. Send the "
                     f"answer again, or decide with aidc git {decision.verb} "
                     f"{decision.request_id}.")
-    elif why_not == "another_dialog":
+    elif replaced:
         delivery = (f"The git request's decision stands (git_request). {option} was chosen "
-                    f"in the git agent's question, and its screen now shows {dialog} instead, "
-                    "waiting for a person. Nothing was typed into the session. Tell the user "
-                    "to look at the git agent's terminal.")
+                    f"in the git agent's question, which is no longer open: its screen now "
+                    f"shows {dialog} instead (status dialog_open, dialog), waiting for a "
+                    "person. Nothing was typed into the session. Tell the user to look at the "
+                    "git agent's terminal.")
     else:
         delivery = (f"The git request's decision stands (git_request), but the git agent's "
                     f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "
                     "was typed into the session. Tell the user the question is still open in "
                     f"the git agent's terminal ({option} there lets it go on).")
     return com.envelope_ok({
-        "status": "answered_question" if answered else "question_open",
+        "status": ("dialog_open" if replaced else "answered_question" if answered
+                   else "question_open"),
         "session": name, "prompt_id": ts.new_prompt_id(), "reply_goes": reply_goes,
         "question_answered": answered,
-        **({"question_not_answered": why_not} if why_not else {}),
+        **({"question_not_answered": why_not} if why_not and not replaced else {}),
         **({"dialog": dialog} if dialog else {}),
         "git_request": decided,
         **({"watched_conversation_id": watched} if watched else {}),

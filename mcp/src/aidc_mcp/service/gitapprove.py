@@ -245,7 +245,10 @@ async def carry_out(decision: Decision) -> dict[str, Any]:
     that reached the holder first (a race the holder lets only one side win, and reports by
     its exit status EXIT_NOT_WAITING). Any other refusal is `code` git_request_not_decided
     with the holder's message; `failed` adds that the holder ran it and it failed (it is no
-    longer waiting), rather than not reaching it (still waiting, so it can be sent again)."""
+    longer waiting), rather than not reaching it (still waiting, so it can be sent again).
+    `code` git_request_outcome_unknown: the holder did not say it was done, and neither the
+    request's result nor the waiting list could be read after, so whether it ran is not
+    known (never reported as still waiting)."""
     outcome: dict[str, Any] = {"request_id": decision.request_id, "decision": decision.verb}
     if not decision.waiting:
         outcome.update(done=False, already_decided=True,
@@ -276,7 +279,11 @@ async def carry_out(decision: Decision) -> dict[str, Any]:
             else:
                 outcome["code"] = "git_request_not_decided"
                 waiting = await waiting_requests()
-                if waiting is not None and decision.request_id not in waiting:
+                if waiting is None:
+                    # Neither its result nor the waiting list could be read: whether the
+                    # holder ran it cannot be told, so it is never "still waits, send again".
+                    outcome["code"] = "git_request_outcome_unknown"
+                elif decision.request_id not in waiting:
                     outcome["failed"] = True
     audit.log_event("git_request_answered", session=backend.GIT_SESSION,
                     request_id=decision.request_id, decision=decision.verb,

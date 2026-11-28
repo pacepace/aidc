@@ -598,7 +598,9 @@ into the question:
   presses Enter. It counts the question answered only when a later read shows a screen aidc
   knows without that question (the input box, Claude at its prompt or working, or a question
   about another request). Another dialog in its place (a permission prompt for the agent's
-  next command) is `another_dialog`, named in the result's `dialog`; an empty or failed read,
+  next command) means the option was chosen and the question is gone: status `dialog_open`,
+  `question_answered: true`, the dialog named in `dialog` (amended 2026-11-28: it said
+  `question_open` and `question_answered: false`, as if the question still waited); an empty or failed read,
   or one aidc cannot classify, is `screen_unread`, and a send-keys that fails is
   `keys_not_sent`. Arrows rather than a number key, because a number may choose at once with no
   chance to check what was chosen. Nothing is pasted or queued: after the menu the text would
@@ -606,11 +608,15 @@ into the question:
   and the result says `question_answered: false` with `question_not_answered`. A request that
   failed is no longer waiting, so its option is chosen too and the agent reports the failure.
   Only a holder that was not reached leaves the question open, so the answer can be sent
-  again.
-- **Reported.** The result (status `answered_question`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
+  again. When the holder did not say it was done and neither the request's result nor the
+  waiting list can be read after, whether it ran is not known: `code`
+  `git_request_outcome_unknown`, the question is left alone, and the delivery says to check
+  the request before answering again (never "still waits, send again").
+- **Reported.** The result (status `answered_question`, `dialog_open`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
   holder's `exit` and `message`, `already_decided: true` when the request was not waiting (or
   the holder exited 3), or `code` `git_request_not_decided` when the holder did not carry it
-  out, with `failed: true` when it ran and failed.
+  out, with `failed: true` when it ran and failed, or `git_request_outcome_unknown` when
+  whether it ran cannot be told.
   The access log records each as `git_request_answered`, and each refusal as
   `git_request_answer_refused` with its reason.
 

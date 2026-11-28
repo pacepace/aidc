@@ -93,7 +93,7 @@ is not in the 3tears repo, so what it supports is unknown here.
 |---|---|---|
 | 23 tools | 23 `TearsTool`s over the core and service | Clean. Canonical names are namespaced (`aidc.session_send`) and used on the mesh; the local MCP face keeps the 1.x names, since LLM APIs reject a dot in a tool name (TRS-15, see "Contract"). |
 | Envelope with its closed set of error codes (design-10 D6) | `ToolResult` with 5 platform codes | Keep the envelope as the tool's content (JSON), unchanged for callers; `success` mirrors `ok`; the aidc code also in `metadata`. Use the 5 platform codes only for their own meaning (bad arguments, permission). |
-| Progress during create and invoke | none | **Open.** Keep `ctx.info` in local mode only; on a mesh, `session_create` returns when the session is ready (as today, without phase messages), and long work goes through `session_send` / `session_invoke_async`. |
+| Progress during create and invoke | none | **Carry it** (owner ruling 2026-11-28): progress travels over the mesh through `TearsTool` and the registry (upstream U13), so a mesh caller sees `session_create`'s phases and an invoke's progress as a local one does. |
 | Resources | none in `3tears-mcp` | **Keep** (owner ruling 2026-11-24): add resource support upstream in `3tears-mcp` (item 4) and serve the same URIs through it (TRS-06). |
 | Dynamic descriptions + `tools/list_changed` (MCP-21) | stateless, not supported | **Keep** (owner ruling 2026-11-24): through upstream stateful mode (item 5) and `McpServer`'s live tool provider (TRS-07). |
 | Blocking `session_invoke` with disconnect cancel | no cancel channel | Keep it in local mode, cancelled through the call context when the client goes away (TRS-09, which retired 1.x's disconnect watcher); on a mesh, offer `session_invoke_async` and `session_interrupt(target="headless")` (blocking calls would sit inside the registry's call deadline). |
@@ -219,8 +219,8 @@ agreed.
 
 ## Open questions for the owner
 
-1. Progress on the mesh: carry it through `TearsTool` (another upstream change in agent-tools
-   and the registry), or keep progress local and use the async tools on the mesh?
+1. ~~Progress on the mesh~~: answered 2026-11-28, carry it through `TearsTool` and the registry
+   (upstream U13).
 2. Mesh delivery of finished turns: keep the webhook, or add a NATS subject the orchestrator
    consumes (agreed with the orchestrator, design-10 D5)?
 3. Packaging: one image with mesh support, or a light default plus a mesh variant?

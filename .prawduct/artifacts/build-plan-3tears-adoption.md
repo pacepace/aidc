@@ -120,7 +120,7 @@ verify-api against the released source.
 
 | Gate | Question | Blocks |
 |---|---|---|
-| design-13 Q1 | Progress on the mesh: through `TearsTool` (upstream in agent-tools and the registry, U13), or local only with the async tools on the mesh? | 20 |
+| design-13 Q1 | Progress on the mesh: **answered 2026-11-28, carry it** (U13). | 20 |
 | design-13 Q2 | Mesh delivery of finished turns: keep the webhook only, or add a NATS subject agreed with the orchestrator? | 21 |
 | design-13 Q3 | Images: one image with the mesh extra, or a light default plus a mesh variant? | 21 |
 | design-13 Q4 | Durable state: an L1-on-a-file 3tears store (U11, TRS-25 A), or aidc's files (TRS-25 B)? | 07 (and U11) |
@@ -169,7 +169,7 @@ Order follows design-13 "Upstream work".
   file, refusing to start with eviction on, no path drops a row that only L1 holds; kill -9 test.
 - **U12 agent-audit reports a failed publish** (item 9; TRS-22). Done when: a failed publish is
   counted or reported to the caller, not only logged.
-- **U13 Progress through `TearsTool` and the registry.** Only if Q1 = carry it. Done when: a mesh
+- **U13 Progress through `TearsTool` and the registry.** Needed: Q1 = carry it (owner ruling 2026-11-28); built on 3tears `feat/mesh-progress`. Done when: a mesh
   caller receives a tool's progress before its result.
 
 ## Build Chunks
@@ -474,8 +474,8 @@ Order follows design-13 "Upstream work".
 
 - **Description:** A `ToolServer` entry point registering the same TearsTools as `aidc.*`, pod
   identity and key, registry grants with the scope on top, `conversation_id` from the hub, mesh
-  audit with the access log as the record; no blocking invoke on the mesh; progress per Q1.
-- **Depends on:** 05; gate Q1; U12 (and U13 if Q1 = carry).
+  audit with the access log as the record; no blocking invoke on the mesh; progress over the mesh (Q1 = carry).
+- **Depends on:** 05; U12; U13.
 - **Requirements:** TRS-19, TRS-20, TRS-21, TRS-22.
 - **Foreign API:** 3tears-agent-tools ToolServer, 3tears-registry, 3tears-agent-audit
 - **Done when:**
@@ -483,7 +483,7 @@ Order follows design-13 "Upstream work".
   1. Tests: an ungranted caller refused, a granted caller outside the scope refused, a granted call
      delivered and audited in both places.
   2. `/prawduct:critic`; committed.
-- **Owner's hands:** the Q1 answer.
+- **Owner's hands:** none (Q1 answered 2026-11-28).
 
 ### Chunk 21: Mesh delivery, the per-user server on the mesh, images
 

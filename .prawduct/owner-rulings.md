@@ -508,3 +508,6 @@ Owner ruling: the git agent's Claude, on Docker and on Kubernetes, starts in its
 
 ## 2026-11-28 Progress travels over the mesh (design-13 Q1)
 Owner ruling: progress notifications reach an orchestrator over the 3tears mesh too, not only on a local connection (the recommendation to keep progress local and rely on the async tools was declined). This needs a 3tears change to carry progress across the mesh; it belongs in the 3tears release aidc 2.0 moves to (chunk 22), and aidc's chunk 20 uses it.
+
+## 2026-11-28 The broker renews by running Claude Code itself
+Owner ruling (confirmed): the account broker renews an account's token by running Claude Code itself (a one-word prompt within an hour of expiry), not by calling the login server directly as Claude Code. This is what chunk 17 built (renewal option B).

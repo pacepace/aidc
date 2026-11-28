@@ -278,6 +278,13 @@ and the envelope are unchanged; what an MCP caller sees differently:
   window as not due yet, waits for that window after any other early failure, and clears a
   recorded failure when the token is found renewed already. A renewal that fails inside the
   window is still shown as RENEWAL FAILING.
+- **`aidc mcp start` puts a running cluster MCP server on an mcp image rebuilt under the same
+  tag.** It restarted the server only when its API address changed, so an image from `aidc k8s
+  build --force` was taken only by a stop and a start. The build now records the digest of each
+  image it pushes in `~/.local/state/aidc/k8s-images`, and start puts that digest on the
+  server's pod template: a new one replaces the pod, the same one leaves a running server
+  alone. Without a record on this machine (the image was built elsewhere) start keeps the
+  server as it is and says so.
 - **`aidc claude broker start` runs a broker image rebuilt under the same tag.** It said
   "deployment unchanged" and kept the old pod; now it restarts the broker then, as `aidc git
   setup` does the git container. Its accounts are kept.

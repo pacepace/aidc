@@ -1876,6 +1876,8 @@ K8S_MCP_TOKEN_SECRET=aidc-mcp-token
 K8S_MCP_CONFIG=aidc-mcp-config
 K8S_MCP_STATE_CLAIM=aidc-mcp-state
 K8S_MCP_PORT=7878
+# The pod template's annotation that carries the mcp image's digest (k8s_render_mcp).
+K8S_MCP_DIGEST_KEY=aidc/image-digest
 # The taint webhook (W-M4, K8S-13's one exception): each session's policy sidecar pokes it when
 # the session is tainted; nothing else may reach this port, and nothing on it but the poke.
 K8S_MCP_TAINT_PORT=7879
@@ -2018,6 +2020,12 @@ spec:
 "
     [ "${AIDC_MCP_SESSION_CREATE:-}" = true ] && session_create=true
     local labels="${K8S_MANAGED_BY}, aidc/user: ${AIDC_K8S_USER}, app: ${K8S_MCP_NAME}"
+    # The mcp image's digest (K8S_MCP_IMAGE_DIGEST, set by aidc mcp start from what aidc k8s build
+    # recorded) on the pod template: the image's tag stays this version's, so a rebuilt image
+    # changes the template only here, and the apply then replaces the pod, which pulls it. The
+    # same digest applies unchanged and the server keeps running.
+    local annotations=""
+    [ -z "${K8S_MCP_IMAGE_DIGEST:-}" ] || annotations=", annotations: {${K8S_MCP_DIGEST_KEY}: \"${K8S_MCP_IMAGE_DIGEST}\"}"
     k8s_render_mcp_service
     cat <<EOF
 ---
@@ -2045,7 +2053,7 @@ spec:
   strategy: {type: Recreate}
   selector: {matchLabels: {app: ${K8S_MCP_NAME}}}
   template:
-    metadata: {labels: {${labels}}}
+    metadata: {labels: {${labels}}${annotations}}
     spec:
       serviceAccountName: ${K8S_MCP_SA}
       automountServiceAccountToken: true

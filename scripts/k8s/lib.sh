@@ -297,6 +297,48 @@ k8s_check_size() {
     [ "$bad" = 0 ]
 }
 
+# The images `aidc k8s build` pushed from this machine, by digest. The tags are aidc's version,
+# so a build with --force pushes new content under a tag a running Deployment already names;
+# only the digest tells the two apart. One line per cluster and image:
+#   <API server URL> <registry path:tag> <digest>
+# in ${XDG_STATE_HOME:-~/.local/state}/aidc/k8s-images. aidc mcp start reads its image's line
+# (mcp.sh). The cluster is named by its API server URL, the one thing the builder's
+# kubeconfig and a user's have in common; the registry is reachable from the cluster only, so
+# start cannot ask it. A build made on another machine leaves no line here.
+k8s_images_record_file() { printf '%s/aidc/k8s-images' "${XDG_STATE_HOME:-${HOME}/.local/state}"; }
+
+# k8s_cluster_server: the API server URL of the configured kubeconfig context ("" when it
+# cannot be read).
+k8s_cluster_server() {
+    k8s_kubectl config view --minify -o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null || true
+}
+
+# k8s_image_digest <registry path:tag>: the digest recorded for it on this cluster, "" when none.
+# The kubeconfig is read for the cluster's URL only when some cluster has a record of the image.
+k8s_image_digest() {
+    local f server
+    f=$(k8s_images_record_file)
+    [ -f "$f" ] && awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' "$f" || return 0
+    server=$(k8s_cluster_server)
+    [ -n "$server" ] || return 0
+    awk -v s="$server" -v t="$1" '$1 == s && $2 == t { d = $3 } END { if (d != "") print d }' "$f"
+}
+
+# k8s_image_digest_set <server> <registry path:tag> <digest>: records it, replacing that
+# image's line; an empty <digest> removes the line. Returns 1, saying why on stderr, when the
+# record cannot be written.
+k8s_image_digest_set() {
+    local f tmp
+    f=$(k8s_images_record_file)
+    [ -n "$1" ] || { printf '[aidc] error: no API server URL to record %s under\n' "$2" >&2; return 1; }
+    mkdir -p "$(dirname "$f")" || { printf '[aidc] error: cannot make %s\n' "$(dirname "$f")" >&2; return 1; }
+    tmp=$(mktemp "${f}.XXXXXX") || { printf '[aidc] error: cannot write %s\n' "$f" >&2; return 1; }
+    { [ ! -f "$f" ] || awk -v s="$1" -v t="$2" '!($1 == s && $2 == t)' "$f"
+      [ -z "$3" ] || printf '%s %s %s\n' "$1" "$2" "$3"; } > "$tmp" \
+        && mv -f "$tmp" "$f" \
+        || { rm -f "$tmp"; printf '[aidc] error: cannot write %s\n' "$f" >&2; return 1; }
+}
+
 # k8s_get <namespace> <kubectl get args...>: the backend's one reader for a cluster object whose
 # absence is an answer. Prints the answer and returns 0, with "" for an object that is not there
 # (--ignore-not-found); when kubectl fails (the cluster did not answer, no rights, a timeout),

@@ -300,6 +300,8 @@ mcp_add_endpoints() {
 
 mcp_start() {
     local sel tok rc=0 eps api_eps first reach target held="" state incluster="" known expose
+    # shellcheck disable=SC2034  # K8S_MCP_IMAGE_DIGEST is read by k8s_render_mcp (manifests.sh)
+    local image digest running_digest="" K8S_MCP_IMAGE_DIGEST=""
     # A token first: the pod mounts it, and a cluster that does not say whether there is one
     # must not get a second.
     tok=$(mcp_token_read) || rc=$?
@@ -322,6 +324,30 @@ mcp_start() {
             incluster=$(printf '%s\n' "$known" | grep -vxF -f <(printf '%s\n' "$eps") || true)
         fi
         eps=$(mcp_add_endpoints "$eps" "$incluster")
+    fi
+    # The image. Its tag is aidc's version, so one rebuilt under it (aidc k8s build --force)
+    # leaves the Deployment as it was, and a running server would keep the old one. The digest
+    # aidc k8s build recorded here goes on the pod template (k8s_render_mcp): a new one replaces
+    # the pod, which pulls the image; the same one changes nothing, so a start does not restart
+    # a server the orchestrator is using for no reason. With no record (the image was built on
+    # another machine), the running server's own annotation is kept, as is the server.
+    image="aidc/mcp:${AIDC_VERSION_TAG}"
+    digest=$(k8s_image_digest "$image")
+    if [ "$state" != "NOT RUNNING" ]; then
+        running_digest=$(k8s_get "$ns" deployment "$K8S_MCP_NAME" -o "jsonpath={.spec.template.metadata.annotations.${K8S_MCP_DIGEST_KEY}}") \
+            || die "cannot read which image your MCP server runs: the cluster did not answer (${running_digest}; nothing was changed)"
+    fi
+    # shellcheck disable=SC2034  # read by k8s_render_mcp
+    K8S_MCP_IMAGE_DIGEST="${digest:-$running_digest}"
+    if [ -z "$digest" ]; then
+        [ "$state" = "NOT RUNNING" ] \
+            || info "no record here of the ${image} image's last build (aidc k8s build on this machine makes one): your running MCP server keeps the image it runs; aidc mcp stop, then start, puts it on one rebuilt since"
+    elif [ "$state" != "NOT RUNNING" ] && [ -z "$running_digest" ]; then
+        info "your MCP server is restarted onto ${image} at ${digest} (which build it runs is not known)"
+    elif [ "$state" != "NOT RUNNING" ] && [ "$digest" != "$running_digest" ]; then
+        info "${image} was rebuilt (now ${digest}): your MCP server is restarted onto it"
+    else
+        info "image: ${image} at ${digest}"
     fi
     # The pod's kubectl goes to one API server address (docs/design-12-kubernetes.md, the MCP
     # server's "API server reach"). A server that runs already is asked which it reaches before

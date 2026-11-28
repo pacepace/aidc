@@ -58,6 +58,8 @@ assert_not_has() {
 #                             <ep> in $K_UNREACHABLE (space-separated)
 #                             (every one with K_EXEC_FAIL=1, as an exec that fails itself)
 #   get configmap aidc-mcp-config  the running server's kubeconfig, at $K_HELD when set
+#   get deployment aidc-mcp ... image-digest  the running pod template's image digest:
+#                             $K_RUNNING_DIGEST (K_DIGEST_READ_FAIL=1: no answer)
 cat > "$SCRATCH/bin/kubectl" <<'STUB_K8S_MCP_x41'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
@@ -69,6 +71,9 @@ case "$*" in
         [ -z "${K_TOKEN:-}" ] || printf '%s' "$K_TOKEN" | base64 | tr -d '\n' ;;
     *"get pvc transcripts"*) [ "${K_NO_TRANSCRIPTS:-}" = 1 ] || echo "persistentvolumeclaim/transcripts" ;;
     *"get pvc aidc-mcp-state"*) [ "${K_NO_STATE:-}" = 1 ] || echo "persistentvolumeclaim/aidc-mcp-state" ;;
+    *"get deployment aidc-mcp"*"image-digest"*)
+        [ "${K_DIGEST_READ_FAIL:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        printf '%s' "${K_RUNNING_DIGEST:-}" ;;
     *"get deployment aidc-mcp"*)
         [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         if [ "${K_RUNNING:-}" = 1 ]; then printf 'aidc-mcp|1'; elif [ "${K_STARTING:-}" = 1 ]; then printf 'aidc-mcp|'; fi ;;
@@ -118,7 +123,9 @@ GETENT_K8S_MCP_x41
 chmod +x "$SCRATCH/bin/kubectl" "$SCRATCH/bin/docker" "$SCRATCH/bin/getent"
 
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
-    PATH="$SCRATCH/bin:$PATH"
+    PATH="$SCRATCH/bin:$PATH" XDG_STATE_HOME="$SCRATCH/home/.local/state"
+[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
+    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
 CFG="$HOME/.config/aidc/config.yaml"
 write_config() {
     cat > "$CFG" <<'CFG_K8S_MCP_x41'
@@ -146,6 +153,8 @@ pols() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp") | 
 # cpol: the callback's own policy's egress, as <cidr>:<port>.
 cpol() { q 'select(.kind == "NetworkPolicy" and .metadata.name == "aidc-mcp-callback") | [.spec.egress[] | .to[0].ipBlock.cidr + ":" + (.ports[0].port | tostring)]' | grep -vx '\[\]' | tail -1; }
 pod() { dep ".spec.template.spec | $1"; }
+pod_meta() { dep ".spec.template.metadata | $1"; }
+VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr '+' '_')
 
 echo "=== aidc mcp start: a first start ==="
 rm -f "$TOKEN_FILE"
@@ -399,6 +408,51 @@ assert_eq "a running server that holds an address it no longer reaches: its kube
 assert_has "...and restarted onto it" "rollout restart deployment/aidc-mcp" "$(cat "$K_LOG")"
 out=$(K_RUNNING=1 K_TOKEN=kept-token K_HELD=192.0.2.10:6443 K_CP_NODES='192.0.2.11 192.0.2.10 192.0.2.12' run start)
 assert_not_has "a running server that reaches the address it holds is not restarted" "rollout restart" "$(cat "$K_LOG")"
+assert_has "...and, with no record of the mcp image's build here, start says it keeps the image it runs" \
+    "no record here of the aidc/mcp:${VERSION_TAG} image's last build (aidc k8s build on this machine makes one): your running MCP server keeps the image it runs; aidc mcp stop, then start" "$out"
+assert_eq "...and its pod template carries no digest" "null" "$(pod_meta '.annotations')"
+
+echo "=== aidc mcp start: the image's digest, as aidc k8s build recorded it ==="
+RECORD="$XDG_STATE_HOME/aidc/k8s-images"
+D1="sha256:$(printf '1%.0s' $(seq 64))" D2="sha256:$(printf '2%.0s' $(seq 64))" D0="sha256:$(printf '0%.0s' $(seq 64))"
+mkdir -p "$(dirname "$RECORD")"
+printf '%s\n' "https://192.0.2.99:6443 aidc/mcp:${VERSION_TAG} ${D0}" "https://192.0.2.10:6443 aidc/mcp:${VERSION_TAG} ${D1}" \
+    "https://192.0.2.10:6443 aidc/broker:${VERSION_TAG} ${D2}" > "$RECORD"
+running() { K_RUNNING=1 K_TOKEN=kept-token K_HELD=192.0.2.10:6443 run start; }
+out=$(K_RUNNING_DIGEST="$D1" running)
+assert_has "exit 0" "exit=0" "$out"
+assert_eq "the pod template carries the digest recorded for this cluster's mcp image" "\"$D1\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_not_has "a running server already on it is not restarted (the apply leaves it as it is)" "rollout restart" "$(cat "$K_LOG")"
+assert_has "...and start says which image it runs" "image: aidc/mcp:${VERSION_TAG} at ${D1}" "$out"
+out=$(K_RUNNING_DIGEST="$D2" running)
+assert_eq "a running server on another digest: the template carries the new one, so the apply replaces the pod" "\"$D1\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_has "...and start says it is restarted onto the rebuilt image" \
+    "aidc/mcp:${VERSION_TAG} was rebuilt (now ${D1}): your MCP server is restarted onto it" "$out"
+assert_has "...and waits for the new pod" "rollout status deployment/aidc-mcp" "$(cat "$K_LOG")"
+out=$(running)
+assert_eq "a running server whose template has no digest yet: the recorded one goes on it" "\"$D1\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_has "...and start says it is restarted onto it" \
+    "your MCP server is restarted onto aidc/mcp:${VERSION_TAG} at ${D1} (which build it runs is not known)" "$out"
+out=$(run start)
+assert_eq "a new server starts with the recorded digest on its template" "\"$D1\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+out=$(K_SERVER=https://192.0.2.11:6443 K_RUNNING_DIGEST="$D2" K_RUNNING=1 K_TOKEN=kept-token K_HELD=192.0.2.11:6443 run start)
+assert_eq "a digest recorded for another cluster is not this one's: the running server's own is kept" "\"$D2\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_has "...and start says there is no record" "no record here of the aidc/mcp:${VERSION_TAG} image's last build" "$out"
+out=$(K_DIGEST_READ_FAIL=1 running)
+assert_has "a running server whose image the cluster does not say: start stops, changing nothing" \
+    "cannot read which image your MCP server runs: the cluster did not answer (Unable to connect to the server; nothing was changed)" "$out"
+assert_has "...exit 1" "exit=1" "$out"
+assert_eq "...and nothing is applied" "" "$(cat "$K_APPLIED")"
+rm -f "$RECORD"
+out=$(K_RUNNING_DIGEST="$D2" running)
+assert_eq "no record here: the running server's digest is kept on its template, so the apply changes nothing" "\"$D2\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_not_has "...and it is not restarted" "rollout restart" "$(cat "$K_LOG")"
 out=$(K_CP_NODES='198.51.100.1 198.51.100.2' run start)
 assert_eq "a kubeconfig address that is no control-plane node's (a load balancer, a tunnel): that address only" \
     '["192.0.2.10/32","10.43.0.1/32"]' "$(pols | tail -1)"

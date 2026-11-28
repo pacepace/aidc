@@ -5,7 +5,9 @@
 # Docker in a privileged builder pod (owner ruling 2026-11-24: the squid image's base needs
 # UIDs no user namespace has), from this aidc install's own files streamed in as tar. Each image is tagged with this aidc version and pushed to the
 # in-cluster registry; an image already there for this version is skipped unless --force.
-# The builder pod is deleted when the build ends, whichever way it ends.
+# The builder pod is deleted when the build ends, whichever way it ends. The digest each image
+# was pushed as is recorded on this machine (lib.sh, k8s_images_record_file), so aidc mcp start
+# can tell a server that runs an image rebuilt under the same tag.
 
 set -euo pipefail
 
@@ -30,6 +32,9 @@ registry `aidc k8s setup` made. Images already there for this aidc version are s
 --force builds them again (and fetches the current Claude Code release into dev-base,
 gitctl and broker, as `aidc rebuild` does for dev-base, and testament's newest release into dev-base
 when the config names its repo). --only builds one role.
+
+The digest each image is pushed as is recorded in ~/.local/state/aidc/k8s-images, so
+`aidc mcp start` on this machine restarts a running MCP server onto a rebuilt mcp image.
 EOF
             exit 0 ;;
         --force) FORCE=1; shift ;;
@@ -78,6 +83,9 @@ done
 bexec docker info >/dev/null 2>&1 || die "Docker did not start in the builder pod"
 
 built=0 skipped=0
+# The cluster the digests are recorded under; none recorded when the kubeconfig does not say.
+server=$(k8s_cluster_server)
+[ -n "$server" ] || err "cannot read the API server's URL from your kubeconfig: the digests of the images pushed are not recorded (aidc mcp start will not know they changed)"
 while IFS='|' read -r tag context dockerfile; do
     [ -n "$tag" ] || continue
     ref="${AIDC_K8S_REGISTRY_PUSH}/${tag}"
@@ -108,6 +116,21 @@ while IFS='|' read -r tag context dockerfile; do
         -f "${dir}/${dockerfile#"$context"/}" "$dir" >&2 \
         || die "build failed for ${tag} (images already pushed are kept)"
     bexec docker push -q "$ref" >&2 || die "push failed for ${ref}"
+    # The digest it was pushed as, recorded for aidc mcp start (lib.sh, k8s_images_record_file):
+    # the tag stays this version's, so the digest is what says the image changed. One that
+    # cannot be read leaves no record, never an old one.
+    digest=$(bexec docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" 2>/dev/null \
+        | grep -F "${AIDC_K8S_REGISTRY_PUSH}/${repo}@" | head -n1 | sed 's/.*@//') || digest=""
+    printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || digest=""
+    if [ -z "$server" ]; then
+        :
+    elif [ -n "$digest" ]; then
+        k8s_image_digest_set "$server" "$tag" "$digest" && info "pushed ${tag} as ${digest}" \
+            || err "${tag} is pushed, but its digest is not recorded: aidc mcp start will not know it changed"
+    else
+        err "${tag} is pushed, but its digest could not be read: aidc mcp start will not know it changed"
+        k8s_image_digest_set "$server" "$tag" "" || true
+    fi
     built=$((built + 1))
 done <<EOF
 $rows

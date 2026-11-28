@@ -58,10 +58,18 @@ assert_not_has() {
 #   exec ... -- tar ...           drains stdin
 #   exec ... -- <anything else>   succeeds
 #   exec -i ...                   drains stdin, as the real kubectl does
+#   exec ... -- docker image inspect <ref>  the pushed image's repo digest, <repo>@sha256:<sha256 of
+#                                 the ref and $K_SALT> (nothing when K_NO_DIGEST=1)
+#   config view                   the kubeconfig's server: $K_SERVER (default https://192.0.2.10:6443)
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
 case "$*" in
+    *"config view"*) printf '%s' "${K_SERVER-https://192.0.2.10:6443}" ;;
+    *" exec "*"-- docker image inspect "*)
+        [ "${K_NO_DIGEST:-}" = 1 ] && exit 0
+        for ref in "$@"; do :; done
+        printf '%s@sha256:%s\n' "${ref%:*}" "$(printf '%s%s' "$ref" "${K_SALT:-}" | sha256sum | cut -c1-64)" ;;
     *"get runtimeclass"*"-o json"*)
         echo '{"handler":"sysbox-runc","scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"get deployment registry"*)
@@ -81,9 +89,13 @@ case "$*" in *" exec -i "*) cat > /dev/null ;; esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/kubectl"
+# A docker that answers nothing, so no case reaches this machine's real daemon.
+printf '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' > "$SCRATCH/bin/docker"; chmod +x "$SCRATCH/bin/docker"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH"
+    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" XDG_STATE_HOME="$SCRATCH/home/.local/state"
+[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
+    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab
@@ -175,6 +187,31 @@ assert_has "the builder trusts plain HTTP only for aidc's own registry" \
 "$AIDC_ROOT/scripts/aidc" k8s build --force --only squid >/dev/null 2>&1
 assert_has "--force builds an image even when it is present" "aidc/squid:${VERSION_TAG} -f /build/squid/Dockerfile" "$(cat "$K_LOG")"
 assert_not_has "--only builds that role alone" "dev-base" "$(grep 'docker build' "$K_LOG")"
+
+echo "=== aidc k8s build: the digests it pushed, recorded for aidc mcp start ==="
+RECORD="$XDG_STATE_HOME/aidc/k8s-images"
+want_digest() { printf 'sha256:%s' "$(printf '%s%s' "registry.aidc-system.svc.cluster.local:5050/$1" "${2:-}" | sha256sum | cut -c1-64)"; }
+rec() { awk -v s="$1" -v t="$2" '$1 == s && $2 == t { print $3 }' "$RECORD"; }
+assert_eq "the full build above recorded each image it pushed, under the cluster's API server" \
+    "$(want_digest "aidc/mcp:${VERSION_TAG}")" "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}")"
+assert_eq "...one line per image built: the full build's 7 and the forced squid (refresher, skipped, has none)" \
+    "8 0" "$(grep -c . "$RECORD") $(grep -c " aidc/refresher:" "$RECORD")"
+printf '%s\n' "https://192.0.2.99:6443 aidc/mcp:${VERSION_TAG} sha256:$(printf '0%.0s' $(seq 64))" >> "$RECORD"
+out=$(K_SALT=again "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null); rc=$?
+assert_eq "a rebuild exits 0" 0 "$rc"
+assert_eq "a rebuild under the same tag replaces the image's line with the new digest" \
+    "$(want_digest "aidc/mcp:${VERSION_TAG}" again)" "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}")"
+assert_has "...and says it" "pushed aidc/mcp:${VERSION_TAG} as $(want_digest "aidc/mcp:${VERSION_TAG}" again)" "$out"
+assert_eq "...and leaves the other images' lines and another cluster's alone" "9 1" \
+    "$(grep -c . "$RECORD") $(grep -c '^https://192.0.2.99:6443 ' "$RECORD")"
+out=$(K_NO_DIGEST=1 "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null); rc=$?
+assert_eq "a pushed image whose digest cannot be read does not fail the build" 0 "$rc"
+assert_has "...it says start will not know" "aidc/mcp:${VERSION_TAG} is pushed, but its digest could not be read: aidc mcp start will not know it changed" "$out"
+assert_eq "...and its old line is removed, never left to claim the old digest" "" "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}")"
+out=$(K_SERVER="" "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null); rc=$?
+assert_eq "a kubeconfig that does not name its server: the build still exits 0" 0 "$rc"
+assert_has "...and says the digests are not recorded" "the digests of the images pushed are not recorded" "$out"
+assert_eq "...and records none" "" "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}")"
 
 echo "=== failure paths ==="
 : > "$K_LOG"

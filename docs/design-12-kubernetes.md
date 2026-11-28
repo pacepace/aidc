@@ -827,6 +827,17 @@ ruling; REL-08 amended: never pushed to a public registry). `aidc k8s setup` mak
   The builder and every session's inner dockerd take the pod's MTU.
 - **Always pulled.** `aidc k8s build --force` replaces an image under the same version tag, so
   session pods pull aidc's images every time (the registry is on the node; a pull is cheap).
+- **Digests recorded where the build ran.** A pull happens only when a pod is made, and a
+  Deployment that names the same tag applies unchanged, so a long-running pod keeps an image
+  rebuilt under it. `aidc k8s build` records the digest each image was pushed as (`docker image
+  inspect` in the builder, after the push) in `~/.local/state/aidc/k8s-images`, one line per
+  cluster (its API server URL, which the builder's kubeconfig and a user's share) and image; a
+  digest it cannot read removes that image's line rather than leave an old one. The record is
+  on the machine, not in the cluster: users have no read access to the system namespace, and the
+  registry is reachable from inside the cluster only. `aidc mcp start` uses it (below, the MCP
+  server's image). The broker and the git container are restarted on start or setup whenever
+  their Deployment applies unchanged instead: neither is a connection the orchestrator holds,
+  and an unconditional restart also takes an image built on another machine.
 
 ## Sessions: Sysbox, Docker inside, GPU on request
 
@@ -1547,6 +1558,19 @@ namespace (TRS-23, MCP-02/03 as amended):
   would have to replay a command's stdin, which a streaming exec (attach, send) cannot. So
   with that control-plane node down every cluster call from the server fails until
   `aidc mcp start` is run again, which asks the pod afresh and moves it to a node that answers.
+- **The server's image:** the orchestrator holds a connection to the server, so start never
+  restarts a running server for nothing (only for the API address above, or a rebuilt image).
+  The image's tag is aidc's version, and an image rebuilt under it (`aidc k8s build --force`)
+  would leave the Deployment unchanged and the old pod running. Start puts the digest `aidc k8s
+  build` recorded on this machine (above, "Images") on the pod template as the annotation
+  `aidc/image-digest`: a new digest changes the template, so the apply replaces the pod, which
+  pulls the image (imagePullPolicy Always); the same digest applies unchanged and the server
+  keeps running. Start says which: the digest it runs, or that it is restarted onto the rebuilt
+  image. With no record for this cluster (the image was built on another machine) the running
+  server's own annotation is kept, so it is not restarted, and start says a stop and then a
+  start puts it on an image rebuilt since. A cluster that does not say which digest the running
+  server has stops start before anything is changed. The kubeconfig's server URL is read for
+  this only when some cluster has a record of the image.
 - **Creating sessions (MCP-38/39, TRS-23):** with `mcp.session_create: true` the server's
   `session_create` runs `aidc create --backend kubernetes` in its pod, under its ServiceAccount:
   no repo or workspace (refused), the session starting at `/home/<user>` (the pod's home and

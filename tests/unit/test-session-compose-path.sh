@@ -116,6 +116,12 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
+# kubectl answers nothing. Both are the stubs on the PATH the cases below run with, or the test
+# refuses to run: nothing here may reach this machine's daemon or a cluster.
+printf '#!/bin/sh\necho "kubectl stub: no cluster here" >&2\nexit 1\n' > "$SCRATCH/bin/kubectl"; chmod +x "$SCRATCH/bin/kubectl"
+[ "$(env -i PATH="$SCRATCH/bin:/usr/bin:/bin" sh -c 'command -v docker')" = "$SCRATCH/bin/docker" ] \
+    && [ "$(env -i PATH="$SCRATCH/bin:/usr/bin:/bin" sh -c 'command -v kubectl')" = "$SCRATCH/bin/kubectl" ] \
+    || { echo "FAIL: docker or kubectl is not the stub; refusing to run"; exit 1; }
 run_kill() {
     env -i PATH="$SCRATCH/bin:/usr/bin:/bin" HOME="$SCRATCH/home" \
         AIDC_HOST_HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" \

@@ -3,8 +3,9 @@
 # scripts/docker/claude.sh; K8S-27, K8S-28): `aidc claude account|broker` reach the container
 # aidc-claude-broker; it holds the accounts on a volume only it mounts and is started with nothing
 # published and no capability; a session made while it runs gets its own folder of the
-# aidc-claude-config volume as its Claude config dir (and no long-lived token), one made while it
-# does not keeps today's way; aidc kill forgets the folder.
+# aidc-claude-config volume as its Claude config dir (and no long-lived token), which its audit
+# sidecar reads the conversations from, one made while it does not keeps today's way; aidc kill
+# forgets the folder.
 #
 # docker is a PATH stub, and the test refuses to run unless `docker` is that stub: nothing here may
 # reach this machine's daemon. HOME holds the config. Needs jq; yq for the compose and settings
@@ -183,7 +184,8 @@ ready() {
       # shellcheck source=../../scripts/docker/broker.sh
       . "$AIDC_ROOT/scripts/docker/broker.sh"
       dk_claude_session_ready s1 2>"$SCRATCH/ready.err"
-      printf '%s|%s|%s|%s\n' "$DK_CLAUDE_VIA" "$CLAUDE_BROKER" "$CLAUDE_CONFIG_MOUNT" "$(printf '%s' "$CLAUDE_CONFIG_VOLUME_DECL" | paste -sd'~' -)" )
+      printf '%s|%s|%s|%s|%s|%s\n' "$DK_CLAUDE_VIA" "$CLAUDE_BROKER" "$CLAUDE_CONFIG_MOUNT" "$(printf '%s' "$CLAUDE_CONFIG_VOLUME_DECL" | paste -sd'~' -)" \
+          "$AUDIT_CLAUDE_CONFIG_MOUNT" "$AUDIT_CLAUDE_PROJECTS" )
 }
 got=$(D_BROKER=running ready)
 assert_eq "with the broker running, the session uses it" "broker|1" "$(printf '%s' "$got" | cut -d'|' -f1-2)"
@@ -193,12 +195,16 @@ assert_has "its Claude config dir is its own folder of the volume, at the path C
     "{type: volume, source: claude-config, target: /home/vscode/.claude, volume: {subpath: s1}}" "$got"
 assert_has "the volume is declared external (aidc kill never removes it with the session)" \
     "  claude-config:~    name: aidc-claude-config~    external: true" "$got"
-assert_eq "with none running, today's way (its own login, or the token)" "none|||" "$(D_BROKER=absent ready)"
-assert_eq "...stopped too" "none|||" "$(D_BROKER=stopped ready)"
-assert_eq "a broker that does not answer for it leaves it on today's way (no folder to mount)" "none|||" "$(D_BROKER=running D_EXEC_RC=1 ready)"
+assert_has "the audit sidecar mounts the same folder, read-only, at a path of its own" \
+    "{type: volume, source: claude-config, target: /var/aidc/claude-config, read_only: true, volume: {subpath: s1}}" "$got"
+assert_eq "...and reads the conversations from its projects/ (where this session's Claude writes them)" \
+    "/var/aidc/claude-config/projects" "$(printf '%s' "$got" | cut -d'|' -f6)"
+assert_eq "with none running, today's way (its own login, or the token)" "none|||||" "$(D_BROKER=absent ready)"
+assert_eq "...stopped too" "none|||||" "$(D_BROKER=stopped ready)"
+assert_eq "a broker that does not answer for it leaves it on today's way (no folder to mount)" "none|||||" "$(D_BROKER=running D_EXEC_RC=1 ready)"
 assert_has "...saying so" "did not answer for s1" "$(cat "$SCRATCH/ready.err")"
-assert_eq "a docker that does not answer: today's way" "none|||" "$(D_DOWN=1 ready)"
-assert_eq "an engine older than 26 (no volume subpath) leaves it on today's way" "none|||" "$(D_BROKER=running D_ENGINE=25.0.3 ready)"
+assert_eq "a docker that does not answer: today's way" "none|||||" "$(D_DOWN=1 ready)"
+assert_eq "an engine older than 26 (no volume subpath) leaves it on today's way" "none|||||" "$(D_BROKER=running D_ENGINE=25.0.3 ready)"
 assert_has "...saying why" "needs 26 or later" "$(cat "$SCRATCH/ready.err")"
 assert_not_has "...without making its folder" "claude-broker session" "$(calls)"
 
@@ -227,15 +233,34 @@ if command -v yq >/dev/null 2>&1; then
         env SESSION=s1 PROFILE=multi REPO_PATH=/r WORKSPACE_PATH=/r AUDIT_DIR=/a HOST_CLAUDE_PROJECT_DIR=/p \
             ENCODED_REPO=-r AIDC_VERSION_TAG=v0 "$@" bash "$AIDC_ROOT/proxy/compose-render.sh" < "$AIDC_ROOT/proxy/compose.yaml.template"
     }
-    y=$(render CLAUDE_BROKER=1 CLAUDE_CONFIG_MOUNT="- {type: volume, source: claude-config, target: /home/vscode/.claude, volume: {subpath: s1}}" \
-        CLAUDE_CONFIG_VOLUME_DECL=$'  claude-config:\n    name: aidc-claude-config\n    external: true')
+    # The compose pieces exactly as dk_claude_session_ready sets them with the broker running.
+    pieces() {
+        ( : > "$D_LOG"; rm -f "$D_LOG.started"
+          AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+          # shellcheck source=../../scripts/docker/broker.sh
+          . "$AIDC_ROOT/scripts/docker/broker.sh"
+          D_BROKER=running dk_claude_session_ready s1 2>/dev/null
+          printf '%s\0' "CLAUDE_BROKER=$CLAUDE_BROKER" "CLAUDE_CONFIG_MOUNT=$CLAUDE_CONFIG_MOUNT" \
+              "CLAUDE_CONFIG_VOLUME_DECL=$CLAUDE_CONFIG_VOLUME_DECL" \
+              "AUDIT_CLAUDE_CONFIG_MOUNT=$AUDIT_CLAUDE_CONFIG_MOUNT" "AUDIT_CLAUDE_PROJECTS=$AUDIT_CLAUDE_PROJECTS" )
+    }
+    mapfile -d '' broker_env < <(pieces)
+    y=$(render "${broker_env[@]}")
     assert_eq "compose: the dev container mounts the session's folder at /home/vscode/.claude" "claude-config /home/vscode/.claude s1" \
         "$(printf '%s' "$y" | yq '.services.dev.volumes[] | select(type == "!!map") | .source + " " + .target + " " + .volume.subpath')"
     assert_eq "...over dev-home, which stays the home" "1" "$(printf '%s' "$y" | yq '[.services.dev.volumes[] | select(. == "dev-home:/home/vscode:rw")] | length')"
     assert_eq "...from the external volume" "aidc-claude-config true" "$(printf '%s' "$y" | yq '.volumes["claude-config"] | .name + " " + (.external | tostring)')"
     assert_eq "...and tells the entrypoint the broker manages it" "1" "$(printf '%s' "$y" | yq '.services.dev.environment.AIDC_CLAUDE_BROKER')"
-    assert_eq "no other service mounts it" "0" "$(printf '%s' "$y" | yq '[.services | to_entries[] | select(.key != "dev") | .value.volumes[]? | select(type == "!!map")] | length')"
+    assert_eq "the audit sidecar mounts the same folder read-only at /var/aidc/claude-config" "claude-config /var/aidc/claude-config s1 true" \
+        "$(printf '%s' "$y" | yq '.services.audit.volumes[] | select(type == "!!map") | .source + " " + .target + " " + .volume.subpath + " " + (.read_only | tostring)')"
+    assert_eq "...and takes the conversations from its projects/, not dev-home's" "/var/aidc/claude-config/projects" \
+        "$(printf '%s' "$y" | yq '.services.audit.environment.AIDC_AUDIT_CLAUDE_PROJECTS')"
+    assert_eq "...dev-home stays mounted for the shell history" "1" "$(printf '%s' "$y" | yq '[.services.audit.volumes[] | select(. == "dev-home:/var/aidc/dev-home:ro")] | length')"
+    assert_eq "no other service mounts it" "0" "$(printf '%s' "$y" | yq '[.services | to_entries[] | select(.key != "dev" and .key != "audit") | .value.volumes[]? | select(type == "!!map")] | length')"
     y=$(render)
+    assert_eq "without the broker: the audit sidecar mounts no folder and reads dev-home's .claude/projects" \
+        "0|/var/aidc/dev-home/.claude/projects" \
+        "$(printf '%s' "$y" | yq '[.services.audit.volumes[] | select(type == "!!map")] | length')|$(printf '%s' "$y" | yq '.services.audit.environment.AIDC_AUDIT_CLAUDE_PROJECTS')"
     assert_eq "without the broker: no folder, no volume, AIDC_CLAUDE_BROKER empty" "0|null|" \
         "$(printf '%s' "$y" | yq '[.services.dev.volumes[] | select(type == "!!map")] | length')|$(printf '%s' "$y" | yq '.volumes["claude-config"]')|$(printf '%s' "$y" | yq '.services.dev.environment.AIDC_CLAUDE_BROKER')"
 else

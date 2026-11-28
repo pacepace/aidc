@@ -42,6 +42,8 @@ DK_BROKER_ACCESS=/var/aidc/claude-config
 DK_BROKER_CONFIG_DIR=/etc/claude-broker
 # The git agent's folder of aidc-claude-config (claude-broker.sh: BROKER_GIT_SESSION).
 DK_BROKER_GIT_FOLDER=git
+# Where the audit sidecar of a session the broker manages mounts that session's folder.
+DK_AUDIT_CLAUDE_CONFIG=/var/aidc/claude-config
 
 dk_broker_image() { printf 'aidc/broker:%s' "${AIDC_VERSION_TAG:?AIDC_VERSION_TAG not set}"; }
 
@@ -137,12 +139,15 @@ dk_broker_stop() {
 # dk_claude_session_ready <session>: when the broker runs, the session's folder of
 # aidc-claude-config, made and given the active account's credentials now, so its Claude starts
 # logged in; sets DK_CLAUDE_VIA=broker and the compose pieces (CLAUDE_CONFIG_MOUNT,
-# CLAUDE_CONFIG_VOLUME_DECL, CLAUDE_BROKER=1). Otherwise DK_CLAUDE_VIA=none and the pieces empty:
+# CLAUDE_CONFIG_VOLUME_DECL, CLAUDE_BROKER=1, and the audit sidecar's AUDIT_CLAUDE_CONFIG_MOUNT
+# and AUDIT_CLAUDE_PROJECTS: it reads the conversations where Claude writes them, the folder, as
+# it reads dev-home's for any other session). Otherwise DK_CLAUDE_VIA=none and the pieces empty:
 # the session keeps its Claude config dir on its dev-home volume (its own /login, or the
 # long-lived token). Never fails: a broker that does not answer leaves the session on today's way.
 dk_claude_session_ready() {
     local session="$1" state rc=0
     DK_CLAUDE_VIA=none CLAUDE_CONFIG_MOUNT="" CLAUDE_CONFIG_VOLUME_DECL="" CLAUDE_BROKER=""
+    AUDIT_CLAUDE_CONFIG_MOUNT="" AUDIT_CLAUDE_PROJECTS=""
     state=$(dk_broker_state) || rc=$?
     if [ "$rc" != 0 ]; then
         info "Claude: cannot tell whether your account broker runs (${state}); ${session} logs in itself"
@@ -166,6 +171,14 @@ dk_claude_session_ready() {
     CLAUDE_CONFIG_VOLUME_DECL="  claude-config:
     name: ${DK_CLAUDE_CONFIG_VOLUME}
     external: true"
+    # The audit sidecar reads the session's conversations from the same folder, read-only, at a
+    # path of its own: dev-home's .claude, which it reads for any other session, no longer holds
+    # them. The whole folder, as dev-home is mounted whole: its projects/ may not exist yet, and
+    # a volume subpath must.
+    # shellcheck disable=SC2034  # read by aidc create (compose-render.sh)
+    AUDIT_CLAUDE_CONFIG_MOUNT="- {type: volume, source: claude-config, target: ${DK_AUDIT_CLAUDE_CONFIG}, read_only: true, volume: {subpath: ${session}}}"
+    # shellcheck disable=SC2034  # read by aidc create (compose-render.sh)
+    AUDIT_CLAUDE_PROJECTS="${DK_AUDIT_CLAUDE_CONFIG}/projects"
     info "Claude: ${session} uses your account broker's active account (aidc claude account list)"
 }
 

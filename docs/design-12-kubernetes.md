@@ -1335,9 +1335,18 @@ amended `aidc-claude-usage`.
 The weekly-or-rate classification of a limit reads only the hook's error and message fields,
 never its paths (a repo named "weekly-report" says nothing about the limit).
 
-Not covered on Docker: the audit sidecar reads `.claude/projects` from dev-home, where a broker
-session's Claude config dir no longer is; with the memory bridge on (the default) that folder is
-the host's in every session anyway.
+**The audit trail** of a broker session holds its Claude conversations as any other session's
+does. Its audit sidecar reads them where the session's Claude writes them: the session's folder of
+`aidc-claude-config`, mounted read-only at `/var/aidc/claude-config` (the whole folder, as
+dev-home is mounted whole: its `projects/` may not exist yet, and a volume subpath must), with
+`AIDC_AUDIT_CLAUDE_PROJECTS` naming its `projects/`, as the cluster's names its mirror folder;
+for any other session compose names dev-home's `.claude/projects`. What reaches the trail is
+then the same for both: with the memory bridge on (the default) the repo's history folder is the
+host's, bind-mounted over the config dir inside the dev container only, in either kind of session.
+Everything else that reads `~/.claude` runs inside the dev container and sees the broker's folder
+there: the memory bridge's mount nested in it (its mountpoint claimed by the entrypoint), the
+transcript mirror, the MCP's `session_mcp_set`. A broker session made before this keeps an audit
+sidecar that reads dev-home's until `aidc kill` + `aidc create`.
 
 ### One history per repo, on every machine
 

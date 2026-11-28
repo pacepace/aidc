@@ -521,7 +521,7 @@ AIDC_CLAUDE_TOKEN=""
 USING_LONG_LIVED_TOKEN=0
 
 dk_claude_session_ready "$NAME"
-export CLAUDE_CONFIG_MOUNT CLAUDE_CONFIG_VOLUME_DECL CLAUDE_BROKER
+export CLAUDE_CONFIG_MOUNT CLAUDE_CONFIG_VOLUME_DECL CLAUDE_BROKER AUDIT_CLAUDE_CONFIG_MOUNT AUDIT_CLAUDE_PROJECTS
 # A create that fails from here until compose is asked to start the session forgets the folder
 # the broker just made (scripts/docker/broker.sh, dk_claude_create_cleanup).
 AIDC_COMPOSE_STARTED=0

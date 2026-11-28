@@ -344,6 +344,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   accounts on a volume only the broker mounts, the active account's credentials without the
   refresh token in each broker session's own Claude config dir, switches reaching running
   sessions with the conversation kept, renewal by Claude Code itself, the git agent included.
+  A broker session's audit trail holds its Claude conversations as any other session's does:
+  its audit sidecar mounts the session's folder read-only and copies them from its `projects/`
+  (they are no longer on dev-home, where it reads them for other sessions).
 - **`sender_label` on `session_send`**: optional, names the sender in the header (one line,
   brackets removed, at most 120 characters). Declared in the input schema.
 

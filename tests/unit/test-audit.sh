@@ -38,10 +38,14 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
+# kubectl answers nothing until the Kubernetes half writes its own stub.
+printf '#!/bin/sh\necho "kubectl stub: no cluster here" >&2\nexit 1\n' > "$SCRATCH/bin/kubectl"; chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" PATH="$SCRATCH/bin:$PATH" \
     D_LOG="$SCRATCH/docker.log" K_LOG="$SCRATCH/kubectl.log" XDG_CACHE_HOME="$SCRATCH/cache"
 export AUDIT="$SCRATCH/trails"
+[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
+    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
 unset AIDC_MCP_MOUNTS AIDC_MCP_STATE_HOST AIDC_HOST_HOME AIDC_AUDIT_WARN_BYTES XDG_CACHE_HOME_UNUSED
 printf 'audit_dir: %s   # the trails\n' "$AUDIT" > "$HOME/.config/aidc/config.yaml"
 

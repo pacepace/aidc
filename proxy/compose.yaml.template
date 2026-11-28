@@ -120,12 +120,16 @@ ${DNS_BLOCK}
     environment:
       AIDC_SESSION: "${SESSION}"
       AIDC_PROFILE: "${PROFILE}"
+      # Where the session's Claude writes its conversations: dev-home's .claude/projects, or
+      # projects/ of the account broker's folder for this session when the broker manages it.
+      AIDC_AUDIT_CLAUDE_PROJECTS: "${AUDIT_CLAUDE_PROJECTS}"
     volumes:
       - squid-log:/var/log/squid:ro
       - aidc-log:/var/log/aidc:ro
       - state:/var/state:ro
       - dev-home:/var/aidc/dev-home:ro
       - ${AUDIT_DIR}:/var/aidc/audit:rw
+      ${AUDIT_CLAUDE_CONFIG_MOUNT}          # the account broker's folder for this session, read-only (only when it manages it)
     depends_on:
       squid:
         condition: service_healthy

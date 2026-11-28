@@ -49,6 +49,30 @@ assert "the taint flag is copied" "test -s '$A/tainted'"
 assert "meta.json records when the session was tainted, from the flag's own field" \
     "[ \"\$(jq -r .tainted_at '$A/meta.json')\" = 2026-11-24T04:31:28Z ]"
 
+echo "=== a session whose Claude config dir the account broker manages (Docker) ==="
+# Compose mounts the broker's folder for the session read-only on its own and names its
+# projects/ (scripts/docker/broker.sh); dev-home's .claude then holds no conversation.
+B="$SCRATCH/broker-audit"
+mkdir -p "$B"/{audit,squid,log,state,home/.claude/projects,claude-config/projects/-home-u-repo}
+echo '{"session":"s","created_at":"2026-11-24T00:00:00Z"}' > "$B/audit/meta.json"
+printf 'ls\n' > "$B/home/.bash_history"
+echo '{"type":"assistant"}' > "$B/claude-config/projects/-home-u-repo/broker-conv.jsonl"
+sweep_b() {
+    AIDC_AUDIT_OUT_DIR="$B/audit" AIDC_AUDIT_SQUID_DIR="$B/squid" \
+    AIDC_AUDIT_LOG_DIR="$B/log" AIDC_AUDIT_HOME_DIR="$B/home" \
+    AIDC_AUDIT_STATE_DIR="$B/state" AIDC_SESSION=s AIDC_AUDIT_CLAUDE_PROJECTS="$1" \
+        bash "$AIDC_ROOT/proxy/audit/aggregate.sh" --once >/dev/null 2>&1
+}
+sweep_b "$B/claude-config/projects"
+assert "its transcripts are copied from the broker's folder" \
+    "test -s '$B/audit/claude-transcript/-home-u-repo/broker-conv.jsonl'"
+assert "...and the shell history still from dev-home" "grep -q ls '$B/audit/dev-bash-history'"
+rm -rf "$B/audit/claude-transcript"
+echo '{"type":"user"}' > "$B/home/.claude/projects/home-conv.jsonl"
+sweep_b ""
+assert "an empty AIDC_AUDIT_CLAUDE_PROJECTS (a compose file that names none) reads dev-home's" \
+    "test -s '$B/audit/claude-transcript/home-conv.jsonl'"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

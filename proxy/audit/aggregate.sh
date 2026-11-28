@@ -13,7 +13,8 @@
 #   /var/log/squid/          squid access.log
 #   /var/log/aidc/           policy-events.log, refresher.log
 #   /var/aidc/dev-home/      dev container's .bash_history, .zsh_history
-#   /var/aidc/dev-home/.claude/projects/  Claude transcript dir (optional)
+#   /var/aidc/dev-home/.claude/projects/  Claude transcript dir (optional; elsewhere when
+#                            AIDC_AUDIT_CLAUDE_PROJECTS names it)
 #   /var/state/              tainted flag (JSON)
 #
 # Output (read-write):
@@ -37,7 +38,9 @@ AIDC_LOG_DIR="${AIDC_AUDIT_LOG_DIR:-/var/log/aidc}"
 DEV_HOME="${AIDC_AUDIT_HOME_DIR:-/var/aidc/dev-home}"
 # Claude Code keeps its transcripts under the session user's config dir
 # (CLAUDE_CONFIG_DIR=/home/vscode/.claude), which is in the dev home this sidecar reads.
-# On Kubernetes the history is the user's disk's (shared by their sessions), mounted on its own.
+# Where the account broker manages it on Docker it is the broker's folder for the session,
+# mounted on its own (compose names it); on Kubernetes the history is the user's disk's (shared
+# by their sessions), and the session's own conversations are its mirror folder's.
 CLAUDE_TRANSCRIPT="${AIDC_AUDIT_CLAUDE_PROJECTS:-${DEV_HOME}/.claude/projects}"
 # The policy sidecar's state volume, mounted at /var/state on both backends.
 STATE_DIR="${AIDC_AUDIT_STATE_DIR:-/var/state}"

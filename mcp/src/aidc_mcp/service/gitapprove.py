@@ -11,16 +11,23 @@ question menu (sending.answer_question_menu), so its turn goes on.
 
 Strict, because an approval pushes to GitHub:
 
-- The id comes from the question the agent asked (its open AskUserQuestion in the session's
-  transcript), never from the orchestrator's text, and must be among the waiting requests.
+- The id comes from the question the agent asked, never from the orchestrator's text, and
+  must be among the waiting requests. Which question is open, if any, is decided once for
+  everything that asks (turns.open_question): the question menu on the agent's screen, or,
+  when the screen cannot be read, the question its current turn waits on in its transcript.
+  A question a cut-off turn left unanswered is not open.
 - The question must name one request id; naming several is `git_request_ambiguous`.
 - The answer must start with Approve or Deny, and say nothing else for Approve (Deny may give
   its reason after it): anything else is `git_answer_unclear`, and nothing is sent.
 - A request no longer waiting (decided, or gone) is approved or denied by nothing; the option
-  is still chosen in the question, and the result says so.
+  is still chosen in the question, and the result says so (`already_decided`, a field of the
+  successful result, not an error code). So does a second answer that lost a race to the
+  first.
 - An answer sent while the agent has no question open answers nothing: no request waits for
   it, so it is refused, `git_request_not_waiting`, and nothing is sent (live 2026-11-27: pasted
-  as a prompt, "Approve" left the agent with nothing to act on). Any other text goes in as an
+  as a prompt, "Approve" left the agent with nothing to act on). When neither its screen nor
+  its transcript can be read, whether a question is open cannot be told: that is
+  `git_transcript_unreadable`, retryable, and nothing is sent. Any other text goes in as an
   ordinary prompt.
 
 The holder's own checks stand behind all of this: it refuses a request that is not waiting,
@@ -35,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aidc_mcp import audit, backend
-from aidc_mcp import transcript as ts
+from aidc_mcp import screen as scr
 from aidc_mcp.service import common as com
 from aidc_mcp.service import turns as tn
 
@@ -48,7 +55,6 @@ LIST_TIMEOUT_S = 30.0
 
 APPROVE, DENY = "approve", "deny"
 
-_REQUEST_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 _ANSWER = re.compile(r"\s*(approve|deny)\b(.*)\Z", re.IGNORECASE | re.DOTALL)
 #: what may follow Approve: punctuation only (no condition, no second thought)
 _APPROVE_TAIL = re.compile(r"[\s.!]*\Z")
@@ -76,24 +82,6 @@ class Answer:
 NOTHING = Answer()
 
 
-def question_text(question: dict[str, Any]) -> str:
-    """Everything an AskUserQuestion shows: each question, header, option and description."""
-    parts: list[str] = []
-    for q in question.get("questions") or []:
-        if not isinstance(q, dict):
-            continue
-        parts += [str(q.get("question", "")), str(q.get("header", ""))]
-        for opt in q.get("options") or []:
-            if isinstance(opt, dict):
-                parts += [str(opt.get("label", "")), str(opt.get("description", ""))]
-    return "\n".join(parts)
-
-
-def option_labels(question: dict[str, Any]) -> list[str]:
-    return [str(opt.get("label", "")) for q in question.get("questions") or []
-            if isinstance(q, dict) for opt in q.get("options") or [] if isinstance(opt, dict)]
-
-
 def parse_answer(prompt: str) -> tuple[str, str] | None:
     """(verb, reason) when the text is plainly Approve or Deny [reason]; None otherwise."""
     m = _ANSWER.match(prompt)
@@ -115,30 +103,35 @@ def _unclear(why: str) -> Answer:
         "\"Approve\", or \"Deny: <why>\".", code="git_answer_unclear"))
 
 
-async def answer_in(name: str, prompt: str) -> Answer:
+async def answer_in(name: str, prompt: str, container: str) -> Answer:
     """What sending `prompt` to session `name` asks of the request holder."""
     if not backend.is_git_session(name):
         return NOTHING
     objs, _, status = tn.session_transcript(name)
-    question = ts.open_question(objs) if status == "ok" else None
+    screen = await tn.read_screen(container, name)
+    question = tn.open_question(objs if status == "ok" else [], screen)
     if question is None:
         parsed = parse_answer(prompt)
         if parsed is None:
             return NOTHING
-        unread = status != "ok"
+        unread = status == "unreadable" and screen.input_box == scr.UNRECOGNIZED
         audit.log_event("git_request_answer_refused", session=name,
                         reason="transcript_unreadable" if unread else "no_question",
                         decision=parsed[0])
-        why = ("its transcript could not be read, so no question it asks can be told"
-               if unread else "it has no question open")
+        if unread:
+            return Answer(refusal=com.envelope_err(
+                f"This {parsed[0].capitalize()} was not carried out: the git agent's "
+                "transcript could not be read and its screen did not show, so whether it has "
+                "a question open cannot be told. Nothing was approved or denied, and nothing "
+                "was sent. Try again.", code="git_transcript_unreadable"))
         return Answer(refusal=com.envelope_err(
-            f"This {parsed[0].capitalize()} answers no question of the git agent's: {why}, "
-            "so no git request is waiting for it. Nothing was approved or denied, and nothing "
-            "was sent. "
+            f"This {parsed[0].capitalize()} answers no question of the git agent's: it has no "
+            "question open, so no git request is waiting for it. Nothing was approved or "
+            "denied, and nothing was sent. "
             "Answer once the agent asks about a request (its question names the request's "
             "id), or decide a waiting one with aidc git approve|deny <id>.",
             code="git_request_not_waiting"))
-    ids = sorted(set(_REQUEST_ID.findall(question_text(question))))
+    ids = list(question.request_ids)
     if not ids:
         return NOTHING
     if len(ids) > 1:
@@ -156,7 +149,7 @@ async def answer_in(name: str, prompt: str) -> Answer:
                         request_id=request_id)
         return _unclear("it must start with Approve or Deny, and Approve must stand alone")
     verb, reason = parsed
-    if not any(label.strip().lower().startswith(verb) for label in option_labels(question)):
+    if not any(label.strip().lower().startswith(verb) for label in question.options):
         audit.log_event("git_request_answer_refused", session=name, reason="not_an_option",
                         request_id=request_id, decision=verb)
         return _unclear(f"the question offers no {verb.capitalize()} option")
@@ -194,29 +187,37 @@ async def waiting_requests() -> set[str] | None:
         audit.log_event("git_requests_list_failed", exit=rc, output=out[-300:])
         return None
     return {line.split()[0] for line in out.splitlines()[1:]
-            if line.split() and _REQUEST_ID.fullmatch(line.split()[0])}
+            if line.split() and tn.REQUEST_ID.fullmatch(line.split()[0])}
 
 
 async def carry_out(decision: Decision) -> dict[str, Any]:
     """Approve or deny the request as the holder; what happened, for session_send's result
-    and the access log."""
+    and the access log. `already_decided` (a result field, never an error code) says the
+    request was not waiting: decided before this answer, gone, or decided by another answer
+    that reached the holder first (a race the holder lets only one side win)."""
+    outcome: dict[str, Any] = {"request_id": decision.request_id, "decision": decision.verb}
     if not decision.waiting:
-        outcome: dict[str, Any] = {
-            "request_id": decision.request_id, "decision": decision.verb, "done": False,
-            "code": "git_request_not_waiting",
-            "message": f"git request {decision.request_id} is not waiting for a decision "
-                       "(already decided, or gone): nothing was approved or denied"}
+        outcome.update(done=False, already_decided=True,
+                       message=f"git request {decision.request_id} is not waiting for a "
+                               "decision (already decided, or gone): nothing was approved or "
+                               "denied")
     else:
         argv = [decision.verb, decision.request_id]
         if decision.verb == DENY and decision.reason:
             argv.append(decision.reason)
         rc, out = await _holder(argv, DECIDE_TIMEOUT_S)
-        outcome = {"request_id": decision.request_id, "decision": decision.verb,
-                   "done": rc == 0, "exit": rc, "message": out[-2000:]}
+        outcome.update(done=rc == 0, exit=rc, message=out[-2000:])
         if rc != 0:
-            outcome["code"] = "git_request_not_decided"
+            # Refused: by its own checks, or because another answer moved it first. The
+            # waiting list read again tells the second from the first.
+            waiting = await waiting_requests()
+            if waiting is not None and decision.request_id not in waiting:
+                outcome["already_decided"] = True
+            else:
+                outcome["code"] = "git_request_not_decided"
     audit.log_event("git_request_answered", session=backend.GIT_SESSION,
                     request_id=decision.request_id, decision=decision.verb,
                     done=outcome["done"], exit=outcome.get("exit"),
+                    already_decided=bool(outcome.get("already_decided")),
                     code=outcome.get("code", ""), reason=decision.reason[:300])
     return outcome

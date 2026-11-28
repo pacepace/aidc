@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -175,6 +176,70 @@ def session_transcript(name: str) -> tuple[list[dict], float, str]:
     return objs, mtime, "ok"
 
 
+#: a git request's id, as gitctl/git-requests.sh names one (id_ok): 32 hex characters
+REQUEST_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
+
+
+@dataclasses.dataclass(frozen=True)
+class OpenQuestion:
+    """The question Claude's current turn waits on: everything it shows, its option labels,
+    the git request ids it names, and its menu when read from the screen."""
+
+    text: str
+    options: tuple[str, ...]
+    request_ids: tuple[str, ...]
+    menu: scr.QuestionMenu | None = None
+
+
+def question_text(question: dict[str, Any]) -> str:
+    """Everything an AskUserQuestion shows: each question, header, option and description."""
+    parts: list[str] = []
+    for q in question.get("questions") or []:
+        if not isinstance(q, dict):
+            continue
+        parts += [str(q.get("question", "")), str(q.get("header", ""))]
+        for opt in q.get("options") or []:
+            if isinstance(opt, dict):
+                parts += [str(opt.get("label", "")), str(opt.get("description", ""))]
+    return "\n".join(parts)
+
+
+def _option_labels(question: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(opt.get("label", "")) for q in question.get("questions") or []
+                 if isinstance(q, dict) for opt in q.get("options") or []
+                 if isinstance(opt, dict))
+
+
+def _request_ids(text: str) -> tuple[str, ...]:
+    """The request ids a question names; on a screen an id may wrap across rows, so the text
+    with its whitespace removed is read when the text as shown names none."""
+    ids = set(REQUEST_ID.findall(text)) or set(REQUEST_ID.findall("".join(text.split())))
+    return tuple(sorted(ids))
+
+
+def open_question(objs: list[dict], screen: scr.ScreenState | None) -> OpenQuestion | None:
+    """The one answer to "is a question of Claude's open, and which": used by session_status
+    (waiting_on_question), by the git answer's gate (gitapprove.answer_in) and by the menu
+    answer (sending.answer_question_menu), so they never disagree.
+
+    A screen that was read and recognized decides, because the transcript can lag it: the
+    question menu on it is the open question, and the input box or any other dialog means
+    none is open. Only when there is no such screen (none read, an empty or unrecognized
+    capture) does the transcript decide, and then only a question of the current turn
+    counts (transcript.current_question): one a cut-off turn left unanswered does not."""
+    if screen is not None and screen.input_box != scr.UNRECOGNIZED:
+        menu = screen.question
+        if menu is None:
+            return None
+        return OpenQuestion(menu.text, tuple(label for _, label in menu.options),
+                            _request_ids(menu.text), menu)
+    asked = ts.current_question(objs)
+    if asked is None:
+        return None
+    text = question_text(asked)
+    return OpenQuestion(text, _option_labels(asked), _request_ids(text))
+
+
 def _relevant(event: he.HookEvent) -> bool:
     """Whether an event says something about the turn: every hook aidc installs does,
     except a notification of a type that is not about waiting (auth, elicitation, ...)."""
@@ -257,9 +322,9 @@ def turn_from_hooks(name: str, objs: list[dict], mtime: float,
             return TURN_IDLE, "log_finished"
         return TURN_RUNNING, "prompt_submitted"
     if event is not None and event.notification_type == he.PERMISSION_PROMPT:
-        # Claude Code raises the same notification for its question tool: the transcript
-        # tells them apart (the newest tool call is a question still open).
-        return TURN_RUNNING, (WHY_ON_QUESTION if ts.asking_question(objs)
+        # Claude Code raises the same notification for its question tool: with no screen
+        # here, the transcript tells them apart (session_state adds the screen).
+        return TURN_RUNNING, (WHY_ON_QUESTION if open_question(objs, None) is not None
                               else WHY_ON_PERMISSION)
     # Every event left says idle, and after each Claude Code can open or continue a turn
     # with no event of its own: a turn the record shows open, written after the event, is
@@ -365,9 +430,10 @@ async def session_state(container: str, name: str) -> SessionState:
         return SessionState(True, screen, TURN_IDLE, WHY_NOT_AT_PROMPT)
     if turn == TURN_UNKNOWN:
         return SessionState(True, None, turn, why)
-    if why in (WHY_ON_PERMISSION, WHY_ON_QUESTION) and screen.input_box == scr.NOT_AT_PROMPT:
+    if why in (WHY_ON_PERMISSION, WHY_ON_QUESTION):
         # The screen shows which menu is open, where the transcript can lag the screen.
-        why = WHY_ON_QUESTION if screen.dialog == scr.QUESTION_MENU else WHY_ON_PERMISSION
+        asked = open_question(objs if status == "ok" else [], screen)
+        why = WHY_ON_QUESTION if asked is not None else WHY_ON_PERMISSION
     awaiting = ss.sent_awaiting_echo.get(name)
     if awaiting is not None:
         if _prompt_arrived(name, awaiting[0], awaiting[1], objs):

@@ -46,16 +46,18 @@ assert_has "no AI attribution" "No AI attribution anywhere" "$md"
 assert_has "no prawduct work" "You do no prawduct work" "$md"
 assert_has "ask mode: the question tool" "Ask with your question tool (AskUserQuestion)" "$md"
 assert_has "the agent cannot decide: approvals come only from outside" "You cannot approve or deny one" "$md"
-assert_has "once answered, the agent reports the request's actual result (live 2026-11-27)" 'run `git-requests show <id>` and report the request' "$md"
-assert_has "...and never tells anyone to run approve or deny" "never tell anyone to run an approve or deny command" "$md"
-assert_eq "no procedure tells anyone to run aidc git approve or deny" "" \
-    "$(printf '%s\n' "$md" | grep -iE '(tell|reply)[^.]*aidc git (approve|deny)' || true)"
+assert_has "once answered, the agent reads the request's actual result (live 2026-11-27)" 'Once your question is answered, run `git-requests show <id>`' "$md"
+assert_has "...a decided one is reported as shown, with no command" "Decided (done, denied or failed): report its state and result message, as shown, in a
+       line, and name no command." "$md"
+assert_has "...a pending one names the commands the user runs outside (owner ruling 2026-11-26)" \
+    '`aidc git approve <id>` or `aidc git deny <id> "<why>"`. Never run either yourself.' "$md"
 assert_has "the protection check runs for every request (live 2026-11-27: one from before a restart was reused)" \
     'for every request, run `gitctl protection <repo>` before you ask' "$md"
 assert_has "...never one from an earlier request or conversation" "Never rely on a check from an earlier request or an
   earlier conversation" "$md"
-assert_has "each option says only what it does, no command to run (live 2026-11-27)" 'Approve "Carry out this request as asked."' "$md"
-assert_has "..." "Write no commands or next steps" "$md"
+assert_has "each option says only what it does, true for an orchestrator and a person alike" 'Approve "Carry out this request (decided outside the agent: by the
+     orchestrator, or with aidc git approve)."' "$md"
+assert_has "..." "Write no other commands or next steps" "$md"
 assert_has "choosing Approve approves nothing by itself" "Choosing Approve in your question does not approve anything" "$md"
 assert_has "the push and PR procedure is a request too, named by its folder (gh -C)" 'gh -C <working copy> pr create --head <branch>' "$md"
 assert_has "the issue procedure puts -C right after gh too (the stand-in's leading form)" 'gh -C <working copy> issue list|view|create|edit|comment|close|reopen' "$md"

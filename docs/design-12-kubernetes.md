@@ -412,11 +412,15 @@ naming only the id into window `claude` when Claude runs there and is set up (`g
 never into a shell or Claude's first-run screens), then says so (`handed`). The agent runs
 `git-requests prompt <id>` (the session's text below a line, marked as data) and asks with
 AskUserQuestion, naming the request id, Deny first; aidc delivers that question to an
-orchestrator as any session's. Once it is answered, the agent reports the request's actual
-result (`git-requests show <id>`), and never tells anyone to run an approve or deny command
-(live 2026-11-27: after an orchestrator's answer it guessed the decision "probably" carried out
-and named the command to run): choosing Approve in the question approves nothing by itself, and
-the user decides with `aidc git approve|deny <id>` on their machine. It checks the repo's
+orchestrator as any session's. Once it is answered, the agent reads the request's actual
+result (`git-requests show <id>`) and reports only that, never a guess (live 2026-11-27: after
+an orchestrator's answer it guessed the decision "probably" carried out). A decided request it
+reports as shown, naming no command; one still pending it reports as waiting, and names
+`aidc git approve <id>` / `aidc git deny <id> "<why>"` for the user to run on their machine,
+outside the agent's reach (owner ruling 2026-11-26): choosing Approve in the question approves
+nothing by itself, so an answer at the terminal, or an orchestrator's answer that was not
+carried out, leaves it pending. The Approve option reads "Carry out this request (decided
+outside the agent: by the orchestrator, or with aidc git approve)", true for both readers. It checks the repo's
 protections (`gitctl protection`) for every request, never reusing an earlier check. An orchestrator's answer is carried out by the MCP
 server, as gitreq, matched to the request id in the question (design-10 S10; on Docker built
 with plan chunk 13's fix round, on Kubernetes plan chunk 14). The one request the agent may be asking about is the one last handed over or the one
@@ -533,7 +537,8 @@ The owner ruling "Ask-mode git approvals bubble up through the orchestrator" has
 ask with its question tool, an orchestrator see that question as any session's, and the answer
 come back by `session_send` or from the user in the terminal. Refined 2026-11-26 (approvals out
 of the agent's reach, above): the answer no longer approves through the agent. The user's answer
-is `aidc git approve|deny <id>` on their machine; an orchestrator's answer is carried out
+is `aidc git approve|deny <id>` on their machine, which the agent names when the request is
+still pending after its question; an orchestrator's answer is carried out
 by the MCP server as gitreq (`git-requests approve|deny <id>` by exec as gitreq, which acts only
 on a request still waiting), matched to the request id the question names. Where the question's
 delivery stands (2026-11-24):

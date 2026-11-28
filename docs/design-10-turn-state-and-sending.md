@@ -289,13 +289,15 @@ missing a code or uses one outside the set:
 | `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again (the git agent, which `aidc kill` refuses: `aidc rebuild`, then `aidc git setup`) | no |
 | `git_answer_unclear` | `session_send` to the git agent while its open question names one git request (waiting or not: the answer is read before the waiting list): the answer is not plainly Approve (alone) or Deny (with its reason), or the question offers no such option; nothing was approved or sent (S10) | fix the call: "Approve", or "Deny: <why>" | no |
 | `git_request_ambiguous` | `session_send` to the git agent: its open question names several git requests; nothing was approved or sent; `data.request_ids` names them (S10) | tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
-| `git_request_not_waiting` | `session_send` to the git agent: the text is plainly Approve or Deny (with its reason) and the agent has no question open, so no request waits for the answer; nothing was approved or sent (S10). In a successful result's `git_request`, the same code says the question's request was no longer waiting | wait for the agent's question, or tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
+| `git_request_not_waiting` | `session_send` to the git agent: the text is plainly Approve or Deny (with its reason) and the agent has no question open (known: its screen or its transcript was read), so no request waits for the answer; nothing was approved or sent (S10). Only this: a request already decided is the successful result's `git_request.already_decided`, never this code | wait for the agent's question, or tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
 | `git_requests_unreadable` | `session_send` to the git agent: the git container's waiting requests could not be read; nothing was approved or sent (S10) | retry | yes |
+| `git_transcript_unreadable` | `session_send` to the git agent: the text is plainly Approve or Deny, and neither the agent's transcript nor its screen could be read, so whether a question is open cannot be told; nothing was approved or sent (S10) | retry | yes |
 
 **Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
 call, made again unchanged, can succeed later. It follows the Caller column: `cli_failed` is
 transient (retry once), `invoke_busy` succeeds once the running headless run ends, and
-`git_requests_unreadable` once the git container answers. Every
+`git_requests_unreadable` once the git container answers, `git_transcript_unreadable` once
+the git agent's transcript copy or screen can be read again. Every
 other code meets the same refusal until something changes (the person acts, or the call is
 fixed). `RETRYABLE_ERROR_CODES` in `service/common.py` is this column, held to it by a test.
 
@@ -550,12 +552,19 @@ tool, naming the request's id, and an orchestrator approves by answering. So `se
 the session `git` carries the answer out itself (`service/gitapprove.py`), before the answer goes
 into the question:
 
-- **Which request.** The id comes from the agent's open question (its last AskUserQuestion with
-  no tool_result, in the session's transcript), never from the orchestrator's text. A question
-  naming no request id is an ordinary send; one naming several is refused,
-  `git_request_ambiguous`, nothing sent. With no question open, a plain Approve or Deny
-  answers nothing: it is refused, `git_request_not_waiting`, nothing sent (live 2026-11-27:
-  pasted, it left the agent with nothing to act on); any other text is an ordinary send.
+- **Which request.** The id comes from the agent's open question, never from the orchestrator's
+  text. Whether a question is open, and which, is decided by one function for every caller
+  (`turns.open_question`: this gate, `session_status`'s `waiting_on_question`, and the menu
+  answer below): a screen that was read and recognized decides, because the transcript copy
+  lags it (the question menu on it is the open question; the input box or another dialog means
+  none); with no such screen, the transcript decides, and only the question the current turn
+  waits on counts (the newest tool call, an AskUserQuestion with no tool_result; one a cut-off
+  turn left unanswered does not). A question naming no request id is an ordinary send; one
+  naming several is refused, `git_request_ambiguous`, nothing sent. With no question open, a
+  plain Approve or Deny answers nothing: it is refused, `git_request_not_waiting`, nothing sent
+  (live 2026-11-27: pasted, it left the agent with nothing to act on); when neither the
+  transcript nor the screen can be read it is `git_transcript_unreadable`, retryable; any other
+  text is an ordinary send.
 - **Which decision.** The answer must start with Approve or Deny, Approve standing alone and Deny
   followed by its reason if any, and the question must offer that option. Anything else is
   refused, `git_answer_unclear`, nothing sent: an approval pushes to GitHub, so a conditional
@@ -565,22 +574,28 @@ into the question:
   `git-requests approve|deny <id> [why]` run as gitreq in the git container (Docker:
   `docker exec -u gitreq -e HOME=/var/lib/gitctl/gitreq aidc-git-dev`, as `aidc git approve`
   runs it; Kubernetes: the pod's gitreq container, plan chunk 14), which acts only on a request
-  still waiting. One no longer waiting is decided by nothing.
+  still waiting. One no longer waiting is decided by nothing: the result says
+  `already_decided`. So does a second answer the holder refused because another reached it
+  first (the waiting list, read again, no longer has it), never "send the answer again".
 - **Never queued.** The answer goes into the question menu, not the input box, so the git agent's
   send queue does not hold it back, full or not (it fills while the menu is open: every other
   prompt waits behind it as `claude_asking_question`).
 - **The question answered.** Claude's question menu takes no typed text (live 2026-11-27: the
   answer waited behind it, never pasted), so once the holder has decided (or the request was no
   longer waiting) the MCP chooses the same option in the menu under the send lock: it reads the
-  menu (screen.QuestionMenu: its one question must name the request id), moves the pointer
-  with the arrow keys, reads the pointer back on the option, then presses Enter, and reads the
-  menu gone. Arrows rather than a number key, because a number may choose at once with no
+  menu (`turns.open_question` from the screen alone: its one question must name the request
+  id), moves the pointer with the arrow keys, reads the pointer back on the option, then
+  presses Enter. It counts the question answered only when a later read shows a screen aidc
+  knows without that question (the input box, Claude at its prompt or working, or a question
+  about another request); an empty or failed read, or one aidc cannot classify, is
+  `screen_unread`, and a send-keys that fails is `keys_not_sent`. Arrows rather than a number key, because a number may choose at once with no
   chance to check what was chosen. Nothing is pasted or queued: after the menu the text would
   be a second, stray prompt. A menu that cannot be answered gets no Enter; the decision stands
   and the result says `question_answered: false` with `question_not_answered`. A holder that
   did not decide leaves the question open, so the answer can be sent again.
 - **Reported.** The result (status `answered_question`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
-  holder's `exit` and `message`, or `code` `git_request_not_waiting` / `git_request_not_decided`.
+  holder's `exit` and `message`, `already_decided: true` when the request was not waiting, or
+  `code` `git_request_not_decided` when the holder refused a request still waiting.
   The access log records each as `git_request_answered`, and each refusal as
   `git_request_answer_refused` with its reason.
 

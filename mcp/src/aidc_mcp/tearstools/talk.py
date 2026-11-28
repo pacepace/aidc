@@ -159,7 +159,11 @@ class SessionSend(SessionAwareTool):
         so its turn goes on (status "answered_question"; nothing is pasted, typed text never
         reaches that menu). If the menu could not be answered, the decision still stands:
         status "question_open", question_answered false and question_not_answered saying
-        why; the question then waits for the user at the git agent's terminal.
+        why; the question then waits for the user at the git agent's terminal. A request
+        already decided (by the user, or by another answer first) is git_request's
+        already_decided, not an error. Approve or Deny with no question open is refused,
+        git_request_not_waiting; when the agent's transcript and screen cannot be read it
+        is git_transcript_unreadable, retryable.
 
         Every return carries `prompt_id`, stable for this prompt: session_queue_cancel
         takes it to take back this prompt alone while it still waits, and the reply's

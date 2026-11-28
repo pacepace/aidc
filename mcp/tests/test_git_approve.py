@@ -67,12 +67,13 @@ class Menu:
         self.open = True
         self.shown = True      # False: the screen shows no menu at all
         self.stuck = False     # the pointer does not move
+        self.options = ("Deny", "Approve")
         self.keys = []
 
     async def capture(self, container, window):
         if not self.shown or not self.open:
             return IDLE
-        return _menu_screen(self.request_id, self.pointer)
+        return _menu_screen(self.request_id, self.pointer, self.options)
 
     async def tmux(self, container, args):
         self.wiring.tmux_calls.append((container, args))
@@ -159,12 +160,21 @@ async def test_a_deny_chooses_deny_where_the_pointer_already_is(git):
     (lambda m: setattr(m, "shown", False), "no_question_on_screen"),
     (lambda m: setattr(m, "request_id", B), "another_question"),
 ])
-async def test_a_question_that_cannot_be_answered_leaves_the_decision_standing(git, setup, why):
+async def test_a_question_that_cannot_be_answered_leaves_the_decision_standing(git, monkeypatch,
+                                                                              setup, why):
     """The holder's decision is the one that counts; the menu only lets the agent go on.
-    When the menu cannot be answered (its pointer does not move, it is not on screen, or it
-    asks about another request), the decision is still reported, the result says the
-    question is open, and no Enter is pressed on an option that was not read back."""
-    setup(git.menu)
+    When the menu cannot be answered (its pointer does not move, or, by the time the holder
+    has decided, it is not on screen or asks about another request), the decision is still
+    reported, the result says the question is open, and no Enter is pressed on an option
+    that was not read back."""
+    real = git.run
+
+    async def then_changes(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            setup(git.menu)
+        return out
+    monkeypatch.setattr(ga, "_holder", then_changes)
     res = await _send("Approve")
     assert git.decisions == [["approve", A]]
     assert res["ok"] is True and res["data"]["git_request"]["done"] is True
@@ -187,7 +197,6 @@ async def test_the_pointer_moves_up_when_it_is_below_the_option(git):
     (lambda rid: _menu_screen(rid).replace("❯ 1. Deny", "  1. Deny"), "pointer_not_moved"),
     (lambda rid: _menu_screen(rid).replace(" ☐ PR request", " ☐ PR request  ☐ Merge"),
      "several_questions"),
-    (lambda rid: _menu_screen(rid, options=("Refuse", "Approve")), "no_such_option"),
 ])
 async def test_a_menu_that_cannot_be_read_right_gets_no_keys(git, monkeypatch, screen, why):
     """No pointer read, several questions, or no option for the answer: nothing is pressed."""
@@ -197,6 +206,17 @@ async def test_a_menu_that_cannot_be_read_right_gets_no_keys(git, monkeypatch, s
     res = await _send("Deny")
     assert git.decisions == [["deny", A]]
     assert res["data"]["question_not_answered"] == why and git.menu.keys == []
+
+
+async def test_a_menu_offering_no_such_option_is_refused_before_anything_runs(git, monkeypatch):
+    """The screen is the question that is open: one offering no Deny refuses a Deny before
+    the holder is asked, and no key is pressed."""
+    async def capture(container, window):
+        return _menu_screen(A, options=("Refuse", "Approve"))
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    res = await _send("Deny")
+    assert res["ok"] is False and res["error_code"] == "git_answer_unclear"
+    assert git.decisions == [] and git.menu.keys == []
 
 
 async def test_a_menu_still_open_after_enter_is_reported(git, monkeypatch):
@@ -237,19 +257,22 @@ async def test_an_answer_to_a_question_naming_no_waiting_request_approves_nothin
     assert git.decisions == []
     assert res["ok"] is True
     assert res["data"]["git_request"]["done"] is False
-    assert res["data"]["git_request"]["code"] == "git_request_not_waiting"
+    # A result field, not an error code (one code, one meaning: Critic 2026-11-28 R-5).
+    assert res["data"]["git_request"]["already_decided"] is True
+    assert "code" not in res["data"]["git_request"]
     assert res["data"]["question_answered"] is True and git.menu.open is False
+    assert "already decided" in res["data"]["delivery"]
 
 
 async def test_a_request_already_decided_is_not_decided_again(git):
     git.waiting.clear()
     res = await _send("Deny: too late")
     assert git.decisions == []
-    assert res["data"]["git_request"]["code"] == "git_request_not_waiting"
+    assert res["data"]["git_request"]["already_decided"] is True
 
 
 async def test_the_holder_refusing_is_reported_not_hidden(git):
-    git.decide_exit = 2       # another approver moved it first
+    git.decide_exit = 1       # its own checks refused it (the working copy moved): still waiting
     res = await _send("Approve")
     assert res["ok"] is True
     assert res["data"]["git_request"]["done"] is False
@@ -257,6 +280,28 @@ async def test_the_holder_refusing_is_reported_not_hidden(git):
     # Its question is left open, so the answer can be sent again.
     assert res["data"]["question_not_answered"] == "request_not_decided"
     assert git.menu.keys == [] and git.wiring.paste_calls == []
+
+
+async def test_a_second_answer_that_lost_the_race_says_already_decided(git, monkeypatch):
+    """Two Approves race: the first decides the request and answers the menu; the holder
+    refuses the second (exit 2: another approver moved it first). The second is told the
+    request is already decided, never to send its answer again (Critic 2026-11-28 O-4)."""
+    real = git.run
+
+    async def first_wins(argv, timeout):
+        if argv[0] != "list":
+            git.calls.append(argv)
+            git.waiting.discard(argv[1])
+            git.menu.open = False
+            return 2, f"request {argv[1]} was not approved: it is running now"
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", first_wins)
+    res = await _send("Approve")
+    assert res["ok"] is True and res["data"]["git_request"]["already_decided"] is True
+    assert "code" not in res["data"]["git_request"]
+    assert "send the answer again" not in res["data"]["delivery"]
+    assert "already decided" in res["data"]["delivery"] and "Do NOT re-send" in res["data"]["delivery"]
+    assert "Enter" not in git.menu.keys
 
 
 @pytest.mark.parametrize("prompt", [
@@ -272,6 +317,7 @@ async def test_an_answer_that_is_not_plainly_approve_or_deny_is_refused_and_not_
 
 async def test_a_question_naming_two_requests_is_ambiguous(git):
     git.state["objs"] = _asked(A, B)
+    git.menu.request_id = f"{A} and {B}"
     git.waiting.add(B)
     res = await _send("Approve")
     assert res["ok"] is False and res["error_code"] == "git_request_ambiguous"
@@ -281,6 +327,7 @@ async def test_a_question_naming_two_requests_is_ambiguous(git):
 
 async def test_a_question_that_offers_no_such_option_is_unclear(git):
     git.state["objs"] = _asked(A, options=("Deny", "Skip"))
+    git.menu.options = ("Deny", "Skip")
     res = await _send("Approve")
     assert res["error_code"] == "git_answer_unclear" and git.decisions == []
 
@@ -296,6 +343,7 @@ async def test_an_unreadable_waiting_list_approves_nothing_and_says_retry(git):
 async def test_an_answered_question_is_not_open(git):
     """Its question answered, the agent has none open: an Approve then waits for nothing."""
     git.state["objs"] = _asked(A, answered=True)
+    git.menu.shown = False
     res = await _send("Approve")
     assert git.calls == [] and res["ok"] is False
     assert res["error_code"] == "git_request_not_waiting"
@@ -308,6 +356,7 @@ async def test_a_git_answer_with_no_question_open_is_refused_and_not_sent(git, o
     prompt, and the agent answered that it had nothing to act on. No request waits for
     such an answer, so it is refused, nothing decided, nothing pasted or queued."""
     git.state["objs"] = objs
+    git.menu.shown = False
     res = await _send(prompt)
     assert res["ok"] is False and res["error_code"] == "git_request_not_waiting"
     assert "no question open" in res["error"]
@@ -316,11 +365,89 @@ async def test_a_git_answer_with_no_question_open_is_refused_and_not_sent(git, o
 
 
 async def test_a_git_answer_with_an_unreadable_transcript_says_so(git, monkeypatch):
-    """Refused as well (no question can be told), and the reason says why."""
+    """Neither the transcript nor the screen can be read: whether a question is open is not
+    known, so the answer is refused with its own code, retryable (a mirror rewriting the file
+    passes), never as git_request_not_waiting (Critic 2026-11-28 R-2)."""
+    monkeypatch.setattr(tn, "session_transcript", lambda name: ([], 0.0, "unreadable"))
+
+    async def unread(container, window):
+        return ""
+    monkeypatch.setattr(tmx, "capture_screen", unread)
+    res = await _send("Approve")
+    assert res["error_code"] == "git_transcript_unreadable" and "could not be read" in res["error"]
+    assert res["error_code"] in com.RETRYABLE_ERROR_CODES
+    assert git.calls == [] and git.wiring.paste_calls == []
+
+
+async def test_an_unreadable_transcript_with_the_menu_on_screen_is_answered(git, monkeypatch):
+    """The screen shows the question: that is enough, whatever the transcript."""
     monkeypatch.setattr(tn, "session_transcript", lambda name: ([], 0.0, "unreadable"))
     res = await _send("Approve")
-    assert res["error_code"] == "git_request_not_waiting" and "could not be read" in res["error"]
-    assert git.calls == [] and git.wiring.paste_calls == []
+    assert git.decisions == [["approve", A]] and res["data"]["question_answered"] is True
+
+
+async def test_a_transcript_lagging_the_screen_does_not_refuse_the_answer(git):
+    """The menu is on screen before the transcript records the question (the copy lags):
+    the screen's question for that request id wins (Critic 2026-11-28 R-4)."""
+    git.state["objs"] = _asked(A)[:1]          # the prompt only, no question yet
+    res = await _send("Approve")
+    assert git.decisions == [["approve", A]]
+    assert res["data"]["status"] == "answered_question"
+
+
+def _cut_off(*ids):
+    """A turn cut off while it asked about `ids`, then a new prompt: that question is stale."""
+    return [*_asked(*ids),
+            {"type": "user", "uuid": "i1", "message": {"role": "user", "content": [
+                {"type": "text", "text": "[Request interrupted by user for tool use]"}]}},
+            {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "go on"}}]
+
+
+async def test_a_stale_question_from_a_cut_off_turn_is_not_open(git, monkeypatch):
+    """Its AskUserQuestion never answered, but a later prompt started another turn: an
+    Approve then answers nothing, and the holder is never asked (Critic 2026-11-28 R-4)."""
+    git.state["objs"] = _cut_off(A)
+
+    async def unread(container, window):
+        return ""
+    monkeypatch.setattr(tmx, "capture_screen", unread)
+    res = await _send("Approve")
+    assert res["ok"] is False and res["error_code"] == "git_request_not_waiting"
+    assert git.calls == []
+    assert tn.open_question(_cut_off(A), None) is None
+    assert tn.open_question(_asked(A), None).request_ids == (A,)
+
+
+async def test_the_gate_runs_no_request_without_an_open_question(git):
+    """The transcript still shows the question, but the screen shows Claude at its prompt
+    (answered at the terminal, the copy behind): no question is open, nothing is run."""
+    git.menu.shown = False
+    res = await _send("Approve")
+    assert res["ok"] is False and res["error_code"] == "git_request_not_waiting"
+    assert git.calls == [] and git.menu.keys == []
+
+
+async def test_an_empty_read_after_enter_is_not_taken_for_answered(git, monkeypatch):
+    """After Enter the screen cannot be read (the exec fails, the capture is empty): the
+    question is not reported answered (Critic 2026-11-28 R-7)."""
+    async def capture(container, window):
+        return "" if not git.menu.open else _menu_screen(A, git.menu.pointer)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    res = await _send("Approve")
+    assert git.decisions == [["approve", A]]
+    assert res["data"]["question_answered"] is False
+    assert res["data"]["question_not_answered"] == "screen_unread"
+    assert res["data"]["status"] == "question_open"
+
+
+async def test_keys_that_cannot_be_sent_are_reported(git, monkeypatch):
+    async def fails(container, args):
+        git.menu.keys.extend(args[3:])
+        return 1
+    monkeypatch.setattr(tmx, "tmux_exec", fails)
+    res = await _send("Approve")
+    assert res["data"]["question_not_answered"] == "keys_not_sent"
+    assert git.menu.keys == ["Down"]
 
 
 @pytest.mark.parametrize("prompt", [
@@ -328,12 +455,14 @@ async def test_a_git_answer_with_an_unreadable_transcript_says_so(git, monkeypat
 ])
 async def test_an_ordinary_prompt_with_no_question_open_goes_in(git, prompt):
     git.state["objs"] = _asked(A, answered=True)
+    git.menu.shown = False
     res = await _send(prompt)
     assert res["ok"] is True and "git_request" not in res["data"] and git.calls == []
 
 
 async def test_a_question_naming_no_request_is_an_ordinary_send(git):
     git.state["objs"] = _asked()
+    git.menu.request_id = "for a session"
     res = await _send("Approve")
     assert git.calls == [] and "git_request" not in res["data"]
 

@@ -30,15 +30,20 @@ out, or change a mode. To upgrade:
 What changes in use:
 - Answering the git agent's question in its terminal no longer approves. Once its question is
   answered, the agent reports the request's actual result (`git-requests show`, which now
-  prints the holder's result), and never tells you to run an approve or deny command; a
-  request still waiting waits for your `aidc git approve <id>` or `aidc git deny <id>`. It
+  prints the holder's result). A decided request it reports as shown, naming no command; a
+  request still waiting it reports as waiting for your `aidc git approve <id>` or
+  `aidc git deny <id> "<why>"`, run on your machine. It
   checks the repo's protections for every request, never reusing an earlier check.
 - On Docker an orchestrator approves by answering the git agent's question: `session_send git
   "Approve"` (or `"Deny: <why>"`) decides the waiting request the question names, as `gitreq`,
   and the result's `git_request` says what happened. Any other answer to such a question is
   refused unsent (`git_answer_unclear`), as is one to a question naming several requests
   (`git_request_ambiguous`), and a plain Approve or Deny sent while the agent has no question
-  open (`git_request_not_waiting`): no request waits for it. On Kubernetes this comes with the per-user MCP
+  open (`git_request_not_waiting`): no request waits for it. When neither the agent's
+  transcript nor its screen can be read, whether a question is open cannot be told, and the
+  answer is refused as `git_transcript_unreadable`, retryable. A request already decided (by
+  you, or by another answer that reached it first) is `git_request.already_decided` in the
+  successful result, not an error. On Kubernetes this comes with the per-user MCP
   server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a
@@ -270,9 +275,17 @@ and the envelope are unchanged; what an MCP caller sees differently:
   the MCP server also chooses the same option in that menu (arrow keys, the pointer read back,
   then Enter) and pastes nothing: `session_send` says status `answered_question`. When the menu
   cannot be answered, the decision still stands and the result says so (status
-  `question_open`, `question_answered: false`, `question_not_answered`: why). The question's
-  options no longer tell the reader to run a command when an orchestrator answers: Approve
-  reads "Carry out this request as asked." A full send queue no longer refuses such an
+  `question_open`, `question_answered: false`, `question_not_answered`: why). It counts the
+  question answered only when the screen, read again after Enter, shows Claude's input box or
+  a question about another request: an empty or unreadable capture is `screen_unread`, and a
+  failed key press `keys_not_sent`. Which question is open is decided in one place for the
+  answer, the menu and session_status: the menu on screen when the screen can be read (the
+  transcript copy lags it), else the question the agent's current turn waits on, never one a
+  cut-off turn left unanswered. The question's
+  options suit both readers: Approve reads "Carry out this request (decided outside the
+  agent: by the orchestrator, or with aidc git approve)", and the agent names the approve or
+  deny command only when `git-requests show` says the request is still pending after its
+  question. A full send queue no longer refuses such an
   answer (it is not queued). Rebuild the gitctl image.
 - **session_status tells a question from a permission prompt.** Claude Code raises the same
   notification for both; a session on its question menu now says why `waiting_on_question`
@@ -283,7 +296,8 @@ and the envelope are unchanged; what an MCP caller sees differently:
   earlier Claude run is closed by Claude Code's own "No response requested." line only when the
   next prompt comes; the watcher delivered that as a fresh reply. It is history, and skipped:
   any such turn whose last line is older than the watch's anchor (set when the watch starts,
-  and again when it is registered after an MCP restart) is not delivered.
+  and again when it is registered after an MCP restart) by more than 30 seconds, the slack for
+  the session's clock and the MCP server's, is not delivered.
 - **A prompt is no longer held behind Claude's startup hint.** With the cursor drawn over the
   hint's first letter (Claude Code 2.1.332), the MCP server read the hint as unsent text and held
   every prompt to a new session as `input_has_text`.

@@ -396,13 +396,23 @@ async def _rotate_if_stale_pin(session: str, conversation_id: str,
     return True
 
 
+#: how far apart the session's clock (its transcript's timestamps) and the MCP server's (a
+#: watch's anchor) may be: on Kubernetes they can run on different nodes
+CLOCK_SLACK_S = 30.0
+
+
 def _filler_for_history(turn: ts.Turn, mark: ts.Watermark) -> bool:
     """Whether `turn` is closed by Claude Code's filler (ts.NO_RESPONSE_FILLER) and its last
-    line before it was written before this watch was (re)anchored."""
+    line before it was written before this watch was (re)anchored.
+
+    The two times come from two clocks (the session's, the MCP server's), so the line must
+    be older than the anchor by CLOCK_SLACK_S. The slack errs towards delivering: a turn
+    cut off within it of a watch start is delivered rather than skipped, and an old reply
+    delivered once is better than a reply lost."""
     if turn.filler_after is None:
         return False
     anchored = ts.wall_time({"timestamp": mark.baselined_at})
-    return anchored is not None and turn.filler_after < anchored
+    return anchored is not None and turn.filler_after < anchored - CLOCK_SLACK_S
 
 
 def _interrupted_before_output(session: str, conversation_id: str, suffix: list[dict],

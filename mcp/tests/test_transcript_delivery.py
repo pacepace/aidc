@@ -195,6 +195,28 @@ class TestDrain:
         assert rec.delivered == ["a3"]
         assert ts.load_watermark(state, "sess", "conv").last_delivered_uuid == "a3"
 
+    async def test_a_turn_cut_off_within_the_clock_slack_is_delivered(self, tmp_path):
+        """The transcript's times are the session's clock, the watch's anchor the MCP
+        server's (different nodes on Kubernetes): a turn cut off a few seconds before the
+        watch began is within their skew, so it is delivered, never skipped as history."""
+        import datetime as _dt
+        base = tmp_path / "t"; state = tmp_path / "s"
+        near = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(seconds=dlv.CLOCK_SLACK_S / 3)
+                ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        old = "2020-01-01T00:00:00.000Z"
+        hist = [_ts(_user("u1", "a"), old), _ts(_assistant("a1", "OLD"), old),
+                _ts(_user("u2", "git request 1 waits"), near),
+                _ts(_assistant("a2", None, stop="tool_use"), near)]
+        _mk_transcript(base, "sess", "sid1", hist)
+        rec = Recorder()
+        await _drain(base, state, rec)
+        new = "2100-01-01T00:00:00.000Z"
+        _mk_transcript(base, "sess", "sid1", hist + [
+            self._filler("f1", new), _ts(_user("u3", "git request 2 waits"), new),
+            _ts(_assistant("a3", "NEW"), new)])
+        await _drain(base, state, rec)
+        assert rec.delivered == ["f1", "a3"]
+
     async def test_a_turn_cut_off_while_watched_is_still_delivered_when_closed(self, tmp_path):
         base = tmp_path / "t"; state = tmp_path / "s"
         old, new = "2020-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z"

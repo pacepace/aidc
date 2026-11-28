@@ -135,14 +135,19 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
                                 "no request waits for it; nothing was sent"),
     "git_requests_unreadable": ("session_send to the git agent: its waiting git requests "
                                 "could not be read; nothing was approved or sent"),
+    "git_transcript_unreadable": ("session_send to the git agent: the text is a git answer, "
+                                  "and neither its transcript nor its screen could be read, "
+                                  "so whether a question is open cannot be told; nothing was "
+                                  "approved or sent"),
 }
 ERROR_CODES = frozenset(ERROR_CODE_DESCRIPTIONS)
 
 # The codes whose call, made again unchanged, can succeed later (design-10 D6's Retryable
 # column): an aidc CLI call that failed is transient, a headless run that is busy ends, and
-# the git container's request list read again can answer. Every other code meets the same
-# refusal until something changes.
-RETRYABLE_ERROR_CODES = frozenset({"cli_failed", "invoke_busy", "git_requests_unreadable"})
+# the git container's request list, or the git agent's transcript, read again can answer.
+# Every other code meets the same refusal until something changes.
+RETRYABLE_ERROR_CODES = frozenset({"cli_failed", "invoke_busy", "git_requests_unreadable",
+                                   "git_transcript_unreadable"})
 
 
 def envelope_err(error: str, data: Any = None, *, code: str) -> dict[str, Any]:

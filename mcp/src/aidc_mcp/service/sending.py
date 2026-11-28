@@ -882,7 +882,7 @@ async def send(
 
     # An answer to the git agent's question about a waiting git request is carried out
     # here, as the request holder, before it goes into the question (gitapprove.py).
-    answer = await gitapprove.answer_in(name, prompt)
+    answer = await gitapprove.answer_in(name, prompt, container)
     if answer.refusal is not None:
         return answer.refusal
     # A decided answer is never queued: it goes into the question menu, not the input box,
@@ -927,14 +927,26 @@ QUESTION_NOT_ANSWERED = {
     "several_questions": "the question menu holds more than one question",
     "no_such_option": "the question menu offers no such option",
     "pointer_not_moved": "the menu's pointer did not reach the option, so nothing was chosen",
+    "keys_not_sent": "the keys could not be sent to the session's window",
     "menu_still_open": "Enter was pressed on the option, and the menu is still on the screen",
+    "screen_unread": "Enter was pressed on the option, and the screen could not be read "
+                     "since (empty, or not a screen aidc knows), so whether the question was "
+                     "answered cannot be told",
 }
 
 
-async def _read_menu(container: str, name: str) -> scr.QuestionMenu | None:
+async def _read_question(container: str, name: str
+                         ) -> tuple[scr.ScreenState, tn.OpenQuestion | None]:
+    """The screen, and the question open on it (turns.open_question, the screen alone: the
+    menu is answered only where it is seen)."""
     raw = await tmx.capture_screen(container, tmx.SESSION_WINDOW)
     ss.last_screen_raw[name] = raw
-    return scr.classify(raw).question
+    screen = scr.classify(raw)
+    return screen, tn.open_question([], screen)
+
+
+def _names(asked: tn.OpenQuestion | None, must_name: str) -> bool:
+    return asked is not None and must_name in asked.request_ids
 
 
 async def answer_question_menu(container: str, name: str, choice: str, must_name: str) -> str:
@@ -945,13 +957,17 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
     The pointer is moved with the arrow keys and read back before Enter: a number key may
     choose its option at once, with no chance to check what was chosen, and Enter on the
     wrong option would answer the question wrongly. A menu that cannot be read, or whose
-    pointer does not land on the option, gets no Enter. Called under the session's send lock,
-    so no paste goes in meanwhile."""
-    menu = await _read_menu(container, name)
-    if menu is None:
+    pointer does not land on the option, gets no Enter. After Enter the question counts as
+    answered only once a read shows a screen aidc knows without it: the input box (Claude at
+    its prompt, or working), or a question about another request. A failed or empty read, or
+    one aidc cannot classify, is not taken for the menu gone. Called under the session's
+    send lock, so no paste goes in meanwhile."""
+    _, asked = await _read_question(container, name)
+    if asked is None or asked.menu is None:
         return "no_question_on_screen"
-    if must_name not in "".join(menu.text.split()):
+    if not _names(asked, must_name):
         return "another_question"
+    menu = asked.menu
     if menu.several:
         return "several_questions"
     matches = [n for n, label in menu.options if label.lower().startswith(choice.lower())]
@@ -965,25 +981,30 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
         # One move, from where the pointer was read; then only read until it shows there.
         # Keys sent again on a screen not redrawn yet would overshoot.
         key = "Down" if target > menu.pointer else "Up"
-        await tmx.tmux_exec(container, ["send-keys", "-t", target_window,
-                                        *[key] * abs(target - menu.pointer)])
+        if await tmx.tmux_exec(container, ["send-keys", "-t", target_window,
+                                           *[key] * abs(target - menu.pointer)]) != 0:
+            return "keys_not_sent"
         for _ in range(_MENU_POLLS):
             await asyncio.sleep(_MENU_POLL_S)
-            menu = await _read_menu(container, name)
-            if menu is None or must_name not in "".join(menu.text.split()):
+            _, asked = await _read_question(container, name)
+            if asked is None or asked.menu is None or not _names(asked, must_name):
                 return "pointer_not_moved"
-            if menu.pointer == target:
+            if asked.menu.pointer == target:
                 break
         else:
             return "pointer_not_moved"
-    await tmx.tmux_exec(container, ["send-keys", "-t", target_window, "Enter"])
+    if await tmx.tmux_exec(container, ["send-keys", "-t", target_window, "Enter"]) != 0:
+        return "keys_not_sent"
+    why_not = "screen_unread"
     for _ in range(_MENU_POLLS):
         await asyncio.sleep(_MENU_POLL_S)
-        menu = await _read_menu(container, name)
-        if menu is None or must_name not in "".join(menu.text.split()):
+        screen, asked = await _read_question(container, name)
+        if _names(asked, must_name):
+            why_not = "menu_still_open"
+        elif asked is not None or screen.input_box in (scr.EMPTY, scr.HAS_TEXT):
             com.session_changed(name)
             return ""
-    return "menu_still_open"
+    return why_not
 
 
 async def _answer_git_question(name: str, conversation_id: str | None, container: str,
@@ -996,7 +1017,7 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
     reported, never a failed send. Nothing is queued: typed text never reaches the menu,
     and pasted after it, it would be a second, stray prompt."""
     no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
-    if decided.get("done") or decided.get("code") == "git_request_not_waiting":
+    if decided.get("done") or decided.get("already_decided"):
         lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
         async with lock:
             why_not = await answer_question_menu(container, name, decision.verb,
@@ -1016,9 +1037,20 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
              else "nowhere: no webhook is open for this session"
              + (f" ({no_watch_reason})" if no_watch_reason else ""))
     option = decision.verb.capitalize()
-    if answered:
+    if decided.get("already_decided") and why_not == "no_question_on_screen":
+        # Decided before this answer (another answer won the race, or it was decided
+        # outside): the question is gone with it, and nothing is left to send.
+        delivery = (f"git request {decision.request_id} was already decided "
+                    "(git_request.already_decided), and the git agent has no question about "
+                    "it on screen: this answer approved or denied nothing, and nothing was "
+                    "sent. Do NOT re-send; git-requests show, or aidc git requests, says how "
+                    "it was decided.")
+    elif answered:
+        settled = (" The request was already decided (git_request.already_decided), so this "
+                   "answer approved or denied nothing." if decided.get("already_decided") else "")
         delivery = (f"Answered: {option} was chosen in the git agent's question, so its turn "
-                    f"goes on; its reply comes {where}. Nothing else was sent. Do NOT re-send.")
+                    f"goes on; its reply comes {where}.{settled} Nothing else was sent. "
+                    "Do NOT re-send.")
     else:
         delivery = (f"The git request's decision stands (git_request), but the git agent's "
                     f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "

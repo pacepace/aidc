@@ -371,50 +371,40 @@ def _blocking_tool_use_block(message: dict) -> dict | None:
     return None
 
 
-def asking_question(objs: list[dict]) -> bool:
-    """Whether the session's newest tool call is an AskUserQuestion still waiting for its
-    answer: Claude is on its question, not on a permission prompt for another tool. An
-    older question left open (a turn cut off while it asked) does not count."""
+def current_question(objs: list[dict]) -> dict | None:
+    """The input of the AskUserQuestion the session's current turn waits on: the newest tool
+    call, a question no later tool_result answers. None when none waits. A question left
+    open by a turn that was cut off does not count: a prompt (or an interrupt) after it
+    started another turn, and so does an answered question followed by other tool calls.
+
+    The transcript half of "is a question open" (service/turns.open_question adds the
+    screen, which the transcript can lag)."""
     answered: set[str] = set()
     for obj in reversed(objs):
-        message = obj.get("message") if isinstance(obj, dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
+        if not isinstance(obj, dict) or _is_skippable(obj):
             continue
-        blocks = [b for b in content if isinstance(b, dict)]
-        for b in blocks:
-            if b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
-                answered.add(b["tool_use_id"])
-        uses = [b for b in blocks if b.get("type") == "tool_use"]
-        if obj.get("type") == "assistant" and uses:
-            return any(b.get("name") == "AskUserQuestion" and b.get("id") not in answered
-                       for b in uses)
-    return False
-
-
-def open_question(objs: list[dict]) -> dict | None:
-    """The input of the session's AskUserQuestion still waiting for its answer: the last
-    one asked whose tool_use no later tool_result answers. None when none waits."""
-    asked: dict[str, dict] = {}
-    order: list[str] = []
-    for obj in objs:
-        message = obj.get("message") if isinstance(obj, dict) else None
+        message = obj.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for b in content:
-            if not isinstance(b, dict):
+        if obj.get("type") == "user":
+            blocks = [b for b in content if isinstance(b, dict)] \
+                if isinstance(content, list) else []
+            results = [b for b in blocks if b.get("type") == "tool_result"]
+            for b in results:
+                if isinstance(b.get("tool_use_id"), str):
+                    answered.add(b["tool_use_id"])
+            if results or obj.get("isMeta"):
                 continue
-            if (obj.get("type") == "assistant" and b.get("type") == "tool_use"
-                    and b.get("name") == "AskUserQuestion" and isinstance(b.get("id"), str)
+            return None         # a prompt, or an interrupt: a turn after any question
+        if obj.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if not uses:
+            continue
+        for b in uses:
+            if (b.get("name") == "AskUserQuestion" and b.get("id") not in answered
                     and isinstance(b.get("input"), dict)):
-                asked[b["id"]] = b["input"]
-                order.append(b["id"])
-            elif b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
-                asked.pop(b["tool_use_id"], None)
-    for tool_use_id in reversed(order):
-        if tool_use_id in asked:
-            return asked[tool_use_id]
+                return b["input"]
+        return None
     return None
 
 
@@ -1551,6 +1541,13 @@ def record_delivered(base_dir: Path, session: str, conversation_id: str,
 # linger forever and swallow a person later typing the same words.
 
 _SENT_PROMPTS_MAX = 200
+# The same age holds for a held entry (hold_sent_entry), on purpose. A held paste is taken
+# only when the turn it was queued behind ends and Claude Code writes it as a "queued" prompt
+# line, and a turn has no bound (hours of work), nor does the send queue give up on a prompt;
+# a shorter age would drop the entry before its line comes and credit the MCP's own prompt to
+# a person. What is left: one Claude Code answered inside the running turn is never taken, and
+# until it ages out a person's queued line (typed while Claude works) with the very same words
+# would take it, newest first. Typed lines at the prompt never take a held entry.
 _SENT_PROMPTS_TTL_S = 24 * 3600.0
 
 

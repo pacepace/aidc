@@ -505,3 +505,6 @@ Owner ruling: a cluster session marks its start folder trusted in Claude (hasTru
 
 ## 2026-11-27 The git agent trusts its own work folder on both backends
 Owner ruling: the git agent's Claude, on Docker and on Kubernetes, starts in its own work folder (/home/git/work) marked trusted and past onboarding, so it never stops at a first-launch screen after a restart and ask mode keeps working unattended. User sessions on Docker still carry only the host's own trust; cluster sessions follow the earlier 2026-11-27 ruling.
+
+## 2026-11-28 Progress travels over the mesh (design-13 Q1)
+Owner ruling: progress notifications reach an orchestrator over the 3tears mesh too, not only on a local connection (the recommendation to keep progress local and rely on the async tools was declined). This needs a 3tears change to carry progress across the mesh; it belongs in the 3tears release aidc 2.0 moves to (chunk 22), and aidc's chunk 20 uses it.

@@ -511,3 +511,6 @@ Owner ruling: progress notifications reach an orchestrator over the 3tears mesh 
 
 ## 2026-11-28 The broker renews by running Claude Code itself
 Owner ruling (confirmed): the account broker renews an account's token by running Claude Code itself (a one-word prompt within an hour of expiry), not by calling the login server directly as Claude Code. This is what chunk 17 built (renewal option B).
+
+## 2026-11-28 Account switching on Docker too
+Owner ruling: the Claude account broker and account switching work the same way on Docker as on Kubernetes ("that is an important part about 2.0 and we want everything to work the same way"). `aidc claude account add|remove|list|use` and `aidc claude broker start|stop|status|logs` work on the Docker backend; Docker sessions and the Docker git agent get the active account's credentials from the broker and switch with it, and renewal runs the same way. Accounts stay per person (one broker per user). This is in 2.0.

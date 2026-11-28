@@ -110,6 +110,31 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
+# A verb that names a session, with -h or --help anywhere on its line, prints its help and
+# nothing else: no session is looked up, no backend asked, and nothing named runs (`aidc kill
+# demo --help` must not kill demo). With --backend it is that backend's help; without, the
+# session could be on either, so it is the default backend's, then the other's.
+case "$SUBCOMMAND" in
+    attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
+        for a in "$@"; do
+            case "$a" in
+                -h|--help)
+                    def=$(AIDC_BACKEND_FLAG="$BACKEND" aidc_default_backend) || exit 2
+                    verb_help() {
+                        if [ "$1" = kubernetes ]; then bash "$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh" --help
+                        else bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" --help; fi
+                    }
+                    if [ -n "$BACKEND" ]; then verb_help "$def"; exit $?; fi
+                    other=kubernetes; [ "$def" = kubernetes ] && other=docker
+                    rc=0
+                    printf 'On %s (your default backend):\n\n' "$def"
+                    verb_help "$def" || rc=$?
+                    printf '\nOn %s (--backend %s):\n\n' "$other" "$other"
+                    verb_help "$other" || rc=$?
+                    exit "$rc" ;;
+            esac
+        done ;;
+esac
 # No flag: `create` (and `clean-env`) takes the default backend (aidc_default_backend: the config's top-level
 # `backend:`, else docker; `aidc git` and `aidc repo` use the same rule); a verb that names
 # a session goes where that session lives, asking the configured cluster first (a quiet no
@@ -124,10 +149,11 @@ if [ -z "$BACKEND" ]; then
         attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
             if [ $# -gt 0 ]; then
                 rc=0
-                bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$1" || rc=$?
+                where=$(bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$1") || rc=$?
                 case "$rc" in
                     0) BACKEND="kubernetes" ;;
                     2) info "the configured cluster did not answer; trying Docker for '$1' (--backend kubernetes to insist)" ;;
+                    3) info "the configured cluster answered with an error, not whether '$1' is there (${where}); trying Docker (--backend kubernetes to insist)" ;;
                 esac
             fi
             ;;

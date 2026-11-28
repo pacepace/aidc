@@ -266,6 +266,15 @@ and the envelope are unchanged; what an MCP caller sees differently:
   is already in a session's input box.
 
 ### Fixed
+- **`--help` on a session verb is its help, and nothing else.** `aidc kill --help` (and
+  `-h`, and the same for attach, logs, status, restart, upgrade, proxy, network, egress and
+  refresh) asked the configured cluster for a session named `--help`, said "the configured
+  cluster did not answer" when kubectl refused that name, and printed the Docker help. A
+  `--help` after a session's name, as in `aidc kill demo --help`, was ignored by the verb, which
+  ran on the session. Now `-h` or `--help` anywhere on the line prints the help of the backend
+  `--backend` names, else your default backend's and then the other's, and asks no backend.
+  A cluster that answers the lookup with an error (Forbidden, say) is now said to have
+  answered with that error, not to have not answered.
 - **A usage report is credited only to the account that produced it.** After a session's first
   call hit one account's weekly limit and the broker switched it, its status line reported that
   account's week under the new account's name, and the broker marked the new account at its

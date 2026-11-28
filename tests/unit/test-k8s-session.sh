@@ -85,6 +85,8 @@ case "$*" in
     *"get deployment,statefulset -l aidc/session=git"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
         [ "${K_GIT:-}" = 1 ] && echo "git deployment.apps/git" | pick ;;
     *"get deployment,statefulset -l"*) [ "${K_DOWN:-}" = 1 ] && { echo 'Unable to connect to the server' >&2; exit 1; }
+        [ "${K_FORBIDDEN:-}" = 1 ] && { echo 'Error from server (Forbidden): deployments.apps is forbidden: User "alice" cannot list resource "deployments"' >&2; exit 1; }
+        case "$*" in *"aidc/session=-"*) echo 'error: unable to parse requirement: invalid label value' >&2; exit 1 ;; esac
         { [ "${K_EXISTS:-}" = 1 ] && echo "proxy deployment.apps/demo-proxy"
           [ "${K_RELAY_LEFT:-}" = 1 ] && echo "egress deployment.apps/demo-egress-db-lan-example-org"; } | pick ;;
     *"get deployment -l app=git,aidc/session=git"*) [ "${K_GIT:-}" = 1 ] && printf '1\t2026-11-24T03:00:00Z\n' ;;
@@ -761,6 +763,47 @@ assert_has "an unreachable cluster is said, not taken for 'no such session'" "th
 assert_has "and the verb falls back to Docker" "docker " "$(cat "$D_LOG")"
 out=$(K_DOWN=1 run list --backend kubernetes)
 assert_has "list says the cluster did not answer instead of 'no sessions'" "the cluster did not answer" "$out"
+
+out=$(K_FORBIDDEN=1 run logs demo --component squid)
+assert_has "a cluster that answers with an error is said so" \
+    "the configured cluster answered with an error, not whether 'demo' is there (Error from server (Forbidden)" "$out"
+assert_not_has "  never 'did not answer'" "did not answer" "$out"
+
+echo "=== -h and --help on a verb that names a session ==="
+# The verb's help, never a lookup of a session named --help, a word to a backend, or the verb
+# run on the session the line names.
+for verb in attach kill logs status restart upgrade proxy network egress refresh; do
+    for h in --help -h; do
+        : > "$D_LOG"; out=$(run "$verb" "$h")
+        assert_has "aidc $verb $h prints the verb's help" "aidc $verb" "$out"
+        assert_has "  Docker's (the default backend) first" "On docker (your default backend):" "$out"
+        assert_has "  then the cluster's" "On kubernetes (--backend kubernetes):" "$out"
+        assert_has "  and exits 0" "exit=0" "$out"
+        assert_not_has "  without a word about the cluster" "configured cluster" "$out"
+        assert_eq "  kubectl is not asked" "" "$(cat "$K_LOG")"
+        assert_eq "  docker is not asked" "" "$(cat "$D_LOG")"
+    done
+done
+: > "$D_LOG"; out=$(K_EXISTS=1 run kill demo --help)
+assert_has "aidc kill demo --help is the help" "aidc kill <name>" "$out"
+assert_not_has "  and kills nothing" "removed" "$out"
+assert_eq "  (kubectl is not asked)" "" "$(cat "$K_LOG")"
+assert_eq "  (docker is not asked)" "" "$(cat "$D_LOG")"
+out=$(K_EXISTS=1 run kill demo --help --backend kubernetes)
+assert_has "--backend kubernetes --help is the cluster's help" "Removes the session from the cluster" "$out"
+assert_not_has "  and not Docker's" "On docker" "$out"
+assert_eq "  and kubectl is not asked" "" "$(cat "$K_LOG")"
+: > "$D_LOG"; out=$(run proxy demo allow example.org --help)
+assert_has "a subcommand's --help is the verb's help" "aidc proxy" "$out"
+assert_eq "  and docker is not asked" "" "$(cat "$D_LOG")"
+printf 'backend: kubernetes\n' >> "$HOME/.config/aidc/config.yaml"
+out=$(run kill --help)
+assert_has "with backend: kubernetes the cluster's help comes first" "On kubernetes (your default backend):"$'\n\n'"aidc kill <name>"$'\n\n'"Removes the session from the cluster" "$out"
+assert_has "  then Docker's" "On docker (--backend docker):" "$out"
+assert_eq "  kubectl is not asked" "" "$(cat "$K_LOG")"
+sed -i '/^backend: /d' "$HOME/.config/aidc/config.yaml"
+K_DOWN=1 bash "$AIDC_SCRIPTS/k8s/session-where.sh" --help; rc=$?
+assert_eq "where: a name no session can have is no session, not an unanswering cluster" 1 "$rc"
 
 for verb in kill status attach; do
     out=$(K_DOWN=1 run "$verb" demo --backend kubernetes)

@@ -1630,7 +1630,8 @@ Built first, with no behaviour change (branch `refactor/backend-seam`):
   Docker and `scripts/k8s/session-<verb>.sh` for Kubernetes. `--backend docker|kubernetes`
   chooses; without it, `create` takes the config's top-level `backend:`, a verb that names a
   session asks the configured cluster first (`scripts/k8s/session-where.sh`, quiet when no
-  cluster is configured) and goes to Docker otherwise, and `list` shows both. A verb the
+  cluster is configured) and goes to Docker otherwise, and `list` shows both. Such a verb with
+  `-h` or `--help` anywhere prints its help and asks no backend. A verb the
   Kubernetes backend lacks says so. Wrapping each Docker
   call in a shell backend library was considered and not done: nearly every call is in a per-verb
   script whose Kubernetes form shares little with it (namespaces and NetworkPolicy instead of

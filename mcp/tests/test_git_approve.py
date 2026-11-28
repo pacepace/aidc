@@ -623,6 +623,28 @@ async def test_another_dialog_after_enter_is_named_not_called_unreadable(git, mo
     assert "permission prompt" in res["data"]["delivery"]
 
 
+async def test_a_failed_request_whose_question_a_dialog_replaced_names_the_dialog(git,
+                                                                                 monkeypatch):
+    """The approval ran and failed, and after Enter a permission prompt took the question's
+    place: the delivery says it failed and names the dialog waiting for a person, never that
+    the agent goes on and reports the failure (Critic 2026-11-28 verify observation 1)."""
+    git.decide_exit = 1
+    perm = "\n".join(["● older output", RULE, " Bash command", "",
+                      "   git-requests show " + A, "", " Do you want to proceed?",
+                      " ❯ 1. Yes", "   2. No", "", " Esc to cancel", ""])
+
+    async def capture(container, window):
+        return perm if not git.menu.open else _menu_screen(A, git.menu.pointer)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    res = await _send("Approve")
+    assert res["data"]["git_request"]["failed"] is True
+    assert res["data"]["status"] == "dialog_open"
+    delivery = res["data"]["delivery"]
+    assert "FAILED" in delivery and "permission prompt" in delivery
+    assert "no longer open" in delivery and "terminal" in delivery
+    assert "goes on and reports" not in delivery
+
+
 async def test_keys_that_cannot_be_sent_are_reported(git, monkeypatch):
     async def fails(container, args):
         git.menu.keys.extend(args[3:])

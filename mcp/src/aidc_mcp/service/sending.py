@@ -1078,8 +1078,12 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
     if failed:
         # The holder ran it and it failed: the request is failed now, so sending the same
         # answer again decides nothing.
-        menu = (f"{option} was chosen in the git agent's question, so it goes on and reports "
-                f"the failed request; its reply comes {where}." if answered
+        menu = (f"{option} was chosen in the git agent's question, which is no longer open: "
+                f"its screen now shows {dialog} instead (status dialog_open, dialog), "
+                "waiting for a person; tell the user to look at the git agent's terminal."
+                if replaced
+                else f"{option} was chosen in the git agent's question, so it goes on and "
+                     f"reports the failed request; its reply comes {where}." if answered
                 else f"The git agent's question was not answered: "
                      f"{QUESTION_NOT_ANSWERED[why_not]}"
                      + (f" ({dialog})" if dialog else "") + ".")

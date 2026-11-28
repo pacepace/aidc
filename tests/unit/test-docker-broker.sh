@@ -38,6 +38,8 @@ assert_not_has() {
 
 # docker stub: logs each call (one line, words as given) to $D_LOG.
 #   D_DOWN=1           every call fails as an unreachable daemon does
+#   D_INSPECT_DOWN=1   only the broker's inspect fails that way (docker info still answers)
+#   D_STOP_RC=1        docker stop fails
 #   D_BROKER=running|stopped|absent   the broker container (default absent)
 #   D_VOLS="a b"       volumes that exist (default none)
 #   D_EXEC_RC=1        claude-broker in the container fails
@@ -56,9 +58,11 @@ case "$a" in
     "volume create "*) exit 0 ;;
     "network inspect "*) echo "Error: network not found" >&2; exit 1 ;;
     "start aidc-claude-broker") : > "$D_LOG.started"; exit 0 ;;
-    "network create "*|"rm -f "*|"create "*|"stop "*) exit 0 ;;
+    "stop "*) [ "${D_STOP_RC:-0}" = 0 ] || echo "Error response from daemon: cannot stop container" >&2; exit "${D_STOP_RC:-0}" ;;
+    "network create "*|"rm -f "*|"create "*) exit 0 ;;
     "cp "*) set -- $a; cp "$2/config.json" "$D_CFG"; exit 0 ;;
     "inspect -f {{.State.Running}} aidc-claude-broker")
+        [ "${D_INSPECT_DOWN:-}" = 1 ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2; exit 1; }
         [ -e "$D_LOG.started" ] && { echo true; exit 0; }
         case "${D_BROKER:-absent}" in
             running) echo true ;; stopped) echo false ;;
@@ -183,6 +187,31 @@ assert_has "...the list indented" "  * work" "$out"
 out=$(D_BROKER=running run broker stop)
 assert_has "broker stop stops the container (volumes and container kept)" "stop aidc-claude-broker" "$(calls)"
 assert_not_has "...removing nothing" "volume rm" "$(calls)"
+assert_has "...and exits 0" "exit=0" "$out"
+out=$(D_BROKER=stopped run broker stop)
+assert_has "broker stop of a stopped broker succeeds" "exit=0" "$out"
+assert_not_has "...stopping nothing" "stop aidc-claude-broker" "$(calls)"
+out=$(D_BROKER=absent run broker stop)
+assert_has "broker stop with no broker at all succeeds" "exit=0" "$out"
+out=$(D_BROKER=running D_STOP_RC=1 run broker stop)
+assert_has "a refused docker stop fails broker stop" "exit=1" "$out"
+assert_has "...saying docker could not stop it" "docker could not stop the Claude account broker (aidc-claude-broker)" "$out"
+out=$(D_INSPECT_DOWN=1 run broker stop)
+assert_has "a docker that does not answer about the broker fails broker stop, never says it stopped" "exit=1" "$out"
+assert_has "...saying whether it runs cannot be told" "cannot tell whether the Claude account broker runs, so it was not stopped: docker did not answer" "$out"
+assert_not_has "...and trying no stop" "stop aidc-claude-broker" "$(calls)"
+out=$(D_DOWN=1 run broker stop)
+assert_has "a docker daemon that does not answer at all fails broker stop" "exit=1" "$out"
+stop_direct() {
+    ( AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+      # shellcheck source=../../scripts/docker/broker.sh
+      . "$AIDC_ROOT/scripts/docker/broker.sh"
+      dk_broker_stop 2>&1; echo "rc=$?" )
+}
+out=$(D_DOWN=1 stop_direct)
+assert_has "dk_broker_stop itself returns 1 when docker does not answer" "rc=1" "$out"
+assert_has "...saying why" "docker did not answer: Cannot connect to the Docker daemon" "$out"
+assert_eq "dk_broker_stop of an absent broker returns 0" "rc=0" "$(D_BROKER=absent stop_direct)"
 out=$(D_BROKER=running run broker logs --follow)
 assert_has "broker logs --follow follows its log" "logs -f aidc-claude-broker" "$(calls)"
 out=$(D_DOWN=1 run account list)
@@ -323,7 +352,7 @@ ready_git() {
     ( : > "$D_LOG"; rm -f "$D_LOG.started"
       AIDC_SCRIPTS="$AIDC_ROOT/scripts"
       # shellcheck source=../../scripts/docker/broker.sh
-      . "$AIDC_ROOT/scripts/docker/broker.sh"
+      . "$AIDC_SCRIPTS/docker/broker.sh"
       dk_git_claude_ready 2>/dev/null; echo "rc=$?" )
 }
 out=$(D_BROKER=running ready_git)

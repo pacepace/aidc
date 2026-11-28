@@ -130,10 +130,22 @@ dk_broker_start() {
 }
 
 # dk_broker_stop: stops it; the container, volumes and sessions' folders are kept (sessions keep
-# the last credentials until they expire). Returns 1 when docker refused.
+# the last credentials until they expire). A broker already stopped or never made is success.
+# Returns 1, saying why on stderr, when docker did not answer (whether it runs cannot be told,
+# so nothing is said to be stopped) or refused the stop. The messages are printed here, not
+# through common.sh's err (.claude/rules/learnings/shell-libraries.md).
 dk_broker_stop() {
-    case "$(dk_broker_state 2>/dev/null)" in RUNNING) ;; *) return 0 ;; esac
-    docker stop "$DK_BROKER_CT" >/dev/null || { err "could not stop the Claude account broker"; return 1; }
+    local state rc=0
+    state=$(dk_broker_state) || rc=$?
+    if [ "$rc" != 0 ]; then
+        printf '[aidc] error: cannot tell whether the Claude account broker runs, so it was not stopped: %s\n' "$state" >&2
+        return 1
+    fi
+    [ "$state" = RUNNING ] || return 0
+    if ! docker stop "$DK_BROKER_CT" >/dev/null; then
+        printf '[aidc] error: docker could not stop the Claude account broker (%s)\n' "$DK_BROKER_CT" >&2
+        return 1
+    fi
 }
 
 # dk_claude_session_ready <session>: when the broker runs, the session's folder of

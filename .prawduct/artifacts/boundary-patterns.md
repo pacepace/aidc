@@ -131,7 +131,19 @@ that ships separately.
 - **Contract**: `git-requests list` (a header line, then one waiting request per line, its 32-hex
   id first), `approve <id>`, `deny <id> [why]`; reached on Docker by `docker exec -u gitreq -e
   HOME=/var/lib/gitctl/gitreq aidc-git-dev`, on Kubernetes by `kubectl exec -c gitreq` into the
-  git pod. Each verb acts only on a request still waiting and exits non-zero saying why otherwise.
+  git pod. Each verb acts only on a request still waiting. `approve` and `deny` exit 0 when they
+  did it; 1 when they ran it and it failed (the result, `failed` with why, is written first: a
+  push refused, no GitHub login, the working copy moved); 3 (`EXIT_NOT_WAITING`) when they
+  decided nothing: the request was not waiting (decided or gone already), another answer holds
+  its lock, or another answer got there first. `show <id>` prints its recorded state on its first
+  line, `request:  <id> (<state>)` (pending, running, done, denied, failed).
+- **Depends on 1 vs 3**: `gitapprove.carry_out` reports 3 as `already_decided` (the option is
+  still chosen, nothing re-sent) and 1 as `failed` (the orchestrator is told to say why). Folding
+  3 back into 1 turns every lost race into a reported failure. A git container older than the
+  split exits 1 for a lost race, so on 1 carry_out reads `show`: done, denied or running is
+  `already_decided`, failed is a failure, pending still waits. `aidc git approve|deny` pass the
+  status through. The value 3 is written twice, `EXIT_NOT_WAITING` in gitctl/git-requests.sh and
+  in gitapprove.py; mcp/tests/test_git_approve.py fails when they differ.
 - **Rule**: the request id always comes from the agent's own question, never from the caller's
   text; the holder refuses these verbs to anything reaching it through sudo or as another user,
   so only an exec from outside the container decides.

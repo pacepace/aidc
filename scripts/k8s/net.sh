@@ -18,6 +18,10 @@
 #
 # Sourced after lib.sh and manifests.sh; uses lib/egress.sh's pure helpers.
 
+# Loads lib.sh itself when the caller has not, so it never calls a helper it has not loaded
+# (tests/unit/test-lib-self-contained.sh).
+# shellcheck source=lib.sh
+declare -F k8s_load_settings >/dev/null || . "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}/k8s/lib.sh"
 # shellcheck source=../lib/egress.sh
 . "$AIDC_SCRIPTS/lib/egress.sh"
 

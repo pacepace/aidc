@@ -299,12 +299,15 @@ k8s_check_size() {
 
 # The images `aidc k8s build` pushed from this machine, by digest. The tags are aidc's version,
 # so a build with --force pushes new content under a tag a running Deployment already names;
-# only the digest tells the two apart. One line per cluster and image:
-#   <API server URL> <registry path:tag> <digest>
+# only the digest tells the two apart. One line per name of the cluster and image:
+#   <cluster name> <registry path:tag> <digest>
 # in ${XDG_STATE_HOME:-~/.local/state}/aidc/k8s-images. aidc mcp start reads its image's line
-# (mcp.sh). The cluster is named by its API server URL, the one thing the builder's
-# kubeconfig and a user's have in common; the registry is reachable from the cluster only, so
-# start cannot ask it. A build made on another machine leaves no line here.
+# (mcp.sh). The registry is reachable from the cluster only, so start cannot ask it; the
+# cluster is named by what the builder's kubeconfig and a user's can both say about it, without
+# rights in it (k8s_cluster_ids): its API server URL, and the certificate authority it is
+# trusted by. The two kubeconfigs may name different addresses for the same API server (a
+# load balancer, a tunnel, 127.0.0.1), and then the CA still matches. A build made on another
+# machine leaves no line here.
 k8s_images_record_file() { printf '%s/aidc/k8s-images' "${XDG_STATE_HOME:-${HOME}/.local/state}"; }
 
 # k8s_cluster_server: the API server URL of the configured kubeconfig context ("" when it
@@ -313,28 +316,58 @@ k8s_cluster_server() {
     k8s_kubectl config view --minify -o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null || true
 }
 
-# k8s_image_digest <registry path:tag>: the digest recorded for it on this cluster, "" when none.
-# The kubeconfig is read for the cluster's URL only when some cluster has a record of the image.
-k8s_image_digest() {
-    local f server
-    f=$(k8s_images_record_file)
-    [ -f "$f" ] && awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' "$f" || return 0
-    server=$(k8s_cluster_server)
-    [ -n "$server" ] || return 0
-    awk -v s="$server" -v t="$1" '$1 == s && $2 == t { d = $3 } END { if (d != "") print d }' "$f"
+# k8s_cluster_ca_id: "ca-sha256:<hex>", the SHA-256 of the configured context's cluster CA
+# certificate (inline data, or the file it names: --flatten reads it in) with its whitespace
+# taken out; "" when the kubeconfig names none (insecure-skip-tls-verify) or it cannot be read.
+k8s_cluster_ca_id() {
+    local data sum
+    data=$(k8s_kubectl config view --minify --flatten \
+        -o 'jsonpath={.clusters[0].cluster.certificate-authority-data}' 2>/dev/null) || return 0
+    [ -n "$data" ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum=$(printf '%s' "$data" | base64 -d 2>/dev/null | tr -d ' \t\r\n' | sha256sum | cut -c1-64)
+    else
+        sum=$(printf '%s' "$data" | base64 -d 2>/dev/null | tr -d ' \t\r\n' | shasum -a 256 | cut -c1-64)
+    fi
+    # The hash of nothing is no CA (data that does not decode).
+    case "$sum" in ""|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855) return 0 ;; esac
+    printf 'ca-sha256:%s\n' "$sum"
 }
 
-# k8s_image_digest_set <server> <registry path:tag> <digest>: records it, replacing that
-# image's line; an empty <digest> removes the line. Returns 1, saying why on stderr, when the
-# record cannot be written.
+# k8s_cluster_ids: the configured cluster's names, one a line: its API server URL, then its CA's
+# (k8s_cluster_ca_id). Nothing when the kubeconfig says neither.
+k8s_cluster_ids() {
+    local server
+    server=$(k8s_cluster_server)
+    [ -z "$server" ] || printf '%s\n' "$server"
+    k8s_cluster_ca_id
+}
+
+# k8s_image_digest <registry path:tag>: the digest recorded for it on this cluster, under any of
+# the cluster's names (the newest line when several match), "" when none. The kubeconfig is read
+# only when some cluster has a record of the image.
+k8s_image_digest() {
+    local f ids
+    f=$(k8s_images_record_file)
+    [ -f "$f" ] && awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' "$f" || return 0
+    ids=$(k8s_cluster_ids)
+    [ -n "$ids" ] || return 0
+    printf '%s\n' "$ids" | awk -v t="$1" 'NR == FNR { if ($1 != "") id[$1] = 1; next }
+        ($1 in id) && $2 == t { d = $3 } END { if (d != "") print d }' - "$f"
+}
+
+# k8s_image_digest_set <cluster names> <registry path:tag> <digest>: records it under each name
+# (one a line, k8s_cluster_ids), replacing that image's lines under them; an empty <digest>
+# removes them. Returns 1, saying why on stderr, when the record cannot be written.
 k8s_image_digest_set() {
     local f tmp
     f=$(k8s_images_record_file)
-    [ -n "$1" ] || { printf '[aidc] error: no API server URL to record %s under\n' "$2" >&2; return 1; }
+    [ -n "$1" ] || { printf '[aidc] error: no name of the cluster to record %s under\n' "$2" >&2; return 1; }
     mkdir -p "$(dirname "$f")" || { printf '[aidc] error: cannot make %s\n' "$(dirname "$f")" >&2; return 1; }
     tmp=$(mktemp "${f}.XXXXXX") || { printf '[aidc] error: cannot write %s\n' "$f" >&2; return 1; }
-    { [ ! -f "$f" ] || awk -v s="$1" -v t="$2" '!($1 == s && $2 == t)' "$f"
-      [ -z "$3" ] || printf '%s %s %s\n' "$1" "$2" "$3"; } > "$tmp" \
+    { [ ! -f "$f" ] || printf '%s\n' "$1" | awk -v t="$2" 'NR == FNR { if ($1 != "") id[$1] = 1; next }
+          !(($1 in id) && $2 == t)' - "$f"
+      [ -z "$3" ] || printf '%s\n' "$1" | awk -v t="$2" -v d="$3" '$1 != "" { print $1, t, d }'; } > "$tmp" \
         && mv -f "$tmp" "$f" \
         || { rm -f "$tmp"; printf '[aidc] error: cannot write %s\n' "$f" >&2; return 1; }
 }
@@ -606,12 +639,14 @@ k8s_repo_state() {
 
 
 # k8s_repo_dir_step <namespace> <cluster-path> <mode> <node-selector-json>: run the repo folder
-# pod (manifests.sh, k8s_render_repo_dir; sourced by the caller) in <mode> and wait for it,
+# pod (manifests.sh, k8s_render_repo_dir; loaded here when the caller has not) in <mode> and wait for it,
 # up to three minutes. Prints the pod's last line; returns 1, with why on stderr, when it
 # failed or did not finish. The pod is deleted either way.
 k8s_repo_dir_step() {
     local ns="$1" path="$2" mode="$3" sel="$4" name phase="" logs
     name="repo-dir-${mode}-$(date -u +%Y%m%d%H%M%S)-$$"
+    # shellcheck source=manifests.sh
+    declare -F k8s_render_repo_dir >/dev/null || . "$AIDC_SCRIPTS/k8s/manifests.sh"
     if ! k8s_render_repo_dir "$name" "$path" "$mode" "$sel" | k8s_kubectl apply -f - >/dev/null; then
         printf '[aidc] error: could not start the folder step for %s\n' "$path" >&2
         return 1
@@ -666,6 +701,8 @@ k8s_git_repos_read() {
 k8s_git_repos_write() {
     local verb=create
     [ -z "$K8S_GIT_REPOS_RV" ] || verb=replace
+    # shellcheck source=manifests.sh
+    declare -F k8s_render_git_repos >/dev/null || . "$AIDC_SCRIPTS/k8s/manifests.sh"
     k8s_render_git_repos "$1" "$2" "$K8S_GIT_REPOS_RV" | k8s_kubectl "$verb" -f - >/dev/null
 }
 

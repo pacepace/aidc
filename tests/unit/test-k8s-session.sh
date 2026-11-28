@@ -771,8 +771,17 @@ assert_not_has "  never 'did not answer'" "did not answer" "$out"
 
 echo "=== -h and --help on a verb that names a session ==="
 # The verb's help, never a lookup of a session named --help, a word to a backend, or the verb
-# run on the session the line names.
-for verb in attach kill logs status restart upgrade proxy network egress refresh; do
+# run on the session the line names. Every verb the dispatcher routes to where its session lives:
+# its one list, SESSION_VERBS, read from scripts/aidc.
+SESSION_VERBS=$(sed -n 's/^SESSION_VERBS="\(.*\)"$/\1/p' "$AIDC_SCRIPTS/aidc")
+assert_has "scripts/aidc holds the session verbs in one list" "kill" "$SESSION_VERBS"
+for verb in $SESSION_VERBS; do
+    assert_eq "  $verb has a verb on each backend" "yes" \
+        "$([ -f "$AIDC_SCRIPTS/cmd-${verb}.sh" ] && [ -f "$AIDC_SCRIPTS/k8s/session-${verb}.sh" ] && echo yes || echo no)"
+done
+assert_eq "  and both its uses read it (no case arm lists the verbs again)" "" \
+    "$(grep -nE '^[[:space:]]*attach\|kill' "$AIDC_SCRIPTS/aidc")"
+for verb in $SESSION_VERBS; do
     for h in --help -h; do
         : > "$D_LOG"; out=$(run "$verb" "$h")
         assert_has "aidc $verb $h prints the verb's help" "aidc $verb" "$out"
@@ -804,6 +813,17 @@ assert_eq "  kubectl is not asked" "" "$(cat "$K_LOG")"
 sed -i '/^backend: /d' "$HOME/.config/aidc/config.yaml"
 K_DOWN=1 bash "$AIDC_SCRIPTS/k8s/session-where.sh" --help; rc=$?
 assert_eq "where: a name no session can have is no session, not an unanswering cluster" 1 "$rc"
+# One rule for a session name (lib/common.sh AIDC_SESSION_NAME_RE): session-where asks the
+# cluster for every name validate_session_name allows and for none it refuses.
+assert_eq "where: no name pattern of its own (it calls common.sh's session_name_ok)" "" \
+    "$(grep -vE '^[[:space:]]*#' "$AIDC_SCRIPTS/k8s/session-where.sh" | grep -E 'grep|a-z0-9')"
+long31="a$(printf '%030d' 0)" long32="a$(printf '%031d' 0)"
+for n in demo a "$long31" "$long32" -x Demo 'a_b' ''; do
+    v=0; ( . "$AIDC_SCRIPTS/lib/common.sh"; validate_session_name "$n" ) >/dev/null 2>&1 || v=1
+    : > "$K_LOG"; K_EXISTS=1 bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$n" >/dev/null 2>&1
+    asked=0; [ -s "$K_LOG" ] && asked=1
+    assert_eq "where and validate_session_name agree on '${n}' (valid: $((1 - v)))" "$((1 - v))" "$asked"
+done
 
 for verb in kill status attach; do
     out=$(K_DOWN=1 run "$verb" demo --backend kubernetes)

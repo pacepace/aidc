@@ -26,6 +26,9 @@ Strict, because an approval pushes to GitHub:
   is still chosen in the question, and the result says so (`already_decided`, a field of the
   successful result, not an error code). So does a second answer that lost a race to the
   first: the holder says so by its own exit status (EXIT_NOT_WAITING), never by exit 1.
+  A git container older than that status exits 1 for a lost race too, so an exit 1 is read
+  again from the request's recorded result (request_state): done or denied by another answer
+  (or being run by it) is already_decided, not a failure.
 - An approval the holder ran that failed (the push refused, no GitHub login, the working copy
   moved: exit 1, the request now failed) is a failure, `git_request_not_decided` with the
   holder's reason and `failed: true`; the option is still chosen, so the agent goes on and
@@ -216,6 +219,25 @@ async def waiting_requests() -> set[str] | None:
             if line.split() and tn.REQUEST_ID.fullmatch(line.split()[0])}
 
 
+#: the request's state on the first line of `git-requests show <id>`: "request:  <id> (<state>)"
+_SHOW_STATE = re.compile(r"request:\s+(\S+)\s+\(([a-z]*)\)")
+#: recorded results that another answer made (or is making): a lost race, never this run's failure
+DECIDED_ELSEWHERE = frozenset({"done", "denied", "running"})
+
+
+async def request_state(request_id: str) -> str | None:
+    """The request's recorded state (pending, running, done, denied, failed; "" when it has
+    no result), as the holder's `show` prints it; None when it cannot be read."""
+    rc, out = await _holder(["show", request_id], LIST_TIMEOUT_S)
+    for line in out.splitlines()[:1]:
+        m = _SHOW_STATE.match(line.strip())
+        if rc == 0 and m and m.group(1) == request_id:
+            return m.group(2)
+    audit.log_event("git_request_show_failed", request_id=request_id, exit=rc,
+                    output=out[-300:])
+    return None
+
+
 async def carry_out(decision: Decision) -> dict[str, Any]:
     """Approve or deny the request as the holder; what happened, for session_send's result
     and the access log. `already_decided` (a result field, never an error code) says the
@@ -242,10 +264,20 @@ async def carry_out(decision: Decision) -> dict[str, Any]:
         elif rc != 0:
             # The holder ran it and it failed (it writes `failed` with the reason before exit
             # 1, so it no longer waits), or the holder could not be reached (still waiting).
-            outcome["code"] = "git_request_not_decided"
-            waiting = await waiting_requests()
-            if waiting is not None and decision.request_id not in waiting:
-                outcome["failed"] = True
+            # A git container from before EXIT_NOT_WAITING also exits 1 for a lost race: its
+            # recorded result then says done or denied (or running) by the other answer.
+            state = await request_state(decision.request_id) if rc == 1 else None
+            if state in DECIDED_ELSEWHERE:
+                outcome["already_decided"] = True
+            elif state == "failed":
+                outcome.update(code="git_request_not_decided", failed=True)
+            elif state is not None:
+                outcome["code"] = "git_request_not_decided"   # pending: it still waits
+            else:
+                outcome["code"] = "git_request_not_decided"
+                waiting = await waiting_requests()
+                if waiting is not None and decision.request_id not in waiting:
+                    outcome["failed"] = True
     audit.log_event("git_request_answered", session=backend.GIT_SESSION,
                     request_id=decision.request_id, decision=decision.verb,
                     done=outcome["done"], exit=outcome.get("exit"),

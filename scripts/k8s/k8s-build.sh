@@ -83,9 +83,10 @@ done
 bexec docker info >/dev/null 2>&1 || die "Docker did not start in the builder pod"
 
 built=0 skipped=0
-# The cluster the digests are recorded under; none recorded when the kubeconfig does not say.
-server=$(k8s_cluster_server)
-[ -n "$server" ] || err "cannot read the API server's URL from your kubeconfig: the digests of the images pushed are not recorded (aidc mcp start will not know they changed)"
+# The names of the cluster the digests are recorded under (its API server URL and its CA: lib.sh,
+# k8s_cluster_ids); none recorded when the kubeconfig says neither.
+server=$(k8s_cluster_ids)
+[ -n "$server" ] || err "cannot read the API server's URL or CA from your kubeconfig: the digests of the images pushed are not recorded (aidc mcp start will not know they changed)"
 while IFS='|' read -r tag context dockerfile; do
     [ -n "$tag" ] || continue
     ref="${AIDC_K8S_REGISTRY_PUSH}/${tag}"

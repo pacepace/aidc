@@ -36,6 +36,9 @@
 
 # shellcheck source=yq.sh
 . "$(dirname "${BASH_SOURCE[0]}")/yq.sh"
+# container_name; loaded here when the caller has not (tests/unit/test-lib-self-contained.sh).
+# shellcheck source=common.sh
+declare -F container_name >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # ---- naming ------------------------------------------------------------------
 

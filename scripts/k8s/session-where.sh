@@ -20,7 +20,7 @@ k8s_load_settings
 [ "$AIDC_K8S_CONFIGURED" = "true" ] || exit 1
 name="${1:-}"
 [ "$name" = "--configured" ] && exit 0
-printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$' || exit 1
+session_name_ok "$name" || exit 1   # lib/common.sh's one rule, through lib.sh
 errf=$(mktemp) || exit 2
 found=$(k8s_kubectl -n "$(k8s_user_ns "$AIDC_K8S_USER")" get deployment,statefulset \
     -l "aidc/session=${name},app in (dev,proxy,git)" -o name --request-timeout=5s 2>"$errf"); rc=$?

@@ -34,13 +34,23 @@ AIDC_DEV_READY_MARKER='[aidc-user-main] ready'
 # and network names. Restrict to a conservative subset to avoid breaking
 # Docker's own resource-name rules.
 
+# The one rule for a session name: validate_session_name dies by it, and session_name_ok (which
+# never dies) lets scripts/k8s/session-where.sh say "no such session" for a name no session can
+# have without asking the cluster.
+AIDC_SESSION_NAME_RE='^[a-z0-9][a-z0-9-]{0,30}$'
+
+# session_name_ok <name>: 0 when <name> is a valid session name. Prints nothing.
+session_name_ok() {
+    [ -n "${1:-}" ] && printf '%s' "$1" | grep -Eq "$AIDC_SESSION_NAME_RE"
+}
+
 validate_session_name() {
     local name="${1:-}"
     if [ -z "$name" ]; then
         die "validation: session name is required (got empty string)"
     fi
-    if ! printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$'; then
-        die "validation: invalid session name '$name' (must match ^[a-z0-9][a-z0-9-]{0,30}$)"
+    if ! session_name_ok "$name"; then
+        die "validation: invalid session name '$name' (must match ${AIDC_SESSION_NAME_RE})"
     fi
 }
 

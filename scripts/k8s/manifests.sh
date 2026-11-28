@@ -5,6 +5,11 @@
 # settings (node selector, tolerations) are JSON, which YAML reads as flow style, so they go
 # in as they are. Sourced after lib.sh.
 
+# Loads lib.sh itself when the caller has not, so it never calls a helper it has not loaded
+# (tests/unit/test-lib-self-contained.sh).
+# shellcheck source=lib.sh
+declare -F k8s_load_settings >/dev/null || . "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}/k8s/lib.sh"
+
 # Pinned images aidc runs itself, not built by it. Each is older than the 14-day cooldown
 # (REL-09) when pinned; bump deliberately.
 K8S_REGISTRY_IMAGE="${K8S_REGISTRY_IMAGE:-docker.io/library/registry:3.0.0}"

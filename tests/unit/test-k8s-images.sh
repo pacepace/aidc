@@ -61,10 +61,12 @@ assert_not_has() {
 #   exec ... -- docker image inspect <ref>  the pushed image's repo digest, <repo>@sha256:<sha256 of
 #                                 the ref and $K_SALT> (nothing when K_NO_DIGEST=1)
 #   config view                   the kubeconfig's server: $K_SERVER (default https://192.0.2.10:6443)
+#   config view ... certificate-authority-data   its cluster CA, base64: $K_CA (default none)
 cat > "$SCRATCH/bin/kubectl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
 case "$*" in
+    *"config view"*"certificate-authority-data"*) printf '%s' "${K_CA:-}" ;;
     *"config view"*) printf '%s' "${K_SERVER-https://192.0.2.10:6443}" ;;
     *" exec "*"-- docker image inspect "*)
         [ "${K_NO_DIGEST:-}" = 1 ] && exit 0
@@ -214,6 +216,21 @@ out=$(K_SERVER="" "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </
 assert_eq "a kubeconfig that does not name its server: the build still exits 0" 0 "$rc"
 assert_has "...and says the digests are not recorded" "the digests of the images pushed are not recorded" "$out"
 assert_eq "...and records none" "" "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}")"
+
+CA_A=$(printf 'CERT-A\n' | base64) CA_B=$(printf 'CERT-B\n' | base64)
+ca_id() { printf 'ca-sha256:%s' "$(printf '%s' "$1" | base64 -d | tr -d ' \t\r\n' | sha256sum | cut -c1-64)"; }
+out=$(K_CA="$CA_A" "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null); rc=$?
+assert_eq "a kubeconfig that names its CA: the build exits 0" 0 "$rc"
+assert_eq "...and records the digest under the API server URL and under the CA, alike" \
+    "$(want_digest "aidc/mcp:${VERSION_TAG}") $(want_digest "aidc/mcp:${VERSION_TAG}")" \
+    "$(rec https://192.0.2.10:6443 "aidc/mcp:${VERSION_TAG}") $(rec "$(ca_id "$CA_A")" "aidc/mcp:${VERSION_TAG}")"
+out=$(K_CA="$CA_A" K_SALT=third "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null)
+assert_eq "...a rebuild replaces both, one line each" "1 1" \
+    "$(grep -c "^https://192.0.2.10:6443 aidc/mcp:" "$RECORD") $(grep -c "^$(ca_id "$CA_A") aidc/mcp:" "$RECORD")"
+out=$(K_SERVER="" K_CA="$CA_B" "$AIDC_ROOT/scripts/aidc" k8s build --force --only mcp 2>&1 </dev/null)
+assert_eq "a kubeconfig that names a CA but no server: recorded under the CA" \
+    "$(want_digest "aidc/mcp:${VERSION_TAG}")" "$(rec "$(ca_id "$CA_B")" "aidc/mcp:${VERSION_TAG}")"
+assert_not_has "...and not refused" "are not recorded" "$out"
 
 echo "=== failure paths ==="
 : > "$K_LOG"

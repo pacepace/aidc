@@ -266,6 +266,19 @@ and the envelope are unchanged; what an MCP caller sees differently:
   is already in a session's input box.
 
 ### Fixed
+- **`aidc mcp start` finds the image build made on this machine when your kubeconfig names
+  another address for the cluster.** `aidc k8s build` recorded the digests it pushed under the
+  builder kubeconfig's API server URL only, so a user kubeconfig that reaches the same API
+  server through a load balancer, a tunnel or 127.0.0.1 got "no record here of the ... image's
+  last build" and a running server kept its old image. The digests are now recorded under the
+  cluster's CA certificate too, and start finds them under either. Run `aidc k8s build` once
+  more for the record to carry the CA.
+- **An answer to the git agent that lost a race to another answer is not reported as failed
+  when the git container is older than the MCP server.** A git container from before the
+  not-waiting exit status exits 1 when another answer decided the request first, and the MCP
+  server reported "carried out and FAILED". On exit 1 the server now reads the request's
+  recorded result: done or denied by the other answer is `already_decided`; only a failed one
+  is a failure.
 - **`--help` on a session verb is its help, and nothing else.** `aidc kill --help` (and
   `-h`, and the same for attach, logs, status, restart, upgrade, proxy, network, egress and
   refresh) asked the configured cluster for a session named `--help`, said "the configured

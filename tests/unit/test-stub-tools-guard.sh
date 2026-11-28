@@ -37,14 +37,16 @@ PENDING=""
 RE_STUB='(>|>>)[[:space:]]*"?[^[:space:]"]*/(docker|kubectl)"?([[:space:]]|$)|bin[0-9]*/(docker|kubectl)([^A-Za-z0-9_.-]|$)'
 RE_RUN='(^|[[:space:];&|(`'"'"'"])(\.|source|bash|sh|exec)[[:space:]]+\\?"?\$\{?[A-Za-z0-9_]+\}?/((scripts|aidc/scripts)/)?(aidc"|aidc[[:space:]]|cmd-|lib/|docker/|k8s/|git/)|(^|[[:space:];&|(`]|\$\()[[:space:]]*"?\$\{?[A-Za-z0-9_]+\}?/scripts/(aidc|cmd-[a-z0-9-]+\.sh)"?[[:space:]]+[A-Za-z-]'
 
-# in_scope <file>: 0 when the test needs the helper.
+# in_scope <file>: 0 when the test needs the helper. The last grep of each pipe reads all of its
+# input (no -q): one that stops at its first match leaves the grep before it writing to a closed
+# pipe, and under pipefail that SIGPIPE fails the pipe now and then (seen under a parallel run).
 in_scope() {
-    grep -vE '^[[:space:]]*#' "$1" | grep -qE "$RE_STUB|$RE_RUN"
+    grep -vE '^[[:space:]]*#' "$1" | grep -E "$RE_STUB|$RE_RUN" >/dev/null
 }
 # uses_helper <file>: 0 when it sources the helper and calls stub_tools.
 uses_helper() {
-    grep -vE '^[[:space:]]*#' "$1" | grep -qE '^[[:space:]]*(\.|source)[[:space:]]+"?\$\{?SCRIPT_DIR\}?/lib/stub-tools\.sh"?' \
-        && grep -vE '^[[:space:]]*#' "$1" | grep -qE '(^|[[:space:];&|])stub_tools[[:space:]]+[^[:space:]]'
+    grep -vE '^[[:space:]]*#' "$1" | grep -E '^[[:space:]]*(\.|source)[[:space:]]+"?\$\{?SCRIPT_DIR\}?/lib/stub-tools\.sh"?' >/dev/null \
+        && grep -vE '^[[:space:]]*#' "$1" | grep -E '(^|[[:space:];&|])stub_tools[[:space:]]+[^[:space:]]' >/dev/null
 }
 
 echo "=== the guard sees what it must (it is not vacuous) ==="

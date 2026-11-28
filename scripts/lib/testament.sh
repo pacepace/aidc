@@ -15,9 +15,12 @@
 # Missing config, no access, no uv: one line on stderr, and the build or upgrade goes on
 # without testament. Nothing here fails a caller.
 #
-# Sourced after config.sh. Reports with printf to stderr and return codes only (a helper from
+# Sourced after config.sh (loaded here when the caller has not). Reports with printf to stderr and return codes only (a helper from
 # another library may not be there: .claude/rules/learnings/shell-libraries.md). Runs no docker
 # and no kubectl: the backends hand aidc_testament_install their own copy and exec.
+
+# shellcheck source=config.sh
+declare -F _aidc_yaml_nested >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
 _aidc_testament_note() { printf '[aidc] testament: %s\n' "$*" >&2; }
 

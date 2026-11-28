@@ -834,8 +834,13 @@ ruling; REL-08 amended: never pushed to a public registry). `aidc k8s setup` mak
   Deployment that names the same tag applies unchanged, so a long-running pod keeps an image
   rebuilt under it. `aidc k8s build` records the digest each image was pushed as (`docker image
   inspect` in the builder, after the push) in `~/.local/state/aidc/k8s-images`, one line per
-  cluster (its API server URL, which the builder's kubeconfig and a user's share) and image; a
-  digest it cannot read removes that image's line rather than leave an old one. The record is
+  name of the cluster and image; a digest it cannot read removes that image's lines rather than
+  leave an old one. A cluster's names are what the builder's kubeconfig and a user's can both
+  say about it without any rights in it: its API server URL, and `ca-sha256:<hex>`, the hash of
+  the CA certificate it is trusted by (amended 2026-11-28: the two kubeconfigs may name
+  different addresses for one API server, a load balancer, a tunnel or 127.0.0.1, and start then
+  said no build had run here; the CA still matches). Start takes the newest line under any of
+  its names. The record is
   on the machine, not in the cluster: users have no read access to the system namespace, and the
   registry is reachable from inside the cluster only. `aidc mcp start` uses it (below, the MCP
   server's image). The broker and the git container are restarted on start or setup whenever
@@ -1276,6 +1281,21 @@ so both backends have the fixes (K8S-17 as amended):
   and the broker counts such a report for the account it names whatever reset time it
   carries; only a report the wrapper could not judge, carrying another account's stored usage
   and reset time both, is left out.
+  The clock this rests on (recorded 2026-11-28): `judged: "call_time"` compares two whole-second
+  times, the transcript's newest assistant `timestamp` (written by Claude in the session, its
+  fraction cut off) and `.aidc-account`'s mtime (set when the broker wrote it), and counts the
+  report only when the call is strictly later. Nothing cross-checks that verdict any more (the
+  broker's reset-time check is skipped for it), so it holds only while both times come from one
+  clock. They do: a container has no clock of its own, only its kernel's. On Docker the session's
+  dev container and the broker container run on one host kernel. On Kubernetes the broker writes
+  `.aidc-account` into the session's folder of the user's `claude-config` claim, which is
+  ReadWriteOnce, so the broker pod and every session pod that mounts it run on the same node, and
+  the file's mtime is that node's kernel time, as is the time Claude reads for its transcript. A
+  claim that pods on different nodes share (ReadWriteMany storage, a network filesystem setting
+  mtimes by its server's clock) would break that, and the comparison would then need a margin
+  (`called > switched + N`); aidc makes none. A call and a switch in the same second are
+  judged stale, never another account's numbers credited: the cut fraction only ever drops a
+  report, and the account's next call brings its own.
   The status line does not show those numbers either (amended the same day: it showed
   `week 100% [second]`, `main`'s week under `second`'s name, until the next call): they are
   left out of what it prints and of the input the user's own status line gets, until the new

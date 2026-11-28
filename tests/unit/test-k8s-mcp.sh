@@ -48,6 +48,7 @@ assert_not_has() {
 # kubectl stub: logs each call's argv (one line) to $K_LOG; apply and create -f - append their
 # stdin to $K_APPLIED, each a document of its own.
 #   config view               the kubeconfig's server: $K_SERVER (default https://192.0.2.10:6443)
+#   config view ... certificate-authority-data   its cluster CA, base64: $K_CA (default none)
 #   get secret aidc-mcp-token  base64 of $K_TOKEN when set; K_SECRET_READ_FAIL=1: no answer
 #   get pvc transcripts|aidc-mcp-state  there unless K_NO_TRANSCRIPTS / K_NO_STATE
 #   get deployment aidc-mcp   "aidc-mcp|1" when K_RUNNING=1, "aidc-mcp|" when K_STARTING=1
@@ -64,6 +65,7 @@ cat > "$SCRATCH/bin/kubectl" <<'STUB_K8S_MCP_x41'
 #!/bin/sh
 printf '%s\n' "$*" >> "$K_LOG"
 case "$*" in
+    *"config view"*"certificate-authority-data"*) printf '%s' "${K_CA:-}" ;;
     *"config view"*) printf '%s' "${K_SERVER-https://192.0.2.10:6443}" ;;
     *"get runtimeclass"*) echo '{"scheduling":{"nodeSelector":{"kubernetes.io/hostname":"n1"}}}' ;;
     *"get secret aidc-mcp-token"*)
@@ -461,6 +463,21 @@ out=$(K_SERVER=https://192.0.2.11:6443 K_RUNNING_DIGEST="$D2" K_RUNNING=1 K_TOKE
 assert_eq "a digest recorded for another cluster is not this one's: the running server's own is kept" "\"$D2\"" \
     "$(pod_meta '.annotations["aidc/image-digest"]')"
 assert_has "...and start says there is no record" "no record here of the aidc/mcp:${VERSION_TAG} image's last build" "$out"
+CA_A=$(printf 'CERT-A\n' | base64) CA_B=$(printf 'CERT-B\n' | base64)
+CA_ID="ca-sha256:$(printf 'CERT-A' | sha256sum | cut -c1-64)"
+cp "$RECORD" "$RECORD.keep"
+printf '%s\n' "https://builder.lan.example:6443 aidc/mcp:${VERSION_TAG} ${D2}" "${CA_ID} aidc/mcp:${VERSION_TAG} ${D2}" > "$RECORD"
+out=$(K_CA="$CA_A" run start)
+assert_eq "the builder's kubeconfig named another address for the cluster: the record is found by its CA" "\"$D2\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+assert_not_has "...and start does not say no build ran here" "no record here" "$out"
+out=$(K_CA="$CA_B" K_RUNNING_DIGEST="$D1" running)
+assert_has "another address and another CA is another cluster: no record" "no record here of the aidc/mcp:${VERSION_TAG} image's last build" "$out"
+printf '%s\n' "${CA_ID} aidc/mcp:${VERSION_TAG} ${D2}" "https://192.0.2.10:6443 aidc/mcp:${VERSION_TAG} ${D1}" > "$RECORD"
+out=$(K_CA="$CA_A" run start)
+assert_eq "two of the cluster's names with different digests: the newer line (the later build) wins" "\"$D1\"" \
+    "$(pod_meta '.annotations["aidc/image-digest"]')"
+mv -f "$RECORD.keep" "$RECORD"
 out=$(K_DIGEST_READ_FAIL=1 running)
 assert_has "a running server whose image the cluster does not say: start stops, changing nothing" \
     "cannot read which image your MCP server runs: the cluster did not answer (Unable to connect to the server; nothing was changed)" "$out"

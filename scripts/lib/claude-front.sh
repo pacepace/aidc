@@ -14,7 +14,13 @@
 #   cf_stop         the broker stopped (accounts and sessions' Claude dirs kept); 1 when refused
 #   cf_logs [-f]    its log
 #
+# It reports with common.sh's die, err and info, and loads common.sh itself when the caller has
+# not (tests/unit/test-lib-self-contained.sh: a library never calls a helper it has not loaded).
+#
 # Everything a user reads (the help, the verbs, the messages) is here, once.
+
+# shellcheck source=common.sh
+declare -F die >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 claude_front_usage() {
     cat <<'USAGE'

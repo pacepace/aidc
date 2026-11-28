@@ -6,6 +6,9 @@ The git container is not run: the holder's `git-requests` is a stand-in recordin
 was asked, with the waiting list it answers. The send path is the session_send tests' own
 wiring, with the git agent's question menu drawn as Claude Code 2.1.332 draws it
 (fixtures/screens/claude-2.1.332-question-menu.ansi) and moved by the keys sent to it."""
+import re
+from pathlib import Path
+
 import pytest
 
 from aidc_mcp import backend
@@ -92,14 +95,19 @@ class Holder:
     gitctl/git-requests.sh does: a decision on a waiting request takes it out of the waiting
     list, whether it is done (exit 0) or ran and failed (exit 1: the result says failed, and
     why); one on a request not waiting decides nothing (exit 3, EXIT_NOT_WAITING). An exit
-    of -1 is the holder not reached (the exec timed out): nothing moves."""
+    of -1 is the holder not reached (the exec timed out): nothing moves. `show` prints the
+    recorded state as the real one does ("request:  <id> (<state>)"); `legacy` is a git
+    container from before EXIT_NOT_WAITING, which exits 1 for a request not waiting too."""
 
     FAILED = "the git container is not logged in to GitHub (the user runs: aidc git login)"
 
-    def __init__(self, waiting=(A,), list_exit=0, decide_exit=0):
+    def __init__(self, waiting=(A,), list_exit=0, decide_exit=0, legacy=False, show_exit=0):
         self.waiting = set(waiting)
         self.list_exit = list_exit
         self.decide_exit = decide_exit
+        self.legacy = legacy
+        self.show_exit = show_exit
+        self.states = {i: "pending" for i in self.waiting}
         self.calls = []
 
     async def run(self, argv, timeout):
@@ -108,19 +116,27 @@ class Holder:
             rows = "\n".join(f"{i}  2026-11-26T08:00:00Z  proj  push  octocat/hello-world  feat"
                              for i in sorted(self.waiting))
             return self.list_exit, "ID  RECEIVED  SESSION  ACTION  REPO  WHAT\n" + rows
+        if argv[0] == "show":
+            if self.show_exit:
+                return self.show_exit, "git-requests: no request " + argv[1]
+            return 0, (f"request:  {argv[1]} ({self.states.get(argv[1], '')})\n"
+                       "result:   x\nsession:  proj\naction:   push")
         if self.decide_exit == -1:
             return -1, f"git-requests {argv[0]} did not finish in 300 s"
         if argv[1] not in self.waiting:
-            return ga.EXIT_NOT_WAITING, (f"git-requests: request {argv[1]} is not waiting for "
-                                         "approval (done)")
+            return (1 if self.legacy else ga.EXIT_NOT_WAITING), (
+                f"git-requests: request {argv[1]} is not waiting for approval "
+                f"({self.states.get(argv[1], '')})")
         self.waiting.discard(argv[1])
         if self.decide_exit == 1:
+            self.states[argv[1]] = "failed"
             return 1, self.FAILED
+        self.states[argv[1]] = "done" if argv[0] == "approve" else "denied"
         return 0, f"{argv[0]}d {argv[1]}"
 
     @property
     def decisions(self):
-        return [c for c in self.calls if c[0] != "list"]
+        return [c for c in self.calls if c[0] not in ("list", "show")]
 
 
 @pytest.fixture
@@ -335,6 +351,61 @@ async def test_an_answer_that_lost_the_race_at_the_holder_says_already_decided(g
     assert "code" not in gr and "failed" not in gr
     assert res["data"]["question_answered"] is True
     assert "already decided" in res["data"]["delivery"]
+
+
+@pytest.mark.parametrize("other", ["approve", "deny"])
+async def test_an_older_git_container_losing_the_race_with_exit_1_says_already_decided(
+        git, monkeypatch, other):
+    """A git container from before EXIT_NOT_WAITING exits 1 when another answer decided the
+    request first. Its recorded result (show) says done or denied by that answer, so this is
+    already_decided, never "carried out and FAILED"."""
+    git.legacy = True
+    real = git.run
+
+    async def decided_meanwhile(argv, timeout):
+        if argv[0] in ("approve", "deny"):
+            git.waiting.discard(argv[1])
+            git.states[argv[1]] = "done" if other == "approve" else "denied"
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", decided_meanwhile)
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["exit"] == 1 and gr["already_decided"] is True
+    assert "code" not in gr and "failed" not in gr
+    assert ["show", A] in git.calls
+    assert "FAILED" not in res["data"]["delivery"] and "already decided" in res["data"]["delivery"]
+
+
+async def test_an_older_git_container_whose_run_failed_still_says_failed(git):
+    """The same older container, exit 1 for a run that failed: its result says failed, so it
+    is a failure, as with a current one."""
+    git.legacy = True
+    git.decide_exit = 1
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["exit"] == 1 and gr["code"] == "git_request_not_decided" and gr["failed"] is True
+    assert "already_decided" not in gr and ["show", A] in git.calls
+    assert "FAILED" in res["data"]["delivery"]
+
+
+async def test_an_exit_1_with_an_unreadable_result_falls_back_to_the_waiting_list(git):
+    """show cannot be read: whether it failed is told by the waiting list, as before (the
+    request left it: failed)."""
+    git.decide_exit = 1
+    git.show_exit = 1
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["code"] == "git_request_not_decided" and gr["failed"] is True
+    assert ["list"] in git.calls[1:]
+
+
+def test_exit_not_waiting_is_the_holders_own_value():
+    """The MCP server tells a lost race from a failed run by the holder's exit status: its
+    EXIT_NOT_WAITING must be the one gitctl/git-requests.sh exits with."""
+    src = (Path(__file__).resolve().parents[2] / "gitctl" / "git-requests.sh").read_text()
+    found = re.findall(r"^EXIT_NOT_WAITING=(\d+)$", src, re.MULTILINE)
+    assert found == [str(ga.EXIT_NOT_WAITING)]
+    assert 'exit "$EXIT_NOT_WAITING"' in src
 
 
 async def test_a_second_answer_that_lost_the_race_says_already_decided(git, monkeypatch):

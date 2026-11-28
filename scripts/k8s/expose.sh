@@ -21,6 +21,11 @@
 #
 # Sourced after lib.sh and manifests.sh.
 
+# Loads lib.sh itself when the caller has not, so it never calls a helper it has not loaded
+# (tests/unit/test-lib-self-contained.sh).
+# shellcheck source=lib.sh
+declare -F k8s_load_settings >/dev/null || . "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}/k8s/lib.sh"
+
 # k8s_expose_host <session> <port> <first: 1|0>: the page's host name.
 k8s_expose_host() {
     if [ "$3" = 1 ]; then

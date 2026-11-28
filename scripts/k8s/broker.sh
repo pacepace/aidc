@@ -5,6 +5,13 @@
 # What runs in the cluster: manifests.sh, "Claude: one login per user, and its broker", and
 # broker/claude-broker.sh.
 
+# Loads lib.sh and manifests.sh itself when the caller has not, so it never calls a helper it has not loaded
+# (tests/unit/test-lib-self-contained.sh).
+# shellcheck source=lib.sh
+declare -F k8s_load_settings >/dev/null || . "${AIDC_SCRIPTS:?AIDC_SCRIPTS not set}/k8s/lib.sh"
+# shellcheck source=manifests.sh
+declare -F k8s_render_broker >/dev/null || . "$AIDC_SCRIPTS/k8s/manifests.sh"
+
 # k8s_broker_state <namespace>: RUNNING, STARTING or NOT RUNNING; returns 2, saying why, when the
 # cluster did not answer.
 k8s_broker_state() { k8s_deployment_state "$1" "$K8S_BROKER_NAME"; }

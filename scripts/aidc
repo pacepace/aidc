@@ -110,57 +110,66 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
+
+# The verbs whose first argument names a session. The --help interception and the routing to
+# where the session lives (below) both read this one list, so a verb added to one is in both
+# (tests/unit/test-k8s-session.sh runs --help on each).
+SESSION_VERBS="attach kill logs status restart upgrade proxy network egress refresh"
+names_session() { case " $SESSION_VERBS " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# verb_help <backend>: the session verb's help on that backend.
+verb_help() {
+    if [ "$1" = kubernetes ]; then bash "$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh" --help
+    else bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" --help; fi
+}
+
 # A verb that names a session, with -h or --help anywhere on its line, prints its help and
 # nothing else: no session is looked up, no backend asked, and nothing named runs (`aidc kill
 # demo --help` must not kill demo). With --backend it is that backend's help; without, the
 # session could be on either, so it is the default backend's, then the other's.
-case "$SUBCOMMAND" in
-    attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
-        for a in "$@"; do
-            case "$a" in
-                -h|--help)
-                    def=$(AIDC_BACKEND_FLAG="$BACKEND" aidc_default_backend) || exit 2
-                    verb_help() {
-                        if [ "$1" = kubernetes ]; then bash "$AIDC_SCRIPTS/k8s/session-${SUBCOMMAND}.sh" --help
-                        else bash "$AIDC_SCRIPTS/cmd-${SUBCOMMAND}.sh" --help; fi
-                    }
-                    if [ -n "$BACKEND" ]; then verb_help "$def"; exit $?; fi
-                    other=kubernetes; [ "$def" = kubernetes ] && other=docker
-                    rc=0
-                    printf 'On %s (your default backend):\n\n' "$def"
-                    verb_help "$def" || rc=$?
-                    printf '\nOn %s (--backend %s):\n\n' "$other" "$other"
-                    verb_help "$other" || rc=$?
-                    exit "$rc" ;;
-            esac
-        done ;;
-esac
+if names_session "$SUBCOMMAND"; then
+    for a in "$@"; do
+        case "$a" in
+            -h|--help)
+                def=$(AIDC_BACKEND_FLAG="$BACKEND" aidc_default_backend) || exit 2
+                if [ -n "$BACKEND" ]; then verb_help "$def"; exit $?; fi
+                other=kubernetes; [ "$def" = kubernetes ] && other=docker
+                rc=0
+                printf 'On %s (your default backend):\n\n' "$def"
+                verb_help "$def" || rc=$?
+                printf '\nOn %s (--backend %s):\n\n' "$other" "$other"
+                verb_help "$other" || rc=$?
+                exit "$rc" ;;
+        esac
+    done
+fi
 # No flag: `create` (and `clean-env`) takes the default backend (aidc_default_backend: the config's top-level
 # `backend:`, else docker; `aidc git` and `aidc repo` use the same rule); a verb that names
 # a session goes where that session lives, asking the configured cluster first (a quiet no
 # when there is none) and Docker otherwise. `list` shows both.
 if [ -z "$BACKEND" ]; then
-    case "$SUBCOMMAND" in
-        create|clean-env)
-            # clean-env names a session that is no longer running, so it cannot be found where
-            # it lives: it goes where create would have made it.
-            BACKEND=$(AIDC_BACKEND_FLAG="" aidc_default_backend) || exit 2
-            ;;
-        attach|kill|logs|status|restart|upgrade|proxy|network|egress|refresh)
-            if [ $# -gt 0 ]; then
-                rc=0
-                where=$(bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$1") || rc=$?
-                case "$rc" in
-                    0) BACKEND="kubernetes" ;;
-                    2) info "the configured cluster did not answer; trying Docker for '$1' (--backend kubernetes to insist)" ;;
-                    3) info "the configured cluster answered with an error, not whether '$1' is there (${where}); trying Docker (--backend kubernetes to insist)" ;;
-                esac
-            fi
-            ;;
-        list)
-            bash "$AIDC_SCRIPTS/k8s/session-where.sh" --configured && LIST_BOTH=1
-            ;;
-    esac
+    if names_session "$SUBCOMMAND"; then
+        if [ $# -gt 0 ]; then
+            rc=0
+            where=$(bash "$AIDC_SCRIPTS/k8s/session-where.sh" "$1") || rc=$?
+            case "$rc" in
+                0) BACKEND="kubernetes" ;;
+                2) info "the configured cluster did not answer; trying Docker for '$1' (--backend kubernetes to insist)" ;;
+                3) info "the configured cluster answered with an error, not whether '$1' is there (${where}); trying Docker (--backend kubernetes to insist)" ;;
+            esac
+        fi
+    else
+        case "$SUBCOMMAND" in
+            create|clean-env)
+                # clean-env names a session that is no longer running, so it cannot be found where
+                # it lives: it goes where create would have made it.
+                BACKEND=$(AIDC_BACKEND_FLAG="" aidc_default_backend) || exit 2
+                ;;
+            list)
+                bash "$AIDC_SCRIPTS/k8s/session-where.sh" --configured && LIST_BOTH=1
+                ;;
+        esac
+    fi
 fi
 
 # Every command warns when the kept audit trails total more than 100 MB (K8S-26), without

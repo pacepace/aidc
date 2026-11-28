@@ -1181,7 +1181,8 @@ tools, MCP servers or slash commands, no session kept. Claude writes the renewed
 there; the broker copies it, without the refresh token, into every session's folder whose copy
 differs, with the account's name (`.aidc-account`) and any notice for the status line
 (`.aidc-notice`). A failed renewal is recorded with Claude's own words, shown by `aidc claude
-account list` (RENEWAL FAILING) and in the sessions' status line, and tried again next pass. A
+account list` (RENEWAL FAILING) and in the sessions' status line, and tried again in Claude's
+own refresh window (below, "Crediting usage, limit events and renewal"). A
 session's own login (a `.credentials.json` the broker did not write) is replaced only while the
 broker has an active account; with none, it is left as it is.
 
@@ -1263,6 +1264,16 @@ so both backends have the fixes (K8S-17 as amended):
   waits until four minutes before expiry (`BROKER_CLAUDE_WINDOW_S`, 240); inside that window
   every pass tries, and a prompt there that still did not refresh is a failure, recorded and
   shown as RENEWAL FAILING. An hour's margin costs two prompts.
+  Amended the same day (the live test's account at its weekly limit): Claude refused the
+  renewal prompt ("You've hit your weekly limit"), and the broker called that a failure and
+  tried again every minute. A renewal is now judged by the stored token, never by Claude's
+  exit: Claude Code refreshes before its call, so a token whose expiry moved on (or is beyond
+  the margin) is renewed even when the prompt was refused. Before the window, a prompt refused
+  for a usage limit (the weekly limit read with the `StopFailure` hook's own pattern) is not
+  due yet, as a prompt that ran well; any other failure there is recorded, and its next try
+  too waits for the window. Inside the window a prompt that left the token unrenewed, whatever
+  it said, is a failure (a login that ended is still reported). A recorded failure clears on a
+  later renewal, or when the broker finds the token renewed already.
 
 `--help` (or `-h`) on any `aidc claude account|broker` verb prints the help on both backends; it
 was passed to the broker as an account name.

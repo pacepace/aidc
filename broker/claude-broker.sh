@@ -191,16 +191,44 @@ access_only() {
 # hhmm <epoch-s>: the time of day, UTC, for the log.
 hhmm() { date -u -d "@${1}" +%H:%M:%SZ 2>/dev/null || printf '%s' "$1"; }
 
+# LIMIT_WEEKLY_RE: Claude's words for its weekly limit, the same pattern the StopFailure hook
+# reads a limit's kind with (aidc-claude-usage, .devcontainer/claude-usage.sh; a test keeps the
+# two the same).
+LIMIT_WEEKLY_RE='weekly|seven[ _-]?day|7[ -]day'
+
+# limit_refusal <claude's output>: true when Claude refused the prompt for a usage limit (its
+# weekly limit, by the hook's pattern, or a session or rate limit), not for a login it could not
+# use.
+limit_refusal() {
+    printf '%s' "$1" | grep -Eqi 'limit' || return 1
+    printf '%s' "$1" | grep -Eqi "${LIMIT_WEEKLY_RE}|(hit|reached|exceeded).{0,40}limit|limit.{0,20}(reached|resets|exceeded)|usage limit|rate limit"
+}
+
 # renew <account>: Claude Code refreshes the account's token when it is within the margin of
-# expiring; recorded in state.json either way. Claude refreshes only in its own last minutes
-# (BROKER_CLAUDE_WINDOW_S): a prompt that ran well and left the token as it was found it not due
-# yet, which is no failure; the next try waits until that window (renew_next_s), so an hour's
-# margin costs two prompts, not one a minute. A prompt that failed, or one inside that window
-# that still left the token unrenewed, is a failure, recorded and said. Returns 1 then.
+# expiring; recorded in state.json either way. Returns 1 on a failure.
+#
+# Success is judged by the stored token, never by Claude's exit: Claude Code refreshes before
+# its API call, so a prompt then refused (the account at its weekly limit, say) has still
+# renewed the login, and a token whose expiry moved on, or is beyond the margin, is renewed.
+# Claude refreshes only in its own last minutes (BROKER_CLAUDE_WINDOW_S), so before that window
+# a token left as it was is not due yet: after a prompt that ran well, or one refused for a usage
+# limit (an account at its limit still needs its login kept), which is no failure. Any other
+# failure before the window is recorded, but the next try still waits for the window
+# (renew_next_s): one prompt a minute would be refused the same way for an hour. Inside the
+# window every pass tries, and a prompt there that left the token unrenewed, whatever it said, is
+# a failure, recorded and said (RENEWAL FAILING): a login that ended is still reported. A
+# recorded failure is cleared by a later renewal, or when the token is found renewed already
+# (by a login, or a session).
 renew() {
-    local name="$1" exp before now margin out rc=0 next
+    local name="$1" exp before now margin out rc=0 next why
     exp=$(expires_s "$name") now=$(now_s) margin=$(renew_margin_s)
-    [ "$exp" -gt $((now + margin)) ] && return 0
+    if [ "$exp" -gt $((now + margin)) ]; then
+        if [ "$(state_json | jq -r --arg n "$name" '(.accounts[$n] // {}) | has("renew_error") or has("renew_next_s")')" = true ]; then
+            state_update '.accounts[$n] |= del(.renew_error, .renew_next_s)' --arg n "$name" || return 1
+            log "${name}: its access token is renewed already (it expires at $(hhmm "$exp"))"
+        fi
+        return 0
+    fi
     next=$(state_json | jq -r --arg n "$name" '.accounts[$n].renew_next_s // 0')
     case "$next" in ''|*[!0-9]*) next=0 ;; esac
     # Inside Claude's window every pass tries, whatever an earlier try set.
@@ -214,24 +242,31 @@ renew() {
         timeout 120 "$BROKER_CLAUDE" -p --model haiku --tools "" --strict-mcp-config \
         --disable-slash-commands --no-session-persistence "Reply with the word ok." </dev/null 2>&1) || rc=$?
     exp=$(expires_s "$name") now=$(now_s)
-    if [ "$rc" = 0 ] && { [ "$exp" -gt $((now + margin)) ] || [ "$exp" -gt "$before" ]; }; then
+    if [ "$exp" -gt $((now + margin)) ] || [ "$exp" -gt "$before" ]; then
         state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renewed_at: $at} | del(.renew_error, .renew_next_s))' \
             --arg n "$name" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
         log "renewed ${name}"
         return 0
     fi
-    if [ "$rc" = 0 ] && [ "$exp" -gt $((now + BROKER_CLAUDE_WINDOW_S)) ]; then
-        next=$((exp - BROKER_CLAUDE_WINDOW_S))
-        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_next_s: $x} | del(.renew_error))' \
-            --arg n "$name" --argjson x "$next" || return 1
-        log "${name}: renewal not due yet (Claude Code refreshes a token only in its last minutes; it expires at $(hhmm "$exp")): next try at $(hhmm "$next")"
-        return 0
-    fi
-    if [ "$rc" = 0 ]; then
-        out="Claude Code ran but did not refresh the token (it expires at $(hhmm "$exp"))"
-    else
+    if [ "$rc" != 0 ]; then
         out=$(printf '%s' "$out" | tr -d '\r' | tail -n 3 | tr '\n' ' ' | head -c 300)
     fi
+    if [ "$exp" -gt $((now + BROKER_CLAUDE_WINDOW_S)) ]; then
+        next=$((exp - BROKER_CLAUDE_WINDOW_S))
+        if [ "$rc" = 0 ] || limit_refusal "$out"; then
+            why="Claude Code refreshes a token only in its last minutes"
+            [ "$rc" = 0 ] || why="Claude refused the prompt for a limit (${out}); it refreshes a token only in its last minutes"
+            state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_next_s: $x} | del(.renew_error))' \
+                --arg n "$name" --argjson x "$next" || return 1
+            log "${name}: renewal not due yet (${why}; it expires at $(hhmm "$exp")): next try at $(hhmm "$next")"
+            return 0
+        fi
+        state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_error: $e, renew_failed_at: $at, renew_next_s: $x})' \
+            --arg n "$name" --arg e "${out:-claude exited ${rc}}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson x "$next"
+        log "could not renew ${name}: ${out:-claude exited ${rc}} (next try at $(hhmm "$next"), in Claude's own refresh window)"
+        return 1
+    fi
+    [ "$rc" = 0 ] && out="Claude Code ran but did not refresh the token (it expires at $(hhmm "$exp"))"
     state_update '.accounts[$n] = ((.accounts[$n] // {}) + {renew_error: $e, renew_failed_at: $at} | del(.renew_next_s))' \
         --arg n "$name" --arg e "${out:-claude exited ${rc}}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     log "could not renew ${name}: ${out:-claude exited ${rc}}"

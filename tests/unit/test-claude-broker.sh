@@ -49,7 +49,9 @@ assert_not_has() {
 #   -p ...       a refresh, as Claude does before a call: the access token's number goes up and
 #                it expires in 8 hours; C_RENEW_FAIL=1 fails without writing; C_RENEW_NOOP=1
 #                answers ok and leaves the token as it is (Claude Code before its own refresh
-#                window, the last minutes before expiry)
+#                window, the last minutes before expiry); C_RENEW_LIMIT=1 refuses the prompt
+#                for the weekly limit, as Claude does, without refreshing; C_RENEW_LIMIT=refresh
+#                refreshes first, as Claude Code does before its call, then refuses
 #   auth logout  nothing
 cat > "$SCRATCH/bin/claude" <<'STUB_CLAUDE_BROKER_r7'
 #!/bin/sh
@@ -67,9 +69,11 @@ case "$*" in
     "-p "*)
         [ "${C_RENEW_FAIL:-}" = 1 ] && { echo "OAuth token refresh failed: invalid_grant" >&2; exit 1; }
         [ "${C_RENEW_NOOP:-}" = 1 ] && { echo ok; exit 0; }
+        [ "${C_RENEW_LIMIT:-}" = 1 ] && { echo "You've hit your weekly limit · resets Dec 2, 10am (UTC)"; exit 1; }
         n=$(jq -r '.claudeAiOauth.accessToken | split("-") | last | tonumber' "$f")
         exp=$(( ($(date +%s) + 28800) * 1000 ))
         jq -c --arg t "at-${name}-$((n + 1))" --argjson e "$exp" '.claudeAiOauth.accessToken = $t | .claudeAiOauth.expiresAt = $e' "$f" > "$f.new" && mv "$f.new" "$f"
+        [ "${C_RENEW_LIMIT:-}" = refresh ] && { echo "You've hit your weekly limit · resets Dec 2, 10am (UTC)"; exit 1; }
         echo ok ;;
     "auth logout"*) : ;;
 esac
@@ -175,13 +179,64 @@ echo "== a failed renewal shows in the list and in the session's notice"
 fresh 7
 C_LOGIN_EXP_S=600 C_RENEW_FAIL=1 broker login work >/dev/null 2>&1
 broker session s1 2>/dev/null
-C_RENEW_FAIL=1 broker pass 2>/dev/null
+C_RENEW_FAIL=1 broker pass 2>"$W/log1"
 list=$(broker list 2>/dev/null)
 assert_has "the list says the renewal is failing, with Claude's words" "RENEWAL FAILING: OAuth token refresh failed: invalid_grant" "$list"
 assert_eq "list --json carries it" "OAuth token refresh failed: invalid_grant" "$(broker list --json | jq -r '.accounts[0].renew_error')"
 assert_has "the session's notice points to the list" "renewal failing" "$(cat "$BROKER_ACCESS/s1/.aidc-notice")"
+assert_eq "a failure before Claude's window backs off to that window: the next pass runs no prompt" "1" "$(grep -c -- '-p --model haiku' "$C_LOG")"
+assert_eq "...and the next try is set to the window" "yes" \
+    "$(jq -r --argjson e "$(( $(jq -r .claudeAiOauth.expiresAt "$BROKER_HOME/accounts/work/.credentials.json") / 1000 ))" \
+        'if .accounts.work.renew_next_s == ($e - 240) then "yes" else "no" end' "$BROKER_HOME/state.json")"
+jq '.claudeAiOauth.expiresAt = (now + 200 | floor) * 1000' "$BROKER_HOME/accounts/work/.credentials.json" > "$W/c" \
+    && mv "$W/c" "$BROKER_HOME/accounts/work/.credentials.json"
 broker pass 2>/dev/null
 assert_eq "a later good renewal clears it" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+
+echo "== a renewal refused for the weekly limit"
+fresh 19
+# Before Claude's window: not due yet, no failure, one prompt (the login's own pass).
+C_LOGIN_EXP_S=3000 C_RENEW_LIMIT=1 broker login work >/dev/null 2>"$W/log1"
+assert_has "before Claude's window it is not due yet" "work: renewal not due yet (Claude refused the prompt for a limit" "$(cat "$W/log1")"
+assert_not_has "...never a failure" "could not renew" "$(cat "$W/log1")"
+assert_eq "...nor shown as one" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+assert_not_has "...in the list either" "RENEWAL FAILING" "$(broker list 2>/dev/null)"
+C_RENEW_LIMIT=1 broker pass 2>"$W/log2"; C_RENEW_LIMIT=1 broker pass 2>>"$W/log2"
+assert_eq "later passes before the window run no prompt" "1" "$(grep -c -- '-p --model haiku' "$C_LOG")"
+assert_eq "...and log nothing" "" "$(cat "$W/log2")"
+# Inside the window: Claude Code refreshes before its call, so a refused prompt there renewed.
+jq '.claudeAiOauth.expiresAt = (now + 200 | floor) * 1000' "$BROKER_HOME/accounts/work/.credentials.json" > "$W/c" \
+    && mv "$W/c" "$BROKER_HOME/accounts/work/.credentials.json"
+C_RENEW_LIMIT=refresh broker pass 2>"$W/log3"
+assert_has "a refused prompt that refreshed the token is a renewal, whatever Claude's exit" "renewed work" "$(cat "$W/log3")"
+assert_eq "...recorded as one" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+# Inside the window, refused and not refreshed: a real failure, said (a login that ended).
+jq '.claudeAiOauth.expiresAt = (now + 200 | floor) * 1000' "$BROKER_HOME/accounts/work/.credentials.json" > "$W/c" \
+    && mv "$W/c" "$BROKER_HOME/accounts/work/.credentials.json"
+C_RENEW_LIMIT=1 broker pass 2>"$W/log4"
+assert_has "inside the window a refusal that left the token unrenewed is a failure" "could not renew work: You've hit your weekly limit" "$(cat "$W/log4")"
+assert_has "...shown in the list" "RENEWAL FAILING: You've hit your weekly limit" "$(broker list 2>/dev/null)"
+C_RENEW_LIMIT=1 broker pass 2>/dev/null
+assert_eq "...and inside the window every pass tries" "4" "$(grep -c -- '-p --model haiku' "$C_LOG")"
+
+echo "== a failure is cleared when the token is found renewed already"
+fresh 20
+C_LOGIN_EXP_S=200 C_RENEW_FAIL=1 broker login work >/dev/null 2>&1
+assert_eq "(the renewal failed)" "OAuth token refresh failed: invalid_grant" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+jq '.claudeAiOauth.expiresAt = (now + 28800 | floor) * 1000' "$BROKER_HOME/accounts/work/.credentials.json" > "$W/c" \
+    && mv "$W/c" "$BROKER_HOME/accounts/work/.credentials.json"
+: > "$C_LOG"
+broker pass 2>"$W/log1"
+assert_eq "a token renewed elsewhere clears the failure" "null" "$(broker list --json | jq -r '.accounts[0].renew_error')"
+assert_not_has "...without a prompt" "-p" "$(cat "$C_LOG")"
+assert_has "...and says so once" "work: its access token is renewed already" "$(cat "$W/log1")"
+broker pass 2>"$W/log2"
+assert_eq "...once" "" "$(cat "$W/log2")"
+
+echo "== the broker reads the weekly limit with the StopFailure hook's own words"
+assert_eq "the same pattern in both" \
+    "$(grep -o "grep -Eqi '[^']*' && kind=weekly" "$AIDC_ROOT/.devcontainer/claude-usage.sh" | sed "s/^grep -Eqi '//; s/' && kind=weekly$//")" \
+    "$(sed -n "s/^LIMIT_WEEKLY_RE='\(.*\)'$/\1/p" "$AIDC_ROOT/broker/claude-broker.sh")"
 
 echo "== switching on weekly usage, automatically, in the configured order"
 fresh 8 '{"accounts":[{"name":"work","switch_at":90},{"name":"personal","switch_at":70}],"switch":"auto"}'

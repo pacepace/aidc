@@ -269,6 +269,12 @@ and the envelope are unchanged; what an MCP caller sees differently:
   its last minutes before expiry; a prompt that found the token not due yet is now logged once
   as such and tried again in that window, never as `could not renew ...: ok`. A real failure is
   still recorded and shown.
+- **Renewal of an account at its weekly limit is no longer a failure every minute.** Claude
+  refuses the renewal prompt then. The broker now judges a renewal by the stored token (Claude
+  Code refreshes before the call it refuses), takes a limit refusal before Claude's own refresh
+  window as not due yet, waits for that window after any other early failure, and clears a
+  recorded failure when the token is found renewed already. A renewal that fails inside the
+  window is still shown as RENEWAL FAILING.
 - **`aidc claude account use --help`** (and every other `aidc claude` verb with `--help` or
   `-h`) prints the help instead of passing `--help` to the broker as an account name.
 - **A turn nobody sent is no longer credited to the orchestrator's last prompt.** A prompt

@@ -151,7 +151,7 @@ assert_has "show gives the request's state and the holder's result, what the age
 result:   pushed feat and opened https://github.com/o/r/pull/12" "$OUT"
 assert_eq "the texts are not left in work/" "" "$(find "$REQ/work" -name '*.title' -o -name '*.body')"
 gr approve "$id"
-assert_eq "a request already done cannot be approved again" 1 "$RC"
+assert_eq "a request already done cannot be approved again: exit 3, decided nothing" 3 "$RC"
 reset_calls; id2=$(newid); put "$id2" "$(req "$id2" push)"; gr once
 gr approve "$id2"
 assert_eq "the protections are read on a repo's first use only" "push $P feat --expect-repo o/r --expect-commit $(git -C "$P" rev-parse feat) --asked-by $id2 " "$(calls)"
@@ -787,20 +787,20 @@ id=$(newid); put "$id" "$(req "$id" push)"; gr once; reset_calls
 OUT=$(AIDC_GITREQ_TEST_BEFORE_LOCK="$S/bin/deny-now" bash "$GR" approve "$id" 2>&1); RC=$?
 assert_eq "a deny that lands first: the request is denied, and nothing is pushed" "denied|" "$(state "$id")|$(calls)"
 assert_has "the deny says it denied" "denied $id" "$(cat "$S/race.out")"
-assert_eq "the approval fails" 1 "$RC"
+assert_eq "the approval decided nothing: exit 3 (not waiting), not 1 (ran and failed)" 3 "$RC"
 assert_has "saying it did not approve, and why" "was not approved: it is denied now" "$OUT"
 id=$(newid); put "$id" "$(req "$id" push)"; gr once; reset_calls
 OUT=$(AIDC_GITREQ_TEST_AFTER_LOCK="$S/bin/deny-now" bash "$GR" approve "$id" 2>&1); RC=$?
 assert_eq "a deny that lands while the approval holds the request: the push runs, and the request is done" "0|done" "$RC|$(state "$id")"
 assert_has "..." "push $P feat" "$(calls)"
 assert_has "the deny says it did not deny" "being approved or run now: not denied" "$(cat "$S/race.out")"
-assert_has "and fails" "rc=1" "$(cat "$S/race.out")"
+assert_has "and decided nothing: exit 3 (another answer holds it)" "rc=3" "$(cat "$S/race.out")"
 id=$(newid); put "$id" "$(req "$id" push)"; gr once; reset_calls
 printf '#!/bin/sh\nbash "%s" approve "$1" > "%s/race.out" 2>&1; echo "rc=$?" >> "%s/race.out"\n' "$GR" "$S" "$S" > "$S/bin/approve-now"
 chmod +x "$S/bin/approve-now"
 OUT=$(AIDC_GITREQ_TEST_AFTER_LOCK="$S/bin/approve-now" bash "$GR" approve "$id" 2>&1); RC=$?
 assert_eq "two approvals at once: the push runs once" "0|1" "$RC|$(calls | grep -c '^push ')"
-assert_has "the second says it did not run it" "rc=1" "$(cat "$S/race.out")"
+assert_has "the second says it did not run it: exit 3 (it lost the race)" "rc=3" "$(cat "$S/race.out")"
 id=$(newid); put "$id" "$(req "$id" push)"; gr once; reset_calls
 mkdir "$REQ/work/$id.lock"; touch -d '10 minutes ago' "$REQ/work/$id.lock"
 gr deny "$id"

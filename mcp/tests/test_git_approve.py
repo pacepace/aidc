@@ -88,7 +88,13 @@ class Menu:
 
 
 class Holder:
-    """The git container's request holder: what it was asked, as which user."""
+    """The git container's request holder: what it was asked, as which user. It acts as
+    gitctl/git-requests.sh does: a decision on a waiting request takes it out of the waiting
+    list, whether it is done (exit 0) or ran and failed (exit 1: the result says failed, and
+    why); one on a request not waiting decides nothing (exit 3, EXIT_NOT_WAITING). An exit
+    of -1 is the holder not reached (the exec timed out): nothing moves."""
+
+    FAILED = "the git container is not logged in to GitHub (the user runs: aidc git login)"
 
     def __init__(self, waiting=(A,), list_exit=0, decide_exit=0):
         self.waiting = set(waiting)
@@ -102,7 +108,15 @@ class Holder:
             rows = "\n".join(f"{i}  2026-11-26T08:00:00Z  proj  push  octocat/hello-world  feat"
                              for i in sorted(self.waiting))
             return self.list_exit, "ID  RECEIVED  SESSION  ACTION  REPO  WHAT\n" + rows
-        return self.decide_exit, f"{argv[0]}d {argv[1]}"
+        if self.decide_exit == -1:
+            return -1, f"git-requests {argv[0]} did not finish in 300 s"
+        if argv[1] not in self.waiting:
+            return ga.EXIT_NOT_WAITING, (f"git-requests: request {argv[1]} is not waiting for "
+                                         "approval (done)")
+        self.waiting.discard(argv[1])
+        if self.decide_exit == 1:
+            return 1, self.FAILED
+        return 0, f"{argv[0]}d {argv[1]}"
 
     @property
     def decisions(self):
@@ -272,19 +286,60 @@ async def test_a_request_already_decided_is_not_decided_again(git):
 
 
 async def test_the_holder_refusing_is_reported_not_hidden(git):
-    git.decide_exit = 1       # its own checks refused it (the working copy moved): still waiting
+    """The holder ran the approval and it failed (here: not logged in to GitHub). The real
+    holder writes `failed` before exit 1, so the request no longer waits: that is a failure
+    with the holder's reason, never "already decided ... Do NOT re-send" (Critic 2026-11-28
+    R-1). The option is chosen so the agent goes on and reports the failed request."""
+    git.decide_exit = 1
     res = await _send("Approve")
     assert res["ok"] is True
-    assert res["data"]["git_request"]["done"] is False
-    assert res["data"]["git_request"]["code"] == "git_request_not_decided"
-    # Its question is left open, so the answer can be sent again.
+    gr = res["data"]["git_request"]
+    assert gr["done"] is False and gr["exit"] == 1
+    assert gr["code"] == "git_request_not_decided" and gr["failed"] is True
+    assert "already_decided" not in gr
+    assert Holder.FAILED in gr["message"]
+    assert "FAILED" in res["data"]["delivery"] and Holder.FAILED in res["data"]["delivery"]
+    assert "already decided" not in res["data"]["delivery"]
+    assert res["data"]["question_answered"] is True and git.menu.keys == ["Down", "Enter"]
+    assert git.wiring.paste_calls == []
+
+
+async def test_a_holder_not_reached_leaves_the_request_and_its_question_open(git):
+    """The holder did not answer (the exec timed out): the request still waits, so the
+    question is left open and the answer can be sent again."""
+    git.decide_exit = -1
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["done"] is False and gr["code"] == "git_request_not_decided"
+    assert "failed" not in gr and "already_decided" not in gr
     assert res["data"]["question_not_answered"] == "request_not_decided"
+    assert "still waits" in res["data"]["delivery"] and "did not finish" in res["data"]["delivery"]
     assert git.menu.keys == [] and git.wiring.paste_calls == []
+    assert git.waiting == {A}
+
+
+async def test_an_answer_that_lost_the_race_at_the_holder_says_already_decided(git, monkeypatch):
+    """The request waited when the answer was read, and another answer decided it before
+    this one reached the holder: the holder exits EXIT_NOT_WAITING, which alone is
+    already_decided, and the option is still chosen in the menu that is still open."""
+    real = git.run
+
+    async def decided_meanwhile(argv, timeout):
+        if argv[0] != "list":
+            git.waiting.discard(argv[1])
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", decided_meanwhile)
+    res = await _send("Deny")
+    gr = res["data"]["git_request"]
+    assert gr["exit"] == ga.EXIT_NOT_WAITING and gr["already_decided"] is True
+    assert "code" not in gr and "failed" not in gr
+    assert res["data"]["question_answered"] is True
+    assert "already decided" in res["data"]["delivery"]
 
 
 async def test_a_second_answer_that_lost_the_race_says_already_decided(git, monkeypatch):
     """Two Approves race: the first decides the request and answers the menu; the holder
-    refuses the second (exit 2: another approver moved it first). The second is told the
+    refuses the second (exit 3, EXIT_NOT_WAITING: another approver moved it first). The second is told the
     request is already decided, never to send its answer again (Critic 2026-11-28 O-4)."""
     real = git.run
 
@@ -293,7 +348,8 @@ async def test_a_second_answer_that_lost_the_race_says_already_decided(git, monk
             git.calls.append(argv)
             git.waiting.discard(argv[1])
             git.menu.open = False
-            return 2, f"request {argv[1]} was not approved: it is running now"
+            return ga.EXIT_NOT_WAITING, (f"git-requests: request {argv[1]} was not approved: "
+                                         "it is running now")
         return await real(argv, timeout)
     monkeypatch.setattr(ga, "_holder", first_wins)
     res = await _send("Approve")
@@ -440,6 +496,24 @@ async def test_an_empty_read_after_enter_is_not_taken_for_answered(git, monkeypa
     assert res["data"]["status"] == "question_open"
 
 
+async def test_another_dialog_after_enter_is_named_not_called_unreadable(git, monkeypatch):
+    """After Enter the question is gone and a permission prompt asks about the agent's next
+    command: the screen was read, so the result names that dialog, not screen_unread."""
+    perm = "\n".join(["● older output", RULE, " Bash command", "",
+                      "   git-requests show " + A, "", " Do you want to proceed?",
+                      " ❯ 1. Yes", "   2. No", "", " Esc to cancel", ""])
+
+    async def capture(container, window):
+        return perm if not git.menu.open else _menu_screen(A, git.menu.pointer)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    res = await _send("Approve")
+    assert git.decisions == [["approve", A]]
+    assert res["data"]["question_not_answered"] == "another_dialog"
+    assert "permission prompt" in res["data"]["dialog"]
+    assert "could not be read" not in res["data"]["delivery"]
+    assert "permission prompt" in res["data"]["delivery"]
+
+
 async def test_keys_that_cannot_be_sent_are_reported(git, monkeypatch):
     async def fails(container, args):
         git.menu.keys.extend(args[3:])
@@ -460,11 +534,30 @@ async def test_an_ordinary_prompt_with_no_question_open_goes_in(git, prompt):
     assert res["ok"] is True and "git_request" not in res["data"] and git.calls == []
 
 
-async def test_a_question_naming_no_request_is_an_ordinary_send(git):
+async def test_a_bare_answer_to_a_question_naming_no_request_is_refused(git):
+    """The menu is on screen, but no request id can be read from it (cut short, or a
+    question about something else): a plain Approve is refused, never queued as a prompt
+    behind the menu (bare answers are never pasted)."""
     git.state["objs"] = _asked()
     git.menu.request_id = "for a session"
     res = await _send("Approve")
-    assert git.calls == [] and "git_request" not in res["data"]
+    assert res["ok"] is False and res["error_code"] == "git_request_not_named"
+    assert git.calls == [] and git.wiring.paste_calls == [] and git.menu.keys == []
+    assert not ss.pending_sends.get(backend.GIT_SESSION)
+
+
+async def test_a_bare_answer_is_refused_when_the_screen_cuts_the_id_short(git):
+    git.menu.request_id = A[:20]           # the menu shows part of the id
+    res = await _send("Deny")
+    assert res["ok"] is False and res["error_code"] == "git_request_not_named"
+    assert git.calls == [] and git.wiring.paste_calls == []
+
+
+async def test_other_text_to_a_question_naming_no_request_is_an_ordinary_send(git):
+    git.state["objs"] = _asked()
+    git.menu.request_id = "for a session"
+    res = await _send("Use the second one")
+    assert res["ok"] is True and git.calls == [] and "git_request" not in res["data"]
 
 
 async def test_another_sessions_answer_never_reaches_the_holder(git):

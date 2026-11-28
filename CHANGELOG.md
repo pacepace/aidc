@@ -55,7 +55,16 @@ What changes in use:
   transcript nor its screen can be read, whether a question is open cannot be told, and the
   answer is refused as `git_transcript_unreadable`, retryable. A request already decided (by
   you, or by another answer that reached it first) is `git_request.already_decided` in the
-  successful result, not an error. On Kubernetes this comes with the per-user MCP
+  successful result, not an error. An approval the git container ran that failed (a push
+  refused, not logged in to GitHub) is reported as a failure, `git_request.code`
+  `git_request_not_decided` with `failed: true` and the container's reason, never as already
+  decided: `git-requests approve|deny` now exit 3 when they decided nothing because the
+  request was not waiting, and 1 only for a run that failed. A plain Approve or Deny sent while
+  the agent's question names no request id aidc can read is refused,
+  `git_request_not_named`, never queued as a prompt behind the menu. When another dialog
+  (a permission prompt) replaces the question after Enter, the result names it
+  (`question_not_answered` `another_dialog`, `dialog`) rather than saying the screen could not
+  be read. On Kubernetes this comes with the per-user MCP
   server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a

@@ -91,6 +91,10 @@
 #   git-requests show <id>            one request, its state and result, its texts made printable
 #   git-requests approve <id>         run a waiting request (the user's, or the MCP server's)
 #   git-requests deny <id> [reason]   refuse it (the user's, or the MCP server's)
+#     approve and deny exit 0 when they did it; 1 when they ran it and it failed (the result
+#     says failed, and why: a push refused, no GitHub login, the working copy moved); 3 when
+#     they decided nothing because the request was not waiting (decided or gone already, or
+#     another answer holds it or got there first). EXIT_NOT_WAITING below.
 #   git-requests prompt <id>          the text the git agent is given for a waiting request
 #   git-requests handoff              the waiting request to hand to the git agent now, if any
 #   git-requests handed <id>          that request was typed into the git agent's terminal
@@ -141,6 +145,11 @@ MAX_LOG_BYTES=1048576 MAX_REQUEST_BYTES=262144 MAX_TITLE_BYTES=256 MAX_BODY_BYTE
 PROTECTED_BRANCHES="main master develop"
 
 die() { printf 'git-requests: %s\n' "$1" >&2; exit 1; }
+# approve or deny decided nothing: the request was not waiting (decided or gone already), or
+# another answer holds it or got there first. Its own status, so a caller (the MCP server
+# carrying out an orchestrator's answer) tells this from a run that failed (exit 1).
+EXIT_NOT_WAITING=3
+not_waiting() { printf 'git-requests: %s\n' "$1" >&2; exit "$EXIT_NOT_WAITING"; }
 usage() { sed -n '/^#   git-requests/s/^#   //p' "$self"; }
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # The watcher's own record, in work/ (trimmed by expire).
@@ -829,10 +838,10 @@ case "$cmd" in
           [ -z "$Q_body" ] || printf 'body:\n%s\n' "$Q_body"; } | printable ;;
     approve)
         id_ok "${1:-}"; enter
-        waiting "$1" || die "request ${1} is not waiting for approval ($(result_state "$1" || true))"
+        waiting "$1" || not_waiting "request ${1} is not waiting for approval ($(result_state "$1" || true))"
         rc=0; run "$1" pending || rc=$?
         # 2: another approver moved it first (run said which way); nothing was done here.
-        [ "$rc" != 2 ] || die "request ${1} was not approved: it is $(result_state "$1" || true) now"
+        [ "$rc" != 2 ] || not_waiting "request ${1} was not approved: it is $(result_state "$1" || true) now"
         jq -r '.message, (.output // empty)' "results/${1}.json"
         exit "$rc" ;;
     deny)
@@ -840,10 +849,10 @@ case "$cmd" in
         # Under the request's lock, as approve runs it: a request being approved or run cannot
         # be denied as well, and a denied one is never run.
         test_hook BEFORE_LOCK "$1"
-        take_lock "$1" || die "request ${1} is being approved or run now: not denied (git-requests show ${1})"
+        take_lock "$1" || not_waiting "request ${1} is being approved or run now: not denied (git-requests show ${1})"
         if ! waiting "$1"; then
             rmdir -- "work/${1}.lock" 2>/dev/null || true
-            die "request ${1} is not waiting for approval ($(result_state "$1" || true)): not denied"
+            not_waiting "request ${1} is not waiting for approval ($(result_state "$1" || true)): not denied"
         fi
         load "$1"; R_ACTION="$Q_action" R_OUTPUT="" R_URL="" R_BRANCH="" R_SHA="" R_PROTECTION="" R_MODE="$Q_mode"
         why=$(printf '%s' "${2:-}" | printable 300)

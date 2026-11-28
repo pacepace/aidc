@@ -109,7 +109,15 @@ EXTENDED_IN_2_0 = {
          "so its turn goes on (status \"answered_question\"; nothing is pasted, typed text never\n"
          "reaches that menu). If the menu could not be answered, the decision still stands:\n"
          "status \"question_open\", question_answered false and question_not_answered saying\n"
-         "why; the question then waits for the user at the git agent's terminal.\n\n"
+         "why; the question then waits for the user at the git agent's terminal. A request\n"
+         "already decided (by the user, or by another answer first) is git_request's\n"
+         "already_decided, not an error. One the git container ran that FAILED (a push\n"
+         "refused, not logged in to GitHub) is git_request's code git_request_not_decided\n"
+         "with failed true and the container's reason in message: tell the user; sending the\n"
+         "answer again decides nothing. Approve or Deny with no question open is refused,\n"
+         "git_request_not_waiting; with a question open that names no readable request id,\n"
+         "git_request_not_named; when the agent's transcript and screen cannot be read it\n"
+         "is git_transcript_unreadable, retryable.\n\n"
          "Every return carries `prompt_id`, stable for this prompt:"),
     ],
 }

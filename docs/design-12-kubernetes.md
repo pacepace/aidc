@@ -269,7 +269,10 @@ for a merge the pull request's head commit as GitHub had it then; the user is sh
 run refuses (nothing done) if any has since changed: gitctl is given them (`--expect-repo`,
 `--expect-commit`, `--expect-head`) and checks them against what it acts on. An approval and a
 denial of one request take its lock and read its state again under it, so when they race exactly
-one happens and the other says it did not. A watcher that cannot use its request folder logs why
+one happens and the other says it did not. `git-requests approve|deny` exit 0 when they did it,
+1 when they ran it and it failed (the result says `failed` and why), and 3 when they decided
+nothing because the request was not waiting (decided or gone already, or another answer holds it
+or got there first), so a caller tells a lost race from a failure without reading the message. A watcher that cannot use its request folder logs why
 (once per reason), and `aidc git status` shows that reason.
 A session's `git push` to GitHub is rewritten (`pushInsteadOf`) to a remote helper that pushes
 nothing and says to use `gh pr create`. Results, written only by the request holder, say done, failed, denied or pending; a run cut short by a

@@ -16,13 +16,20 @@ Strict, because an approval pushes to GitHub:
   everything that asks (turns.open_question): the question menu on the agent's screen, or,
   when the screen cannot be read, the question its current turn waits on in its transcript.
   A question a cut-off turn left unanswered is not open.
-- The question must name one request id; naming several is `git_request_ambiguous`.
+- The question must name one request id; naming several is `git_request_ambiguous`. A plain
+  Approve or Deny sent while a question is open that names no request id aidc can read (the
+  menu cut the id short, or the question is about something else) answers nothing it can
+  tell: `git_request_not_named`, and nothing is sent (a bare answer is never pasted).
 - The answer must start with Approve or Deny, and say nothing else for Approve (Deny may give
   its reason after it): anything else is `git_answer_unclear`, and nothing is sent.
 - A request no longer waiting (decided, or gone) is approved or denied by nothing; the option
   is still chosen in the question, and the result says so (`already_decided`, a field of the
   successful result, not an error code). So does a second answer that lost a race to the
-  first.
+  first: the holder says so by its own exit status (EXIT_NOT_WAITING), never by exit 1.
+- An approval the holder ran that failed (the push refused, no GitHub login, the working copy
+  moved: exit 1, the request now failed) is a failure, `git_request_not_decided` with the
+  holder's reason and `failed: true`; the option is still chosen, so the agent goes on and
+  reports the failed request. Sending the answer again decides nothing.
 - An answer sent while the agent has no question open answers nothing: no request waits for
   it, so it is refused, `git_request_not_waiting`, and nothing is sent (live 2026-11-27: pasted
   as a prompt, "Approve" left the agent with nothing to act on). When neither its screen nor
@@ -54,6 +61,10 @@ DECIDE_TIMEOUT_S = 300.0
 LIST_TIMEOUT_S = 30.0
 
 APPROVE, DENY = "approve", "deny"
+#: git-requests approve|deny's exit status when it decided nothing because the request was
+#: not waiting: decided or gone already, or another answer holds it or got there first
+#: (gitctl/git-requests.sh EXIT_NOT_WAITING). Exit 1 is a run that failed.
+EXIT_NOT_WAITING = 3
 
 _ANSWER = re.compile(r"\s*(approve|deny)\b(.*)\Z", re.IGNORECASE | re.DOTALL)
 #: what may follow Approve: punctuation only (no condition, no second thought)
@@ -133,7 +144,20 @@ async def answer_in(name: str, prompt: str, container: str) -> Answer:
             code="git_request_not_waiting"))
     ids = list(question.request_ids)
     if not ids:
-        return NOTHING
+        parsed = parse_answer(prompt)
+        if parsed is None:
+            return NOTHING
+        # A bare Approve or Deny is never pasted (it would wait behind the menu, then reach
+        # the agent as a stray prompt): with no request id to match it to, it is refused.
+        audit.log_event("git_request_answer_refused", session=name, reason="no_request_id",
+                        decision=parsed[0])
+        return Answer(refusal=com.envelope_err(
+            f"This {parsed[0].capitalize()} was not carried out: the git agent has a question "
+            "open, but no git request id could be read from it (cut short on its screen, or "
+            "a question about something else), so which request it answers cannot be told. "
+            "Nothing was approved or denied, and nothing was sent. Read the question "
+            "(session_status, or attach), and decide with aidc git approve|deny <id>.",
+            code="git_request_not_named"))
     if len(ids) > 1:
         audit.log_event("git_request_answer_refused", session=name, reason="ambiguous",
                         request_ids=ids)
@@ -194,7 +218,10 @@ async def carry_out(decision: Decision) -> dict[str, Any]:
     """Approve or deny the request as the holder; what happened, for session_send's result
     and the access log. `already_decided` (a result field, never an error code) says the
     request was not waiting: decided before this answer, gone, or decided by another answer
-    that reached the holder first (a race the holder lets only one side win)."""
+    that reached the holder first (a race the holder lets only one side win, and reports by
+    its exit status EXIT_NOT_WAITING). Any other refusal is `code` git_request_not_decided
+    with the holder's message; `failed` adds that the holder ran it and it failed (it is no
+    longer waiting), rather than not reaching it (still waiting, so it can be sent again)."""
     outcome: dict[str, Any] = {"request_id": decision.request_id, "decision": decision.verb}
     if not decision.waiting:
         outcome.update(done=False, already_decided=True,
@@ -207,17 +234,20 @@ async def carry_out(decision: Decision) -> dict[str, Any]:
             argv.append(decision.reason)
         rc, out = await _holder(argv, DECIDE_TIMEOUT_S)
         outcome.update(done=rc == 0, exit=rc, message=out[-2000:])
-        if rc != 0:
-            # Refused: by its own checks, or because another answer moved it first. The
-            # waiting list read again tells the second from the first.
+        if rc == EXIT_NOT_WAITING:
+            # Another answer moved it first, or it was decided meanwhile: nothing done here.
+            outcome["already_decided"] = True
+        elif rc != 0:
+            # The holder ran it and it failed (it writes `failed` with the reason before exit
+            # 1, so it no longer waits), or the holder could not be reached (still waiting).
+            outcome["code"] = "git_request_not_decided"
             waiting = await waiting_requests()
             if waiting is not None and decision.request_id not in waiting:
-                outcome["already_decided"] = True
-            else:
-                outcome["code"] = "git_request_not_decided"
+                outcome["failed"] = True
     audit.log_event("git_request_answered", session=backend.GIT_SESSION,
                     request_id=decision.request_id, decision=decision.verb,
                     done=outcome["done"], exit=outcome.get("exit"),
                     already_decided=bool(outcome.get("already_decided")),
+                    failed=bool(outcome.get("failed")),
                     code=outcome.get("code", ""), reason=decision.reason[:300])
     return outcome

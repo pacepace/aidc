@@ -932,7 +932,20 @@ QUESTION_NOT_ANSWERED = {
     "screen_unread": "Enter was pressed on the option, and the screen could not be read "
                      "since (empty, or not a screen aidc knows), so whether the question was "
                      "answered cannot be told",
+    "another_dialog": "Enter was pressed on the option, and the screen now shows another "
+                      "dialog instead of this question (the agent's next step waits on it)",
 }
+
+#: the dialog a screen shows (screen.ScreenState.dialog), as the result names it
+_DIALOG_NAMES = {scr.TRUST_PROMPT: "the folder-trust prompt",
+                 scr.ADD_DIR_PROMPT: "the prompt to add a folder",
+                 scr.QUESTION_MENU: "another question"}
+
+
+def dialog_name(screen: scr.ScreenState) -> str:
+    """What a NOT_AT_PROMPT screen shows, in words."""
+    return _DIALOG_NAMES.get(screen.dialog,
+                             "a dialog aidc does not name (a permission prompt, for example)")
 
 
 async def _read_question(container: str, name: str
@@ -949,7 +962,8 @@ def _names(asked: tn.OpenQuestion | None, must_name: str) -> bool:
     return asked is not None and must_name in asked.request_ids
 
 
-async def answer_question_menu(container: str, name: str, choice: str, must_name: str) -> str:
+async def answer_question_menu(container: str, name: str, choice: str, must_name: str
+                               ) -> tuple[str, str]:
     """Choose the option whose label starts with `choice` in the question menu open in the
     session, the one question it holds naming `must_name`. "" when it was answered, else why
     not (a QUESTION_NOT_ANSWERED key).
@@ -959,52 +973,58 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
     wrong option would answer the question wrongly. A menu that cannot be read, or whose
     pointer does not land on the option, gets no Enter. After Enter the question counts as
     answered only once a read shows a screen aidc knows without it: the input box (Claude at
-    its prompt, or working), or a question about another request. A failed or empty read, or
-    one aidc cannot classify, is not taken for the menu gone. Called under the session's
-    send lock, so no paste goes in meanwhile."""
+    its prompt, or working), or a question about another request. Another dialog in its
+    place (a permission prompt for the agent's next command) is "another_dialog", named in
+    `dialog` (the second of the pair returned), never "screen_unread": the screen was read.
+    A failed or empty read, or one aidc cannot classify, is not taken for the menu gone.
+    Called under the session's send lock, so no paste goes in meanwhile.
+
+    Returns (why not, or "", the dialog's name when why not is another_dialog)."""
     _, asked = await _read_question(container, name)
     if asked is None or asked.menu is None:
-        return "no_question_on_screen"
+        return "no_question_on_screen", ""
     if not _names(asked, must_name):
-        return "another_question"
+        return "another_question", ""
     menu = asked.menu
     if menu.several:
-        return "several_questions"
+        return "several_questions", ""
     matches = [n for n, label in menu.options if label.lower().startswith(choice.lower())]
     if len(matches) != 1:
-        return "no_such_option"
+        return "no_such_option", ""
     target = matches[0]
     target_window = f"main:{tmx.SESSION_WINDOW}"
     if menu.pointer != target:
         if not menu.pointer:
-            return "pointer_not_moved"
+            return "pointer_not_moved", ""
         # One move, from where the pointer was read; then only read until it shows there.
         # Keys sent again on a screen not redrawn yet would overshoot.
         key = "Down" if target > menu.pointer else "Up"
         if await tmx.tmux_exec(container, ["send-keys", "-t", target_window,
                                            *[key] * abs(target - menu.pointer)]) != 0:
-            return "keys_not_sent"
+            return "keys_not_sent", ""
         for _ in range(_MENU_POLLS):
             await asyncio.sleep(_MENU_POLL_S)
             _, asked = await _read_question(container, name)
             if asked is None or asked.menu is None or not _names(asked, must_name):
-                return "pointer_not_moved"
+                return "pointer_not_moved", ""
             if asked.menu.pointer == target:
                 break
         else:
-            return "pointer_not_moved"
+            return "pointer_not_moved", ""
     if await tmx.tmux_exec(container, ["send-keys", "-t", target_window, "Enter"]) != 0:
-        return "keys_not_sent"
-    why_not = "screen_unread"
+        return "keys_not_sent", ""
+    why_not, dialog = "screen_unread", ""
     for _ in range(_MENU_POLLS):
         await asyncio.sleep(_MENU_POLL_S)
         screen, asked = await _read_question(container, name)
         if _names(asked, must_name):
-            why_not = "menu_still_open"
+            why_not, dialog = "menu_still_open", ""
         elif asked is not None or screen.input_box in (scr.EMPTY, scr.HAS_TEXT):
             com.session_changed(name)
-            return ""
-    return why_not
+            return "", ""
+        elif screen.input_box == scr.NOT_AT_PROMPT:
+            why_not, dialog = "another_dialog", dialog_name(screen)
+    return why_not, dialog
 
 
 async def _answer_git_question(name: str, conversation_id: str | None, container: str,
@@ -1017,11 +1037,15 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
     reported, never a failed send. Nothing is queued: typed text never reaches the menu,
     and pasted after it, it would be a second, stray prompt."""
     no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
-    if decided.get("done") or decided.get("already_decided"):
+    dialog = ""
+    # Decided, or no longer waiting: the option is chosen so the agent goes on and reports
+    # the request's state (a failed one too). Only a request still waiting keeps its
+    # question open, so the answer can be sent again.
+    if decided.get("done") or decided.get("already_decided") or decided.get("failed"):
         lock = ss.session_send_locks.setdefault(name, asyncio.Lock())
         async with lock:
-            why_not = await answer_question_menu(container, name, decision.verb,
-                                                 decision.request_id)
+            why_not, dialog = await answer_question_menu(container, name, decision.verb,
+                                                         decision.request_id)
     else:
         why_not = "request_not_decided"
     answered = not why_not
@@ -1037,7 +1061,23 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
              else "nowhere: no webhook is open for this session"
              + (f" ({no_watch_reason})" if no_watch_reason else ""))
     option = decision.verb.capitalize()
-    if decided.get("already_decided") and why_not == "no_question_on_screen":
+    failed = bool(decided.get("failed"))
+    holder_said = " ".join(str(decided.get("message", "")).split())[-500:]
+    if failed:
+        # The holder ran it and it failed: the request is failed now, so sending the same
+        # answer again decides nothing.
+        menu = (f"{option} was chosen in the git agent's question, so it goes on and reports "
+                f"the failed request; its reply comes {where}." if answered
+                else f"The git agent's question was not answered: "
+                     f"{QUESTION_NOT_ANSWERED[why_not]}"
+                     + (f" ({dialog})" if dialog else "") + ".")
+        delivery = (f"The {option} was carried out and FAILED (git_request.code "
+                    f"git_request_not_decided, git_request.failed): the git container says "
+                    f"\"{holder_said}\". Git request {decision.request_id} is failed now. "
+                    f"{menu} Nothing was typed into the session. Do NOT re-send the answer: it "
+                    "would decide nothing. Tell the user why it failed; once that is fixed "
+                    "(for example aidc git login), the session asks again.")
+    elif decided.get("already_decided") and why_not == "no_question_on_screen":
         # Decided before this answer (another answer won the race, or it was decided
         # outside): the question is gone with it, and nothing is left to send.
         delivery = (f"git request {decision.request_id} was already decided "
@@ -1051,6 +1091,18 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
         delivery = (f"Answered: {option} was chosen in the git agent's question, so its turn "
                     f"goes on; its reply comes {where}.{settled} Nothing else was sent. "
                     "Do NOT re-send.")
+    elif why_not == "request_not_decided":
+        delivery = (f"The {option} was NOT carried out (git_request.code "
+                    f"git_request_not_decided): the git container says \"{holder_said}\". "
+                    f"Git request {decision.request_id} still waits, and the git agent's "
+                    "question is left open. Nothing was typed into the session. Send the "
+                    f"answer again, or decide with aidc git {decision.verb} "
+                    f"{decision.request_id}.")
+    elif why_not == "another_dialog":
+        delivery = (f"The git request's decision stands (git_request). {option} was chosen "
+                    f"in the git agent's question, and its screen now shows {dialog} instead, "
+                    "waiting for a person. Nothing was typed into the session. Tell the user "
+                    "to look at the git agent's terminal.")
     else:
         delivery = (f"The git request's decision stands (git_request), but the git agent's "
                     f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "
@@ -1061,6 +1113,7 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
         "session": name, "prompt_id": ts.new_prompt_id(), "reply_goes": reply_goes,
         "question_answered": answered,
         **({"question_not_answered": why_not} if why_not else {}),
+        **({"dialog": dialog} if dialog else {}),
         "git_request": decided,
         **({"watched_conversation_id": watched} if watched else {}),
         "window": tmx.SESSION_WINDOW, "delivery": delivery})

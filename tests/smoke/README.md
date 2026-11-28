@@ -113,9 +113,15 @@ an orchestrator connected:
    Check that the request is approved or denied as chosen (`aidc git requests`), that the
    session reads the result (`gh pr status`), and that the question was answered (`aidc attach
    git`). If paste and Enter do not answer the question, record it: the decision stands
-   either way, but the agent's turn then needs another way on.
-5. Send `"Approve"` again for the same question: `git_request.code` is
-   `git_request_not_waiting`, and nothing runs twice.
+   either way, but the agent's turn then needs another way on. A git container not logged in
+   to GitHub shows the failure instead: `git_request.done: false`, `failed: true`, `code`
+   `git_request_not_decided` and the container's reason in `message` (never
+   `already_decided`).
+5. Send `"Approve"` again for the same request. Once its question was answered, the agent has
+   no question open: the call fails with the top-level `error_code` `git_request_not_waiting`
+   (design-10's error-code table), and nothing is sent. If the question is still on screen,
+   the result's `git_request.already_decided` is `true` instead. Either way nothing runs
+   twice (`aidc git requests`).
 
 On Kubernetes the question does not reach an orchestrator until aidc 2.0's per-user MCP server.
 

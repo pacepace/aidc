@@ -133,6 +133,9 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "git_request_not_waiting": ("session_send to the git agent: the text is a git answer "
                                 "(Approve or Deny) and no question of the agent's is open, so "
                                 "no request waits for it; nothing was sent"),
+    "git_request_not_named": ("session_send to the git agent: the text is a git answer "
+                              "(Approve or Deny) and the agent's open question names no git "
+                              "request id that could be read; nothing was approved or sent"),
     "git_requests_unreadable": ("session_send to the git agent: its waiting git requests "
                                 "could not be read; nothing was approved or sent"),
     "git_transcript_unreadable": ("session_send to the git agent: the text is a git answer, "

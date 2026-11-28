@@ -161,8 +161,12 @@ class SessionSend(SessionAwareTool):
         status "question_open", question_answered false and question_not_answered saying
         why; the question then waits for the user at the git agent's terminal. A request
         already decided (by the user, or by another answer first) is git_request's
-        already_decided, not an error. Approve or Deny with no question open is refused,
-        git_request_not_waiting; when the agent's transcript and screen cannot be read it
+        already_decided, not an error. One the git container ran that FAILED (a push
+        refused, not logged in to GitHub) is git_request's code git_request_not_decided
+        with failed true and the container's reason in message: tell the user; sending the
+        answer again decides nothing. Approve or Deny with no question open is refused,
+        git_request_not_waiting; with a question open that names no readable request id,
+        git_request_not_named; when the agent's transcript and screen cannot be read it
         is git_transcript_unreadable, retryable.
 
         Every return carries `prompt_id`, stable for this prompt: session_queue_cancel

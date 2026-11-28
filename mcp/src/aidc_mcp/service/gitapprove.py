@@ -49,7 +49,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from aidc_mcp import audit, backend
-from aidc_mcp import screen as scr
 from aidc_mcp.service import common as com
 from aidc_mcp.service import turns as tn
 
@@ -120,12 +119,15 @@ async def answer_in(name: str, prompt: str, container: str) -> Answer:
         return NOTHING
     objs, _, status = tn.session_transcript(name)
     screen = await tn.read_screen(container, name)
-    question = tn.open_question(objs if status == "ok" else [], screen)
-    if question is None:
+    # An unreadable transcript is no transcript to go by: with no screen either, whether a
+    # question is open cannot be told (UNKNOWN), never taken for none open.
+    question = tn.open_question(objs if status == "ok" else None if status == "unreadable"
+                                else [], screen)
+    if question is None or question is tn.UNKNOWN:
         parsed = parse_answer(prompt)
         if parsed is None:
             return NOTHING
-        unread = status == "unreadable" and screen.input_box == scr.UNRECOGNIZED
+        unread = question is tn.UNKNOWN
         audit.log_event("git_request_answer_refused", session=name,
                         reason="transcript_unreadable" if unread else "no_question",
                         decision=parsed[0])

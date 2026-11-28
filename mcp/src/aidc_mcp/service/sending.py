@@ -949,17 +949,18 @@ def dialog_name(screen: scr.ScreenState) -> str:
 
 
 async def _read_question(container: str, name: str
-                         ) -> tuple[scr.ScreenState, tn.OpenQuestion | None]:
+                         ) -> tuple[scr.ScreenState, tn.QuestionState]:
     """The screen, and the question open on it (turns.open_question, the screen alone: the
-    menu is answered only where it is seen)."""
+    menu is answered only where it is seen, so a screen that cannot be read or classified
+    is UNKNOWN)."""
     raw = await tmx.capture_screen(container, tmx.SESSION_WINDOW)
     ss.last_screen_raw[name] = raw
     screen = scr.classify(raw)
-    return screen, tn.open_question([], screen)
+    return screen, tn.open_question(None, screen)
 
 
-def _names(asked: tn.OpenQuestion | None, must_name: str) -> bool:
-    return asked is not None and must_name in asked.request_ids
+def _names(asked: tn.QuestionState, must_name: str) -> bool:
+    return isinstance(asked, tn.OpenQuestion) and must_name in asked.request_ids
 
 
 async def answer_question_menu(container: str, name: str, choice: str, must_name: str
@@ -981,7 +982,7 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
 
     Returns (why not, or "", the dialog's name when why not is another_dialog)."""
     _, asked = await _read_question(container, name)
-    if asked is None or asked.menu is None:
+    if not isinstance(asked, tn.OpenQuestion) or asked.menu is None:
         return "no_question_on_screen", ""
     if not _names(asked, must_name):
         return "another_question", ""
@@ -1005,7 +1006,8 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
         for _ in range(_MENU_POLLS):
             await asyncio.sleep(_MENU_POLL_S)
             _, asked = await _read_question(container, name)
-            if asked is None or asked.menu is None or not _names(asked, must_name):
+            if (not isinstance(asked, tn.OpenQuestion) or asked.menu is None
+                    or not _names(asked, must_name)):
                 return "pointer_not_moved", ""
             if asked.menu.pointer == target:
                 break
@@ -1017,12 +1019,14 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
     for _ in range(_MENU_POLLS):
         await asyncio.sleep(_MENU_POLL_S)
         screen, asked = await _read_question(container, name)
+        if asked is tn.UNKNOWN:
+            continue
         if _names(asked, must_name):
             why_not, dialog = "menu_still_open", ""
-        elif asked is not None or screen.input_box in (scr.EMPTY, scr.HAS_TEXT):
+        elif asked is not None or screen.input_box != scr.NOT_AT_PROMPT:
             com.session_changed(name)
             return "", ""
-        elif screen.input_box == scr.NOT_AT_PROMPT:
+        else:
             why_not, dialog = "another_dialog", dialog_name(screen)
     return why_not, dialog
 

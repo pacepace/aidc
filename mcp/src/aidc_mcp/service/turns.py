@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import enum
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal, overload
 
 from aidc_mcp import audit, backend
 from aidc_mcp import hook_events as he
@@ -217,22 +218,43 @@ def _request_ids(text: str) -> tuple[str, ...]:
     return tuple(sorted(ids))
 
 
-def open_question(objs: list[dict], screen: scr.ScreenState | None) -> OpenQuestion | None:
+class _Unknown(enum.Enum):
+    UNKNOWN = "unknown"
+
+
+#: open_question's answer when whether a question is open cannot be told: the screen could
+#: not be read or classified, and there is no transcript to go by
+UNKNOWN: Final = _Unknown.UNKNOWN
+
+#: what open_question answers: the open question, None (none is open) or UNKNOWN
+type QuestionState = OpenQuestion | Literal[_Unknown.UNKNOWN] | None
+
+
+@overload
+def open_question(objs: list[dict], screen: scr.ScreenState | None) -> OpenQuestion | None: ...
+@overload
+def open_question(objs: None, screen: scr.ScreenState | None) -> QuestionState: ...
+def open_question(objs: list[dict] | None, screen: scr.ScreenState | None) -> QuestionState:
     """The one answer to "is a question of Claude's open, and which": used by session_status
     (waiting_on_question), by the git answer's gate (gitapprove.answer_in) and by the menu
-    answer (sending.answer_question_menu), so they never disagree.
+    answer (sending.answer_question_menu), so they never disagree. The question when one is
+    open, None when none is, UNKNOWN when that cannot be told.
 
     A screen that was read and recognized decides, because the transcript can lag it: the
     question menu on it is the open question, and the input box or any other dialog means
     none is open. Only when there is no such screen (none read, an empty or unrecognized
     capture) does the transcript decide, and then only a question of the current turn
-    counts (transcript.current_question): one a cut-off turn left unanswered does not."""
+    counts (transcript.current_question): one a cut-off turn left unanswered does not.
+    `objs` None means there is no transcript to go by (it could not be read, or the caller
+    goes by the screen alone): then, with no such screen either, the answer is UNKNOWN."""
     if screen is not None and screen.input_box != scr.UNRECOGNIZED:
         menu = screen.question
         if menu is None:
             return None
         return OpenQuestion(menu.text, tuple(label for _, label in menu.options),
                             _request_ids(menu.text), menu)
+    if objs is None:
+        return UNKNOWN
     asked = ts.current_question(objs)
     if asked is None:
         return None

@@ -6,6 +6,7 @@ The git container is not run: the holder's `git-requests` is a stand-in recordin
 was asked, with the waiting list it answers. The send path is the session_send tests' own
 wiring, with the git agent's question menu drawn as Claude Code 2.1.332 draws it
 (fixtures/screens/claude-2.1.332-question-menu.ansi) and moved by the keys sent to it."""
+import asyncio
 import re
 from pathlib import Path
 
@@ -187,16 +188,14 @@ async def test_a_deny_chooses_deny_where_the_pointer_already_is(git):
 
 @pytest.mark.parametrize("setup, why", [
     (lambda m: setattr(m, "stuck", True), "pointer_not_moved"),
-    (lambda m: setattr(m, "shown", False), "no_question_on_screen"),
-    (lambda m: setattr(m, "request_id", B), "another_question"),
 ])
 async def test_a_question_that_cannot_be_answered_leaves_the_decision_standing(git, monkeypatch,
                                                                               setup, why):
     """The holder's decision is the one that counts; the menu only lets the agent go on.
-    When the menu cannot be answered (its pointer does not move, or, by the time the holder
-    has decided, it is not on screen or asks about another request), the decision is still
+    When the menu cannot be answered (its pointer does not move), the decision is still
     reported, the result says the question is open, and no Enter is pressed on an option
-    that was not read back."""
+    that was not read back. A menu that is gone altogether, or asks about another request
+    by the time the holder has decided, was answered already, not open (the tests below)."""
     real = git.run
 
     async def then_changes(argv, timeout):
@@ -214,6 +213,330 @@ async def test_a_question_that_cannot_be_answered_leaves_the_decision_standing(g
     assert "Enter" not in git.menu.keys
     assert "decision stands" in res["data"]["delivery"]
     assert git.wiring.paste_calls == [] and not ss.pending_sends.get(backend.GIT_SESSION)
+
+
+async def test_a_decision_that_finds_the_menu_gone_is_decided_not_question_open(git,
+                                                                                monkeypatch):
+    """The holder decided the request (exit 0), and by then the question was answered (by
+    another answer, or at the terminal): the screen shows no menu. The question is not open,
+    so the result never says it is, or to tell the user it waits (live 2026-11-28: the
+    winner of a race was told so)."""
+    real = git.run
+
+    async def answered_meanwhile(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            git.menu.open = False
+        return out
+    monkeypatch.setattr(ga, "_holder", answered_meanwhile)
+    res = await _send("Approve")
+    assert git.decisions == [["approve", A]]
+    gr = res["data"]["git_request"]
+    assert gr["done"] is True and gr["exit"] == 0 and "already_decided" not in gr
+    assert res["data"]["status"] == "decided_no_question"
+    assert res["data"]["question_answered"] is False
+    assert res["data"]["question_not_answered"] == "no_question_on_screen"
+    d = res["data"]["delivery"]
+    assert "Do NOT re-send" in d and "carried out" in d
+    assert "still open" not in d and "question_open" not in d
+    assert git.menu.keys == [] and git.wiring.paste_calls == []
+
+
+async def test_an_already_decided_request_with_no_menu_is_decided_not_question_open(
+        git, monkeypatch):
+    """The question was open when the answer was read, the request no longer waiting, and
+    by the time the menu is read it was answered (a person at the terminal):
+    decided_no_question, never question_open."""
+    git.waiting.clear()
+    real = git.run
+
+    async def answered_meanwhile(argv, timeout):
+        out = await real(argv, timeout)
+        git.menu.open = False
+        return out
+    monkeypatch.setattr(ga, "_holder", answered_meanwhile)
+    res = await _send("Approve")
+    assert res["ok"] is True and git.decisions == []
+    assert res["data"]["git_request"]["already_decided"] is True
+    assert res["data"]["status"] == "decided_no_question"
+    assert "Do NOT re-send" in res["data"]["delivery"]
+    assert "still open" not in res["data"]["delivery"]
+
+
+async def test_a_screen_unread_before_the_menu_is_not_called_no_question(git, monkeypatch):
+    """The screen cannot be read when the menu is to be answered: whether the question is
+    still open cannot be told, so it is neither decided_no_question nor said to be open."""
+    real = git.run
+
+    async def then_unread(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            async def unread(container, window):
+                return ""
+            monkeypatch.setattr(tmx, "capture_screen", unread)
+        return out
+    monkeypatch.setattr(ga, "_holder", then_unread)
+    res = await _send("Approve")
+    assert res["data"]["git_request"]["done"] is True
+    assert res["data"]["question_not_answered"] == "question_screen_unread"
+    assert res["data"]["status"] == "question_open"
+    assert "still open in" not in res["data"]["delivery"]
+    assert git.menu.keys == []
+
+
+async def test_a_second_answer_for_the_same_request_does_not_wait_out_the_first(
+        git, monkeypatch):
+    """Two Approves for the same request at once, from two orchestrator sessions (live
+    2026-11-28: the winner was told the question was still open). The first is carried out
+    and answers the menu; the second returns at once, while the first's push still runs,
+    as answer_in_progress: the holder is not asked again and nothing is chosen for it.
+    Neither says the question is open."""
+    real = git.run
+    gate, entered = asyncio.Event(), asyncio.Event()
+
+    async def slow_push(argv, timeout):
+        if argv[0] == "approve":
+            entered.set()
+            await gate.wait()   # the push runs
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", slow_push)
+    first = asyncio.create_task(_send("Approve"))
+    await entered.wait()
+    second = await asyncio.wait_for(_send("Approve"), 5)   # does not wait for the push
+    assert not first.done()
+    gate.set()
+    won = (await first)["data"]
+    lost = second["data"]
+    assert git.decisions == [["approve", A]]
+    assert won["git_request"]["done"] is True and won["status"] == "answered_question"
+    assert lost["status"] == "answer_in_progress" and lost["question_answered"] is False
+    assert lost["git_request"] == {"request_id": A, "decision": "approve", "done": False,
+                                   "in_progress": True}
+    for d in (won, lost):
+        assert d["status"] != "question_open" and "still open" not in d["delivery"]
+        assert "Do NOT re-send" in d["delivery"]
+    assert git.menu.keys == ["Down", "Enter"] and git.wiring.paste_calls == []
+    assert not ss.git_answers_claimed and not ss.git_answer_locks[backend.GIT_SESSION].locked()
+
+
+async def test_two_answers_that_reach_the_holder_together_are_decided_one_at_a_time(
+        git, monkeypatch):
+    """Two answers for the same request both reach the decision (the first one's claim had
+    ended, its menu not yet answered): the git answer lock puts them to the holder and the
+    menu one after the other, so the second is refused at the holder (exit 3) and finds the
+    menu gone: already_decided, decided_no_question, never question_open."""
+    real = git.run
+    inside = {"now": 0, "most": 0}
+
+    async def slow_decide(argv, timeout):
+        if argv[0] in ("approve", "deny"):
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+            await asyncio.sleep(0.05)
+            inside["now"] -= 1
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", slow_decide)
+    # The claims are what lets a same-request answer return at once; with them out of the
+    # way the lock alone must keep the two apart.
+    monkeypatch.setattr(ss, "git_answers_claimed", _NeverClaimed())
+    first, second = await asyncio.gather(_send("Approve"), _send("Approve"))
+    won, lost = sorted([first["data"], second["data"]],
+                       key=lambda d: d["git_request"].get("exit", 0))
+    assert inside["most"] == 1
+    assert git.decisions == [["approve", A], ["approve", A]]
+    assert won["git_request"]["exit"] == 0 and won["status"] == "answered_question"
+    assert lost["git_request"]["exit"] == ga.EXIT_NOT_WAITING
+    assert lost["git_request"]["already_decided"] is True
+    assert lost["status"] == "decided_no_question"
+    for d in (won, lost):
+        assert d["status"] != "question_open" and "still open" not in d["delivery"]
+        assert "Do NOT re-send" in d["delivery"]
+    assert git.menu.keys == ["Down", "Enter"]
+
+
+class _NeverClaimed(dict):
+    """git_answers_claimed that keeps no claim (each send gets a fresh, empty set)."""
+
+    def setdefault(self, key, default=None):
+        return set()
+
+
+async def test_an_answer_for_another_request_waits_its_turn_and_leaves_its_menu_alone(
+        git, monkeypatch):
+    """An answer for request A is being carried out; meanwhile the agent asks about request B
+    and B is answered. B waits for the lock (it is not answer_in_progress: another request).
+    When A's decision is done, the menu on screen asks about B: A's answer chooses nothing in
+    it and says A's question was answered already (decided_no_question), never that the
+    question is still open. Then B is decided and its menu answered."""
+    real = git.run
+    gate, entered = asyncio.Event(), asyncio.Event()
+
+    async def slow_a(argv, timeout):
+        if argv[:2] == ["approve", A]:
+            entered.set()
+            await gate.wait()
+        return await real(argv, timeout)
+    monkeypatch.setattr(ga, "_holder", slow_a)
+    first = asyncio.create_task(_send("Approve"))
+    await entered.wait()
+    # A's question was answered at the terminal; the agent asks about B now.
+    git.waiting.add(B)
+    git.states[B] = "pending"
+    git.menu.request_id = B
+    git.state["objs"] = _asked(B)
+    second = asyncio.create_task(_send("Approve"))
+    await asyncio.sleep(0.2)
+    assert not second.done() and ["approve", B] not in git.decisions
+    gate.set()
+    a, b = (await first)["data"], (await second)["data"]
+    assert git.decisions == [["approve", A], ["approve", B]]
+    assert a["git_request"]["done"] is True
+    assert a["status"] == "decided_no_question"
+    assert a["question_not_answered"] == "another_question"
+    assert "another git request" in a["delivery"] and "Do NOT re-send" in a["delivery"]
+    assert "still open" not in a["delivery"]
+    assert b["git_request"]["request_id"] == B and b["status"] == "answered_question"
+    assert git.menu.keys == ["Down", "Enter"]   # B's answer only
+
+
+async def test_a_question_about_another_request_after_the_decision_is_left_alone(
+        git, monkeypatch):
+    """By the time this request is decided the agent asks about another one: its menu is
+    not touched, and this request is reported decided with its question gone."""
+    real = git.run
+
+    async def then_next_question(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            git.menu.request_id = B
+        return out
+    monkeypatch.setattr(ga, "_holder", then_next_question)
+    res = await _send("Approve")
+    assert res["data"]["git_request"]["done"] is True
+    assert res["data"]["status"] == "decided_no_question"
+    assert res["data"]["question_not_answered"] == "another_question"
+    assert "still open" not in res["data"]["delivery"]
+    assert git.menu.keys == []
+
+
+async def test_a_failed_request_whose_menu_is_gone_is_decided_not_question_open(
+        git, monkeypatch):
+    """The approval ran and FAILED, and by then the question was answered: the failure is
+    reported, the status is decided_no_question, and nothing is said to be open."""
+    git.decide_exit = 1
+    real = git.run
+
+    async def answered_meanwhile(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            git.menu.open = False
+        return out
+    monkeypatch.setattr(ga, "_holder", answered_meanwhile)
+    res = await _send("Approve")
+    gr = res["data"]["git_request"]
+    assert gr["failed"] is True and gr["code"] == "git_request_not_decided"
+    assert res["data"]["status"] == "decided_no_question"
+    d = res["data"]["delivery"]
+    assert "FAILED" in d and "Do NOT re-send" in d and "still open" not in d
+    assert git.menu.keys == [] and git.wiring.paste_calls == []
+
+
+PERMISSION = "\n".join(["● older output", RULE, " Bash command", "",
+                        "   git-requests show " + A, "", " Do you want to proceed?",
+                        " ❯ 1. Yes", "   2. No", "", " Esc to cancel", ""])
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_dialog_in_the_menus_place_before_any_key_is_named(git, monkeypatch, fails):
+    """The decision is made, and the screen then shows a permission prompt where the menu
+    was: nothing was chosen, and a person must answer that dialog. The result names it
+    (dialog_open, question_answered false), never decided_no_question saying nothing is
+    open."""
+    git.decide_exit = 1 if fails else 0
+    real = git.run
+
+    async def then_dialog(argv, timeout):
+        out = await real(argv, timeout)
+        if argv[0] != "list":
+            async def capture(container, window):
+                return PERMISSION
+            monkeypatch.setattr(tmx, "capture_screen", capture)
+        return out
+    monkeypatch.setattr(ga, "_holder", then_dialog)
+    res = await _send("Approve")
+    assert res["data"]["status"] == "dialog_open"
+    assert res["data"]["question_answered"] is False
+    assert res["data"]["question_not_answered"] == "dialog_on_screen"
+    assert "permission prompt" in res["data"]["dialog"]
+    d = res["data"]["delivery"]
+    assert "permission prompt" in d and "terminal" in d and "nothing was chosen" in d
+    assert ("FAILED" in d) is fails
+    assert git.menu.keys == []
+
+
+@pytest.mark.parametrize("hangs", ["capture", "enter"])
+async def test_a_tmux_command_that_hangs_is_stopped_and_never_called_answered(
+        git, monkeypatch, hangs):
+    """A capture or a key send that does not finish is stopped after _MENU_EXEC_TIMEOUT_S,
+    so it cannot hold the git answer lock (and every later decision) for ever. Whether the
+    option was chosen is then not known: never answered."""
+    monkeypatch.setattr(snd, "_MENU_EXEC_TIMEOUT_S", 0.05)
+    real_capture, real_tmux = git.menu.capture, git.menu.tmux
+
+    async def capture(container, window):
+        if hangs == "capture" and git.decisions:
+            await asyncio.Event().wait()
+        return await real_capture(container, window)
+
+    async def tmux(container, args):
+        if hangs == "enter" and args[-1:] == ["Enter"]:
+            await asyncio.Event().wait()
+        return await real_tmux(container, args)
+    monkeypatch.setattr(tmx, "capture_screen", capture)
+    monkeypatch.setattr(tmx, "tmux_exec", tmux)
+    res = await _send("Approve")
+    assert res["data"]["git_request"]["done"] is True
+    assert res["data"]["question_answered"] is False
+    assert res["data"]["question_not_answered"] == "menu_timed_out"
+    d = res["data"]["delivery"]
+    assert "NOT KNOWN" in d and "terminal" in d and "Do NOT re-send" in d
+    assert "Answered" not in d
+    assert not ss.git_answer_locks[backend.GIT_SESSION].locked()
+    assert not ss.session_send_locks[backend.GIT_SESSION].locked()
+
+
+@pytest.mark.parametrize("call", ["tmux_exec", "capture_screen"])
+def test_a_tmux_exec_given_up_on_is_killed(monkeypatch, call):
+    """A timeout around tmux_exec or capture_screen kills the exec and reaps it, as the
+    holder's does, rather than leave it running."""
+    class Proc:
+        returncode = None
+        killed = False
+
+        def __init__(self):
+            self.done = asyncio.Event()
+
+        async def wait(self):
+            await self.done.wait()
+            return -9
+
+        async def communicate(self):
+            await self.done.wait()
+            return b"", b""
+
+        def kill(self):
+            self.killed = True
+            self.done.set()
+    proc = Proc()
+
+    async def fake_exec(*argv, **kw):
+        return proc
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    run = (tmx.tmux_exec("c", ["send-keys", "Enter"]) if call == "tmux_exec"
+           else tmx.capture_screen("c", "claude"))
+    with pytest.raises(TimeoutError):
+        asyncio.run(asyncio.wait_for(run, 0.05))
+    assert proc.killed is True
 
 
 async def test_the_pointer_moves_up_when_it_is_below_the_option(git):

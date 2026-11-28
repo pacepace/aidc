@@ -116,6 +116,8 @@ async def clean_session_watchers():
         ss.pending_drainers.clear()
         ss.settle_state.clear()
         ss.session_send_locks.clear()
+        ss.git_answer_locks.clear()
+        ss.git_answers_claimed.clear()
         ss.sent_awaiting_echo.clear()
         ss.hook_events_read.clear()
         ss.hook_turn_event.clear()

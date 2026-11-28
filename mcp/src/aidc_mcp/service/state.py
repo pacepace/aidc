@@ -55,6 +55,16 @@ invoke_locks: dict[str, asyncio.Lock] = {}
 # Per-session asyncio locks: serialize concurrent session_send calls.
 session_send_locks: dict[str, asyncio.Lock] = {}
 
+# One answer to the git agent's question at a time (sending.send): held across the
+# holder's decision and the question menu, so a second answer that raced the first is
+# decided and put to the menu only once the first is done, and finds the request decided
+# (live 2026-11-28: the winner found the menu gone, chosen by the loser meanwhile).
+git_answer_locks: dict[str, asyncio.Lock] = {}
+# The git request ids an answer is being carried out for (or waits on that lock for), by
+# session: a second answer for the same request returns at once (answer_in_progress) rather
+# than wait out the first's push.
+git_answers_claimed: dict[str, set[str]] = {}
+
 
 # Per-session FIFO of prompts accepted but not yet pasted (design-10 S4, MCP-30). A
 # dev-agent turn routinely outlives any sane inline wait — prod 2026-08-22 conv
@@ -172,7 +182,7 @@ def forget_session_send_state(name: str) -> None:
             table.pop(name, None)
         else:
             table.discard(name)
-    for locks in (invoke_locks, taint_locks):
+    for locks in (invoke_locks, taint_locks, git_answer_locks):
         lock = locks.get(name)
         if lock is not None and not lock.locked():
             del locks[name]
@@ -333,6 +343,8 @@ LIFETIMES: dict[str, tuple[str, str]] = {
     "background_tasks": (TASK, "each task removes itself when done (common.fire)"),
     "pending_drainers": (TASK, "the drainer removes itself when it ends"),
     "session_watchers": (TASK, "the watcher's done callback, or session_unwatch"),
+    "git_answers_claimed": (TASK, "the answer that claimed a request id removes it when it "
+                                  "ends, and the session's entry once it is empty"),
     "invokes_in_flight": (TASK, "keyed by run id; the call removes it when its run ends"),
     "pending_sends": (TASK, "the drainer removes a session's queue once it is empty, and "
                             "a gone session's queue is dead-lettered and removed (MCP-30)"),
@@ -340,6 +352,8 @@ LIFETIMES: dict[str, tuple[str, str]] = {
                                  "second send paste into the same window at once"),
     "invoke_locks": (KEPT, "dropped by forget_session_send_state only when no run holds it"),
     "taint_locks": (KEPT, "dropped by forget_session_send_state only when no check holds it"),
+    "git_answer_locks": (KEPT, "dropped by forget_session_send_state only when no answer "
+                               "holds it"),
     "queue_loaded": (KEPT, "a saved queue is read once per process; a session created again "
                            "has its old queue dropped (MCP-33) and its new one saved from "
                            "memory, never read back over it"),

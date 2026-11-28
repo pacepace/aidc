@@ -889,11 +889,63 @@ async def send(
     # so a full queue (which fills while that menu is open: every prompt waits behind it) does
     # not hold it back.
     if answer.decision is not None:
-        decided = await gitapprove.carry_out(answer.decision)
-        return await _answer_git_question(name, conversation_id, container, answer.decision,
-                                          decided, announce)
+        claimed = ss.git_answers_claimed.setdefault(name, set())
+        if answer.decision.request_id in claimed:
+            # Another answer for this same request is being carried out (or waits its turn):
+            # this one adds nothing, so it does not wait out that answer's push.
+            return _answer_in_progress(name, answer.decision)
+        claimed.add(answer.decision.request_id)
+        try:
+            return await _decide_git_answer(name, conversation_id, container,
+                                            answer.decision, announce)
+        finally:
+            claimed.discard(answer.decision.request_id)
+            if not claimed:
+                ss.git_answers_claimed.pop(name, None)
     return await _send_accepted(name, prompt, conversation_id, sent_by, sender_label,
                                 deliver, container, announce)
+
+
+async def _decide_git_answer(name: str, conversation_id: str | None, container: str,
+                             decision: gitapprove.Decision,
+                             announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
+    """Carry out an answer to the git agent's question and put it to the menu, one answer at
+    a time."""
+    no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
+    # One answer at a time, from the holder's decision to the menu: two answers sent
+    # together (from two orchestrator sessions) would otherwise both find the question
+    # open, and the one that lost at the holder could choose the option in the menu
+    # while the winner's push ran, so the winner found no menu (live 2026-11-28). Held
+    # here, the second is decided after the first is done: the holder says
+    # already_decided, and the menu is gone. Taken before the send lock (inside
+    # answer_question_menu) and only here, so the two cannot be taken in the other
+    # order. Every wait under it has a timeout: the holder's (DECIDE_TIMEOUT_S,
+    # LIST_TIMEOUT_S) and each tmux command of the menu answer's
+    # (_MENU_EXEC_TIMEOUT_S), with a fixed number of polls between them.
+    git_lock = ss.git_answer_locks.setdefault(name, asyncio.Lock())
+    async with git_lock:
+        decided = await gitapprove.carry_out(decision)
+        return await _answer_git_question(name, conversation_id, container,
+                                          decision, decided, no_watch_reason)
+
+
+def _answer_in_progress(name: str, decision: gitapprove.Decision) -> dict[str, Any]:
+    """session_send's result for an answer to a git request that another answer is being
+    carried out for: nothing is run, chosen or typed."""
+    audit.log_event("git_request_answer_in_progress", session=name,
+                    request_id=decision.request_id, decision=decision.verb)
+    return com.envelope_ok({
+        "status": "answer_in_progress", "session": name, "prompt_id": ts.new_prompt_id(),
+        "question_answered": False,
+        "git_request": {"request_id": decision.request_id, "decision": decision.verb,
+                        "done": False, "in_progress": True},
+        "window": tmx.SESSION_WINDOW,
+        "delivery": (f"Another answer for git request {decision.request_id} is being carried "
+                     "out now (git_request.in_progress), so this one did nothing: the git "
+                     "container was not asked, nothing was chosen in the git agent's question "
+                     "and nothing was typed into the session. Do NOT re-send: that answer's "
+                     "outcome reaches the orchestrator that sent it, and aidc git requests "
+                     "shows how the request was decided.")})
 
 
 async def _ensure_watcher(name: str, conversation_id: str | None,
@@ -917,12 +969,19 @@ async def _ensure_watcher(name: str, conversation_id: str | None,
 #: and how far apart, while Claude Code redraws it after a key.
 _MENU_POLLS = 10
 _MENU_POLL_S = 0.3
+#: how long one tmux command of the menu answer (a capture, the keys) may take: it runs
+#: under the git answer lock and the send lock, so a hung exec must not hold them (and
+#: every later decision and paste) for ever
+_MENU_EXEC_TIMEOUT_S = 15.0
 
 #: why answer_question_menu did not answer, for session_send's result
 QUESTION_NOT_ANSWERED = {
     "request_not_decided": "the git request was not decided, so its question is left open: "
                            "send the answer again, or decide with aidc git approve|deny <id>",
     "no_question_on_screen": "Claude's question menu is not on the session's screen",
+    "question_screen_unread": "the session's screen could not be read (empty, or not a "
+                              "screen aidc knows), so the question menu was not answered and "
+                              "whether it is still open cannot be told",
     "another_question": "the question on the screen does not name this git request",
     "several_questions": "the question menu holds more than one question",
     "no_such_option": "the question menu offers no such option",
@@ -934,6 +993,11 @@ QUESTION_NOT_ANSWERED = {
                      "answered cannot be told",
     "another_dialog": "Enter was pressed on the option, and the screen now shows another "
                       "dialog instead of this question (the agent's next step waits on it)",
+    "dialog_on_screen": "the session's screen shows another dialog where the question menu "
+                        "was, so nothing was chosen",
+    "menu_timed_out": "a tmux command to the session's window did not finish in "
+                      f"{int(_MENU_EXEC_TIMEOUT_S)} s and was stopped, so whether the option "
+                      "was chosen in the question cannot be told",
     "outcome_unknown": "whether the git container ran the request cannot be told, so its "
                        "question is left as it is",
 }
@@ -956,7 +1020,8 @@ async def _read_question(container: str, name: str
     """The screen, and the question open on it (turns.open_question, the screen alone: the
     menu is answered only where it is seen, so a screen that cannot be read or classified
     is UNKNOWN)."""
-    raw = await tmx.capture_screen(container, tmx.SESSION_WINDOW)
+    raw = await asyncio.wait_for(tmx.capture_screen(container, tmx.SESSION_WINDOW),
+                                 _MENU_EXEC_TIMEOUT_S)
     ss.last_screen_raw[name] = raw
     screen = scr.classify(raw)
     return screen, tn.open_question(None, screen)
@@ -983,8 +1048,34 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
     A failed or empty read, or one aidc cannot classify, is not taken for the menu gone.
     Called under the session's send lock, so no paste goes in meanwhile.
 
-    Returns (why not, or "", the dialog's name when why not is another_dialog)."""
-    _, asked = await _read_question(container, name)
+    The first read decides whether there is a menu to answer: none read is
+    "question_screen_unread" (never taken for no question), another dialog in its place
+    "dialog_on_screen" (named in `dialog`), the input box "no_question_on_screen". Each tmux
+    command is bounded (_MENU_EXEC_TIMEOUT_S, the exec killed): one that does not finish is
+    "menu_timed_out", never answered.
+
+    Returns (why not, or "", the dialog's name when why not is another_dialog or
+    dialog_on_screen)."""
+    try:
+        return await _answer_menu(container, name, choice, must_name)
+    except TimeoutError:
+        return "menu_timed_out", ""
+
+
+async def _keys(container: str, args: list[str]) -> int:
+    return await asyncio.wait_for(tmx.tmux_exec(container, args), _MENU_EXEC_TIMEOUT_S)
+
+
+async def _answer_menu(container: str, name: str, choice: str, must_name: str
+                       ) -> tuple[str, str]:
+    screen, asked = await _read_question(container, name)
+    if asked is tn.UNKNOWN:
+        # Not read is not "no question": the menu may still be there.
+        return "question_screen_unread", ""
+    if asked is None and screen.input_box == scr.NOT_AT_PROMPT:
+        # A dialog (a permission prompt, say) where the menu was: something waits for a
+        # person, so the result never says nothing is open.
+        return "dialog_on_screen", dialog_name(screen)
     if not isinstance(asked, tn.OpenQuestion) or asked.menu is None:
         return "no_question_on_screen", ""
     if not _names(asked, must_name):
@@ -1003,8 +1094,8 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
         # One move, from where the pointer was read; then only read until it shows there.
         # Keys sent again on a screen not redrawn yet would overshoot.
         key = "Down" if target > menu.pointer else "Up"
-        if await tmx.tmux_exec(container, ["send-keys", "-t", target_window,
-                                           *[key] * abs(target - menu.pointer)]) != 0:
+        if await _keys(container, ["send-keys", "-t", target_window,
+                                   *[key] * abs(target - menu.pointer)]) != 0:
             return "keys_not_sent", ""
         for _ in range(_MENU_POLLS):
             await asyncio.sleep(_MENU_POLL_S)
@@ -1016,7 +1107,7 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
                 break
         else:
             return "pointer_not_moved", ""
-    if await tmx.tmux_exec(container, ["send-keys", "-t", target_window, "Enter"]) != 0:
+    if await _keys(container, ["send-keys", "-t", target_window, "Enter"]) != 0:
         return "keys_not_sent", ""
     why_not, dialog = "screen_unread", ""
     for _ in range(_MENU_POLLS):
@@ -1036,14 +1127,14 @@ async def answer_question_menu(container: str, name: str, choice: str, must_name
 
 async def _answer_git_question(name: str, conversation_id: str | None, container: str,
                                decision: gitapprove.Decision, decided: dict[str, Any],
-                               announce: Callable[[], Awaitable[None]]) -> dict[str, Any]:
+                               no_watch_reason: str) -> dict[str, Any]:
     """session_send's end for an answer to the git agent's question about a git request,
     once the holder has carried it out: the same option is chosen in the agent's question
     menu, so its turn goes on (the menu takes no typed text). The holder's decision is what
     counts; the menu only lets the agent go on, so a menu that could not be answered is
     reported, never a failed send. Nothing is queued: typed text never reaches the menu,
-    and pasted after it, it would be a second, stray prompt."""
-    no_watch_reason = await _ensure_watcher(name, conversation_id, announce)
+    and pasted after it, it would be a second, stray prompt. Called under the session's
+    git answer lock (send), so no other answer is decided or put to the menu meanwhile."""
     dialog = ""
     # Decided, or no longer waiting: the option is chosen so the agent goes on and reports
     # the request's state (a failed one too). Only a request still waiting keeps its
@@ -1061,6 +1152,15 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
     # (no longer open); what waits now is that dialog, named in `dialog`.
     replaced = why_not == "another_dialog"
     answered = not why_not or replaced
+    # No longer waiting at the holder (decided by this answer or before it, or run and
+    # failed) and a screen read with no question on it: the question was answered already
+    # (by another answer, or at the git agent's terminal), so it is not open, and nothing is
+    # left to send (live 2026-11-28: the winner of a race was told it was still open). So
+    # is a question about another request in its place: the agent went on to the next one,
+    # whose menu is never touched for this answer.
+    gone = why_not in ("no_question_on_screen", "another_question")
+    # A dialog where the menu was, before anything was chosen: a person must answer it.
+    dialog_instead = why_not == "dialog_on_screen"
     audit.log_event("git_question_answered" if answered else "git_question_not_answered",
                     session=name, request_id=decision.request_id, option=decision.verb,
                     reason=why_not, dialog=dialog)
@@ -1075,6 +1175,17 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
     option = decision.verb.capitalize()
     failed = bool(decided.get("failed"))
     holder_said = " ".join(str(decided.get("message", "")).split())[-500:]
+    gone_said = (
+        "The git agent's question about it was answered already: the question now on its "
+        "screen is about another git request, and nothing was chosen in it (status "
+        "decided_no_question)." if why_not == "another_question"
+        else "The git agent's question about it was answered already: no question menu is "
+             "on its screen (status decided_no_question), so nothing was chosen in it.")
+    dialog_said = (f"The git agent's question is not on its screen: it shows {dialog} "
+                   "instead (status dialog_open, dialog), waiting for a person, and nothing "
+                   "was chosen.")
+    settled = (" The request was already decided (git_request.already_decided), so this "
+               "answer approved or denied nothing." if decided.get("already_decided") else "")
     if failed:
         # The holder ran it and it failed: the request is failed now, so sending the same
         # answer again decides nothing.
@@ -1084,6 +1195,9 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                 if replaced
                 else f"{option} was chosen in the git agent's question, so it goes on and "
                      f"reports the failed request; its reply comes {where}." if answered
+                else gone_said if gone
+                else f"{dialog_said} Tell the user to look at the git agent's terminal."
+                if dialog_instead
                 else f"The git agent's question was not answered: "
                      f"{QUESTION_NOT_ANSWERED[why_not]}"
                      + (f" ({dialog})" if dialog else "") + ".")
@@ -1093,17 +1207,30 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                     f"{menu} Nothing was typed into the session. Do NOT re-send the answer: it "
                     "would decide nothing. Tell the user why it failed; once that is fixed "
                     "(for example aidc git login), the session asks again.")
-    elif decided.get("already_decided") and why_not == "no_question_on_screen":
+    elif gone and decided.get("already_decided"):
         # Decided before this answer (another answer won the race, or it was decided
         # outside): the question is gone with it, and nothing is left to send.
         delivery = (f"git request {decision.request_id} was already decided "
-                    "(git_request.already_decided), and the git agent has no question about "
-                    "it on screen: this answer approved or denied nothing, and nothing was "
-                    "sent. Do NOT re-send; git-requests show, or aidc git requests, says how "
-                    "it was decided.")
+                    f"(git_request.already_decided). {gone_said} This answer approved or "
+                    "denied nothing, and nothing was sent. Do NOT re-send; git-requests show, "
+                    "or aidc git requests, says how it was decided.")
+    elif gone:
+        # This answer decided it, and by the time the menu was read it had been answered
+        # (another answer that lost at the holder chose its option, or a person did).
+        delivery = (f"Decided: the {option} was carried out (git_request.done). {gone_said} "
+                    f"The agent goes on, and its reply comes {where}. Nothing was typed into "
+                    "the session. Do NOT re-send.")
+    elif dialog_instead:
+        delivery = (f"The git request's decision stands (git_request).{settled} "
+                    f"{dialog_said} Nothing was typed into the session. Do NOT re-send; tell "
+                    "the user to look at the git agent's terminal.")
+    elif why_not == "menu_timed_out":
+        delivery = (f"The git request's decision stands (git_request).{settled} Whether "
+                    f"{option} was chosen in the git agent's question is NOT KNOWN: "
+                    f"{QUESTION_NOT_ANSWERED[why_not]}. Nothing was pasted into the session. "
+                    "Do NOT re-send; tell the user to look at the git agent's terminal (if the "
+                    f"question still waits, {option} there lets it go on).")
     elif answered and not replaced:
-        settled = (" The request was already decided (git_request.already_decided), so this "
-                   "answer approved or denied nothing." if decided.get("already_decided") else "")
         delivery = (f"Answered: {option} was chosen in the git agent's question, so its turn "
                     f"goes on; its reply comes {where}.{settled} Nothing else was sent. "
                     "Do NOT re-send.")
@@ -1129,14 +1256,20 @@ async def _answer_git_question(name: str, conversation_id: str | None, container
                     f"shows {dialog} instead (status dialog_open, dialog), waiting for a "
                     "person. Nothing was typed into the session. Tell the user to look at the "
                     "git agent's terminal.")
+    elif why_not == "question_screen_unread":
+        delivery = (f"The git request's decision stands (git_request), but the git agent's "
+                    f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "
+                    "was typed into the session. Tell the user to look at the git agent's "
+                    f"terminal ({option} there lets it go on if the question still waits).")
     else:
         delivery = (f"The git request's decision stands (git_request), but the git agent's "
                     f"question was not answered: {QUESTION_NOT_ANSWERED[why_not]}. Nothing "
                     "was typed into the session. Tell the user the question is still open in "
                     f"the git agent's terminal ({option} there lets it go on).")
     return com.envelope_ok({
-        "status": ("dialog_open" if replaced else "answered_question" if answered
-                   else "question_open"),
+        "status": ("dialog_open" if replaced or dialog_instead
+                   else "answered_question" if answered
+                   else "decided_no_question" if gone else "question_open"),
         "session": name, "prompt_id": ts.new_prompt_id(), "reply_goes": reply_goes,
         "question_answered": answered,
         **({"question_not_answered": why_not} if why_not and not replaced else {}),

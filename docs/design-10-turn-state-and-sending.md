@@ -611,8 +611,35 @@ into the question:
   again. When the holder did not say it was done and neither the request's result nor the
   waiting list can be read after, whether it ran is not known: `code`
   `git_request_outcome_unknown`, the question is left alone, and the delivery says to check
-  the request before answering again (never "still waits, send again").
-- **Reported.** The result (status `answered_question`, `dialog_open`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
+  the request before answering again (never "still waits, send again"). A request no longer
+  waiting at the holder (decided by this answer or another, or failed) whose screen, read,
+  shows no question menu, or a question about another request, was answered already (by
+  another answer, or at the terminal): status `decided_no_question`, `question_answered:
+  false`, `question_not_answered` `no_question_on_screen` or `another_question`, and the
+  delivery says not to re-send, never that the question is still open (live 2026-11-28: the
+  winner of a race was told it was). Another request's menu is never touched for this
+  answer. A screen that cannot be read at that point is `question_screen_unread`, never taken
+  for no question; another dialog in the menu's place (a permission prompt) before anything
+  was chosen is status `dialog_open` with `question_answered: false`, `question_not_answered`
+  `dialog_on_screen` and the dialog named in `dialog`, never "nothing is open". Each tmux
+  command of the menu answer (a capture, the keys) is given `_MENU_EXEC_TIMEOUT_S` (15 s);
+  one that does not finish is killed and the result is `menu_timed_out`: whether the option
+  was chosen is not known, never answered, and the delivery sends the user to the terminal.
+- **One answer at a time.** The decision and the menu answer run under the session's git
+  answer lock (`state.git_answer_locks`), so two answers sent together (from two orchestrator
+  sessions) are decided and put to the menu one after the other: the second finds the
+  request decided at the holder (exit 3, `already_decided`) and the menu gone
+  (`decided_no_question`). Without it, both read the question open; the one that lost at the
+  holder chose the option in the menu while the winner's push ran, and the winner found no
+  menu. The lock is taken only here, before the send lock (taken inside the menu answer), so
+  the two are never taken in the other order. Every wait under it has a timeout: the
+  holder's (300 s to decide, 30 s to list or show) and each tmux command's (15 s), with a
+  fixed number of polls between them. An answer for a request another answer is already
+  being carried out for (or waits on the lock for) does not wait: it returns at once, status
+  `answer_in_progress` with `git_request.in_progress: true`, having run, chosen and typed
+  nothing, and says not to re-send (the other answer's outcome reaches the orchestrator that
+  sent it). An answer for a different request waits its turn.
+- **Reported.** The result (status `answered_question`, `dialog_open`, `decided_no_question`, `answer_in_progress`, or `question_open`) carries `git_request`: `request_id`, `decision`, `done`, the
   holder's `exit` and `message`, `already_decided: true` when the request was not waiting (or
   the holder exited 3), or `code` `git_request_not_decided` when the holder did not carry it
   out, with `failed: true` when it ran and failed, or `git_request_outcome_unknown` when

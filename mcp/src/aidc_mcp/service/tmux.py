@@ -6,6 +6,7 @@ No MCP types here (test_service_boundary): the tools in tearstools/ adapt it.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 
 from aidc_mcp import backend
 
@@ -16,14 +17,28 @@ SESSION_WINDOW = "claude"
 _SHELL_COMMANDS = frozenset({"bash", "sh", "zsh", "fish", "dash", ""})
 
 
+async def _killed_on_cancel[T](proc: asyncio.subprocess.Process, wait: Awaitable[T]) -> T:
+    """Await `wait` (the process's wait or communicate); when the caller gives up on it (a
+    timeout around the call cancels it), kill the process and reap it, as gitapprove's
+    _holder does, rather than leave the exec running."""
+    try:
+        return await wait
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
+
+
 async def tmux_exec(container: str, args: list[str]) -> int:
-    """Run a tmux command inside the container as vscode user. Returns exit code."""
+    """Run a tmux command inside the container as vscode user. Returns exit code. A
+    timeout around the call kills the exec."""
     proc = await asyncio.create_subprocess_exec(
         *backend.exec_argv(container, ["tmux", *args], user="vscode"),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    return await proc.wait()
+    return await _killed_on_cancel(proc, proc.wait())
 
 
 #: the file and the command whose presence says a session's Claude runs aidc's hooks (MCP-46)
@@ -58,14 +73,15 @@ def hooks_answer(output: str) -> bool | None:
 
 
 async def capture_screen(container: str, window: str) -> str:
-    """The visible pane with its escape sequences (-e), wrapped lines joined (-J)."""
+    """The visible pane with its escape sequences (-e), wrapped lines joined (-J). A
+    timeout around the call kills the exec."""
     proc = await asyncio.create_subprocess_exec(
         *backend.exec_argv(container, ["tmux", "capture-pane", "-t", f"main:{window}", "-p",
                                        "-e", "-J"], user="vscode"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    stdout, _ = await proc.communicate()
+    stdout, _ = await _killed_on_cancel(proc, proc.communicate())
     return stdout.decode("utf-8", errors="replace")
 
 

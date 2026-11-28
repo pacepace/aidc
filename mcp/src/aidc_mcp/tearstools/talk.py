@@ -159,10 +159,17 @@ class SessionSend(SessionAwareTool):
         so its turn goes on (status "answered_question"; nothing is pasted, typed text never
         reaches that menu). If the menu could not be answered, the decision still stands:
         status "question_open", question_answered false and question_not_answered saying
-        why; the question then waits for the user at the git agent's terminal. When the
-        option was chosen and another dialog took the question's place (a permission
-        prompt), the status is "dialog_open", question_answered true and `dialog` names
-        what waits for the user now. A request
+        why; the question then waits for the user at the git agent's terminal (with
+        question_screen_unread or menu_timed_out whether it still waits cannot be told:
+        have the user look). When another dialog (a permission prompt) is in the
+        question's place, the status is "dialog_open" and `dialog` names what waits for the
+        user now: question_answered true when the option was chosen first, false
+        (dialog_on_screen) when nothing was. When the request is decided (by this answer or
+        another first) and its question was already answered (no menu on screen, or one
+        about another request), the status is "decided_no_question": nothing was chosen;
+        do not re-send. An answer sent while another answer for the same request is being
+        carried out does nothing: status "answer_in_progress", git_request.in_progress; do
+        not re-send, the other answer's outcome reaches its sender. A request
         already decided (by the user, or by another answer first) is git_request's
         already_decided, not an error. One the git container ran that FAILED (a push
         refused, not logged in to GitHub) is git_request's code git_request_not_decided

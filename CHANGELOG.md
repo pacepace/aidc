@@ -67,7 +67,18 @@ What changes in use:
   be read or that the question is still open. When the git container's answer cannot be
   confirmed either way (it did not say it was done, and neither the request's result nor
   the waiting list could be read after), the result is `git_request_outcome_unknown` and
-  says to check the request before answering again, never to send the answer again. On Kubernetes this comes with the per-user MCP
+  says to check the request before answering again, never to send the answer again. Two
+  answers sent together (from two orchestrator sessions) are decided and put to the question
+  menu one at a time; a second answer for the same request returns at once, status
+  `answer_in_progress` (`git_request.in_progress`), having done nothing, rather than wait out
+  the first one's push. A request decided (by this answer or another) whose question was
+  already answered, with no menu left on screen or one about another request, is status
+  `decided_no_question` and says not to re-send, never that the question is still open in
+  the git agent's terminal; another request's menu is never touched. A permission prompt in
+  the menu's place before anything was chosen is status `dialog_open` with
+  `question_answered: false` (`dialog_on_screen`). Each tmux command of the menu answer is
+  stopped after 15 s (`menu_timed_out`: whether the option was chosen is not known), so a
+  hung exec cannot hold up later answers. On Kubernetes this comes with the per-user MCP
   server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a

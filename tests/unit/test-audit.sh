@@ -44,8 +44,10 @@ printf '#!/bin/sh\necho "kubectl stub: no cluster here" >&2\nexit 1\n' > "$SCRAT
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" PATH="$SCRATCH/bin:$PATH" \
     D_LOG="$SCRATCH/docker.log" K_LOG="$SCRATCH/kubectl.log" XDG_CACHE_HOME="$SCRATCH/cache"
 export AUDIT="$SCRATCH/trails"
-[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
-    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
+# docker and kubectl first on PATH are the stubs above, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 unset AIDC_MCP_MOUNTS AIDC_MCP_STATE_HOST AIDC_HOST_HOME AIDC_AUDIT_WARN_BYTES XDG_CACHE_HOME_UNUSED
 printf 'audit_dir: %s   # the trails\n' "$AUDIT" > "$HOME/.config/aidc/config.yaml"
 

@@ -23,6 +23,9 @@ PASS=0
 FAIL=0
 trap 'rm -rf "$S"' EXIT INT TERM
 mkdir -p "$S/bin"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$S/bin"
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }

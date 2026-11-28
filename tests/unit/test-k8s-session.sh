@@ -163,7 +163,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 
 export K_UID_FILE="$SCRATCH/dev-uid" AIDC_ROOT_FOR_STUB="$AIDC_ROOT" AIDC_K8S_READY_WAIT=4
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" PATH="$SCRATCH/bin:$PATH" K_STATE_SEED="$SCRATCH/state-seed.json"
+    K_APPLIED="$SCRATCH/applied.yaml" K_STATE_SEED="$SCRATCH/state-seed.json"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab

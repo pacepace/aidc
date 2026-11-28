@@ -65,6 +65,11 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
+# docker and kubectl are stubs first on PATH (every case runs with $SCRATCH/bin first), or the
+# test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 reset_state() {
     rm -f "$SCRATCH"/state/*

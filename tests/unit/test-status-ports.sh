@@ -36,7 +36,11 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
-export PATH="$SCRATCH/bin:$PATH" HOME="$SCRATCH/home"
+export HOME="$SCRATCH/home"
+# docker and kubectl are stubs first on PATH, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 ports() { "$AIDC_ROOT/scripts/aidc" status s 2>&1 </dev/null | sed -n '/-- port forwards --/,/adhoc/p'; }
 check() {

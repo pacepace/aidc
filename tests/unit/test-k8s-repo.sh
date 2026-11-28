@@ -114,7 +114,10 @@ STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" K_CM="$SCRATCH/configmap.json" AIDC_K8S_GIT_REPOS_WAIT=2 PATH="$SCRATCH/bin:$PATH"
+    K_APPLIED="$SCRATCH/applied.yaml" K_CM="$SCRATCH/configmap.json" AIDC_K8S_GIT_REPOS_WAIT=2
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 # backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
 # aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'

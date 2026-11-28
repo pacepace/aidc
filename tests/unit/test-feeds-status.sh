@@ -15,6 +15,9 @@ PASS=0
 FAIL=0
 trap 'rm -rf "$S"' EXIT INT TERM
 mkdir -p "$S/bin" "$S/home/.config/aidc"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$S/bin"
 
 assert_eq() { if [ "$2" = "$3" ]; then echo "  PASS: $1"; PASS=$((PASS + 1)); else echo "  FAIL: $1 (want '$2', got '$3')"; FAIL=$((FAIL + 1)); fi; }
 assert_has() { case "$3" in *"$2"*) echo "  PASS: $1"; PASS=$((PASS + 1)) ;; *) echo "  FAIL: $1 (no '$2' in: $3)"; FAIL=$((FAIL + 1)) ;; esac; }
@@ -92,6 +95,7 @@ exit 0
 STUB
 chmod +x "$S/bin/docker" "$S/bin/kubectl"
 export PATH="$S/bin:$PATH" HOME="$S/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+stub_tools_check
 
 echo "=== aidc status, Docker ==="
 dstatus() { "$AIDC_ROOT/scripts/aidc" status s --backend docker 2>&1 </dev/null | sed -n '/-- malware feeds --/,/^$/p'; }

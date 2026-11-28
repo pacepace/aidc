@@ -21,6 +21,10 @@ PASS=0
 FAIL=0
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 mkdir -p "$SCRATCH/bin" "$SCRATCH/home"
+# docker and kubectl first on PATH are stubs (the fake docker below), or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 eq() {
     local desc="$1" want="$2" got="$3"

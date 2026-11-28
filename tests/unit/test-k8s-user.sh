@@ -84,6 +84,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
     K_APPLIED="$SCRATCH/applied.yaml" K_RAN="$SCRATCH/ran" PATH="$SCRATCH/bin:$PATH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'
 kubernetes:
   context: lab

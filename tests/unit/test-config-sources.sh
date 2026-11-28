@@ -42,6 +42,12 @@ FAIL=0
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 mkdir -p "$SCRATCH/host/.config/aidc" "$SCRATCH/mount" "$SCRATCH/empty" "$SCRATCH/container" \
          "$SCRATCH/bin"
+# docker and kubectl first on PATH are stubs, or the test refuses to run; the inner shells' bare
+# PATH (where /usr/bin holds a real docker) starts with the stubs too.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/stub-bin"
+TEST_PATH="$STUB_TOOLS_DIR:$TEST_PATH"
 
 eq() {
     local desc="$1" want="$2" got="$3"

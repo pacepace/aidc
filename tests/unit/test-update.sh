@@ -39,6 +39,10 @@ eq() {
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# docker and kubectl are stubs first on PATH, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$TMP/stub-bin"
 
 # --- 1. install-kind detection ----------------------------------------------
 echo "-- install kind --"

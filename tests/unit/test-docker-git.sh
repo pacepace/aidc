@@ -123,7 +123,11 @@ exit 1
 STUB
 chmod +x "$SCRATCH/bin/docker"
 
-export HOME="$SCRATCH/home" PATH="$SCRATCH/bin:$PATH"
+export HOME="$SCRATCH/home"
+# docker and kubectl first on PATH are stubs (the docker one above), or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 export D_LOG="$SCRATCH/docker.log" D_STDIN="$SCRATCH/stdin"
 unset XDG_STATE_HOME AIDC_MCP_STATE_HOST AIDC_HOST_HOME AIDC_MCP_MOUNTS
 HOMEP=$(cd "$HOME" && pwd -P)

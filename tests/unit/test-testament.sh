@@ -64,7 +64,12 @@ mkdir -p "$out" && echo wheel > "$out/testament-${v}-py3-none-any.whl"
 echo "$v" >> "$UV_LOG"
 STUB
 chmod +x "$S/bin/uv"
-export UV_LOG="$S/uv.log" UV_ARGS="$S/uv-args.log" PATH="$S/bin:$PATH"
+export UV_LOG="$S/uv.log" UV_ARGS="$S/uv-args.log"
+# docker and kubectl are stubs first on PATH, in the same folder as the stubs above (put first on
+# PATH by stub_tools), or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$S/bin"
 : > "$UV_LOG"; : > "$UV_ARGS"
 
 # shellcheck source=../../scripts/lib/config.sh

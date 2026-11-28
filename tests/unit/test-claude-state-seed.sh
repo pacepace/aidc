@@ -13,15 +13,19 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# shellcheck source=../../scripts/lib/claude-state.sh
-. "$AIDC_ROOT/scripts/lib/claude-state.sh"
-
 SCRATCH="$AIDC_ROOT/tests/scratch/claude-state-unit-$$"
 PASS=0
 FAIL=0
 cleanup() { rm -rf "$SCRATCH" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 mkdir -p "$SCRATCH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/stub-bin"
+
+# shellcheck source=../../scripts/lib/claude-state.sh
+. "$AIDC_ROOT/scripts/lib/claude-state.sh"
 
 assert() {
     local desc="$1" cmd="$2"

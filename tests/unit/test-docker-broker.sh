@@ -83,8 +83,10 @@ unset KUBECONFIG
 export HOME="$SCRATCH/home" PATH="$SCRATCH/bin:$PATH" AIDC_VERSION_TAG=vtest
 export D_LOG="$SCRATCH/docker.log" D_CFG="$SCRATCH/copied-config.json"
 unset XDG_STATE_HOME AIDC_MCP_STATE_HOST AIDC_HOST_HOME AIDC_MCP_MOUNTS AIDC_BACKEND_FLAG
-[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
-    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
+# docker and kubectl first on PATH are the stubs above, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 CFG="$HOME/.config/aidc/config.yaml"
 run() { : > "$D_LOG"; rm -f "$D_LOG.started"; "$AIDC_ROOT/scripts/aidc" claude "$@" 2>&1 </dev/null; echo "exit=$?"; }
 calls() { cat "$D_LOG"; }

@@ -17,9 +17,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# shellcheck source=../../scripts/lib/common.sh
-. "$AIDC_ROOT/scripts/lib/common.sh"
-
 SCRATCH="$AIDC_ROOT/tests/scratch/retire-bridge-unit-$$"
 export HOME="$SCRATCH/home"
 CFG="$HOME/.config/aidc"
@@ -33,6 +30,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 mkdir -p "$CFG"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
+
+# shellcheck source=../../scripts/lib/common.sh
+. "$AIDC_ROOT/scripts/lib/common.sh"
 
 assert() {
     local desc="$1" cmd="$2"

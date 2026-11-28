@@ -75,10 +75,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 # backend's broker would otherwise be built and started for real).
 printf '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' > "$SCRATCH/bin/docker"; chmod +x "$SCRATCH/bin/docker"
 
-export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
-    PATH="$SCRATCH/bin:$PATH"
-[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] || { echo "FAIL: docker is not the stub ($(command -v docker)); refusing to run"; exit 1; }
-[ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] || { echo "FAIL: kubectl is not the stub ($(command -v kubectl)); refusing to run"; exit 1; }
+export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 CFG="$HOME/.config/aidc/config.yaml"
 cat > "$CFG" <<'CFG_K8S_CLAUDE_m3'
 backend: kubernetes

@@ -22,9 +22,14 @@ AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRATCH="$AIDC_ROOT/tests/scratch/upgrade-compose-unit-$$"
 PASS=0
 FAIL=0
-cleanup() { rm -rf "$SCRATCH" 2>/dev/null || true; }
+cleanup() { rm -rf "$SCRATCH" "$SCRATCH-bin" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 mkdir -p "$SCRATCH"
+# docker and kubectl are stubs first on PATH, or the test refuses to run. Their folder is beside
+# $SCRATCH, not in it: the cases count what $SCRATCH holds.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH-bin"
 
 assert() {
     local desc="$1" cmd="$2"

@@ -140,9 +140,10 @@ chmod +x "$SCRATCH/bin/kubectl"
 printf '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' > "$SCRATCH/bin/docker"; chmod +x "$SCRATCH/bin/docker"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" K_CMS="$SCRATCH/configmaps.json" PATH="$SCRATCH/bin:$PATH" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
-[ "$(command -v docker)" = "$SCRATCH/bin/docker" ] && [ "$(command -v kubectl)" = "$SCRATCH/bin/kubectl" ] \
-    || { echo "FAIL: docker or kubectl is not the stub ($(command -v docker), $(command -v kubectl)); refusing to run"; exit 1; }
+    K_APPLIED="$SCRATCH/applied.yaml" K_CMS="$SCRATCH/configmaps.json" TERM=xterm-test K_STDIN="$SCRATCH/stdin"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 # backend: kubernetes: the cluster is this user's default (aidc_default_backend), so aidc git and
 # aidc repo talk to its git container; a kubernetes: block alone would leave them on Docker.
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'

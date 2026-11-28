@@ -66,6 +66,12 @@ if grep -qx 'COPY aidc/ /aidc/' "$AIDC_ROOT/mcp/Dockerfile"; then
 else
     echo "  FAIL: mcp/Dockerfile does not COPY aidc/ /aidc/"; FAIL=$((FAIL + 1))
 fi
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+SCRATCH="$AIDC_ROOT/tests/scratch/mcp-image-deps-$$"
+trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 staged=$(AIDC_ROOT="$AIDC_ROOT" bash -c '. "$1/scripts/lib/common.sh" && aidc_build_context aidc/mcp:t "$1/mcp" && printf "%s|%s" "$AIDC_BUILD_CONTEXT" "$AIDC_BUILD_STAGE"' _ "$AIDC_ROOT")
 ctx=${staged%|*}; stage=${staged#*|}
 check_staged() {

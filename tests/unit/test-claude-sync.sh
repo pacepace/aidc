@@ -14,6 +14,11 @@ PASS=0
 FAIL=0
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 mkdir -p "$SCRATCH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (the aidc cases write
+# their own kubectl into the same folder).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/dbin"
 
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 

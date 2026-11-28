@@ -34,9 +34,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# shellcheck source=../../scripts/lib/common.sh
-. "$AIDC_ROOT/scripts/lib/common.sh"
-
 RUN_ID="scratchpad-unit-$$"
 SCRATCH="$AIDC_ROOT/tests/scratch/${RUN_ID}"
 PASS=0
@@ -46,6 +43,13 @@ cleanup() { rm -rf "$SCRATCH" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 mkdir -p "$SCRATCH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
+
+# shellcheck source=../../scripts/lib/common.sh
+. "$AIDC_ROOT/scripts/lib/common.sh"
 
 assert() {
     local desc="$1" cmd="$2"

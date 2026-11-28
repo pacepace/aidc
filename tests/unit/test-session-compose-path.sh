@@ -30,6 +30,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 mkdir -p "$SCRATCH/home"
+# docker and kubectl are stubs first on PATH, or the test refuses to run (the cases below write
+# their own docker stub into the same folder).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 assert() {
     local desc="$1" cmd="$2"
@@ -116,8 +121,9 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
-# kubectl answers nothing. Both are the stubs on the PATH the cases below run with, or the test
-# refuses to run: nothing here may reach this machine's daemon or a cluster.
+# kubectl answers nothing. Both are the stubs on the PATH the cases below run with (env -i, so
+# stub_tools' own check does not cover it), or the test refuses to run: nothing here may reach
+# this machine's daemon or a cluster.
 printf '#!/bin/sh\necho "kubectl stub: no cluster here" >&2\nexit 1\n' > "$SCRATCH/bin/kubectl"; chmod +x "$SCRATCH/bin/kubectl"
 [ "$(env -i PATH="$SCRATCH/bin:/usr/bin:/bin" sh -c 'command -v docker')" = "$SCRATCH/bin/docker" ] \
     && [ "$(env -i PATH="$SCRATCH/bin:/usr/bin:/bin" sh -c 'command -v kubectl')" = "$SCRATCH/bin/kubectl" ] \

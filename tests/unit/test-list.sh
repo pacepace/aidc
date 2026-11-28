@@ -55,6 +55,10 @@ esac
 exit 0
 STUB
 chmod +x "$SCRATCH/bin/docker"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 run_list() {   # env assignments...
     : > "$SCRATCH/docker.log"

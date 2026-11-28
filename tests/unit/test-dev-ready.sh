@@ -26,6 +26,11 @@ PASS=0
 FAIL=0
 trap 'chmod -R u+w "$SCRATCH" 2>/dev/null; rm -rf "$SCRATCH"' EXIT INT TERM
 mkdir -p "$SCRATCH/bin"
+# docker and kubectl first on PATH are stubs, or the test refuses to run. A folder of their own:
+# $SCRATCH/bin's chown and stat stubs go first only where a case puts them.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/tools"
 
 eq() {
     local desc="$1" want="$2" got="$3"

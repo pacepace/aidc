@@ -22,12 +22,20 @@
 #      out through the foreign network's gateway. That regression is invisible
 #      in normal use, which is exactly why it is pinned by a test.
 #
-# Hygiene: no scratch files, no Docker, no network. Pure function calls.
+# Hygiene: no Docker, no network. Pure function calls; the only scratch is the stub folder
+# (tests/scratch/, removed on exit).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+SCRATCH="$AIDC_ROOT/tests/scratch/network-attach-$$"
+trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 # shellcheck source=../../scripts/lib/network.sh
 . "$AIDC_ROOT/scripts/lib/network.sh"

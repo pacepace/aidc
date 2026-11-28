@@ -71,6 +71,10 @@ chmod +x "$SCRATCH/bin/getent"
 
 export HOME="$SCRATCH/home" K_LOG="$SCRATCH/kubectl.log" K_APPLIED="$SCRATCH/applied.yaml" \
     K_PUSHED="$SCRATCH/pushed" PATH="$SCRATCH/bin:$PATH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 CFG="$HOME/.config/aidc/config.yaml"
 write_config() {
     cat > "$CFG" <<CFG_K8S_SYNC_t2

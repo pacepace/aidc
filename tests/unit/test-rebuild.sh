@@ -55,6 +55,10 @@ case "\$1" in
 esac
 STUB
 chmod +x "$TMP/bin/docker"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$TMP/bin"
 
 # HOME is the test's: no testament configured (the user's own config is never read here).
 mkdir -p "$TMP/home"
@@ -70,6 +74,10 @@ echo
 echo "-- with the account broker set up here (its accounts' volume), its image is rebuilt too --"
 sed 's|^    info) exit 0 ;;|    info) exit 0 ;;\n    volume) [ "\$3" = aidc-claude-accounts ] \&\& exit 0; exit 1 ;;|' "$TMP/bin/docker" > "$TMP/docker2"
 mkdir -p "$TMP/bin2"; mv "$TMP/docker2" "$TMP/bin2/docker"; chmod +x "$TMP/bin2/docker"
+# Under bin2 first, docker is that stub and kubectl the helper's: refuse otherwise.
+[ "$(PATH="$TMP/bin2:$PATH" command -v docker)" = "$TMP/bin2/docker" ] \
+    && [ "$(PATH="$TMP/bin2:$PATH" command -v kubectl)" = "$STUB_TOOLS_DIR/kubectl" ] \
+    || { echo "FAIL: under bin2, docker or kubectl is not a stub; refusing to run"; exit 1; }
 : > "$TMP/builds.log"
 HOME="$TMP/home" PATH="$TMP/bin2:$PATH" bash "$AIDC_SCRIPTS/cmd-rebuild.sh" >"$TMP/out2.log" 2>&1
 eq "the broker is built, refreshing its Claude Code (its logins and renewals are Claude Code's)" "1" \

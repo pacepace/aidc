@@ -37,6 +37,9 @@ done
 # The rules, and the kinds each manifest function renders (settings from a scratch config; no
 # cluster is asked).
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 printf 'kubernetes:\n  storage_class: s\n  user: alice\n' > "$HOME/.config/aidc/config.yaml"
 # shellcheck disable=SC1091,SC2034
 (

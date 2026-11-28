@@ -162,8 +162,10 @@ STUB
 chmod +x "$SCRATCH/bin/curl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log" \
-    K_APPLIED="$SCRATCH/applied.yaml" K_STATE="$SCRATCH/state" PATH="$SCRATCH/bin:$PATH" \
-    XDG_STATE_HOME="$SCRATCH/xdg"
+    K_APPLIED="$SCRATCH/applied.yaml" K_STATE="$SCRATCH/state" XDG_STATE_HOME="$SCRATCH/xdg"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 AIDC_VERSION_TAG=$(head -n1 "$AIDC_ROOT/VERSION" | tr -d '\r' | tr '+' '_')
 export AIDC_VERSION_TAG
 cat > "$HOME/.config/aidc/config.yaml" <<'EOF'

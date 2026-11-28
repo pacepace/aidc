@@ -20,6 +20,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRATCH="$AIDC_ROOT/tests/scratch/egress-tcp-$$"
+trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+mkdir -p "$SCRATCH"
+# docker and kubectl first on PATH are stubs, or the test refuses to run.
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 # shellcheck source=../../scripts/lib/egress.sh
 . "$AIDC_ROOT/scripts/lib/egress.sh"

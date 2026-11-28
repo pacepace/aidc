@@ -92,7 +92,9 @@ STUB
 chmod +x "$SCRATCH/bin/kubectl"
 
 export HOME="$SCRATCH/home" AIDC_SCRIPTS="$AIDC_ROOT/scripts" K_LOG="$SCRATCH/kubectl.log"
-export PATH="$SCRATCH/bin:$PATH"
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 CFG="$HOME/.config/aidc/config.yaml"
 
 settings() {

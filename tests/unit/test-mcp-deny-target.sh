@@ -43,6 +43,10 @@ echo "Error: no such object: aidc-mcp" >&2
 exit 1
 STUB
 chmod +x "$SCRATCH/bin/docker"
+# docker and kubectl first on PATH are stubs, or the test refuses to run (tests/unit/lib/stub-tools.sh).
+# shellcheck source=lib/stub-tools.sh
+. "$SCRIPT_DIR/lib/stub-tools.sh"
+stub_tools "$SCRATCH/bin"
 
 target() {   # env assignments..., runs aidc_mcp_deny_target in a clean shell
     # Under the same shell options cmd-create.sh runs with, so a failing docker
@@ -97,7 +101,7 @@ assert_eq "cmd-create derives MCP_DENY from aidc_mcp_deny_target" "1" \
 
 echo "== aidc create refuses a malformed address or port with a message naming the key"
 validate() {   # MCP_DENY value -> runs cmd-create.sh's validation block
-    env -i PATH="/usr/bin:/bin" MCP_DENY="$1" bash -c '
+    env -i PATH="$STUB_TOOLS_DIR:/usr/bin:/bin" MCP_DENY="$1" bash -c '
         set -euo pipefail
         die() { echo "die: $*"; exit 1; }
         eval "$(awk "/^MCP_DENY=\\\$\\(aidc_mcp_deny_target\\)\$/{f=1; next} f && /^export MCP_DENY\$/{exit} f" "'"$AIDC_ROOT"'/scripts/cmd-create.sh")"

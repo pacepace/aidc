@@ -412,9 +412,12 @@ naming only the id into window `claude` when Claude runs there and is set up (`g
 never into a shell or Claude's first-run screens), then says so (`handed`). The agent runs
 `git-requests prompt <id>` (the session's text below a line, marked as data) and asks with
 AskUserQuestion, naming the request id, Deny first; aidc delivers that question to an
-orchestrator as any session's. Whatever the answer, the agent replies with the command that
-carries it out, `aidc git approve|deny <id>`, for the user to run on their machine: choosing
-Approve in the question approves nothing. An orchestrator's answer is carried out by the MCP
+orchestrator as any session's. Once it is answered, the agent reports the request's actual
+result (`git-requests show <id>`), and never tells anyone to run an approve or deny command
+(live 2026-11-27: after an orchestrator's answer it guessed the decision "probably" carried out
+and named the command to run): choosing Approve in the question approves nothing by itself, and
+the user decides with `aidc git approve|deny <id>` on their machine. It checks the repo's
+protections (`gitctl protection`) for every request, never reusing an earlier check. An orchestrator's answer is carried out by the MCP
 server, as gitreq, matched to the request id in the question (design-10 S10; on Docker built
 with plan chunk 13's fix round, on Kubernetes plan chunk 14). The one request the agent may be asking about is the one last handed over or the one
 it last ran `prompt` for; after a watcher start, when which one is open is not known, it is every
@@ -530,7 +533,7 @@ The owner ruling "Ask-mode git approvals bubble up through the orchestrator" has
 ask with its question tool, an orchestrator see that question as any session's, and the answer
 come back by `session_send` or from the user in the terminal. Refined 2026-11-26 (approvals out
 of the agent's reach, above): the answer no longer approves through the agent. The user's answer
-is `aidc git approve|deny <id>`, which the agent names; an orchestrator's answer is carried out
+is `aidc git approve|deny <id>` on their machine; an orchestrator's answer is carried out
 by the MCP server as gitreq (`git-requests approve|deny <id>` by exec as gitreq, which acts only
 on a request still waiting), matched to the request id the question names. Where the question's
 delivery stands (2026-11-24):

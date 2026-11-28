@@ -18,6 +18,10 @@ Strict, because an approval pushes to GitHub:
   its reason after it): anything else is `git_answer_unclear`, and nothing is sent.
 - A request no longer waiting (decided, or gone) is approved or denied by nothing; the option
   is still chosen in the question, and the result says so.
+- An answer sent while the agent has no question open answers nothing: no request waits for
+  it, so it is refused, `git_request_not_waiting`, and nothing is sent (live 2026-11-27: pasted
+  as a prompt, "Approve" left the agent with nothing to act on). Any other text goes in as an
+  ordinary prompt.
 
 The holder's own checks stand behind all of this: it refuses a request that is not waiting,
 one being run, or one whose working copy moved (git-requests.sh).
@@ -118,7 +122,22 @@ async def answer_in(name: str, prompt: str) -> Answer:
     objs, _, status = tn.session_transcript(name)
     question = ts.open_question(objs) if status == "ok" else None
     if question is None:
-        return NOTHING
+        parsed = parse_answer(prompt)
+        if parsed is None:
+            return NOTHING
+        unread = status != "ok"
+        audit.log_event("git_request_answer_refused", session=name,
+                        reason="transcript_unreadable" if unread else "no_question",
+                        decision=parsed[0])
+        why = ("its transcript could not be read, so no question it asks can be told"
+               if unread else "it has no question open")
+        return Answer(refusal=com.envelope_err(
+            f"This {parsed[0].capitalize()} answers no question of the git agent's: {why}, "
+            "so no git request is waiting for it. Nothing was approved or denied, and nothing "
+            "was sent. "
+            "Answer once the agent asks about a request (its question names the request's "
+            "id), or decide a waiting one with aidc git approve|deny <id>.",
+            code="git_request_not_waiting"))
     ids = sorted(set(_REQUEST_ID.findall(question_text(question))))
     if not ids:
         return NOTHING

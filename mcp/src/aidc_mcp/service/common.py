@@ -130,6 +130,9 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
                            "answer is not plainly Approve or Deny; nothing was sent"),
     "git_request_ambiguous": ("session_send to the git agent: its question names several git "
                               "requests; nothing was approved or sent"),
+    "git_request_not_waiting": ("session_send to the git agent: the text is a git answer "
+                                "(Approve or Deny) and no question of the agent's is open, so "
+                                "no request waits for it; nothing was sent"),
     "git_requests_unreadable": ("session_send to the git agent: its waiting git requests "
                                 "could not be read; nothing was approved or sent"),
 }

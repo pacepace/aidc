@@ -430,15 +430,18 @@ def paste_reason(state: SessionState) -> str:
 
 
 def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -> bool:
-    """Whether the transcript shows a pasted prompt arrived — and, when no turn will
-    ever claim it, give its send record back.
+    """Whether the transcript shows a pasted prompt arrived — and, when no typed prompt
+    line will ever claim it, hold its send record or give it back.
 
     Claude Code records a prompt pasted while it is working only as a `queue-operation`
     and answers it inside the running turn, so it never becomes a prompt line; if the
     turn ends first, it runs it next as a prompt line marked `promptSource: "queued"`,
-    which no turn attributes (human_prompt_text). A local slash command (/clear,
-    /model) arrives as a prompt line, but Claude Code runs it itself and no turn opens
-    for it. In each case no turn can claim the prompt, and its
+    which human_prompt_text does not attribute. Its entry is then held
+    (ts.hold_sent_entry): only such a queued line takes it, so the turn it opens is the
+    paste's, while a turn opened by a queued line nobody sent (the git container's
+    request watcher pastes its notices too) is not credited to the orchestrator. A local
+    slash command (/clear, /model) arrives as a prompt line, but Claude Code runs it
+    itself and no turn opens for it, so its entry is given back. Left as it was, either
     record would wait out its 24 h, where the same words typed by a person would match
     it and be delivered as the orchestrator's own prompt. Both watchers of a pasted
     prompt (the free check and watch_for_echo) come through here, because either can
@@ -459,7 +462,11 @@ def _prompt_arrived(session: str, text: str, sent_at: float, objs: list[dict]) -
     else:
         return True
     try:
-        entry = ts.take_sent_entry(ss.WATCHER_STATE_DIR, session, text)
+        # Held, not taken: the line Claude Code runs it in later (promptSource "queued")
+        # takes it, so its turn is the paste's whenever that turn is delivered; until then
+        # no typed line can match it. A local command's is given back.
+        entry = (ts.hold_sent_entry if event == "session_send_queued_by_claude"
+                 else ts.take_sent_entry)(ss.WATCHER_STATE_DIR, session, text)
         by = None if entry is None else entry["by"]
         if entry is not None and by is not None and event == "session_send_queued_by_claude":
             # The answer comes in a turn with no prompt of its own (the running one, or

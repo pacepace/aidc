@@ -294,9 +294,42 @@ async def test_an_unreadable_waiting_list_approves_nothing_and_says_retry(git):
 
 
 async def test_an_answered_question_is_not_open(git):
+    """Its question answered, the agent has none open: an Approve then waits for nothing."""
     git.state["objs"] = _asked(A, answered=True)
     res = await _send("Approve")
-    assert git.calls == [] and res["ok"] is True and "git_request" not in res["data"]
+    assert git.calls == [] and res["ok"] is False
+    assert res["error_code"] == "git_request_not_waiting"
+
+
+@pytest.mark.parametrize("objs", [_asked(A, answered=True), []], ids=["answered", "no-question"])
+@pytest.mark.parametrize("prompt", ["Approve", "approve.", "Deny", "Deny: not this one"])
+async def test_a_git_answer_with_no_question_open_is_refused_and_not_sent(git, objs, prompt):
+    """Live 2026-11-27: an "Approve" sent while the agent asked nothing was pasted as a
+    prompt, and the agent answered that it had nothing to act on. No request waits for
+    such an answer, so it is refused, nothing decided, nothing pasted or queued."""
+    git.state["objs"] = objs
+    res = await _send(prompt)
+    assert res["ok"] is False and res["error_code"] == "git_request_not_waiting"
+    assert "no question open" in res["error"]
+    assert git.calls == [] and git.wiring.paste_calls == [] and git.menu.keys == []
+    assert not ss.pending_sends.get(backend.GIT_SESSION)
+
+
+async def test_a_git_answer_with_an_unreadable_transcript_says_so(git, monkeypatch):
+    """Refused as well (no question can be told), and the reason says why."""
+    monkeypatch.setattr(tn, "session_transcript", lambda name: ([], 0.0, "unreadable"))
+    res = await _send("Approve")
+    assert res["error_code"] == "git_request_not_waiting" and "could not be read" in res["error"]
+    assert git.calls == [] and git.wiring.paste_calls == []
+
+
+@pytest.mark.parametrize("prompt", [
+    "Approve if the tests pass", "list the waiting requests", "What is waiting?",
+])
+async def test_an_ordinary_prompt_with_no_question_open_goes_in(git, prompt):
+    git.state["objs"] = _asked(A, answered=True)
+    res = await _send(prompt)
+    assert res["ok"] is True and "git_request" not in res["data"] and git.calls == []
 
 
 async def test_a_question_naming_no_request_is_an_ordinary_send(git):

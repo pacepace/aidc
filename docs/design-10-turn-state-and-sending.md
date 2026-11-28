@@ -289,6 +289,7 @@ missing a code or uses one outside the set:
 | `session_outdated` | `session_send`: the session predates aidc 2.0's hook events, so whether it is free cannot be told (MCP-47); `session_status` reports `turn: "unknown"`, `why: "session_predates_hook_events"` | kill it and create it again (the git agent, which `aidc kill` refuses: `aidc rebuild`, then `aidc git setup`) | no |
 | `git_answer_unclear` | `session_send` to the git agent while its open question names one git request (waiting or not: the answer is read before the waiting list): the answer is not plainly Approve (alone) or Deny (with its reason), or the question offers no such option; nothing was approved or sent (S10) | fix the call: "Approve", or "Deny: <why>" | no |
 | `git_request_ambiguous` | `session_send` to the git agent: its open question names several git requests; nothing was approved or sent; `data.request_ids` names them (S10) | tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
+| `git_request_not_waiting` | `session_send` to the git agent: the text is plainly Approve or Deny (with its reason) and the agent has no question open, so no request waits for the answer; nothing was approved or sent (S10). In a successful result's `git_request`, the same code says the question's request was no longer waiting | wait for the agent's question, or tell the person (`aidc git approve <id>`, or `aidc git deny <id>`) | no |
 | `git_requests_unreadable` | `session_send` to the git agent: the git container's waiting requests could not be read; nothing was approved or sent (S10) | retry | yes |
 
 **Retryable** is what a failed call carries as `retryable` from 2.0 (TRS-05): whether the same
@@ -552,7 +553,9 @@ into the question:
 - **Which request.** The id comes from the agent's open question (its last AskUserQuestion with
   no tool_result, in the session's transcript), never from the orchestrator's text. A question
   naming no request id is an ordinary send; one naming several is refused,
-  `git_request_ambiguous`, nothing sent.
+  `git_request_ambiguous`, nothing sent. With no question open, a plain Approve or Deny
+  answers nothing: it is refused, `git_request_not_waiting`, nothing sent (live 2026-11-27:
+  pasted, it left the agent with nothing to act on); any other text is an ordinary send.
 - **Which decision.** The answer must start with Approve or Deny, Approve standing alone and Deny
   followed by its reason if any, and the question must offer that option. Anything else is
   refused, `git_answer_unclear`, nothing sent: an approval pushes to GitHub, so a conditional
@@ -788,11 +791,16 @@ reading of the session (`_join_running_turn`, under the send lock): idle, it sen
 pastes now through `_inject`, with its send record and echo hold, and returns `status:
 "joined_turn"`. The two-reading wait exists to keep a prompt out of a turn just starting, which is
 what joining asks for. Claude Code holds the paste as a queue-operation and hands it to the turn
-at its next tool boundary; `_prompt_arrived` sees the queue-operation, gives the send record back
-(no turn will claim the prompt) and logs `session_send_queued_by_claude`. The answer comes in the
-running turn's final reply, delivered as any reply. If the turn ends first, Claude Code runs the
-prompt next as a `promptSource: "queued"` line, which no turn attributes; `_prompt_arrived` gives
-that record back too.
+at its next tool boundary; `_prompt_arrived` sees the queue-operation, holds the send record
+(`hold_sent_entry`: no typed line can take it, so a person's same words later are not the MCP's)
+and logs `session_send_queued_by_claude`. The answer comes in the running turn's final reply,
+delivered as any reply. If the turn ends first, Claude Code runs the prompt next as a
+`promptSource: "queued"` line, which human_prompt_text does not attribute; the turn keeps it as
+`Turn.queued_prompts`, and the watcher matches it against the send record, held entries
+included. A held line that matches no entry was not the MCP's paste (a person typing while
+Claude worked, or the git container's request watcher pasting a notice): it is delivered as
+typed at the terminal, `prompt_origin` `"terminal"`, never as a continuation carrying the
+orchestrator's last prompt and its id (live 2026-11-27).
 
 A join is declined, and the prompt queued as `"queue"` would, with `join_declined` naming why,
 when: a prompt is already queued for the session (`queued_behind`: order is kept, a join never

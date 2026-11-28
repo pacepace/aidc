@@ -1817,6 +1817,92 @@ class TestTerminalPromptAttribution:
             ["p-open", "p-join"], []]
         assert rec.turns[0].pasted_at == own["pasted_at"]
 
+    async def test_a_held_prompt_no_one_sent_is_not_the_orchestrators(self, tmp_path):
+        """Live 2026-11-27: the git container's watcher pasted a request notice while the
+        agent was answering the orchestrator's prompt; Claude Code held it and ran it next
+        as a line marked promptSource "queued", and the turn it opened was delivered as
+        the orchestrator's, naming that earlier prompt's id. Nobody's send record holds
+        it, so it reads as typed at the terminal, with no batch."""
+        base, state = tmp_path / "t", ss.WATCHER_STATE_DIR
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        own = {"pasted_at": "2026-11-27T23:37:37Z",
+               "prompts": [{"prompt_id": "p-8bec", "sent_by": "", "conversation_id": "conv"}]}
+        ts.record_sent_prompt(state, "sess", "Approve", batch=own)
+        notice = "git request 1234 waits for the user's decision: run git-requests prompt 1234"
+        held = {**_typed("u2", notice), "promptSource": "queued"}
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "Approve"), _assistant("a1", "Nothing is waiting."),
+            held, _assistant("a2", "[Question] Git request 1234?")])
+        await _drain(base, state, rec)
+        assert [(t.prompt_origin, [p["prompt_id"] for p in t.batch]) for t in rec.turns] == [
+            ("orchestrator", ["p-8bec"]), ("terminal", [])]
+        assert rec.turns[1].text == ts.render_delivery("[Question] Git request 1234?", [notice])
+        assert rec.turns[1].pasted_at == "" and rec.turns[1].speaker == "human"
+
+    async def test_a_held_line_takes_the_newest_held_entry_and_beside_a_typed_one(self, tmp_path):
+        """An older held entry of the same words may be one Claude Code answered inside
+        a running turn, which no line takes: the newest is matched. Held lines that open a
+        turn beside a typed line are matched too, not left to wait out the record."""
+        base, state = tmp_path / "t", ss.WATCHER_STATE_DIR
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        def b(i):
+            return {"pasted_at": f"2026-11-27T10:0{i}:00Z",
+                    "prompts": [{"prompt_id": f"p-{i}", "sent_by": "", "conversation_id": "conv"}]}
+        for i in (1, 2):
+            ts.record_sent_prompt(state, "sess", "continue", batch=b(i))
+            assert ts.hold_sent_entry(state, "sess", "continue") is not None
+        _mk_transcript(base, "sess", "sid1", seed + [
+            _typed("u1", "by hand"), {**_typed("u2", "continue"), "promptSource": "queued"},
+            _assistant("a1", "Done.")])
+        await _drain(base, state, rec)
+        assert [p["prompt_id"] for p in rec.turns[0].batch] == ["p-2"]
+        assert rec.turns[0].prompt_origin == "terminal"      # "by hand" is quoted
+        assert rec.turns[0].text == ts.render_delivery("Done.", ["by hand"])
+
+    @pytest.mark.parametrize("seen", ["queue-operation", "queued-line", "not-yet"])
+    async def test_a_held_paste_of_the_mcps_answers_its_own_prompt(self, tmp_path, seen):
+        """The MCP's own paste held the same way is still the orchestrator's, with its own
+        batch: whether the send path saw it first as Claude Code's queue-operation or as
+        the held line (_prompt_arrived holds its entry), or not at all before the turn is
+        delivered (the line then takes the entry itself)."""
+        base, state = tmp_path / "t", ss.WATCHER_STATE_DIR
+        seed = [_user("u0", "seed"), _assistant("a0", "SEED")]
+        _mk_transcript(base, "sess", "sid1", seed)
+        rec = ContentRecorder()
+        await _drain(base, state, rec)
+        first = {"pasted_at": "2026-11-27T10:00:00Z",
+                 "prompts": [{"prompt_id": "p-1", "sent_by": "", "conversation_id": "conv"}]}
+        second = {"pasted_at": "2026-11-27T10:01:00Z",
+                  "prompts": [{"prompt_id": "p-2", "sent_by": "", "conversation_id": "conv"}]}
+        ts.record_sent_prompt(state, "sess", "first", batch=first)
+        ts.record_sent_prompt(state, "sess", "second", batch=second)
+        enqueue = {"type": "queue-operation", "operation": "enqueue", "content": "second"}
+        running = seed + [_typed("u1", "first"), enqueue]
+        lines = running + [_assistant("a1", "One."),
+                           {**_typed("u2", "second"), "promptSource": "queued"}]
+        if seen != "not-yet":
+            ts.record_prompt_origin(state, "sess", "orchestrator", batch=first)
+            assert tn._prompt_arrived("sess", "second", 0.0,
+                                      running if seen == "queue-operation" else lines)
+            # Held: a typed line of the same words is not the MCP's.
+            assert ts.take_sent_entry(state, "sess", "second") is None
+            assert ts.sent_prompts_remaining(state, "sess") == 1      # "first" only
+        _mk_transcript(base, "sess", "sid1", lines + [_assistant("a2", "Two.")])
+        await _drain(base, state, rec)
+        # Seen as a queue-operation, it may yet be answered in the running turn, so that
+        # turn's reply names it too (deliver="join"'s rule); its own turn names it alone.
+        joined = ["p-2"] if seen == "queue-operation" else []
+        assert [(t.prompt_origin, t.text, [p["prompt_id"] for p in t.batch])
+                for t in rec.turns] == [("orchestrator", "One.", ["p-1", *joined]),
+                                        ("orchestrator", "Two.", ["p-2"])]
+        assert ts.sent_prompts_remaining(state, "sess") == 0
+
     async def test_a_continuation_of_a_batch_turn_names_the_same_batch(self, tmp_path):
         """The reply that finishes a pasted batch's work may come in a continuation
         with no prompt of its own; it names the batch's prompts and paste time too, and

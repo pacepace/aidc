@@ -714,8 +714,9 @@ the commit you approve, or for a merge the pull request's head commit: a branch 
 that moves after the request is refused), `aidc git approve
 <id>` runs it, `aidc git deny <id> [why]` refuses it and the session reads why. Your git agent
 also asks about each waiting request with its question tool, but it cannot approve or deny
-anything: whatever you answer, it replies with the `aidc git approve|deny <id>` to run on your
-machine. Approvals happen only outside the git agent's reach (a user of their own in the git
+anything: answered in its terminal, the question approves nothing, and it replies with the
+request's actual state (still waiting for your `aidc git approve|deny <id>`); an orchestrator's
+answer is carried out by aidc's MCP server, and the agent then reports the result. Approvals happen only outside the git agent's reach (a user of their own in the git
 container holds and decides requests), so text a session wrote can never talk the agent into
 one. Reads (`gh pr view`, `gh pr list`) run at once. Requests and results are deleted after 30
 days.

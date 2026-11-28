@@ -22,8 +22,8 @@ from aidc_mcp.service import state as ss
 from aidc_mcp.service import turns as tn
 
 
-def _terminal_prompts(session: str, prompts: tuple[str, ...],
-                      state_dir: Path) -> tuple[list[str], str, dict | None]:
+def _terminal_prompts(session: str, prompts: tuple[str, ...], state_dir: Path, *,
+                      held: tuple[str, ...] = ()) -> tuple[list[str], str, dict | None]:
     """The subset of a turn's opening prompts that a PERSON typed at the terminal:
     every prompt that does not match one the MCP itself injected (each match
     consumes its record entry); who the injected ones were sent for, the
@@ -32,13 +32,21 @@ def _terminal_prompts(session: str, prompts: tuple[str, ...],
     paste's time and every batched prompt in paste order, or None when no match
     carried one). A record that cannot be updated counts the prompt as the MCP's
     own — an orchestrator prompt mislabelled as the person's is the confusion this
-    exists to remove, so it is the side never to err on."""
+    exists to remove, so it is the side never to err on.
+
+    ``held``: the held prompt lines Claude Code ran as the turn's opener too
+    (Turn.queued_prompts), matched after ``prompts``; they also take an entry the send
+    path held for them (_prompt_arrived). One that matches none was not the MCP's paste:
+    a person typed it while Claude worked, or something in the session pasted it (the git
+    container's request watcher, live 2026-11-27). Carried as a continuation, it read as an
+    answer to the orchestrator's last prompt and named that prompt's id; it reads as typed
+    at the terminal instead, as the same line does when Claude is idle."""
     typed: list[str] = []
     sent_by = ""
     batch: dict | None = None
-    for prompt in prompts:
+    for prompt, is_held in [*((p, False) for p in prompts), *((p, True) for p in held)]:
         try:
-            entry = ts.take_sent_entry(state_dir, session, prompt)
+            entry = ts.take_sent_entry(state_dir, session, prompt, held=is_held)
         except OSError as exc:
             audit.log_event("transcript_sent_record_failed", session=session,
                       error_type=type(exc).__name__, error=repr(exc))
@@ -93,7 +101,7 @@ def _with_joined(session: str, batch: dict | None, state_dir: Path) -> dict | No
     return merged
 
 
-def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
+def _carry_prompt_origin(session: str, prompted: bool, origin: str, sent_by: str,
                          batch: dict | None,
                          state_dir: Path) -> tuple[str, str, dict | None]:
     """Whose prompt a turn answers, and who sent it when a person did, carried
@@ -105,8 +113,9 @@ def _carry_prompt_origin(session: str, turn: ts.Turn, origin: str, sent_by: str,
     takes the recorded origin, and the pasted batch it answers. Delivered as "", a
     night of continuations of turns a person typed (2026-10-08) read to the
     orchestrator as replies to its own prompts. A record that cannot be written
-    leaves the origin as computed."""
-    if turn.prompts:
+    leaves the origin as computed. ``prompted``: the turn opened with prompts of its own
+    (Turn.prompts, or the held lines of Turn.queued_prompts)."""
+    if prompted:
         try:
             ts.record_prompt_origin(state_dir, session, origin, sent_by=sent_by, batch=batch)
         except OSError as exc:
@@ -700,18 +709,20 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
                       conversation_id=conversation_id, turn_uuid=turn.terminal_uuid)
         fingerprint = ts.delivery_fingerprint(turn) if deliverable else ""
         already_delivered = bool(fingerprint) and fingerprint in delivered_fps
+        # The prompts that opened the turn: typed lines, and held ones (Turn.queued_prompts).
+        opening = (*turn.prompts, *turn.queued_prompts)
         terminal_prompts, sent_by, batch = (
             ([], "", None) if already_delivered
-            else _terminal_prompts(session, turn.prompts, state_dir)
+            else _terminal_prompts(session, turn.prompts, state_dir, held=turn.queued_prompts)
         )
         # A prompt typed at the terminal outranks one sent for a person: the content
         # then quotes it, and only one origin goes with the reply.
         origin = ("terminal" if terminal_prompts else "person" if sent_by
-                  else "orchestrator" if turn.prompts else "")
+                  else "orchestrator" if opening else "")
         sent_by = sent_by if origin == "person" else ""
         if not already_delivered:
-            origin, sent_by, batch = _carry_prompt_origin(session, turn, origin, sent_by,
-                                                          batch, state_dir)
+            origin, sent_by, batch = _carry_prompt_origin(session, bool(opening), origin,
+                                                          sent_by, batch, state_dir)
             if deliverable:
                 batch = _with_joined(session, batch, state_dir)
         outgoing = dataclasses.replace(
@@ -721,7 +732,7 @@ async def _drain_once_body(session: str, conversation_id: str, callback_base: st
             sent_by=sent_by,
             pasted_at=batch["pasted_at"] if batch else "",
             batch=tuple(batch["prompts"]) if batch else (),
-            speaker=("human" if turn.prompts and len(terminal_prompts) == len(turn.prompts)
+            speaker=("human" if opening and len(terminal_prompts) == len(opening)
                      else "agent"),
         )
         if terminal_prompts:

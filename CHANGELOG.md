@@ -28,13 +28,17 @@ out, or change a mode. To upgrade:
 4. Give sessions their own git mode again if you had (`aidc git mode <session> rules|ask`):
    per-session modes start again from your mode.
 What changes in use:
-- Answering the git agent's question in its terminal no longer approves. It replies with the
-  command to run: `aidc git approve <id>` or `aidc git deny <id>`.
+- Answering the git agent's question in its terminal no longer approves. Once its question is
+  answered, the agent reports the request's actual result (`git-requests show`, which now
+  prints the holder's result), and never tells you to run an approve or deny command; a
+  request still waiting waits for your `aidc git approve <id>` or `aidc git deny <id>`. It
+  checks the repo's protections for every request, never reusing an earlier check.
 - On Docker an orchestrator approves by answering the git agent's question: `session_send git
   "Approve"` (or `"Deny: <why>"`) decides the waiting request the question names, as `gitreq`,
   and the result's `git_request` says what happened. Any other answer to such a question is
   refused unsent (`git_answer_unclear`), as is one to a question naming several requests
-  (`git_request_ambiguous`). On Kubernetes this comes with the per-user MCP
+  (`git_request_ambiguous`), and a plain Approve or Deny sent while the agent has no question
+  open (`git_request_not_waiting`): no request waits for it. On Kubernetes this comes with the per-user MCP
   server.
 - The git image's build context now takes the sessions' own `gh` stand-in, transcript mirror and
   hook writer from `.devcontainer/`; build it with `aidc rebuild` or `aidc k8s build`, not with a
@@ -236,6 +240,12 @@ and the envelope are unchanged; what an MCP caller sees differently:
   is already in a session's input box.
 
 ### Fixed
+- **A turn nobody sent is no longer credited to the orchestrator's last prompt.** A prompt
+  Claude Code held while it worked and ran next (a person typing then, or the git container
+  pasting a new request's notice) opened a turn delivered with `prompt_origin`
+  `"orchestrator"` and the id of the orchestrator's earlier prompt. It is now delivered as
+  typed at the terminal (`"terminal"`, the prompt quoted), as when Claude is idle; a held
+  prompt the MCP pasted still answers its own prompt id.
 - **A new cluster session starts at Claude's prompt.** Its first `~/.claude.json` is seeded as
   on Docker, from this machine's minus its account and every other project's state (an empty one
   when there is none, as for a session your MCP server makes), with onboarding marked done and

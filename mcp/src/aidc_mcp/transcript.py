@@ -94,6 +94,12 @@ class Turn:
     # The watcher matches these against the prompts IT injected to decide which
     # were typed at the terminal by a person (consume_sent_prompt, in the drain).
     prompts: tuple[str, ...] = ()
+    # The prompt lines Claude Code held while a turn ran and then ran as this turn's
+    # opener (promptSource "queued", see queued_prompt_text). Their line alone does not
+    # say who sent them, so the watcher matches them against the send record as it does
+    # `prompts`, held entries included (hold_sent_entry). Not part of equality: what
+    # opened the turn is told by `prompts` and the delivery's origin.
+    queued_prompts: tuple[str, ...] = field(default=(), compare=False)
     # Set by the watcher at delivery time: "terminal" when at least one prompt
     # was typed at the terminal (the delivered content then carries it), "person"
     # when the MCP injected it for a person named by session_send's ``sent_by``,
@@ -575,6 +581,17 @@ def human_prompt_text(obj: dict) -> str:
     return unwrap_paste(text).strip()
 
 
+def queued_prompt_text(obj: dict) -> str:
+    """The text of a prompt Claude Code held while a turn ran and then ran as a prompt
+    line of its own (``promptSource`` "queued"), by human_prompt_text's other rules; ""
+    for any other line. Whoever pasted or typed it, the line does not say: an MCP paste,
+    a person typing while Claude worked, or something in the session itself (the git
+    container's request watcher pastes its notices the same way)."""
+    if obj.get("promptSource") != "queued":
+        return ""
+    return human_prompt_text({**obj, "promptSource": "typed"})
+
+
 # The wrapper tags that open a slash command's own line. The command may be answered
 # by Claude (a skill, a custom command) or run locally (/clear, /login, /model); either
 # way a person typed it. The line alone does not say which: its neighbours do
@@ -810,6 +827,7 @@ def extract_completed_turns(objs: list[dict],
     has_terminal = False      # has this group reached a TERMINAL_STOP yet?
     committed_ok = True        # False when the committed terminal is an API error
     prompts: list[str] = []   # person-typed prompt lines that opened this group
+    queued: list[str] = []    # held prompt lines Claude Code ran as this group's opener
     saw_assistant = False     # has an assistant line been seen since the prompt(s)?
     interrupted = False       # was the group closed by an interrupt marker?
     superseded = 0            # replies followed by more work with no pushback between
@@ -833,7 +851,7 @@ def extract_completed_turns(objs: list[dict],
 
     def flush(end_of_read: bool = False) -> None:
         nonlocal pending, committed, terminal_uuid, has_terminal, committed_ok
-        nonlocal prompts, saw_assistant, interrupted, superseded, terminal_had_text
+        nonlocal prompts, queued, saw_assistant, interrupted, superseded, terminal_had_text
         nonlocal withdrawn_uuid, late_pushback, last_at, filler_after
         # Only a group that reached a terminal is a completed (deliverable) turn.
         # Deliver the text COMMITTED at that terminal — never the trailing `pending`
@@ -844,6 +862,7 @@ def extract_completed_turns(objs: list[dict],
         if has_terminal:
             turns.append(Turn(terminal_uuid=terminal_uuid, text=committed.strip(),
                               ok=committed_ok, prompts=tuple(prompts),
+                              queued_prompts=tuple(queued),
                               interrupted=interrupted, superseded=superseded,
                               late_pushback=late_pushback, filler_after=filler_after))
         elif withdrawn_uuid and dropped is not None and not end_of_read:
@@ -856,6 +875,7 @@ def extract_completed_turns(objs: list[dict],
         has_terminal = False
         committed_ok = True
         prompts = []
+        queued = []
         saw_assistant = False
         interrupted = False
         superseded = 0
@@ -904,8 +924,11 @@ def extract_completed_turns(objs: list[dict],
                 # typed text accumulates rather than being dropped by a flush.
                 if saw_assistant:
                     flush()
-                elif _is_system_sourced_prompt(obj):
+                elif _is_system_sourced_prompt(obj) and not queued_prompt_text(obj):
+                    # A held prompt line is someone's prompt, not one Claude Code raised:
+                    # it joins the prompts before it, as a typed line does.
                     prompts = []
+                    queued = []
                 # A local command or its output is nobody's request to Claude: it
                 # closes a reply before it, and adds no prompt to the next turn.
                 if _ends_without_reply(objs, index):
@@ -913,6 +936,9 @@ def extract_completed_turns(objs: list[dict],
                 typed = human_prompt_text(obj)
                 if typed:
                     prompts.append(typed)
+                held = queued_prompt_text(obj)
+                if held:
+                    queued.append(held)
             last_at = wall_time(obj) or last_at
             continue
 
@@ -1565,6 +1591,8 @@ def _load_sent_prompts(base_dir: Path, session: str, now: float) -> list[dict]:
             batch = _valid_batch(e.get("batch"))
             if batch:
                 entry["batch"] = batch
+            if e.get("held") is True:
+                entry["held"] = True
             out.append(entry)
     return out
 
@@ -1871,7 +1899,25 @@ def sent_prompts_remaining(base_dir: Path, session: str, *, now_fn=time.time) ->
     """Live (unexpired) entries still waiting to be matched — the health signal
     for the record: a count that only grows while replies keep arriving means
     matching has drifted (every reply then goes out under the terminal note)."""
-    return len(_load_sent_prompts(base_dir, session, now_fn()))
+    return sum(1 for e in _load_sent_prompts(base_dir, session, now_fn()) if not e.get("held"))
+
+
+def hold_sent_entry(base_dir: Path, session: str, text: str, *,
+                    now_fn=time.time) -> dict | None:
+    """The entry ``text`` matches, as take_sent_entry finds it, now marked held: Claude
+    Code took the paste while a turn ran, so it reaches the transcript only as a
+    queue-operation, or as a later prompt line marked promptSource "queued". Such a line
+    then takes the entry (take_sent_entry ``held``), and no typed line can: the same
+    words typed by a person later are not the MCP's. None when nothing matches."""
+    now = now_fn()
+    entries = _load_sent_prompts(base_dir, session, now)
+    fp = prompt_fingerprint(text)
+    for e in entries:
+        if e["fp"] == fp and not e.get("held"):
+            e["held"] = True
+            _save_sent_prompts(base_dir, session, entries)
+            return e
+    return None
 
 
 def take_sent_prompt(base_dir: Path, session: str, text: str, *,
@@ -1886,14 +1932,21 @@ def take_sent_prompt(base_dir: Path, session: str, text: str, *,
     return None if entry is None else entry["by"]
 
 
-def take_sent_entry(base_dir: Path, session: str, text: str, *,
+def take_sent_entry(base_dir: Path, session: str, text: str, *, held: bool = False,
                     now_fn=time.time) -> dict | None:
     """take_sent_prompt, returning the whole entry: ``by``, and ``batch`` when the
-    paste carried one."""
+    paste carried one. An entry Claude Code held (hold_sent_entry) is matched only for a
+    held prompt line (``held``), and first then, the newest first: an older held entry may
+    be one Claude Code answered inside a running turn, which no line ever takes; a typed
+    prompt line never takes one."""
     now = now_fn()
     entries = _load_sent_prompts(base_dir, session, now)
     fp = prompt_fingerprint(text)
-    for i, e in enumerate(entries):
+    order = ([i for i in reversed(range(len(entries))) if entries[i].get("held")]
+             + [i for i, e in enumerate(entries) if not e.get("held")]) if held \
+        else [i for i, e in enumerate(entries) if not e.get("held")]
+    for i in order:
+        e = entries[i]
         if e["fp"] == fp:
             del entries[i]
             _save_sent_prompts(base_dir, session, entries)

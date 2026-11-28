@@ -522,6 +522,10 @@ USING_LONG_LIVED_TOKEN=0
 
 dk_claude_session_ready "$NAME"
 export CLAUDE_CONFIG_MOUNT CLAUDE_CONFIG_VOLUME_DECL CLAUDE_BROKER
+# A create that fails from here until compose is asked to start the session forgets the folder
+# the broker just made (scripts/docker/broker.sh, dk_claude_create_cleanup).
+AIDC_COMPOSE_STARTED=0
+trap 'dk_claude_create_cleanup "$NAME" "$?" "$AIDC_COMPOSE_STARTED"' EXIT
 if [ "$DK_CLAUDE_VIA" = broker ]; then
     if [ -f "$AIDC_CLAUDE_TOKEN_FILE" ]; then
         info "auth: your long-lived token is not handed on (it would override the broker's credentials)"
@@ -1088,6 +1092,7 @@ remove_session_networks "$NAME" || \
     die "a network from an earlier session named '${NAME}' could not be removed; remove it by hand: docker network rm aidc-${NAME}-net aidc-${NAME}-egress"
 
 info "starting compose project: $PROJECT"
+AIDC_COMPOSE_STARTED=1
 docker compose -p "$PROJECT" -f "$COMPOSE_OUT" up -d
 
 # ---- wait for Squid healthy --------------------------------------------------

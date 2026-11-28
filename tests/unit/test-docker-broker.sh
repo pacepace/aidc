@@ -41,6 +41,7 @@ assert_not_has() {
 #   D_VOLS="a b"       volumes that exist (default none)
 #   D_EXEC_RC=1        claude-broker in the container fails
 #   D_GITMOUNT=1       the git container running now has its folder of aidc-claude-config
+#   D_ENGINE=25.0.3    the Docker Engine's version (default 29.8.0)
 # `cp <dir> <ct>:<dest>` keeps the copied folder's config.json at $D_CFG.
 cat > "$SCRATCH/bin/docker" <<'STUB_DOCKER_BROKER_q8'
 #!/usr/bin/env bash
@@ -67,6 +68,7 @@ case "$a" in
     "exec aidc-claude-broker claude-broker "*) exit "${D_EXEC_RC:-0}" ;;
     "exec -it "*) exit 0 ;;
     "logs "*) echo "a log line"; exit 0 ;;
+    "version -f {{.Server.Version}}") echo "${D_ENGINE:-29.8.0}"; exit 0 ;;
     "run --rm "*) echo seeded; exit 0 ;;
 esac
 echo "docker stub: unexpected: $a" >&2
@@ -196,6 +198,29 @@ assert_eq "...stopped too" "none|||" "$(D_BROKER=stopped ready)"
 assert_eq "a broker that does not answer for it leaves it on today's way (no folder to mount)" "none|||" "$(D_BROKER=running D_EXEC_RC=1 ready)"
 assert_has "...saying so" "did not answer for s1" "$(cat "$SCRATCH/ready.err")"
 assert_eq "a docker that does not answer: today's way" "none|||" "$(D_DOWN=1 ready)"
+assert_eq "an engine older than 26 (no volume subpath) leaves it on today's way" "none|||" "$(D_BROKER=running D_ENGINE=25.0.3 ready)"
+assert_has "...saying why" "needs 26 or later" "$(cat "$SCRATCH/ready.err")"
+assert_not_has "...without making its folder" "claude-broker session" "$(calls)"
+
+cleanup() {
+    ( : > "$D_LOG"; rm -f "$D_LOG.started"
+      AIDC_SCRIPTS="$AIDC_ROOT/scripts"
+      # shellcheck source=../../scripts/docker/broker.sh
+      . "$AIDC_ROOT/scripts/docker/broker.sh"
+      DK_CLAUDE_VIA="$1"
+      dk_claude_create_cleanup s1 "$2" "$3" 2>/dev/null )
+}
+D_VOLS=aidc-claude-config D_BROKER=running cleanup broker 1 0
+assert_has "a create that failed before compose started forgets the folder the broker made" "claude-broker forget s1" "$(calls)"
+D_VOLS=aidc-claude-config D_BROKER=running cleanup broker 1 1
+assert_eq "...not once compose was asked (its containers may hold it: aidc kill's)" "" "$(calls)"
+D_VOLS=aidc-claude-config D_BROKER=running cleanup broker 0 1
+assert_eq "...nor a create that succeeded" "" "$(calls)"
+D_VOLS=aidc-claude-config D_BROKER=running cleanup none 1 0
+assert_eq "...nor a session the broker does not manage" "" "$(calls)"
+assert_has "aidc create sets the trap after readying, and marks compose started before asking it" \
+    "trap 'dk_claude_create_cleanup \"\$NAME\" \"\$?\" \"\$AIDC_COMPOSE_STARTED\"' EXIT" "$(cat "$AIDC_ROOT/scripts/cmd-create.sh")"
+assert_eq "...in that order" "yes" "$(awk '/^trap .dk_claude_create_cleanup/{t=NR} /^AIDC_COMPOSE_STARTED=1/{c=NR} /compose -p "\$PROJECT" -f "\$COMPOSE_OUT" up -d/{u=NR} END{print (t && c && u && t < c && c < u) ? "yes" : "no"}' "$AIDC_ROOT/scripts/cmd-create.sh")"
 
 if command -v yq >/dev/null 2>&1; then
     render() {
@@ -257,6 +282,7 @@ uses() {
 assert_eq "it moves to the broker when the broker runs" "yes" "$(D_BROKER=running uses)"
 assert_eq "it stays moved while the broker is stopped (its history is in its folder)" "yes" "$(D_BROKER=stopped D_GITMOUNT=1 uses)"
 assert_eq "it keeps its home's Claude otherwise" "no" "$(D_BROKER=absent uses)"
+assert_eq "...and on an engine older than 26" "no" "$(D_BROKER=running D_ENGINE=24.0.7 uses)"
 ready_git() {
     ( : > "$D_LOG"; rm -f "$D_LOG.started"
       AIDC_SCRIPTS="$AIDC_ROOT/scripts"

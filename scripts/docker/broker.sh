@@ -149,6 +149,11 @@ dk_claude_session_ready() {
         return 0
     fi
     [ "$state" = RUNNING ] || return 0
+    # The folder is a volume subpath: Docker Engine 26 or later.
+    if ! dk_engine_has_subpath; then
+        info "Claude: your account broker runs, but this Docker Engine ($(docker version -f '{{.Server.Version}}' 2>/dev/null || echo unknown)) cannot mount a session's folder (needs 26 or later); ${session} logs in itself"
+        return 0
+    fi
     if ! dk_broker_exec session "$session" >/dev/null 2>&1; then
         info "Claude: your account broker did not answer for ${session}; it logs in itself (aidc attach ${session}, then /login)"
         return 0
@@ -162,6 +167,23 @@ dk_claude_session_ready() {
     name: ${DK_CLAUDE_CONFIG_VOLUME}
     external: true"
     info "Claude: ${session} uses your account broker's active account (aidc claude account list)"
+}
+
+# dk_engine_has_subpath: 0 when the Docker Engine mounts volume subpaths (26.0 or later).
+dk_engine_has_subpath() {
+    local v
+    v=$(docker version -f '{{.Server.Version}}' 2>/dev/null) || return 1
+    case "${v%%.*}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${v%%.*}" -ge 26 ]
+}
+
+# dk_claude_create_cleanup <session> <exit-status> <compose-started 0|1>: aidc create's exit trap.
+# A create that failed after the broker made the session's folder and before compose was asked to
+# start the session leaves nothing aidc kill would find: the folder is forgotten here. Once
+# compose was asked, the session's containers may hold the folder, and aidc kill removes it.
+dk_claude_create_cleanup() {
+    [ "${DK_CLAUDE_VIA:-none}" = broker ] && [ "$2" != 0 ] && [ "$3" != 1 ] || return 0
+    dk_claude_session_forget "$1"
 }
 
 # dk_claude_session_forget <session>: the killed session's folder of aidc-claude-config removed:
@@ -187,8 +209,10 @@ dk_claude_session_forget() {
 
 # dk_git_uses_broker: 0 when the git container's Claude config dir should be its folder of
 # aidc-claude-config: the broker runs now, or the git container running now has it already
-# (moved once, it stays, so a start while the broker is stopped keeps its history).
+# (moved once, it stays, so a start while the broker is stopped keeps its history); never on an
+# engine that cannot mount a volume subpath.
 dk_git_uses_broker() {
+    dk_engine_has_subpath || return 1
     [ "$(dk_broker_state 2>/dev/null)" = RUNNING ] && return 0
     docker inspect -f '{{range .Mounts}}{{.Name}}|{{.Destination}} {{end}}' "${DK_GIT_CT:-aidc-git-dev}" 2>/dev/null \
         | grep -q "${DK_CLAUDE_CONFIG_VOLUME}|/home/git/.claude"

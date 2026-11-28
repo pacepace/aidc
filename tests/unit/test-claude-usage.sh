@@ -84,6 +84,10 @@ printf '{"error":"rate_limit","message":"You have reached your weekly limit. Res
 assert_eq "a weekly limit is reported as one" '["second","weekly"]' "$(jq -c '[.account, .kind]' "$D/.aidc-limit.json")"
 printf '{"error":"rate_limit","message":"5-hour limit reached"}' | bash "$U" rate-limited
 assert_eq "any other limit as a rate limit" "rate" "$(jq -r '.kind' "$D/.aidc-limit.json")"
+printf '{"error":"rate_limit","message":"5-hour limit reached","cwd":"/home/u/weekly-report","transcript_path":"/home/u/.claude/projects/-home-u-weekly-report/x.jsonl"}' | bash "$U" rate-limited
+assert_eq "...even in a repo whose path says weekly (only Claude's error and message are read)" "rate" "$(jq -r '.kind' "$D/.aidc-limit.json")"
+printf '{"hook_event_name":"StopFailure","error":{"type":"rate_limit","details":"Weekly limit reached"}}' | bash "$U" rate-limited
+assert_eq "...and a weekly limit named in a nested error detail is one" "weekly" "$(jq -r '.kind' "$D/.aidc-limit.json")"
 D="$D2"; export CLAUDE_CONFIG_DIR="$D"
 
 echo "== the account and its notice reach the user's MCP server (session_status)"

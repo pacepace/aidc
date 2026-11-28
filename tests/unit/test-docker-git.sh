@@ -89,6 +89,7 @@ case "$a" in
         echo "Error: No such object: aidc-claude-broker" >&2; exit 1 ;;
     "inspect -f {{range .Mounts}}"*) exit 0 ;;
     "exec aidc-claude-broker claude-broker session git") exit 0 ;;
+    "version -f {{.Server.Version}}") echo 29.8.0; exit 0 ;;
     "exec -u git aidc-git-dev stat -c %d:%i -- "*) # what the container sees at a mounted path
         [ -n "${D_SEEN:-}" ] && { echo "$D_SEEN"; exit 0; }
         stat -c %d:%i -- "${a##* }"; exit 0 ;;

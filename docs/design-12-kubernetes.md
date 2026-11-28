@@ -1311,8 +1311,12 @@ rename; Claude reads the new credentials on its next message, conversation kept.
 **`aidc kill`** removes the session's folder: the broker's `forget` (under its lock) when it runs;
 else, or for what the broker cannot remove (a mountpoint Docker made root-owned for a nested
 mount), a one-shot root container from the broker image with no network and only
-`DAC_OVERRIDE`. Never fatal; a create that stopped after the folder was made is cleaned the same
-way by the kill of its leftovers.
+`DAC_OVERRIDE`. Never fatal. A create that fails after the broker made the folder and before compose was asked to
+start the session forgets it itself (its exit trap, `dk_claude_create_cleanup`); once compose was
+asked, the kill of what it left does.
+
+**Docker Engine 26 or later** mounts a volume subpath; on an older engine a session, and the git
+agent, keep today's way and `aidc create` says why.
 
 **The git agent** (`dk_git_start`, at `aidc git setup`): when the broker runs, or the git container
 it replaces already had it (once moved it stays, so its history follows), its Claude config dir is
@@ -1327,6 +1331,9 @@ next start; `aidc claude broker start` says so.
 `ensure_image` does for any image); `aidc rebuild` rebuilds it where its accounts' volume exists,
 with a fresh Claude Code. The dev image carries the `broker` form of the managed settings and the
 amended `aidc-claude-usage`.
+
+The weekly-or-rate classification of a limit reads only the hook's error and message fields,
+never its paths (a repo named "weekly-report" says nothing about the limit).
 
 Not covered on Docker: the audit sidecar reads `.claude/projects` from dev-home, where a broker
 session's Claude config dir no longer is; with the memory bridge on (the default) that folder is

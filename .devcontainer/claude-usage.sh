@@ -135,8 +135,13 @@ do_rate_limited() {
     local input kind=rate
     input=$(cat 2>/dev/null) || input=""
     managed || return 0
-    # Claude's words for the limit it hit, wherever the hook's JSON carries them.
-    printf '%s' "$input" | grep -Eqi 'weekly|seven[ _-]?day|7[ -]day' && kind=weekly
+    # Claude's words for the limit it hit: the hook's error and message fields only (wherever
+    # in its JSON they are), never its paths or ids (a repo folder named "weekly-report" says
+    # nothing about the limit).
+    printf '%s' "$input" | jq -r '[paths(strings) as $p
+            | select(($p | last | tostring) | test("error|message|reason|detail"; "i"))
+            | getpath($p)] | join(" ")' 2>/dev/null \
+        | grep -Eqi 'weekly|seven[ _-]?day|7[ -]day' && kind=weekly
     write_json .aidc-limit.json "$(jq -n -c --arg a "$(account_now)" --argjson t "$(date -u +%s)" --arg k "$kind" \
         '{account: $a, at_s: $t, kind: $k}')"
 }

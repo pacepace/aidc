@@ -57,7 +57,8 @@ if ! session_exists "$NAME"; then
         exit 0
     fi
     if [ -n "$LEFT_FILES" ]; then
-        # A create that stopped after the account broker readied the session's Claude config dir.
+        # A create that stopped after compose was asked to start it, with the account broker's
+        # folder for it made (one that stopped before that forgot the folder itself).
         dk_claude_session_forget "$NAME"
         printf "Session '%s' had no containers left; removed its leftover compose file.\n" "$NAME"
         exit 0

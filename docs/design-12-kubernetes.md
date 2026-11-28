@@ -1268,7 +1268,14 @@ so both backends have the fixes (K8S-17 as amended):
   entry (a failed call's error included) is no later than `.aidc-account`'s time, the moment the
   broker named the account (where the transcript cannot be read, the earlier rule: the previous
   report's numbers under a new name are dropped); and the broker counts no report whose week
-  (its reset time) is another account's and not the named account's own.
+  (its reset time) is another account's and not the named account's own. Amended 2026-11-28:
+  Claude rounds reset times to the hour, so two accounts can share one, and that check alone
+  dropped every report of the second account (its usage never known, its threshold never
+  reached). The wrapper now marks a report it judged by its call's time (`judged:
+  "call_time"` in `.aidc-usage.json`: the call answered after the broker named the account),
+  and the broker counts such a report for the account it names whatever reset time it
+  carries; only a report the wrapper could not judge, carrying another account's stored usage
+  and reset time both, is left out.
   The status line does not show those numbers either (amended the same day: it showed
   `week 100% [second]`, `main`'s week under `second`'s name, until the next call): they are
   left out of what it prints and of the input the user's own status line gets, until the new

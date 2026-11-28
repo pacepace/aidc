@@ -5,7 +5,9 @@
 #   aidc-claude-usage statusline     Claude Code's statusLine command (managed settings, in a
 #                                    cluster session): reads the status JSON on stdin, leaves the
 #                                    weekly usage in the Claude config dir (.aidc-usage.json:
-#                                    {account, seven_day, resets_at, at_s}), and prints the user's own
+#                                    {account, seven_day, resets_at, at_s, judged}; judged
+#                                    "call_time" when the numbers' API call answered after the
+#                                    broker named this account), and prints the user's own
 #                                    status line (their settings.json statusLine, run with the
 #                                    same input) or a short one, and the broker's notice if any.
 #                                    It also leaves the account and the notice in the session's
@@ -69,7 +71,7 @@ last_call_s() {
 }
 
 do_statusline() {
-    local input input_usage usage cmd line notice called switched prev stale=""
+    local input input_usage usage cmd line notice called switched prev stale="" judged=""
     input=$(cat 2>/dev/null) || input=""
     if managed; then
         # The report names the account it measured, and is credited only to the account whose
@@ -88,6 +90,10 @@ do_statusline() {
         case "$switched" in ''|*[!0-9]*) switched="" ;; esac
         if [ -n "$called" ] && [ -n "$switched" ] && [ "$called" -le "$switched" ]; then
             stale=1
+        elif [ -n "$called" ] && [ -n "$switched" ]; then
+            # The call answered after this account was named: its numbers are this account's,
+            # whatever reset time another account shares (Claude rounds them to the hour).
+            judged=call_time
         elif [ -z "$called" ]; then
             prev=$(cat "${dir}/.aidc-usage.json" 2>/dev/null) || prev=""
             printf '%s' "$input" | jq -e --arg a "$(account_now)" --argjson p "${prev:-null}" '
@@ -102,10 +108,11 @@ do_statusline() {
         else
             input_usage="$input"
         fi
-        usage=$(printf '%s' "$input_usage" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" '
+        usage=$(printf '%s' "$input_usage" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" --arg j "$judged" '
             .rate_limits.seven_day as $w
             | select(($w.used_percentage | type) == "number" and $a != "")
-            | {account: $a, seven_day: $w.used_percentage, resets_at: ($w.resets_at // null), at_s: $t}' 2>/dev/null) || usage=""
+            | {account: $a, seven_day: $w.used_percentage, resets_at: ($w.resets_at // null), at_s: $t}
+              + (if $j != "" then {judged: $j} else {} end)' 2>/dev/null) || usage=""
         [ -z "$usage" ] || write_json .aidc-usage.json "$usage"
     fi
     cmd=$(user_statusline)

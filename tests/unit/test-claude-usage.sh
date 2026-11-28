@@ -87,6 +87,8 @@ shown=$(printf '%s' "$LIMITED" | jq -c '.rate_limits.seven_day = {used_percentag
 assert_eq "the new account's first call shows its own week" "Opus  week 5%  [second]" "$shown"
 assert_eq "the first call made after the switch is reported as the new account's" '["second",5,1790400000]' \
     "$(jq -c '[.account, .seven_day, .resets_at]' "$D/.aidc-usage.json" 2>/dev/null)"
+assert_eq "...marked as judged by its call's time, so the broker counts it whatever reset time another account shares" \
+    "call_time" "$(jq -r '.judged // ""' "$D/.aidc-usage.json" 2>/dev/null)"
 printf '{"error":"rate_limit","message":"You have reached your weekly limit. Resets Monday."}' | bash "$U" rate-limited
 assert_eq "a weekly limit is reported as one" '["second","weekly"]' "$(jq -c '[.account, .kind]' "$D/.aidc-limit.json")"
 printf '{"error":"rate_limit","message":"5-hour limit reached"}' | bash "$U" rate-limited

@@ -276,8 +276,10 @@ renew() {
 # --- usage and switching --------------------------------------------------------------------
 
 # usage_reports: every session's fresh usage report, one JSON object a line ({session, account,
-# seven_day, resets_at, at_s}): what its statusline wrapper wrote, credited to the account the
-# report names (the wrapper's, at the source); a report naming none is not counted.
+# seven_day, resets_at, at_s, judged}): what its statusline wrapper wrote, credited to the account
+# the report names (the wrapper's, at the source); a report naming none is not counted. judged is
+# "call_time" when the wrapper saw the numbers' API call answer after the broker named that
+# account (claude-usage.sh), else "".
 usage_reports() {
     local d f now fresh n
     now=$(now_s) fresh="$BROKER_USAGE_FRESH_S"
@@ -288,7 +290,8 @@ usage_reports() {
         jq -c --arg s "$n" --argjson now "$now" --argjson fresh "$fresh" '
             select(type == "object" and (.at_s | type) == "number" and ($now - .at_s) <= $fresh
                    and (.seven_day | type) == "number" and (.account | type) == "string" and .account != "")
-            | {session: $s, account, seven_day, resets_at: (.resets_at // null), at_s}' \
+            | {session: $s, account, seven_day, resets_at: (.resets_at // null), at_s,
+               judged: (if .judged == "call_time" then "call_time" else "" end)}' \
             "$f" 2>/dev/null
     done < <(sessions)
 }
@@ -320,9 +323,13 @@ JQ_EPOCH='def epoch: if type == "number" then . elif type == "string" then (sub(
 #
 # A report is credited only to the account whose credentials produced it. The session's status
 # line shows the numbers of its last API call, which right after a switch are the previous
-# account's under the new account's name (the wrapper drops those it can tell: claude-usage.sh);
-# here, a report whose week (its reset time) is another account's week, and not the named
-# account's own, is that other account's, and is not counted.
+# account's under the new account's name. The wrapper drops those it can tell (claude-usage.sh)
+# and marks a report judged by its call's time (judged "call_time": the call answered after the
+# session was put on the named account): that report is the named account's, counted whatever
+# reset time another account shares, since Claude rounds reset times to the hour and two
+# accounts can share one. Only a report the wrapper could not judge so is checked here: one
+# carrying another account's stored numbers (its usage and its reset time both), and not the
+# named account's own reset time, is that other account's, and is not counted.
 #
 # A session's limit event is authoritative for the account it was on: a weekly limit makes the
 # account's usage 100% (source limit) until its week resets (its known reset time, else an hour);
@@ -335,8 +342,11 @@ record_usage() {
             reduce ($r | split("\n")[] | select(length > 0) | fromjson | select(.account != "")) as $x
               (.;
                ($x.resets_at) as $rx
-               | (if $rx == null or ((.accounts[$x.account].resets_at // null) == $rx) then false
-                  else any((.accounts // {}) | to_entries[]; .key != $x.account and .value.resets_at == $rx) end) as $others
+               | (if $x.judged == "call_time" or $rx == null
+                     or ((.accounts[$x.account].resets_at // null) == $rx) then false
+                  else any((.accounts // {}) | to_entries[];
+                           .key != $x.account and .value.resets_at == $rx
+                           and .value.usage == $x.seven_day) end) as $others
                | if (((.accounts[$x.account].usage_at_s // 0) <= $x.at_s) and ($others | not))
                   then .accounts[$x.account] = ((.accounts[$x.account] // {})
                        + {usage: $x.seven_day, usage_at_s: $x.at_s, resets_at: $x.resets_at, usage_source: "statusline"})

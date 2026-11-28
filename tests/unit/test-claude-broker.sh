@@ -93,12 +93,14 @@ fresh() {
 
 broker() { bash "$AIDC_ROOT/broker/claude-broker.sh" "$@"; }
 
-# usage <session> <account> <percent> [<resets_at epoch>]: the session's statusline report, naming
-# the account it measured (the broker gave the session that account: checked).
+# usage <session> <account> <percent> [<resets_at epoch>] [<judged>]: the session's statusline
+# report, naming the account it measured (the broker gave the session that account: checked);
+# judged "call_time" as the wrapper marks a report whose call answered after the switch.
 usage() {
     assert_eq "(the session $1 is on $2)" "$2" "$(cat "$BROKER_ACCESS/$1/.aidc-account")"
-    jq -n -c --arg a "$2" --argjson p "$3" --argjson r "${4:-null}" --argjson t "$(date +%s)" \
-        '{account: $a, seven_day: $p, resets_at: $r, at_s: $t}' > "$BROKER_ACCESS/$1/.aidc-usage.json"
+    jq -n -c --arg a "$2" --argjson p "$3" --argjson r "${4:-null}" --argjson t "$(date +%s)" --arg j "${5:-}" \
+        '{account: $a, seven_day: $p, resets_at: $r, at_s: $t} + (if $j != "" then {judged: $j} else {} end)' \
+        > "$BROKER_ACCESS/$1/.aidc-usage.json"
 }
 
 echo "== an account added by Claude's own login reaches a session without its refresh token"
@@ -341,6 +343,45 @@ assert_not_has "...and nothing claims every account is at a limit" "no account i
 usage s1 second 5 "$(( R_MAIN + 3600 ))"
 broker pass 2>/dev/null
 assert_eq "second's own week is counted" "5" "$(broker list --json | jq -r '.accounts[] | select(.name == "second") | .usage')"
+
+echo "== two accounts whose weeks reset at the same hour each have their own usage"
+# Claude rounds reset times to the hour, so two accounts opened in the same hour share one. A
+# shared reset time alone must not drop the second account's reports, or its threshold never fires.
+fresh 23 '{"accounts":[{"name":"a","switch_at":90},{"name":"b","switch_at":90}]}'
+broker login a >/dev/null 2>&1; broker login b >/dev/null 2>&1
+broker session s1 2>/dev/null
+R_SAME=$(( $(date +%s) + 86400 ))
+usage s1 a 40 "$R_SAME"
+broker pass 2>/dev/null
+assert_eq "(a's usage is counted)" "40" "$(broker list --json | jq -r '.accounts[] | select(.name == "a") | .usage')"
+broker use b 2>/dev/null
+usage s1 b 40 "$R_SAME" call_time
+broker pass 2>/dev/null
+assert_eq "b's report, judged by its call's time, is b's though a holds the same reset time and usage" "40" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "b") | .usage')"
+assert_eq "a keeps its own number" "40" "$(broker list --json | jq -r '.accounts[] | select(.name == "a") | .usage')"
+sleep 1
+usage s1 b 95 "$R_SAME"
+broker pass 2>/dev/null
+assert_eq "b's later reports are counted too (the reset time is b's own now)" "95" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "b") | .usage')"
+assert_eq "so b's threshold fires: the session moves off b" "a" "$(cat "$BROKER_ACCESS/s1/.aidc-account")"
+fresh 24 '{"accounts":[{"name":"a"},{"name":"b"}]}'
+broker login a >/dev/null 2>&1; broker login b >/dev/null 2>&1
+broker session s1 2>/dev/null
+usage s1 a 40 "$R_SAME"; broker pass 2>/dev/null
+broker use b 2>/dev/null
+usage s1 b 12 "$R_SAME"
+broker pass 2>/dev/null
+assert_eq "a report the wrapper could not judge, with a's reset time but not a's usage, is b's" "12" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "b") | .usage')"
+jq 'del(.accounts.b.usage, .accounts.b.usage_at_s, .accounts.b.resets_at, .accounts.b.usage_source)' \
+    "$BROKER_HOME/state.json" > "$W/s" && mv "$W/s" "$BROKER_HOME/state.json"
+sleep 1
+usage s1 b 40 "$R_SAME"
+broker pass 2>/dev/null
+assert_eq "one carrying a's very numbers (usage and reset time) under b's name is a's, not counted for b" "null" \
+    "$(broker list --json | jq -r '.accounts[] | select(.name == "b") | .usage')"
 
 echo "== an account whose login ended (expired, renewal failing) is moved away from"
 fresh 14 '{"accounts":[{"name":"a"},{"name":"b"}]}'

@@ -270,7 +270,11 @@ and the envelope are unchanged; what an MCP caller sees differently:
   call hit one account's weekly limit and the broker switched it, its status line reported that
   account's week under the new account's name, and the broker marked the new account at its
   threshold. The status line now skips numbers from a call older than the switch, and the
-  broker counts no report carrying another account's week.
+  broker counts no report carrying another account's week. A report whose call answered after
+  the switch is the named account's even when another account's week resets at the same hour
+  (Claude rounds reset times to the hour), so two such accounts each keep their own usage and
+  threshold; only a report the status line could not judge, carrying another account's usage
+  and reset time both, is left out.
 - **The status line no longer shows the old account's week under the new account's name**
   right after a switch (`week 100% [second]`). It leaves the number out until the new
   account's first call, the user's own status line included.

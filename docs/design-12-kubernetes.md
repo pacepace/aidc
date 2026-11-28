@@ -1311,7 +1311,10 @@ was passed to the broker as an account name.
 
 Owner ruling 2026-11-28 ("Account switching on Docker too"; K8S-27, K8S-28): the broker and
 switching work on Docker as in a cluster. The same `aidc/broker` image and `claude-broker`
-program; the difference is the Docker glue (`scripts/docker/broker.sh`, `scripts/docker/claude.sh`):
+program; the difference is the Docker glue (`scripts/docker/broker.sh`, `scripts/docker/claude.sh`).
+`aidc claude` is one front end on both (`scripts/lib/claude-front.sh`: the help, the verbs and
+their messages); each backend's `claude.sh` supplies only how to reach its broker (its state,
+exec, start, stop and log), so the two cannot drift apart:
 
 | | Kubernetes | Docker |
 |---|---|---|

@@ -91,16 +91,25 @@ calls() { cat "$D_LOG"; }
 line() { grep -F -- "$1" "$D_LOG" | head -n1; }
 
 echo "=== which backend aidc claude talks to (aidc's one rule) ==="
-out=$(run help)
-assert_has "no config: Docker's broker" "aidc-claude-broker" "$out"
-out=$(run help --backend kubernetes)
-assert_has "--backend kubernetes: the cluster's" "a broker pod in" "$out"
+# broker status names the backend it asked; the cluster's, with no cluster here, asks no docker.
+out=$(run broker status)
+assert_has "no config: Docker's broker" "claude-broker (docker, aidc-claude-broker)" "$out"
+out=$(run broker status --backend kubernetes)
+assert_not_has "--backend kubernetes: the cluster's" "claude-broker (docker" "$out"
+assert_eq "...asking no docker" "" "$(calls)"
 printf 'backend: kubernetes\n' > "$CFG"
-out=$(run help --backend docker)
-assert_has "--backend docker wins over the config" "aidc-claude-broker" "$out"
-out=$(run help)
-assert_has "the config's backend line otherwise" "a broker pod in" "$out"
+out=$(run broker status --backend docker)
+assert_has "--backend docker wins over the config" "claude-broker (docker, aidc-claude-broker)" "$out"
+out=$(run broker status)
+assert_not_has "the config's backend line otherwise" "claude-broker (docker" "$out"
+assert_eq "...asking no docker" "" "$(calls)"
 : > "$CFG"
+
+echo "=== one front end: the help is the same on both backends ==="
+dk_help=$(run help) k8s_help=$(run help --backend kubernetes)
+assert_eq "aidc claude help reads the same on Docker and on Kubernetes" "$dk_help" "$k8s_help"
+assert_has "...naming both brokers" "on Docker the container aidc-claude-broker, on Kubernetes a pod in your namespace" "$dk_help"
+assert_has "...and saying account list shows each number's source and age" "usage seen (with its source and age)" "$k8s_help"
 
 echo "=== with no broker ==="
 out=$(run account list)

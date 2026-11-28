@@ -45,8 +45,9 @@ out=$(printf '%s' "$STATUS" | bash "$U" statusline)
 assert_eq "the weekly usage and its reset are left for the broker, naming the account" '["work",42.5,1790000000,true]' \
     "$(jq -c '[.account, .seven_day, .resets_at, (.at_s | type == "number")]' "$D/.aidc-usage.json")"
 echo personal > "$D/.aidc-account"
-printf '%s' "$STATUS" | bash "$U" statusline >/dev/null
+shown=$(printf '%s' "$STATUS" | bash "$U" statusline)
 assert_eq "right after a switch, the old account's numbers are not reported as the new one's" "work" "$(jq -r .account "$D/.aidc-usage.json")"
+assert_eq "...nor shown under the new one's name" "Opus  [personal]" "$shown"
 printf '%s' "$STATUS" | jq -c '.rate_limits.seven_day = {used_percentage: 3, resets_at: 1790500000}' | bash "$U" statusline >/dev/null
 assert_eq "...the new account's own numbers are" '["personal",3]' "$(jq -c '[.account, .seven_day]' "$D/.aidc-usage.json")"
 echo work > "$D/.aidc-account"
@@ -74,10 +75,16 @@ printf '{"type":"user","timestamp":"%s"}\n{"type":"assistant","timestamp":"%s","
 echo second > "$D/.aidc-account"; touch -d "@$((T - 10))" "$D/.aidc-account"
 LIMITED=$(jq -n -c --arg tp "$TP" '{model: {display_name: "Opus"}, transcript_path: $tp,
     rate_limits: {seven_day: {used_percentage: 100, resets_at: 1790000000}}}')
-printf '%s' "$LIMITED" | bash "$U" statusline >/dev/null
+shown=$(printf '%s' "$LIMITED" | bash "$U" statusline)
 assert_eq "the limited call's numbers are not reported under the account named after it" "no" "$([ -e "$D/.aidc-usage.json" ] && echo yes || echo no)"
+assert_eq "...nor shown under its name (seen live: week 100% [second])" "Opus  [second]" "$shown"
+printf '#!/bin/sh\njq -r ".model.display_name + \\" week \\" + (.rate_limits.seven_day.used_percentage // \\"none\\" | tostring)"\n' > "$D/own.sh"; chmod +x "$D/own.sh"
+printf '{"statusLine":{"type":"command","command":"%s"}}' "$D/own.sh" > "$D/settings.json"
+assert_eq "...nor handed to the user's own status line" "Opus week none  [second]" "$(printf '%s' "$LIMITED" | bash "$U" statusline)"
+rm -f "$D/settings.json"
 printf '{"type":"assistant","timestamp":"%s"}\n' "$(iso "$T")" >> "$TP"
-printf '%s' "$LIMITED" | jq -c '.rate_limits.seven_day = {used_percentage: 5, resets_at: 1790400000}' | bash "$U" statusline >/dev/null
+shown=$(printf '%s' "$LIMITED" | jq -c '.rate_limits.seven_day = {used_percentage: 5, resets_at: 1790400000}' | bash "$U" statusline)
+assert_eq "the new account's first call shows its own week" "Opus  week 5%  [second]" "$shown"
 assert_eq "the first call made after the switch is reported as the new account's" '["second",5,1790400000]' \
     "$(jq -c '[.account, .seven_day, .resets_at]' "$D/.aidc-usage.json" 2>/dev/null)"
 printf '{"error":"rate_limit","message":"You have reached your weekly limit. Resets Monday."}' | bash "$U" rate-limited

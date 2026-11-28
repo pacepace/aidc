@@ -1251,6 +1251,10 @@ so both backends have the fixes (K8S-17 as amended):
   broker named the account (where the transcript cannot be read, the earlier rule: the previous
   report's numbers under a new name are dropped); and the broker counts no report whose week
   (its reset time) is another account's and not the named account's own.
+  The status line does not show those numbers either (amended the same day: it showed
+  `week 100% [second]`, `main`'s week under `second`'s name, until the next call): they are
+  left out of what it prints and of the input the user's own status line gets, until the new
+  account's first call brings its own.
 - **A limit event is authoritative.** The `StopFailure` hook now says which limit was hit
   (`kind: weekly` when Claude's words name the weekly limit, else `rate`). A weekly limit makes the
   account's usage 100% (source: limit) and keeps it spent until its known reset time (else an

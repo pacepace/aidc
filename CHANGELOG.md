@@ -262,6 +262,9 @@ and the envelope are unchanged; what an MCP caller sees differently:
   account's week under the new account's name, and the broker marked the new account at its
   threshold. The status line now skips numbers from a call older than the switch, and the
   broker counts no report carrying another account's week.
+- **The status line no longer shows the old account's week under the new account's name**
+  right after a switch (`week 100% [second]`). It leaves the number out until the new
+  account's first call, the user's own status line included.
 - **A session's limit event is authoritative.** A weekly limit hit in a session makes that
   account's usage 100% until its week resets; `aidc claude account list` shows each usage
   number's source and age, so an hours-old 70% is not trusted blindly.

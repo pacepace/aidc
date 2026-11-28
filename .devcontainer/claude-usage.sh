@@ -69,33 +69,42 @@ last_call_s() {
 }
 
 do_statusline() {
-    local input input_usage usage cmd line notice called switched
+    local input input_usage usage cmd line notice called switched prev stale=""
     input=$(cat 2>/dev/null) || input=""
     if managed; then
         # The report names the account it measured, and is credited only to the account whose
         # credentials produced it. Claude shows the usage of its last API call: right after the
-        # broker switches accounts the status still carries the old account's numbers. So a
-        # report is not written when that call answered no later than the broker named this
-        # account (.aidc-account's time; a session whose very first call hit a limit and was
-        # switched has no earlier report to compare with), nor, when the transcript cannot
-        # tell, when its numbers are the previous report's under a new account name; the new
+        # broker switches accounts the status still carries the old account's numbers. So those
+        # numbers are another account's (stale) when that call answered no later than the broker
+        # named this account (.aidc-account's time; a session whose very first call hit a limit
+        # and was switched has no earlier report to compare with), or, when the transcript
+        # cannot tell, when they are the previous report's under a new account name; the new
         # account's first call brings its own (each account's week resets at its own time).
+        # Stale numbers are neither reported nor shown: the status line would put the old
+        # account's week under the new account's name.
         called=$(last_call_s "$input")
         switched=$(stat -c %Y -- "${dir}/.aidc-account" 2>/dev/null || stat -f %m -- "${dir}/.aidc-account" 2>/dev/null || true)
         case "$called" in ''|*[!0-9]*) called="" ;; esac
         case "$switched" in ''|*[!0-9]*) switched="" ;; esac
         if [ -n "$called" ] && [ -n "$switched" ] && [ "$called" -le "$switched" ]; then
+            stale=1
+        elif [ -z "$called" ]; then
+            prev=$(cat "${dir}/.aidc-usage.json" 2>/dev/null) || prev=""
+            printf '%s' "$input" | jq -e --arg a "$(account_now)" --argjson p "${prev:-null}" '
+                .rate_limits.seven_day as $w
+                | ($w.used_percentage | type) == "number" and ($p | type) == "object"
+                  and ($p.account // $a) != $a and $p.seven_day == $w.used_percentage
+                  and $p.resets_at == ($w.resets_at // null)' >/dev/null 2>&1 && stale=1
+        fi
+        if [ -n "$stale" ]; then
             input_usage=""
+            input=$(printf '%s' "$input" | jq -c 'del(.rate_limits)' 2>/dev/null) || input=""
         else
             input_usage="$input"
         fi
-        usage=$(printf '%s' "$input_usage" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" \
-            --slurpfile prev <(cat "${dir}/.aidc-usage.json" 2>/dev/null || echo null) '
+        usage=$(printf '%s' "$input_usage" | jq -c --argjson t "$(date -u +%s)" --arg a "$(account_now)" '
             .rate_limits.seven_day as $w
             | select(($w.used_percentage | type) == "number" and $a != "")
-            | ($prev[0] // {}) as $p
-            | select(($p | type) != "object" or ($p.account // $a) == $a
-                     or $p.seven_day != $w.used_percentage or $p.resets_at != ($w.resets_at // null))
             | {account: $a, seven_day: $w.used_percentage, resets_at: ($w.resets_at // null), at_s: $t}' 2>/dev/null) || usage=""
         [ -z "$usage" ] || write_json .aidc-usage.json "$usage"
     fi
